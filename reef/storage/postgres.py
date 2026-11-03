@@ -48,6 +48,7 @@ from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     migrate_generated_task_marks,
     migrate_imported_tasks,
+    migrate_manual_buffers,
     migrate_record_storage,
     migrate_record_trajectories,
     migrate_sample_columns,
@@ -66,12 +67,12 @@ from reef.storage.sql_records import (
     sample_record_table,
     trajectory_node_table,
 )
-from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
+from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 16
+POSTGRES_SCHEMA_VERSION = 17
 
 
 def postgres_url(database_url: str) -> URL:
@@ -198,7 +199,6 @@ class PostgresRecordDatabase:
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
         self.sample_table = sample_table(metadata, foreign_key="record_store.storage_id")
         self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
-        self.manual_buffer_table = manual_buffer_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
@@ -233,7 +233,8 @@ class PostgresRecordDatabase:
                 # payload as ATIF, with only the entries after its parent's (migrate_record_trajectories).
                 # Version 15 adds sample_record, the records whose trajectory nodes a stored sample renders from.
                 # Version 16 deletes the model_config scenario settings (migrate_scenario_settings): a scenario has no
-                # model override of its own (RFC #1062).
+                # model override of its own (RFC #1062). Version 17 drops manual_buffer (migrate_manual_buffers): a
+                # training instruction names its samples (RFC #1140).
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 migrate_record_trajectories(connection, self.tables.records, self.tables.nodes)
@@ -250,6 +251,7 @@ class PostgresRecordDatabase:
                 )
                 migrate_generated_task_marks(connection, self.sample_train_count_table)
                 migrate_scenario_settings(connection, self.tables.settings)
+                migrate_manual_buffers(connection, schema)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
                 if versions and versions != [POSTGRES_SCHEMA_VERSION]:
@@ -427,7 +429,6 @@ class PostgresRecordStore(SQLRecordStore):
             self,
             ScopedTable(self._database.sample_table, scope=scope),
             ScopedTable(self._database.sample_train_count_table, scope=scope),
-            ScopedTable(self._database.manual_buffer_table, scope=scope),
             files,
             scenario,
         )
@@ -444,7 +445,6 @@ class PostgresRecordStore(SQLRecordStore):
             self,
             ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
             ScopedTable(self._database.sample_train_count_table, scope={"storage_id": self.storage_id}),
-            ScopedTable(self._database.manual_buffer_table, scope={"storage_id": self.storage_id}),
             label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
             durable=True,
         )

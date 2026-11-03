@@ -1639,32 +1639,29 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
 
 
 @pytest.mark.unit
-def test_a_manual_weights_trainer_waits_for_inserted_samples_and_submits_them_with_the_instruction(
+def test_a_manual_weights_trainer_submits_the_samples_that_its_instruction_names(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """In manual mode a weights stage takes an instruction as a request to train: the job waits until a client
-    inserts samples into the trainer's manual buffer, then carries them and the instruction, and the submission
-    consumes both and empties the buffer."""
+    """In manual mode a weights stage trains only for an instruction: the job carries the samples that the
+    instruction names and the instruction, and the submission consumes both."""
     training = WeightsJobComponent(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     scenario.set_training_mode("manual")
-    dispatcher.accept_instruction(
-        "agent", {"text": "learn the tool", "session": "session-1", "release_id": "release-1"}, request_id="t1"
-    )
-    assert scenario.prepare_training_step(WEIGHTS) is None
     _append_records(scenario, 1)
     make_samples(scenario)
-    # The samples service stores the step's sample, but no sample joins the manual buffer by itself: the instruction
-    # waits.
+    # The samples service stores the step's sample, but without an instruction nothing trains.
     assert scenario.prepare_training_step(WEIGHTS) is None
     trainer = scenario.trainer_for(WEIGHTS)
     held = tuple(trainer.pipeline.held)
     # In a scenario of several components, a sample's ID names its component first.
     assert held == (f"{WEIGHTS}:r1:0",)
-    trainer.change_buffer(held, insert=True)
+    dispatcher.accept_instruction(
+        "agent",
+        {"text": "learn the tool", "session": "session-1", "release_id": "release-1", "samples": list(held)},
+        request_id="t1",
+    )
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
-    assert trainer.buffer_listing()["samples"] == []
     [job] = _submitted(training, 1)
     assert job.data.data_id == "agent:instruction:t1"
     assert job.data.request is not None and job.data.request.id == "t1"

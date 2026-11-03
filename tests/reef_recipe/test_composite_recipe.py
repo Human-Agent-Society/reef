@@ -1085,7 +1085,7 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         assert block["training_mode"] == "manual"
         assert block["processor"] == {
             **harness.pipeline_status(),
-            "pending_instructions": harness.pending_instructions(),
+            "pending_instructions": scenario.pending_instructions(),
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "manual"

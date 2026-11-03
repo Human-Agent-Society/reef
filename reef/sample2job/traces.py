@@ -1,8 +1,8 @@
 """Job data of harness evolution: trace samples as they come, and offline runs of the imported train tasks.
 
-``TraceJobData`` puts the trace samples of the buffer into one job's data.
+``TraceJobData`` puts the trace samples of the next job into one job's data.
 ``TrainTaskJobData`` also trains the scenario's imported train tasks: they
-are buffer samples, and the harness backend rolls a job's tasks out on the
+are samples of the next job, and the harness backend rolls a job's tasks out on the
 head tree as the step's material. That is offline harness evolution: a step
 needs no traffic, so uploaded train tasks start a run.
 """
@@ -20,8 +20,8 @@ class TraceJobData(DistillJobData):
     Values: as ``DistillJobData``, except that ``job_samples`` defaults to 1,
     so each trace starts a step unless the deployment sets
     ``pipeline.sample2job.config.job_samples``.
-    In ``manual`` a queued instruction takes the samples of the manual
-    buffer, possibly none, so the method reads the request beside them.
+    In ``manual`` a queued instruction takes the samples that it names,
+    possibly none, so the method reads the request beside them.
     """
 
     reads_instructions = True

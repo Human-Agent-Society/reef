@@ -497,3 +497,10 @@ def migrate_scenario_settings(connection: Connection, settings: Table) -> None:
     Run in the caller's schema transaction, after ``create_all``. The other settings stay as they are.
     """
     connection.execute(settings.delete().where(settings.c.name == "model_config"))
+
+
+def migrate_manual_buffers(connection: Connection, schema: str | None) -> None:
+    """Drop the old ``manual_buffer`` table: a training instruction names its samples (RFC #1140), and its queued
+    buffers are lost. Run in the caller's schema transaction. A schema without the table is left unchanged."""
+    if inspect(connection).has_table("manual_buffer", schema=schema):
+        Table("manual_buffer", MetaData(), schema=schema, autoload_with=connection).drop(connection)

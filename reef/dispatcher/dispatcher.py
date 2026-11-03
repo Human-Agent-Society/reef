@@ -741,23 +741,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         elif result.added:
             self.local_workers.wake(current)
 
-    def sample_buffer(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
-        """The buffer of the trainer of ``component`` (the only one when None): its mode and its samples."""
+    def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
+        """The next automatic job of the trainer of ``component`` (the only one when None): its mode and samples."""
         with self.locked_scenario(scenario) as current:
-            return self.trainer_of(current, component).buffer_listing()
-
-    def change_buffer(
-        self, scenario: str, sample_ids: tuple[str, ...], *, insert: bool, component: str | None = None
-    ) -> Mapping[str, Any]:
-        """Insert ``sample_ids`` into the manual buffer of the trainer of ``component``, or remove them.
-
-        Raise ``ManualBufferRefused`` in automatic mode and ``ValueError`` for an ID that the trainer cannot take.
-        """
-        with self.locked_scenario(scenario) as current:
-            listing = self.trainer_of(current, component).change_buffer(sample_ids, insert=insert)
-            # A queued instruction may now have samples to train.
-            self.local_workers.wake(current)
-            return listing
+            return self.trainer_of(current, component).next_job_listing()
 
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""

@@ -71,7 +71,7 @@ def test_a_trainer_gets_the_queued_instructions_and_a_commit_settles_the_one_it_
         instructions.file("one", payload("one"))
         instructions.file("two", payload("two"))
         instructions.give([trainer])
-        assert trainer.pending_instructions() == 2
+        assert len(trainer.pipeline.training_requests) == 2
         make_samples(trainer)
         # The commit that submits a job consumes its instruction; the job's end is the next commit.
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
@@ -83,7 +83,7 @@ def test_a_trainer_gets_the_queued_instructions_and_a_commit_settles_the_one_it_
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         instructions.give([trainer])
         assert [batch.request.id for batch in component.batches] == ["one", "two"] and instructions.queued() == ()
-        assert trainer.pending_instructions() == 0
+        assert trainer.pipeline.training_requests == {}
     finally:
         trainer.close()
         records.close()

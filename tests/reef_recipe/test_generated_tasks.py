@@ -135,8 +135,13 @@ def processor(**config: object) -> TrainingPipeline:
 
 
 def handed_out_names(p: TrainingPipeline) -> list[str]:
-    """The names of the tasks that the next job's data takes: the buffer's."""
-    return [sample.metadata["task"]["name"] for _, sample in p.buffer_entries()]
+    """The names of the tasks that the next job's data takes: in ``manual``, the oldest instruction's."""
+    if p.training_mode == "auto":
+        entries = p.auto_entries()
+    else:
+        request = next(iter(p.training_requests.values()), None)
+        entries = () if request is None else p.instruction_entries(request)
+    return [sample.metadata["task"]["name"] for _, sample in entries]
 
 
 def sample(task: str, index: int, reward: float) -> TrajectorySample:
@@ -190,11 +195,14 @@ def test_the_contract_values_refuse_what_the_recipe_cannot_run(build: Any, messa
 def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1, training_mode="manual")
     looked(p)
-    assert handed_out_names(p) == [], "manual adds no generated task to the buffer by itself"
-    p.insert_into_buffer(("generated-tasks/harbor-00000-001",))
-    p.queue_instructions(
-        [TrainingRequest.from_dict({"text": "train it", "session": "s-1", "release_id": "r-1"}, request_id="train-1")]
-    )
+    assert handed_out_names(p) == [], "manual trains no generated task by itself"
+    payload = {
+        "text": "train it",
+        "session": "s-1",
+        "release_id": "r-1",
+        "samples": ["generated-tasks/harbor-00000-001"],
+    }
+    p.queue_instructions([TrainingRequest.from_dict(payload, request_id="train-1")])
     assert p.ready(BATCH_SIZE) and handed_out_names(p) == ["harbor-00000-001"]
     assert train_job(p) == ["harbor-00000-001"]
     assert set(rollout_results(p.record2sample.task_store)) == {"harbor-00000-001"}
@@ -755,16 +763,16 @@ class FirstResultsFail(ScriptedGenerator):
 # ------------------------------------------------------------------------------------------------- the task jobs
 
 
-def test_saved_tasks_are_stored_as_samples_and_the_buffer_trains_them_as_one_task_job(tmp_path: Path) -> None:
+def test_saved_tasks_are_stored_as_samples_and_train_as_one_task_job(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1, 2)])
     p, _ = rounds(tmp_path, task_generator, rounds=1)
     assert not p.ready(BATCH_SIZE), "the generation saves three tasks"
-    assert p.ready(BATCH_SIZE), "the stored tasks make the buffer"
+    assert p.ready(BATCH_SIZE), "the stored tasks make the next job"
     stored = p.store.page(kind="task")
     assert [task.sample_id for task in stored] == [f"generated-tasks/harbor-00000-00{index}" for index in range(3)]
     assert all(task.component == "" and task.record_ids == () for task in stored)
     names = ["harbor-00000-000", "harbor-00000-001"]
-    assert handed_out_names(p) == names, "the buffer takes buffer_size tasks"
+    assert handed_out_names(p) == names, "the job takes buffer_size tasks"
     built = p.build_job_data(BATCH_SIZE)
     assert [item.metadata["task"]["name"] for item in built.samples] == names
     assert p.acknowledge(built.data_id) == {f"sample:generated-tasks/{name}" for name in names}

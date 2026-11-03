@@ -127,7 +127,7 @@ class TaskSample:
 
 
 #: One sample of job data: a trajectory that trains as it is, or a Harbor task that the training component rolls
-#: out. The record-to-sample stage makes samples, ``job_samples`` and the sample buffer count them, and
+#: out. The record-to-sample stage makes samples, ``job_samples`` and ``buffer_size`` count them, and
 #: ``JobData.samples`` holds them.
 Sample = TrajectorySample | TaskSample
 

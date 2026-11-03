@@ -17,7 +17,6 @@ from tests.train.test_record_stage_job_data_parity import counting_jobs, inferen
 
 from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ManualBufferRefused
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
@@ -221,7 +220,7 @@ def test_the_pipeline_keeps_instructions_and_sends_records_through_its_stage() -
         [TrainingRequest.from_dict({"text": "train-1", "session": "s-1", "release_id": "r-1"}, request_id="train-1")]
     )
     assert processor.stage.assembled == ["i1"]
-    assert processor.buffered_requests() == 1
+    assert len(processor.training_requests) == 1
     assert processor.releasable_record_ids() == {"drop-1"}
 
 
@@ -234,7 +233,6 @@ def test_the_pipeline_adds_its_stages_background_work_and_status_and_closes_them
     assert processor.status() == {
         "ready_samples": 0,
         "buffer_size": None,
-        "buffered_requests": 0,
         "ended_records": 0,
     }
     processor.close()
@@ -662,8 +660,19 @@ class MadeSamples(RecordingSamples):
         self.ended.append(outcome)
 
 
+def auto_ids(pipeline: TrainingPipeline) -> tuple[str, ...]:
+    """The IDs of the samples that the pipeline's next automatic job takes."""
+    return tuple(stored.sample_id for stored, _ in pipeline.auto_entries())
+
+
+def instruction(*samples: str) -> TrainingRequest:
+    """A queued instruction that names ``samples``."""
+    payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": {"rollout": {}}}
+    return TrainingRequest.from_dict({**payload, **({"samples": list(samples)} if samples else {})}, request_id="t")
+
+
 @pytest.mark.unit
-def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train_from_the_buffer() -> None:
+def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train() -> None:
     context = PipelineContext("s")
     samples = MadeSamples()
     processor = TrainingPipeline(context, record2sample=samples, sample2job=RecordingJobData(context))
@@ -673,7 +682,7 @@ def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train_from_
     assert processor.ready(1)
     samples.made = (("made/a", TaskSample(Path("a"))),)
     processor.produce()
-    assert processor.buffer() == ("made/a",), "a sample made again is stored once"
+    assert auto_ids(processor) == ("made/a",), "a sample made again is stored once"
     (stored,) = processor.store.page()
     assert (stored.sample_id, stored.component, stored.group, stored.record_ids) == ("made/a", "", None, ())
     built = processor.build_job_data(1)
@@ -758,25 +767,26 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
 
 
 @pytest.mark.unit
-def test_the_manual_buffer_holds_one_kind_of_sample_that_the_trainer_can_train() -> None:
+def test_an_instruction_names_stored_samples_of_one_kind_that_the_trainer_can_train() -> None:
     context = PipelineContext("s", training_mode="manual")
     processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
     store = processor.store.store
     store.add_trajectories((("upload", TRAJECTORY),))
     store.add_record_samples("", None, ("r1",), (("r1:0", TaskSample(Path("task"))),))
     store.add_record_samples("other", None, ("r2",), (("other:r2:0", TRAJECTORY),))
-    processor.insert_into_buffer(("upload",))
+    processor.check_instruction(instruction("upload"))
     with pytest.raises(ValueError, match="one kind"):
-        processor.insert_into_buffer(("r1:0",))
+        processor.check_instruction(instruction("upload", "r1:0"))
     with pytest.raises(ValueError, match="cannot train the samples"):
-        processor.insert_into_buffer(("other:r2:0",))
-    assert processor.buffer() == ("upload",)
-    processor.remove_from_buffer(("upload",))
-    processor.insert_into_buffer(("r1:0",))
-    assert processor.buffer() == ("r1:0",)
-    processor.set_training_mode("auto")
-    with pytest.raises(ManualBufferRefused):
-        processor.remove_from_buffer(("r1:0",))
+        processor.check_instruction(instruction("other:r2:0"))
+    with pytest.raises(ValueError, match="holds no samples"):
+        processor.check_instruction(instruction("missing"))
+    with pytest.raises(ValueError, match="names no samples"):
+        processor.check_instruction(instruction())
+    # A sample that left the scenario after the instruction was filed is left out of its job.
+    assert [stored.sample_id for stored, _ in processor.instruction_entries(instruction("upload", "gone"))] == [
+        "upload"
+    ]
 
 
 class TaskJobData(RecordingJobData):
@@ -796,17 +806,15 @@ def test_imported_train_tasks_are_buffer_samples_of_a_stage_that_trains_them(tmp
         return TrainingPipeline(built, record2sample=RecordingSamples(), sample2job=stage(built))
 
     trains = pipeline(TaskJobData)
-    assert trains.ready(1) and trains.buffer() == ("task-a",), "an eval task never trains"
+    assert trains.ready(1) and auto_ids(trains) == ("task-a",), "an eval task never trains"
     assert not pipeline(RecordingJobData).ready(1), "a stage that trains no imported task skips them"
     # A kind that the recipe gives no parameters trains only for an instruction that gives them.
     manual = pipeline(TaskJobData, job_parameters={"trajectory": {}}, training_mode="manual")
     manual.set_training_mode("auto")
-    assert manual.buffer() == ()
+    assert auto_ids(manual) == ()
     manual.set_training_mode("manual")
-    manual.insert_into_buffer(("task-a",))
-    payload = {"text": "RL", "session": "s-1", "release_id": "r-1", "parameters": {"rollout": {}}}
-    manual.queue_instructions([TrainingRequest.from_dict(payload, request_id="t")])
+    manual.queue_instructions([instruction("task-a")])
     data = manual.build_job_data(1)
     assert manual.sample2job.job_parameters(data) == {"rollout": {}}
     with pytest.raises(ValueError, match="cannot train the samples"):
-        manual.insert_into_buffer(("held",))
+        manual.check_instruction(instruction("held"))

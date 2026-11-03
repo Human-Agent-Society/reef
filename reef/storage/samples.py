@@ -150,19 +150,16 @@ class StoredSample:
 class SampleStore(ABC):
     """The training samples of one scenario.
 
-    Values: the state of a store is a pair ``(S, B)``. ``S`` is a finite
+    Values: the state of a store is ``S``, a finite
     sequence of stored samples, in increasing ``sequence``. No two of them have
     the same ``sample_id``, also across kinds. A stored sample's ``sample``,
     ``split`` and ``files_digest`` do not change, and record retention does not
     remove it. ``remove_uploads`` is the only operation that removes samples:
     the uploads (samples of no component) of the data items that the scenario
     no longer uses. A new sample always gets a ``sequence`` above every
-    ``sequence`` the store gave before. ``B`` maps each trainer (a ``train_counts`` key) to its manual
-    buffer, a set of sample IDs. ``insert_into_buffer`` and
-    ``remove_from_buffer`` change ``B``. Only a commit changes
+    ``sequence`` the store gave before. Only a commit changes
     ``train_counts``: the commit history adds one, for the commit's trainer,
-    for each consumed sample ID that the commit lists, and removes those IDs
-    from that trainer's manual buffer. Archiving the scenario retires the whole
+    for each consumed sample ID that the commit lists. Archiving the scenario retires the whole
     store.
 
     Purpose: the data sync (``reef.storage.data_sync``) keeps the uploads equal
@@ -171,8 +168,8 @@ class SampleStore(ABC):
     scenario (``remove_uploads``). A trainer's pipeline adds the samples that its
     stages make (``add_record_samples``), and a rebuilt trainer skips the
     records they consumed (``consumed_record_ids``). The pipeline reads the
-    samples in arrival order, after its cursor (``page``), and the samples of
-    its manual buffer (``manual_buffer``, ``get``). An evaluation and the task
+    samples in arrival order, after its cursor (``page``), and the samples
+    that an instruction names (``get``). An evaluation and the task
     listing read the imported tasks (``imported_tasks``).
     """
 
@@ -243,24 +240,8 @@ class SampleStore(ABC):
         """The stored samples of ``sample_ids`` that the store holds, in arrival order."""
 
     @abstractmethod
-    def manual_buffer(self, trainer: str) -> tuple[str, ...]:
-        """The IDs of the samples in the manual buffer of ``trainer`` (a ``train_counts`` key), in arrival order."""
-
-    @abstractmethod
-    def insert_into_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
-        """Add ``sample_ids`` to the manual buffer of ``trainer``, in one transaction; a held ID stays held.
-
-        The caller checks that each ID names a stored sample that ``trainer`` can train. A commit of ``trainer``
-        removes from its manual buffer the samples that it consumed, in the commit's transaction.
-        """
-
-    @abstractmethod
-    def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
-        """Remove ``sample_ids`` from the manual buffer of ``trainer``, in one transaction; an absent ID is skipped."""
-
-    @abstractmethod
     def remove_uploads(self, sample_ids: tuple[str, ...]) -> tuple[str, ...]:
-        """Remove the uploads of ``sample_ids`` and their entries in every manual buffer, in one transaction.
+        """Remove the uploads of ``sample_ids``, in one transaction.
 
         An upload is a sample of no component. An ID of no upload is skipped. The train counts stay, so a sample
         that the store gets again under the same ID keeps them. Return the IDs that the call removed, in arrival
@@ -282,15 +263,13 @@ class SampleStore(ABC):
 class MemorySampleStore(SampleStore):
     """A sample store in process memory, for a trainer without a scenario session, such as a test's pipeline.
 
-    Values: ``rows`` holds ``S`` and ``buffers`` holds ``B``. There is no commit history, so every
-    ``train_counts`` stays empty and nothing removes trained samples from a manual buffer; the pipeline keeps the
-    samples that it trained in this process itself. Imported tasks need a task file store, so ``add_tasks`` raises
+    Values: ``rows`` holds ``S``. There is no commit history, so every ``train_counts`` stays empty; the pipeline
+    keeps the samples that it trained in this process itself. Imported tasks need a task file store, so ``add_tasks`` raises
     ``ValueError``. Purpose: ``TrainingPipeline`` makes one when its context has no sample store.
     """
 
     def __init__(self) -> None:
         self.rows: list[StoredSample] = []
-        self.buffers: dict[str, set[str]] = {}
         self.next_sequence = 1
 
     def stored(self, sample_id: str) -> StoredSample | None:
@@ -363,21 +342,9 @@ class MemorySampleStore(SampleStore):
     def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
         return tuple(row for row in self.rows if row.sample_id in sample_ids)
 
-    def manual_buffer(self, trainer: str) -> tuple[str, ...]:
-        held = self.buffers.get(trainer, set())
-        return tuple(row.sample_id for row in self.rows if row.sample_id in held)
-
-    def insert_into_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
-        self.buffers.setdefault(trainer, set()).update(sample_ids)
-
-    def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
-        self.buffers.get(trainer, set()).difference_update(sample_ids)
-
     def remove_uploads(self, sample_ids: tuple[str, ...]) -> tuple[str, ...]:
         removed = tuple(row.sample_id for row in self.rows if row.component is None and row.sample_id in sample_ids)
         self.rows = [row for row in self.rows if row.sample_id not in removed]
-        for buffer in self.buffers.values():
-            buffer.difference_update(removed)
         return removed
 
 
@@ -389,8 +356,7 @@ class TrainerSamples:
     component that its commits name or ``""`` for the only trainer of a scenario. Operations pass ``trainer``
     to the store: ``page`` reads the samples that the trainer reads (its own and those of no component),
     ``add_record_samples`` saves its own, ``consumed_record_ids`` reads the records that its samples consumed,
-    ``imported_tasks`` reads the imported tasks, and ``manual_buffer``, ``insert_into_buffer`` and ``remove_from_buffer``
-    read and change its manual buffer. Purpose: ``Recipe.build_trainers`` makes one for each trainer; the
+    and ``imported_tasks`` reads the imported tasks. Purpose: ``Recipe.build_trainers`` makes one for each trainer; the
     trainer's pipeline (``PipelineContext.samples``) and its stages read it.
     """
 
@@ -421,15 +387,6 @@ class TrainerSamples:
 
     def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
         return self.store.get(sample_ids)
-
-    def manual_buffer(self) -> tuple[str, ...]:
-        return self.store.manual_buffer(self.trainer)
-
-    def insert_into_buffer(self, sample_ids: tuple[str, ...]) -> None:
-        self.store.insert_into_buffer(self.trainer, sample_ids)
-
-    def remove_from_buffer(self, sample_ids: tuple[str, ...]) -> None:
-        self.store.remove_from_buffer(self.trainer, sample_ids)
 
 
 __all__ = [

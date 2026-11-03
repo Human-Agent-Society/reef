@@ -13,11 +13,12 @@ from typing import Any
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
-from reef.core.training_request import normalize_training_request_payload
+from reef.core.training_request import TrainingRequest, normalize_training_request_payload
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
 from reef.storage.work_queue import WorkItem
+from reef.train.trainer import Trainer
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -45,8 +46,9 @@ def file_instruction(current: Scenario, request_id: str, payload: Mapping[str, A
     """Check a training instruction and queue it in ``current``'s instructions; return its queue item.
 
     A retry of an instruction that the scenario queued before returns its item, whatever the training mode now.
-    Otherwise the scenario must train in ``manual`` mode with a trainer that trains, and the text and ``requires``
-    must pass the screens (``training_request_refusal``). Raise ``ValueError`` for a refused instruction, and
+    Otherwise the scenario must train in ``manual`` mode, the text and ``requires`` must pass the screens
+    (``training_request_refusal``), and a trainer that trains must take the instruction's samples
+    (``Trainer.check_instruction``). Raise ``ValueError`` for a refused instruction, and
     ``RecordConflict`` for an ID that the scenario queued with another payload.
     """
     if current.instructions is None:
@@ -55,12 +57,17 @@ def file_instruction(current: Scenario, request_id: str, payload: Mapping[str, A
         retry = current.instructions.get(request_id) is not None
         if not retry and current.training_mode == "auto":
             raise ValueError("explicit training requests require training_mode='manual'")
-        if not retry and not any(component_trainer.trainer.trains for component_trainer in current.trainers):
+        trainers = [
+            component_trainer.trainer for component_trainer in current.trainers if component_trainer.trainer.trains
+        ]
+        if not retry and not trainers:
             raise ValueError("explicit training requests require a training backend")
         request = normalize_training_request_payload(payload)
-        refusal = None if retry else training_request_refusal(request["text"], request["requires"])
-        if refusal is not None:
-            raise ValueError(refusal)
+        if not retry:
+            refusal = training_request_refusal(request["text"], request["requires"])
+            if refusal is not None:
+                raise ValueError(refusal)
+            check_instruction(trainers, TrainingRequest.from_dict(request))
         return current.instructions.file(request_id, request)
     except RecordConflict:
         current.operations.increment("ingest/rejected_conflict_total")
@@ -119,6 +126,18 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
         current.operations.increment("ingest/rejected_request_total")
         raise
     return None
+
+
+def check_instruction(trainers: Sequence[Trainer], request: TrainingRequest) -> None:
+    """Raise ``ValueError`` unless one of ``trainers`` can run ``request``, with the first trainer's reason."""
+    reasons: list[str] = []
+    for trainer in trainers:
+        try:
+            trainer.check_instruction(request)
+            return
+        except ValueError as exc:
+            reasons.append(str(exc))
+    raise ValueError(reasons[0])
 
 
 def append_record(current: Scenario, item: AgentRecord) -> tuple[AgentRecord, bool]:

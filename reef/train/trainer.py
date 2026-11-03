@@ -242,8 +242,7 @@ class Trainer:
                     start = job_loop.component.root_start(root)
                 except ValueError as exc:
                     raise TrainingStartRefused(
-                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.revision}: "
-                        f"{exc}"
+                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.revision}: {exc}"
                     ) from exc
                 initial_state = JobLoopState(start).to_dict()
             trainer = cls(
@@ -335,16 +334,10 @@ class Trainer:
     def scenario(self) -> str:
         return self._scenario
 
-    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
+    def set_training_mode(self, training_mode: str) -> None:
         """Serialize mode selection with record push and job data reservation (``TrainingPipeline.set_training_mode``)."""
         with self._lock:
-            self._pipeline.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
-
-    def pending_instructions(self) -> int:
-        """The instructions that the pipeline holds: those that the scenario last gave it (``queue_instructions``) and
-        that it did not consume yet. ``Scenario.pending_instructions`` counts the queue itself."""
-        with self._lock:
-            return self._pipeline.buffered_requests()
+            self._pipeline.set_training_mode(training_mode)
 
     def consumed_among(self, ids: Iterable[str]) -> frozenset[str]:
         """The IDs among ``ids`` that a commit of this trainer consumed, or that its recovery read as consumed."""
@@ -491,23 +484,16 @@ class Trainer:
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
 
-    def buffer_listing(self) -> Mapping[str, Any]:
-        """The trainer's training mode and the samples of its buffer (``TrainingPipeline.buffer_listing``)."""
+    def next_job_listing(self) -> Mapping[str, Any]:
+        """The trainer's training mode and the samples of its next automatic job (``TrainingPipeline.next_job_listing``)."""
         with self._lock:
             self._pipeline.read_store()
-            return {"training_mode": self._pipeline.training_mode, "samples": list(self._pipeline.buffer_listing())}
+            return {"training_mode": self._pipeline.training_mode, "samples": list(self._pipeline.next_job_listing())}
 
-    def change_buffer(self, sample_ids: tuple[str, ...], *, insert: bool) -> Mapping[str, Any]:
-        """Insert ``sample_ids`` into the manual buffer, or remove them; return ``buffer_listing`` after it.
-
-        Raise as ``TrainingPipeline.insert_into_buffer`` and ``remove_from_buffer`` do.
-        """
+    def check_instruction(self, request: TrainingRequest) -> None:
+        """Raise ``ValueError`` unless this trainer can run ``request`` (``TrainingPipeline.check_instruction``)."""
         with self._lock:
-            if insert:
-                self._pipeline.insert_into_buffer(sample_ids)
-            else:
-                self._pipeline.remove_from_buffer(sample_ids)
-        return self.buffer_listing()
+            self._pipeline.check_instruction(request)
 
     def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
         """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""
@@ -675,7 +661,7 @@ class Trainer:
             return result
 
     def skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
-        """Consume the instruction alone; the samples of its job data stay in the buffer."""
+        """Consume the instruction alone; the samples of its job data stay untrained."""
         with self._lock:
             pending = self.pending_step
             if not isinstance(pending, JobDataReservation) or pending.data_id != data.data_id:

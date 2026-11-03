@@ -72,20 +72,15 @@ class Serve:
 
 
 @dataclass(frozen=True)
-class Insert:
-    """A client inserts the stored samples ``sample_ids`` into the trainer's manual buffer at this step."""
+class Instruct:
+    """A client queues the training instruction ``request_id``, which names the stored samples ``sample_ids``, at
+    this step (``POST /reef/train``)."""
 
+    request_id: str
     sample_ids: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class Instruct:
-    """A client queues the training instruction ``request_id`` at this step (``POST /reef/train``)."""
-
-    request_id: str
-
-
-Step = AgentRecord | Serve | Insert | Instruct | str
+Step = AgentRecord | Serve | Instruct | str
 
 
 # ------------------------------------------------------------------- the driver
@@ -213,10 +208,13 @@ class StreamRun:
                 elif isinstance(step, Serve):
                     self.serving_artifact_id = step.artifact_id
                     trainer.pipeline.observe_serving_artifact_id(step.artifact_id)
-                elif isinstance(step, Insert):
-                    trainer.change_buffer(step.sample_ids, insert=True)
                 elif isinstance(step, Instruct):
-                    payload = {"text": step.request_id, "session": "session-1", "release_id": "release-1"}
+                    payload = {
+                        "text": step.request_id,
+                        "session": "session-1",
+                        "release_id": "release-1",
+                        "samples": list(step.sample_ids),
+                    }
                     self.instructions.file(step.request_id, normalize_training_request_payload(payload))
                 elif step == CYCLE:
                     self.drain(trainer)
@@ -261,8 +259,8 @@ def report(record_id: str, *references: str, score: float = 1.0, **metadata: obj
     )
 
 
-def instruction(record_id: str) -> Instruct:
-    return Instruct(record_id)
+def instruction(record_id: str, *sample_ids: str) -> Instruct:
+    return Instruct(record_id, sample_ids)
 
 
 def scored(prefix: str, index: int, score: float = 1.0, **metadata: object) -> list[AgentRecord]:
@@ -661,16 +659,13 @@ def trace_steps(mode_requests: bool) -> list[Step]:
     for index in range(6):
         steps += scored("c", index, float(index))
     if mode_requests:
-        # The samples join the manual buffer only by a client's insert; each instruction trains the one inserted
-        # sample, and the other stored samples wait.
+        # Each instruction trains the one sample that it names, and the other stored samples wait.
         steps += [
             CYCLE,
-            Insert(("r-c-0:0",)),
-            instruction("train-1"),
+            instruction("train-1", "r-c-0:0"),
             CYCLE,
             *scored("c", 6),
-            Insert(("r-c-1:0",)),
-            instruction("train-2"),
+            instruction("train-2", "r-c-1:0"),
         ]
     return steps
 

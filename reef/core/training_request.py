@@ -22,12 +22,15 @@ class TrainingRequestPayload(TypedDict):
     requires: list[dict[str, str]]
     client: NotRequired[ClientReport]
     parameters: NotRequired[dict[str, Any]]
+    samples: NotRequired[list[str]]
 
 
 #: At most this many commands in one report.
 MAX_CLIENT_COMMANDS = 64
 #: At most this many bytes of JSON in an instruction's job parameters.
 MAX_PARAMETERS_BYTES = 16384
+#: At most this many samples in one instruction.
+MAX_INSTRUCTION_SAMPLES = 10000
 CLIENT_WORD = re.compile(r"[A-Za-z0-9._+\- ()]{1,64}")
 COMMAND_NAME = re.compile(r"[A-Za-z0-9._+\-]{1,40}")
 
@@ -65,6 +68,8 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     Older clients may send ``release_id`` instead of ``artifact_id``; normalized records use ``artifact_id``.
     ``parameters`` is a JSON object with string keys, at most ``MAX_PARAMETERS_BYTES`` bytes of JSON: the
     parameters of the instruction's training job, merged into the recipe's (``Sample2Job.job_parameters``).
+    ``samples`` is a list of 1 to ``MAX_INSTRUCTION_SAMPLES`` distinct non-empty sample IDs: the samples that the
+    instruction's job trains.
     """
     fields: dict[str, str] = {}
     for key in ("text", "session", "artifact_id"):
@@ -99,6 +104,16 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
         raise ValueError(f"parameters must not exceed {MAX_PARAMETERS_BYTES} bytes of JSON")
     if parameters:
         normalized["parameters"] = json.loads(encoded)
+    if "samples" in payload:
+        samples = payload["samples"]
+        if (
+            not isinstance(samples, list)
+            or not 1 <= len(samples) <= MAX_INSTRUCTION_SAMPLES
+            or any(not isinstance(sample_id, str) or not sample_id for sample_id in samples)
+            or len(set(samples)) != len(samples)
+        ):
+            raise ValueError(f"samples must be 1 to {MAX_INSTRUCTION_SAMPLES} distinct non-empty sample IDs")
+        normalized["samples"] = list(samples)
     return normalized
 
 
@@ -114,6 +129,7 @@ class TrainingRequest:
     ``client`` is the requesting client's report of its machine (see
     :func:`reef.core.training_request.parse_client`); empty when it sent none.
     ``parameters`` are the parameters of the instruction's training job, merged into the recipe's; empty when it sent none.
+    ``samples`` are the IDs of the samples that the instruction's job trains; empty when it named none.
 
     :meth:`from_dict` validates a payload with
     :func:`normalize_training_request_payload`; the constructor takes values
@@ -128,6 +144,7 @@ class TrainingRequest:
     requires: tuple[Mapping[str, str], ...] = field(default=(), hash=False)
     client: Mapping[str, str | dict[str, bool]] = field(default_factory=dict, hash=False)
     parameters: Mapping[str, Any] = field(default_factory=dict, hash=False)
+    samples: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object], *, request_id: str = "") -> TrainingRequest:
@@ -141,6 +158,7 @@ class TrainingRequest:
             requires=tuple(normalized["requires"]),
             client=normalized.get("client", {}),
             parameters=normalized.get("parameters", {}),
+            samples=tuple(normalized.get("samples", ())),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -152,4 +170,5 @@ class TrainingRequest:
             # Only when the client reported one, so a request without it keeps its earlier shape.
             **({"client": dict(self.client)} if self.client else {}),
             **({"parameters": dict(self.parameters)} if self.parameters else {}),
+            **({"samples": list(self.samples)} if self.samples else {}),
         }

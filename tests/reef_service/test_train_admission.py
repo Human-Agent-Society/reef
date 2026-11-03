@@ -149,14 +149,13 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
             assert scenario.pending_instructions() == 9
             release.set()
             for _ in range(600):
-                if scenario.pending_instructions() == 0 and scenario.trainer.pending_instructions() == 0:
+                if scenario.pending_instructions() == 0:
                     break
                 await asyncio.sleep(0.05)
             assert scenario.pending_instructions() == 0
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
             drained = (await status.json())["scenarios"]["agents"]["processor"]
-            assert drained["buffered_requests"] == 0
             assert drained["pending_instructions"] == 0
         finally:
             release.set()
