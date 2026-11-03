@@ -12,8 +12,8 @@ from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.core import RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

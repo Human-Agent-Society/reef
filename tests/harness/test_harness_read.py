@@ -6,6 +6,7 @@ import pytest
 from tests.support.harness_steps import IdleMethod, evolution_config
 
 from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, InMemoryRepositoryBackend
+from reef.artifact.components import ScenarioComponents
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import EvaluationSettings
 from reef.harness.adapters import get_adapter
@@ -16,11 +17,10 @@ from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.service.app import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface
 
 #: The files pi reads for a tree that holds only ``rules.md`` with the text ``rule``: its package and empty configs.
 PI_RULES_RENDER = render_tree(HarnessTree({"rules.md": "rule"}), get_adapter("pi"))
-#: A pi harness evolution recipe: what its surface serves is the subject here, so it never builds a backend.
+#: A pi harness evolution recipe: what its components serves is the subject here, so it never builds a backend.
 PI_RECIPE = HarnessEvolutionRecipe(
     method=IdleMethod(), evolution=EvolutionSettings(), evaluation=EvaluationSettings(policy="none")
 )
@@ -28,13 +28,13 @@ PI_RECIPE = HarnessEvolutionRecipe(
 
 @dataclass(frozen=True, kw_only=True)
 class _HarnessRecipe(Recipe):
-    """A pull-delivery recipe that serves the harness surface harness evolution builds; a new scenario's root holds
+    """A pull-delivery recipe that serves the harness components harness evolution builds; a new scenario's root holds
     ``rules.md`` with the text ``rules``, or no file when ``rules`` is ``None``."""
 
     rules: str | None = None
 
-    def build_surface(self, scenario: str) -> Surface:
-        return PI_RECIPE.build_surface(scenario)
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return PI_RECIPE.build_components(scenario)
 
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={} if self.rules is None else {"rules.md": self.rules})
@@ -72,7 +72,7 @@ def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path
     monkeypatch.setattr(
         service.dispatcher.get_or_create_scenario("delivery").repository, "materialize", fail_materialize
     )
-    with pytest.raises(ArtifactNotFound, match="the deployment's recipe carries no harness surface"):
+    with pytest.raises(ArtifactNotFound, match="the deployment's recipe declares no harness component"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
 
@@ -83,26 +83,26 @@ def test_current_files_never_creates_a_scenario(tmp_path) -> None:
 
 
 def test_manifest_error_distinguishes_a_scenario_without_a_published_tree(tmp_path) -> None:
-    # A scenario exists and its recipe has a harness surface, but its release holds no tree yet. The message must
-    # tell the operator that nothing has been published, not that the surface is missing.
+    # A scenario exists and its recipe has a harness components, but its release holds no tree yet. The message must
+    # tell the operator that nothing has been published, not that the components is missing.
     service = _service(tmp_path, recipe=_HarnessRecipe(rules=None))
     with pytest.raises(ArtifactNotFound, match="holds no harness tree"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
 
-def test_harness_surface_renders_the_source_tree_for_its_adapter(tmp_path) -> None:
+def test_harness_components_render_the_source_tree_for_their_adapter(tmp_path) -> None:
     root = tmp_path / "artifact"
     root.mkdir()
     (root / "rules.md").write_text("rule", encoding="utf-8")
-    surface = PI_RECIPE.build_surface("s")
-    assert surface.files is not None
-    assert surface.files.read_files(Artifact.local(root)) == PI_RULES_RENDER
+    components = PI_RECIPE.build_components("s")
+    assert components.files_component is not None
+    assert components.read_files(Artifact.local(root)) == PI_RULES_RENDER
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert surface.files.read_files(Artifact.local(empty)) is None
+    assert components.read_files(Artifact.local(empty)) is None
 
 
-def test_harness_surface_ignores_repository_bookkeeping(tmp_path) -> None:
+def test_harness_components_ignore_repository_bookkeeping(tmp_path) -> None:
     """Backend files at the tree root are neither served nor rendered.
 
     The git-lfs backend commits reef-artifact.json and .gitattributes into
@@ -114,9 +114,9 @@ def test_harness_surface_ignores_repository_bookkeeping(tmp_path) -> None:
     (root / "rules.md").write_text("rule", encoding="utf-8")
     (root / "reef-artifact.json").write_text("{}", encoding="utf-8")
     (root / ".gitattributes").write_text("* text", encoding="utf-8")
-    surface = PI_RECIPE.build_surface("s")
-    assert surface.files is not None
-    assert surface.files.read_files(Artifact.local(root)) == PI_RULES_RENDER
+    components = PI_RECIPE.build_components("s")
+    assert components.files_component is not None
+    assert components.read_files(Artifact.local(root)) == PI_RULES_RENDER
 
 
 @dataclass(frozen=True, kw_only=True)

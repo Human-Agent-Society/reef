@@ -9,11 +9,10 @@ factory hands it to the recipe when it builds the trainers.
 from __future__ import annotations
 
 from reef.artifact.artifact import Artifact, ArtifactNotFound, SnapshotRef
+from reef.artifact.components import ScenarioComponents, TextFileTree
 from reef.artifact.repository import Repository
 from reef.storage.commits import CommitRecord
 from reef.storage.scenario import ScenarioStore
-from reef.surface.base import Surface
-from reef.surface.files import TextFileTree
 from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 
 
@@ -30,11 +29,13 @@ class ScenarioArtifactFiles(CommittedArtifacts):
     the catalog lists it.
     """
 
-    def __init__(self, *, name: str, store: ScenarioStore, repository: Repository, surface: Surface) -> None:
+    def __init__(
+        self, *, name: str, store: ScenarioStore, repository: Repository, components: ScenarioComponents
+    ) -> None:
         self.name = name
         self.store = store
         self.repository = repository
-        self.surface = surface
+        self.components = components
 
     def head(self, component: str) -> ArtifactTextFiles:
         history = self.store.history() if self.store.durable else ()
@@ -47,7 +48,7 @@ class ScenarioArtifactFiles(CommittedArtifacts):
         refs.extend(record.snapshot for record in self.store.history())
         for ref in dict.fromkeys(refs):
             artifact = self.repository.resolve(ref)
-            selected = self.surface.component_artifact(artifact, component)
+            selected = self.components.component_artifact(artifact, component)
             if selected.artifact_id == artifact_id:
                 return ArtifactTextFiles(artifact_id, dict(TextFileTree().read_files(selected) or {}))
         raise ArtifactNotFound(f"scenario {self.name!r} has no artifact {artifact_id!r} of component {component!r}")
@@ -55,13 +56,13 @@ class ScenarioArtifactFiles(CommittedArtifacts):
     def files(self, ref: SnapshotRef, component: str) -> ArtifactTextFiles:
         """Return the selected component's ID and text files from a stored snapshot."""
         artifact = self.repository.resolve(ref)
-        selected = self.surface.component_artifact(artifact, component)
+        selected = self.components.component_artifact(artifact, component)
         return ArtifactTextFiles(selected.artifact_id, dict(TextFileTree().read_files(selected) or {}))
 
 
-def component_files(surface: Surface, artifact: Artifact, component: str) -> dict[str, str]:
+def component_files(components: ScenarioComponents, artifact: Artifact, component: str) -> dict[str, str]:
     """``component``'s text files in ``artifact``, as the release stores them: the harness source tree."""
-    return dict(TextFileTree().read_files(surface.component_artifact(artifact, component)) or {})
+    return dict(TextFileTree().read_files(components.component_artifact(artifact, component)) or {})
 
 
 def moves_head(record: CommitRecord, component: str) -> bool:

@@ -24,17 +24,16 @@ from tests.support.artifact_versions import (
     train,
 )
 from tests.support.runtime_stubs import runtime_bindings
-
 from tests.support.serving import wait_for_serving
 
 from reef.dispatcher import Dispatcher
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
-from reef.runtime.interfaces import InferenceArtifact, InferenceHandler
-from reef.runtime.jobs import SavedCheckpoint
 from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SavedCheckpoint
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 

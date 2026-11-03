@@ -16,15 +16,16 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData, TaskSample
 from reef.core.snapshot import SnapshotRef
 from reef.core.training_request import TrainingRequest
+from reef.core.weight_layout import ReleaseFormat
 from reef.observability.base import (
     ExperimentRun,
     ExperimentTracker,
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.work_queue import NewWork
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.job_queue import (
     JOBS_QUEUE,
     JobExperimentRecorder,

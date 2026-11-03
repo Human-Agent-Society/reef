@@ -47,7 +47,6 @@ from reef.recipe.generated_tasks.processor import (
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.runtime.jobs import TrainingComponent
 from reef.sample2job import Sample2JobSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
@@ -55,6 +54,7 @@ from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
+from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 
 MODULE = "tests.reef_recipe.test_generated_tasks"
@@ -445,9 +445,14 @@ def generation_numbers(worker: InlineWorker | DeferredWorker) -> list[int]:
     return [job.generation for job in worker.submitted if isinstance(job, GenerationJob)]
 
 
-def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -> None:
+@pytest.mark.parametrize("generation_deadline_seconds", [1800.0, float("inf")])
+def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(
+    tmp_path: Path, generation_deadline_seconds: float
+) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1) + generated(0, 2)])
-    p, service = rounds(tmp_path, task_generator, buffer_size=3)
+    p, service = rounds(
+        tmp_path, task_generator, buffer_size=3, generation_deadline_seconds=generation_deadline_seconds
+    )
     status = p.status()["task_generation"]
     assert status["generator"] == "ScriptedGenerator"
     assert (status["next"], status["completed"], status["of"]) == (0, 0, 3)

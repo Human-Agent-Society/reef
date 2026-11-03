@@ -32,13 +32,13 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
-from reef.runtime.jobs import ScenarioRoot
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -58,7 +58,7 @@ def scenario_double(
     job_loop=None,
     state: dict | None = None,
 ) -> SimpleNamespace:
-    """A scenario with one trainer; it carries what the status and the local workers read."""
+    """A scenario with one trainer; it carries what the status, the local workers and ``Dispatcher.close`` read."""
     pipeline = SimpleNamespace(background_jobs_running=lambda: background_jobs_running, training_mode="auto")
     trainer = SimpleNamespace(
         pipeline=pipeline,
@@ -78,12 +78,15 @@ def scenario_double(
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
         served_artifact_id=lambda: "base",
+        close=lambda: None,
     )
 
 
-def registry_double(scenario: SimpleNamespace) -> SimpleNamespace:
+def registry_double(scenario: SimpleNamespace, experiment_reports=None) -> SimpleNamespace:
+    """A registry of ``scenario`` alone; ``experiment_reports`` is what ``Dispatcher.close`` closes."""
     return SimpleNamespace(
         training_status_scenario_names=("s",),
+        experiment_reports=experiment_reports,
         get_optional=lambda name: scenario if name == "s" else None,
         loaded_scenarios=lambda: (scenario,),
         preload_errors={},
@@ -100,7 +103,7 @@ def bound_dispatcher(scenario: SimpleNamespace) -> Dispatcher:
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
-    dispatcher.registry = registry_double(scenario)
+    dispatcher.registry = registry_double(scenario, dispatcher.registry.experiment_reports)
     dispatcher.local_workers.registry = dispatcher.registry
     dispatcher.training_status.registry = dispatcher.registry
     return dispatcher

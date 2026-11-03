@@ -28,14 +28,14 @@ from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ComparePolicy
+from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import ScenarioRoot
 from reef.scenario.scenario import Scenario
 from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JobQueueComponent

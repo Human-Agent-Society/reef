@@ -649,6 +649,10 @@ class TrainingPipeline:
         """
         return self.record2sample.background_jobs_running()
 
+    def next_due(self) -> float | None:
+        """The monotonic time at which ``produce`` can make samples without a new record (``Record2Sample.next_due``)."""
+        return self.record2sample.next_due()
+
     def operational_metrics(self) -> Mapping[str, float | int]:
         """Numeric queue state, sampled under the trainer lock without advancing work."""
         return {

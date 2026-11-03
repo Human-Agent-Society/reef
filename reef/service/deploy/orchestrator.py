@@ -26,13 +26,13 @@ from typing import Any
 
 import yaml
 
+from reef.core.errors import RuntimeConfigError
+from reef.execution.executor import Executor
+from reef.execution.executor.config import ExecutorSelection, role_executor_settings, select_executor
+from reef.execution.executor.ray import RayExecutor
+from reef.execution.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.executor import Executor
-from reef.runtime.executor.config import ExecutorSelection, role_executor_settings, select_executor
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 from reef.service.deploy.cli import (
     InvalidOverrideError,
     _apply_overrides,

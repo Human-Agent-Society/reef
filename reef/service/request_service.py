@@ -2,8 +2,7 @@
 
 ``RequestService`` normalizes typed Reef payloads, resolves the artifact
 version before every provider call so concurrent publication cannot change
-what gets recorded, stores each exchange as a record, and applies the
-scenario surface's request/response checks. No aiohttp types appear here;
+what gets recorded, and stores each exchange as a record. No aiohttp types appear here;
 ``reef.service.routes`` adapts these methods to HTTP.
 """
 
@@ -214,7 +213,9 @@ class RequestService:
         manifest = self.harness_manifest_for_artifact(scenario, selected, source=form != "rendered")
         if form == "client" and service_url is not None and root is not None:
             descriptor = self.harness_descriptor(scenario)
-            served = self._dispatcher.recipe.harness_served_model(scenario.name, str(scenario.surface.files_component))
+            served = self._dispatcher.recipe.harness_served_model(
+                scenario.name, str(scenario.components.files_component)
+            )
             if served is None:
                 raise ArtifactNotFound(f"scenario {scenario.name!r} evolves no harness that calls a model")
             # The layer's model calls go to the inference service when the deployment names its address.
@@ -262,7 +263,7 @@ class RequestService:
         ):
             raise ValueError("files must map each path under the adapter's roots to the file's text")
         scenario = self._file_scenario(headers)
-        component = scenario.surface.files_component
+        component = scenario.components.files_component
         if component is None:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
         if payload.get("base_artifact_id") is None and payload.get("base_release_id") is None:
@@ -270,7 +271,7 @@ class RequestService:
         base_artifact = self.harness_artifact(
             scenario, payload.get("base_artifact_id"), payload.get("base_release_id")
         )
-        base_artifact_id = scenario.surface.component_artifact(base_artifact, component).artifact_id
+        base_artifact_id = scenario.components.component_artifact(base_artifact, component).artifact_id
         descriptor = self.harness_descriptor(scenario)
         expected_selection = scenario.artifact_selection()
         active_id = expected_selection.components[component]
@@ -347,8 +348,8 @@ class RequestService:
     @staticmethod
     def harness_descriptor(scenario: Scenario) -> AdapterDescriptor:
         """The adapter of the harness a client pulls; ArtifactNotFound when the scenario serves no harness tree."""
-        component = scenario.surface.files_component
-        files = None if component is None else scenario.surface.components[component].files
+        component = scenario.components.files_component
+        files = None if component is None else scenario.components.components[component].files
         if not isinstance(files, HarnessFiles):
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} evolves no harness: the deployment's recipe is not a harness "
@@ -358,7 +359,7 @@ class RequestService:
 
     def harness_state_dir(self, scenario: Scenario) -> Path | None:
         """The state directory of the harness a client pulls (``Recipe.harness_state_dir``), or None."""
-        component = scenario.surface.files_component
+        component = scenario.components.files_component
         return None if component is None else self._dispatcher.recipe.harness_state_dir(scenario.name, component)
 
     def step_progress(self, scenario: Scenario) -> StepProgress | None:
@@ -369,7 +370,7 @@ class RequestService:
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:
         """The trainer evolving the component a client pulls; a flat scenario's only trainer."""
-        return scenario.trainer_for(scenario.surface.files_component)
+        return scenario.trainer_for(scenario.components.files_component)
 
     @staticmethod
     def harness_artifact(scenario: Scenario, artifact_id: object, legacy_revision: object) -> Artifact:
@@ -387,7 +388,7 @@ class RequestService:
                 raise ValueError(f"{name} must be a non-empty string")
         if isinstance(legacy_revision, str):
             return scenario.release_queries.artifact_for_version(legacy_revision)
-        component = scenario.surface.files_component
+        component = scenario.components.files_component
         if not isinstance(artifact_id, str):
             if component is None:
                 raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
@@ -399,22 +400,25 @@ class RequestService:
     def harness_manifest_for_artifact(
         scenario: Scenario, artifact: Artifact, *, source: bool = False
     ) -> dict[str, Any]:
-        tree = scenario.surface.files
-        component = scenario.surface.files_component
-        if tree is None or component is None:
+        component = scenario.components.files_component
+        if component is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} serves no files: the deployment's recipe "
-                "carries no harness surface (record-only or weight-training recipes have "
+                "declares no harness component (record-only or weight-training recipes have "
                 "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
-        files = component_files(scenario.surface, artifact, component) if source else tree.read_files(artifact)
+        files = (
+            component_files(scenario.components, artifact, component)
+            if source
+            else scenario.components.read_files(artifact)
+        )
         if files is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} serves no files: snapshot {artifact.ref.revision!r} holds no "
                 "harness tree. A root release made from the default start holds the recipe's evolution.seed, so an empty seed serves "
                 "nothing until a step publishes a tree."
             )
-        artifact_id = scenario.surface.component_artifact(artifact, component).artifact_id
+        artifact_id = scenario.components.component_artifact(artifact, component).artifact_id
         catalog = scenario.artifacts()
         row = next((row for row in catalog if row["artifact_id"] == artifact_id), None)
         manifest = {
@@ -452,7 +456,7 @@ class RequestService:
     def harness_artifacts(self, headers: Mapping[str, str]) -> dict[str, Any]:
         """The harness artifacts, oldest first, addressed by artifact ID; operation history stays separate."""
         scenario = self._file_scenario(headers)
-        component = scenario.surface.files_component
+        component = scenario.components.files_component
         rows = [row for row in reversed(scenario.artifacts()) if row["component"] == component]
         return {"scenario": scenario.name, "artifacts": rows}
 
@@ -517,12 +521,12 @@ class RequestService:
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
             )
         before = before_artifact_id(rows[step])
-        component = scenario.surface.files_component
+        component = scenario.components.files_component
         before_files: Mapping[str, str] | None = None
         if before is not None and component is not None:
             try:
                 _, artifact = scenario.resolve_artifact(before, component)
-                before_files = component_files(scenario.surface, artifact, component)
+                before_files = component_files(scenario.components, artifact, component)
             except ArtifactError:
                 before_files = None
         return build_release_page(step, rows, before_files=before_files, link_query=link_query)
@@ -615,10 +619,10 @@ class RequestService:
         scenario = self._dispatcher.get_or_create_scenario(parsed.scenario)
         if scenario is None:
             raise ReefError(f"scenario {parsed.scenario!r} disappeared during lookup")
-        if scenario.surface.files is None:
+        if scenario.components.files_component is None:
             raise ArtifactNotFound(
                 f"scenario {parsed.scenario!r} serves no files: the deployment's recipe "
-                "carries no harness surface (record-only or weight-training recipes have "
+                "declares no harness component (record-only or weight-training recipes have "
                 "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
         if not self._dispatcher.services.runs_control:

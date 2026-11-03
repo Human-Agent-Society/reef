@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import Any, Self
 
 from reef.core.config import config_option
+from reef.core.errors import inference_aborted
 from reef.core.job_data import JobOutcome, Sample, TrajectorySample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2sample.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
 from reef.record2sample.staleness import ServedArtifacts, is_stale, producing_artifact_ids
-from reef.runtime.interfaces import inference_aborted
 
 
 class SampleStatus(Enum):
@@ -260,6 +260,11 @@ class Record2Sample(ABC, Plugin):
     def background_jobs_running(self) -> bool:
         """Return True while background jobs run. A finished job can form sets without a new record."""
         return False
+
+    def next_due(self) -> float | None:
+        """Return the monotonic time at which ``advance`` can form a set without a new record, such as the end of a
+        trajectory's idle time; None when no set waits for time alone. The default is None."""
+        return None
 
     # ------------------------------------------------------- other samples
 

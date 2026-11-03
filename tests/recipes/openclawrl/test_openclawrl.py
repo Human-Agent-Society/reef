@@ -22,10 +22,9 @@ from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.surface import Surface, WeightLoader
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData
@@ -323,11 +322,10 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
 
 
 @pytest.mark.unit
-def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
+def test_recipe_serves_loaded_weights_and_builds_a_trainer() -> None:
     recipe = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=job_sized_stages(OpenClawRLRecipe.pipeline_spec()))
-    surface = recipe.build_surface("s")
-    assert type(surface) is Surface
-    assert isinstance(surface.loader, WeightLoader)
+    components = recipe.build_components("s")
+    assert components.loaded_component == "weights"
     trainer = recipe.build("s", SQLiteRecordStore(), root=STUB_ROOT)
     assert trainer.job_loop is not None
     assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "openclawrl"

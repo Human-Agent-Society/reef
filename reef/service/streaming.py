@@ -5,8 +5,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import SSE_DONE, frame_data, stream_events
-from reef.runtime.interfaces import InferenceStream
 
 #: Responses events that end a stream the model finished; ``incomplete`` is a normal stop at a token limit.
 RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete"})

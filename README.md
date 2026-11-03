@@ -71,10 +71,10 @@ modules implement each step.
 
 | Step | What happens | Where it lives |
 |---|---|---|
-| **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`runtime/`](reef/runtime) — inference and artifact updates |
+| **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`inference/`](reef/inference) — inference and artifact updates |
 | **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`storage/records.py`](reef/storage/records.py) — stored interactions and feedback<br>[`record2sample/`](reef/record2sample) — feedback matching, eligibility, and samples |
 | **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — the training pipeline, job data, and training jobs |
-| **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`evaluation/`](reef/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
+| **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`evaluation/`](reef/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history and release components |
 
 
 ## 📦 Installation

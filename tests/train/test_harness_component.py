@@ -27,8 +27,8 @@ from reef.core.job_data import JobData
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.recipe.harness import HarnessJobLoop
-from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import JobStatus, TrainingJob
 from reef.train.harness_backend.backend import StepProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,

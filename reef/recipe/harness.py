@@ -7,8 +7,8 @@ training service on one ``HarnessBackend`` per scenario component, with
 the evaluator and the selection policy around it. A method is a
 ``reef.train.harness_backend.Method`` that the deployment names in
 ``evolution.method``; a method needs no recipe of its own. A recipe subclass
-is for a method that changes more than the method, such as the delivery
-surface::
+is for a method that changes more than the method, such as the files a
+client pulls::
 
     evolution:
       adapter: pi
@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComponents
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
@@ -54,12 +55,13 @@ from reef.evaluation.harness import (
     TaskScorer,
     evaluation_selection,
 )
+from reef.execution.executor.config import ExecutorSettings, role_executor_settings
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.adapters.parts import TreeLayout
-from reef.harness.sync import create_harness_surface
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tasks.harbor_task import can_run_in_task_container
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
@@ -68,14 +70,12 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
-from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.runtime.jobs import SavedCheckpoint, ScenarioRoot, TrainingComponent
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
-from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingComponent
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
@@ -160,7 +160,7 @@ class HarnessLayout(ArtifactLayout):
     A directory meets it when its files, read as UTF-8 text, form a
     ``HarnessTree`` that passes ``validate_tree`` for ``descriptor``: the
     files a release of the harness component stores.
-    Purpose: ``HarnessEvolutionRecipe.build_surface`` binds it on the harness
+    Purpose: ``HarnessEvolutionRecipe.build_components`` binds it on the harness
     component; the committer checks an imported harness with it.
     """
 
@@ -555,9 +555,12 @@ class HarnessEvolutionRecipe(Recipe):
         reviewed = frozenset(name for name, part in layout.parts.items() if part.review)
         return AlwaysActivate(rule.review_kinds | reviewed)
 
-    def build_surface(self, scenario: str) -> Surface:
+    def build_components(self, scenario: str) -> ScenarioComponents:
         descriptor = get_adapter(self.evolution.adapter)
-        return create_harness_surface(descriptor, layout=HarnessLayout(descriptor))
+        harness = ComponentSpec(
+            files=HarnessFiles(descriptor), kind="harness_plugin", layout=HarnessLayout(descriptor)
+        )
+        return ScenarioComponents({HARNESS_COMPONENT: harness})
 
     def default_start(self) -> DefaultStart:
         """The seed tree, which a new scenario's root release holds unless an artifact item starts it.

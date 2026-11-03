@@ -32,7 +32,7 @@ def guidance_chat_request(
 ) -> dict[str, Any]:
     """Describe one guidance sample through Reef's chat route.
 
-    The request never names an adapter: Reef's weight surface addresses it to
+    The request never names an adapter: Reef routes it to
     whatever the deployment serves, so no caller can sample the frozen base by
     forgetting to name it.
     """

@@ -194,7 +194,10 @@ generation contract <#task-generation-contract>`__).
 The pipeline also merges the stages' ``status()`` and metrics.
 ``background_jobs_running()`` is true while the record-to-sample stage runs a
 background job, such as a judgment or a task-generation round. The scenario's
-worker then polls at a fixed interval. ``close()`` closes both stages.
+worker then polls at a fixed interval. ``next_due()`` is the monotonic time at
+which a set that waits for time alone is due, such as an idle trajectory, or
+None. The samples service then runs the next selection at that time, without a
+new record. ``close()`` closes both stages.
 ``releasable_record_ids()`` returns
 the completed records that no held set references, and
 ``release_records(ids)`` frees their memory after a successful commit. New
@@ -399,8 +402,8 @@ rules also apply:
 * A sample whose record names no artifact is stale.
 * A sample from an artifact that the stage did not see is stale. A rebuilt
   trainer knows only the artifacts that it sees after the rebuild.
-* A scenario that has no runtime, or whose surface has no component that a
-  runtime loads (no ``loader``), has no staleness check: no data is stale.
+* A scenario that has no runtime, or no component of a weight kind for the
+  runtime to load, has no staleness check: no data is stale.
 * Until the scenario first gives the stage a served artifact, no data is
   stale.
 
@@ -430,7 +433,7 @@ A recipe's stage extends one of these classes of the ``reef.record2sample`` pack
        ``exclusive_sources=True``, a report that ends owns its inference records
    * - ``TrajectorySamples``
      - one sample per trajectory that ended without a report, after ``trajectory_idle_seconds`` without a
-       continuing call
+       continuing call, counted from the last call's ``created_at``
    * - ``JudgedSamples``
      - correlation, the judging worker, and one sample per judged record (``make_sample``)
    * - ``InferenceRecordSamples``
@@ -466,9 +469,19 @@ A stage can add what the component renders with:
 - ``extra.reef.max_tokens``: the longest sample that may train, as SFT
   writes it.
 
+The component renders each trained turn as its call rendered it. When a
+call's prompt does not extend the tokens of the call before it, as with a
+template that drops earlier turns' reasoning, the trajectory trains as
+several segments. Each segment is one sample with
+``extra.reef.training.segment``: ``{"index": i, "count": n}``. The segments
+keep the trajectory's group and reward. A recipe whose objective counts
+trajectories, such as one that compares the samples of a group, must read
+``segment``.
+
 The component leaves out a sample that cannot render, that is longer than
 its ``max_tokens``, or whose teacher sequence is longer than the request's
-``max_tokens``. The job metric ``unrenderable_samples`` counts them. The
+``max_tokens``. It also leaves out a sample with a teacher and several
+segments. The job metric ``unrenderable_samples`` counts them. The
 component must render as the serving engine did: give it the engine's chat
 template arguments (see `Chat template arguments
 <../reference/configuration.rst#chat-template-arguments>`__). A task rollout
