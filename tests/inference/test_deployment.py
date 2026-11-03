@@ -6,7 +6,7 @@ import pytest
 
 from reef.core.errors import DeployConfigError
 from reef.inference import deployment
-from reef.runtime.deployment import InferenceService
+from reef.inference.deployment import InferenceService
 
 
 class Receiver(InferenceService):

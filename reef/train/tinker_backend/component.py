@@ -11,7 +11,7 @@ attempt can consume API resources but cannot apply its gradient twice.
 
 Serving reads each saved checkpoint from its artifact: Tinker's sampler
 (``reef.inference.tinker``) reads the manifest, and Reef's serving engines
-(``reef.runtime.serving``) load the PEFT adapter the component exports beside
+(``reef.inference.serving``) load the PEFT adapter the component exports beside
 it. Nothing is shared in process.
 """
 
@@ -34,15 +34,17 @@ from reef.artifact.repository import BaseModelFiles, DefaultStart
 from reef.core.chat_rendering import needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
+from reef.core.weight_layout import ReleaseFormat
+from reef.storage.durable_files import read_json, write_json
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.local_jobs import LocalJobComponent
+from reef.train.method import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job

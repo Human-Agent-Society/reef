@@ -70,6 +70,8 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data``                                            | the owner's items, in arrival order               |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data/groups/{key}``                               | the owner's items grouped by a metadata value     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/{id}``                                       | one item, with its content                        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/metadata``                                  | patch the metadata of items                       |
@@ -594,6 +596,19 @@ Read, query, update and delete items
   leaves it out. Use it with ``kind=artifact`` to read the artifact library's
   kinds and sources in one page; a page of trajectories with content can be
   large.
+- ``GET /reef/namespaces/{owner}/data/groups/{key}?kind=&before=&limit=``
+  groups the owner's items of ``kind`` by the string under ``key`` in their
+  metadata, for example the trajectories of each uploaded file by
+  ``set_id``: ``{"owner", "groups", "next"}``. Each group is ``{"value",
+  "item_count", "first_sequence", "last_sequence", "metadata"}``. ``value`` is
+  null for the items without a string under ``key``. ``metadata`` is that of
+  the group's first item. The groups come newest first, by
+  ``first_sequence``. ``kind`` is required. ``key`` is 1 to 64 letters, digits
+  and underscores. ``before`` returns only the groups whose
+  ``first_sequence`` is lower. ``limit`` is 1 to 1000, 1000 by default.
+  ``next`` is the ``before`` of the next page, or null after the last group.
+  To read the items of one group, page with ``after`` from its
+  ``first_sequence`` and stop after its ``last_sequence``.
 - ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its
   ``content``. A task's ``content`` is null.
 - ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...],
@@ -1080,7 +1095,7 @@ the deployment's configured recipe. Requests never select a recipe.
      -d '{"model": "m", "messages": [{"role": "user", "content": "fix it"}]}'
 
 The bindings never change; a request naming a different recipe with the same
-scenario returns HTTP 409. This means the surface, runtime, inference backend,
+scenario returns HTTP 409. This means the components, runtime, inference backend,
 and optional report schema chosen when the recipe is constructed are fixed with
 it.
 
@@ -2149,7 +2164,7 @@ The runtime must answer each call from the artifact that the call names.
 The Tinker runtime does, so a Tinker scenario can serve any of its
 artifacts. A runtime that loads weights into engines answers only from the
 release it has loaded, so Reef refuses a serve there. A scenario whose
-surface loads nothing into a runtime, such as a harness scenario, can serve
+components load nothing into a runtime, such as a harness scenario, can serve
 any of its artifacts. A store without a durable commit history also refuses
 a serve.
 

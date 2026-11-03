@@ -18,6 +18,7 @@ from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewIt
 from reef.storage.item_kinds import json_digest
 from reef.storage.record_items import record_item
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
+from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
@@ -202,6 +203,24 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
         store.task_path(store.create("acme", [trajectory("t1")])[0])
 
 
+def test_groups_count_the_items_of_each_metadata_value_newest_first(store):
+    store.create("acme", [trajectory("a1", set_id="a", set_name="A"), trajectory("a2", set_id="a")])
+    store.create("acme", [trajectory("n1"), trajectory("b1", set_id="b", set_name="B"), trajectory("x", set_id=7)])
+    store.create("acme", calls(1))
+    store.create("other", [trajectory("o1", set_id="a")])
+    groups = store.groups("acme", kind="trajectory", key="set_id")
+    assert [(group.value, group.item_count, group.metadata.get("set_name")) for group in groups] == [
+        ("b", 1, "B"),
+        (None, 2, None),
+        ("a", 2, "A"),
+    ]
+    assert groups[2].last_sequence == groups[2].first_sequence + 1
+    assert store.groups("acme", kind="trajectory", key="set_id", limit=2) == groups[:2]
+    assert store.groups("acme", kind="trajectory", key="set_id", before=groups[1].first_sequence) == groups[2:]
+    with pytest.raises(ValueError, match="key"):
+        store.groups("acme", kind="trajectory", key="set.id")
+
+
 def test_query_arguments_are_checked(store):
     for arguments, reason in [({"kind": "dataset"}, "kind"), ({"after": -1}, "after"), ({"limit": 0}, "limit")]:
         with pytest.raises(ValueError, match=reason):
@@ -266,6 +285,38 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-3": RecordLink("coding/call-1", entries[3]),
         "coding/retry-2": RecordLink("coding/call-1", entries[2]),
     }
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda store: store.read("acme", "coding/call-2").item_id,
+        lambda store: [item.item_id for item in store.query("acme", kind="record")],
+        lambda store: list(store.record_links("acme", ["coding/call-1", "coding/call-2"])),
+    ],
+    ids=["read", "query", "record_links"],
+)
+def test_a_read_sees_one_snapshot_while_a_delete_commits(postgres_config, tmp_path, monkeypatch, read):
+    url, schema = postgres_config
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    with (
+        closing(task_files),
+        closing(PostgresDataStore(url, task_files, schema=schema)) as reader,
+        closing(PostgresDataStore(url, task_files, schema=schema)) as writer,
+    ):
+        writer.create("acme", calls(1, 2))
+        paths = TrajectoryNodes.paths
+
+        def paths_after_delete(self, connection, node_sequences, *columns):
+            # The leaf call-2 and its node go between the read's item rows and its node rows.
+            writer.delete("acme", "coding/call-2")
+            return paths(self, connection, node_sequences, *columns)
+
+        monkeypatch.setattr(TrajectoryNodes, "paths", paths_after_delete)
+        before = read(reader)
+        monkeypatch.undo()
+        assert before in ("coding/call-2", ["coding/call-1", "coding/call-2"])
+        assert reader.read("acme", "coding/call-2") is None
 
 
 def test_a_record_link_is_checked_at_construction():

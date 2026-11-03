@@ -17,7 +17,7 @@ from slime.data.data_source import RolloutDataSourceWithBuffer
 from slime.utils.data import Dataset
 from slime.utils.processing_utils import load_processor, load_tokenizer
 
-from reef.runtime.durable_files import read_json
+from reef.storage.durable_files import read_json
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
 
 

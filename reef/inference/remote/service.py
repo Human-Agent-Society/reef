@@ -12,9 +12,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any, BinaryIO
 from urllib.parse import quote, urlencode
 
+from reef.core.weight_layout import WeightFiles
+from reef.execution.executor.placement import DeploymentResources
+from reef.inference.deployment import InferenceConnection, InferenceService
+from reef.inference.interfaces import InferenceBackend
 from reef.inference.remote.config import CONTROL_PATH, CONTROL_PROTOCOL, RemoteInferenceSettings
-from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceService
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
 
 #: Bound on one control call other than an engine start; a full-weight upload legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400

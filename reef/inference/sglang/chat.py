@@ -26,7 +26,7 @@ from reef.inference.chat import (
     stream_ids,
 )
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.runtime.interfaces import InferenceArtifact, InferenceStream
+from reef.inference.interfaces import InferenceArtifact, InferenceStream
 
 SGLANG_GENERATE_PATH = "/generate"
 #: ``meta_info`` entries that hold per-token tensors; they feed the training block, never a client.
@@ -259,7 +259,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
-        rollout_continuation: bool = False,
         client: NativeGenerateClient | None = None,
         request_headers: RequestHeadersFactory | None = None,
     ) -> None:
@@ -273,7 +272,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
             chat_template_kwargs=chat_template_kwargs,
-            rollout_continuation=rollout_continuation,
             request_headers=request_headers,
         )
 

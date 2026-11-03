@@ -16,8 +16,8 @@ import yaml
 
 from reef.core.config import ConfigArgument
 from reef.core.errors import DeployConfigError
+from reef.execution.executor.arguments import normalize_native_options
 from reef.execution.workers import SERVICE_COMPONENTS
-from reef.runtime.executor.arguments import normalize_native_options
 from reef.service.deploy.deployment_config import (
     RECIPE_SECTION_PATHS,
     component_config_arguments,

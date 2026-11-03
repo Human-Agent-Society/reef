@@ -17,6 +17,7 @@ from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.samples_service import make_samples
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
@@ -25,19 +26,17 @@ from reef.dispatcher.errors import local_error_source
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
-from reef.surface.weights import WeightLoader
 
 
 @dataclass(frozen=True)
 class _LoadedRecipe(_TwoTrainerRecipe):
-    """The two trainer recipe whose weights component loads into a runtime, as a real weight surface does."""
+    """The two trainer recipe whose weights component loads into a runtime, as real weights do."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return Surface(
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(
             components={
-                WEIGHTS: ComponentSurface(loader=WeightLoader()),
-                HARNESS: ComponentSurface(files=TextFileTree()),
+                WEIGHTS: ComponentSpec(kind="model"),
+                HARNESS: ComponentSpec(files=TextFileTree()),
             }
         )
 
@@ -291,10 +290,10 @@ class HarnessText(ArtifactLayout):
 class _ImportingRecipe(_LoadedRecipe):
     """The loaded recipe whose harness takes imports; its weights take none."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        surface = super().build_surface(scenario)
-        harness = replace(surface.components[HARNESS], layout=HarnessText())
-        return replace(surface, components={**surface.components, HARNESS: harness})
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        components = super().build_components(scenario)
+        harness = replace(components.components[HARNESS], layout=HarnessText())
+        return replace(components, components={**components.components, HARNESS: harness})
 
 
 class PinnedSource(DirectorySource):

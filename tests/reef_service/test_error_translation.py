@@ -18,8 +18,14 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactNotFound, ArtifactSourceError
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.errors import CommitPending, InferenceUnavailable, ReefError, TrainingStartRefused, UnknownScenario
-from reef.runtime.interfaces import UpstreamStatusError
+from reef.core.errors import (
+    CommitPending,
+    InferenceUnavailable,
+    ReefError,
+    TrainingStartRefused,
+    UnknownScenario,
+    UpstreamStatusError,
+)
 from reef.service.errors import translate_error, translate_errors
 from reef.storage.records import RecordConflict
 
