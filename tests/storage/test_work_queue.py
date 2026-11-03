@@ -591,7 +591,7 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
     owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
 
-    table.recover_completed(owner, "worker", stop_delay_seconds=10, now=4)
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=4)
     recovery = table.current_request("ready")
     assert recovery.id != ready.id and recovery.payload == ready.payload and recovery.state == "queued"
     assert recovery.metadata == {"recovery": True}
@@ -600,11 +600,31 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     assert table.current_request("queued") == queued
     assert table.current_request("withdrawn") == withdrawn
     assert table.current_request("failed").state == "failed"
-    table.recover_completed(owner, "worker", stop_delay_seconds=10, now=5)
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=5)
     assert table.current_request("ready") == recovery
     with pytest.raises(WorkLeaseLost):
-        table.recover_completed(owner, "worker", stop_delay_seconds=10, now=14)
+        table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=14)
     assert table.current_request("ready") == recovery
+
+
+@pytest.mark.unit
+def test_a_new_owner_keeps_the_routes_whose_engines_still_serve_until_it_serves_again(open_coordination):
+    stores = open_coordination()
+    lease = stores.lease.acquire("control", now=0)
+    table, queue = stores.served, stores.queue
+    live, gone = ServedArtifact("a", "http://live", "a"), ServedArtifact("b", "http://gone", "b")
+    for scenario, served in (("live", live), ("gone", gone)):
+        table.request(scenario, {"artifact_id": served.artifact_id}, control_lease_number=lease.number, now=0)
+        running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
+        table.complete_request(running, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=2)
+    queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
+    owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
+
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(live,), now=4)
+    assert table.current_request("live").metadata == table.current_request("gone").metadata == {"recovery": True}
+    assert table.read_scenario("live") == {"active": live}
+    assert table.read_scenario("gone") == {}
+    assert table.due_stops(14) == (ScheduledStop(gone, 14),)
 
 
 @pytest.mark.unit

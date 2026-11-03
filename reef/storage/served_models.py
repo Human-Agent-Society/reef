@@ -8,7 +8,7 @@ Direct route writes retain their control lease checks for callers that manage ro
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
@@ -173,12 +173,15 @@ class ServedModelsWriter(ServedModels):
         worker_id: str,
         *,
         stop_delay_seconds: float,
+        kept: Collection[ServedArtifact],
         now: float | None = None,
     ) -> None:
         """Queue completed current selections again after an inference owner takes over.
 
         ``owner`` is a held item of the inference-owner queue and kind, in the same attempt.
-        Remove current selections' old routes and schedule cleanup after the finite, non-negative delay.
+        ``kept`` holds the routes whose engines still serve them (``InferenceRuntime.adopt``): they stay until the
+        queued selections replace them. Remove current selections' other routes and schedule cleanup after the
+        finite, non-negative delay.
         Failed, unfinished, and withdrawn requests keep their state.
         """
 
