@@ -17,9 +17,9 @@ from typing import Any
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.tasks import primary_reward
+from reef.execution.executor.requirements import ExecutionRequirements
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.run import TaskResult
-from reef.runtime.executor.requirements import ExecutionRequirements
 
 
 class TaskScorer(ConfiguredPlugin, ABC):

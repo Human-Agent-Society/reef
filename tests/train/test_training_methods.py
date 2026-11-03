@@ -13,16 +13,16 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
 
 from reef.core.job_data import JobOutcome, TaskSample
-from reef.runtime.interfaces import (
+from reef.storage.samples import SampleKind
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.train.component import job_id_for
+from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.method import (
     LearningRateSchedule,
     LearningRateScheduleState,
     TrainingMethod,
     resolve_learning_rate_schedule_state,
 )
-from reef.runtime.jobs import job_id_for
-from reef.storage.samples import SampleKind
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig
 from reef.train.types import JobData
 

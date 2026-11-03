@@ -28,13 +28,13 @@ from reef.artifact import Artifact, ModelDirectory
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.snapshot import RootSource
 from reef.core.trajectories import trajectory_reward
-from reef.core.weight_layout import ADAPTER_DIR
-from reef.runtime.durable_files import write_json
-from reef.runtime.executor import ExecutorFuture, base
-from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
-from reef.runtime.jobs import JobStatus, ReleaseFormat, ScenarioRoot, TrainingJob
+from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
+from reef.execution.executor import ExecutorFuture, base
+from reef.storage.durable_files import write_json
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
+from reef.train.component import JobStatus, ScenarioRoot, TrainingJob
+from reef.train.method import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.component import (

@@ -44,17 +44,17 @@ from reef.core.reports import ReportBase, ReportValidationError
 from reef.core.snapshot import RootSource
 from reef.evaluation.activation import activation_reference
 from reef.harness.tasks.model_binding import ModelBinding
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import ScenarioRoot, TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
+from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.trainer import ComponentTrainer
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.

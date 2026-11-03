@@ -35,8 +35,8 @@ from reef.recipe import (
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import Sample2Job, Trainer, TrainingPipeline
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent, TrainingJob
+from reef.inference.interfaces import InferenceRuntime
+from reef.train.component import TrainingComponent, TrainingJob
 
 __all__ = [
     "SCENARIO_METADATA_KEY",

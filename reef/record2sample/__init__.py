@@ -60,7 +60,7 @@ The subpackage ``generator``, which this module does not import, is the generato
 that need containers (the designer prompt, the authoring rules, the oracle check, and the task rollouts) in a
 process beside the HTTP service.
 
-The modules in this directory depend only on ``reef.core``, ``reef.runtime.interfaces``, ``reef.execution.jobs``,
+The modules in this directory depend only on ``reef.core``, ``reef.execution.jobs``
 and ``reef.pipeline_context``. Thus the trainer can use them without the generator service.
 """
 

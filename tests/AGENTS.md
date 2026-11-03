@@ -9,7 +9,7 @@ module before adding another. Keep new test modules out of the `tests/` root.
 | --- | --- |
 | `artifact/`, `storage/` | Artifact repositories, scenario components, and record persistence |
 | `core/`, `scenario/` | Shared value contracts, scenario lifecycle, dispatcher coordination, and commit recovery |
-| `runtime/`, `inference/`, `train/` | Runtime coordination, inference integrations, and the training pipeline |
+| `execution/`, `inference/`, `train/` | Worker executors, inference contracts and integrations, and the training pipeline |
 | `sandbox/` | Shared execution, environment contracts, isolation, file transfer, and cleanup |
 | `slime_backend/`, `tinker_backend/` | Contracts specific to a training backend |
 | `record2sample/`, `sample2job/` | The corresponding stages of the training pipeline |

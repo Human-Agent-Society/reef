@@ -112,7 +112,7 @@ scenario's adapter revision under its own model name
 (``InferenceRuntime.served_model_name``), and control writes that name to the
 scenario's row in ``served_models``, so every request reaches that revision.
 After a restart, each scenario's release loads again under a new runtime load
-ID. ``adapter_name(scenario, runtime_load_id)`` in ``reef.runtime.residency``
+ID. ``adapter_name(scenario, runtime_load_id)`` in ``reef.inference.residency``
 names a revision on the engine, and ``parse_adapter_name`` inverts it, so a
 recorded ``lora_path`` names exactly one (scenario, revision). The serving
 runtime owns one ``AdapterResidencyManager``, which keeps at most
@@ -172,7 +172,7 @@ Remote weight snapshots
 -----------------------
 
 An inference runtime implements ``activate_checkpoint(artifact)``. The
-saved-weight serving runtimes (``reef.runtime.serving``) load the release's
+saved-weight serving runtimes (``reef.inference.serving``) load the release's
 files into the engines. A proxy runtime loads nothing and returns the release
 ID. An inference runtime that serves immutable remote snapshots validates the
 checkpoint and binds its remote sampler. Tinker's inference runtime uses this

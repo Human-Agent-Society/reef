@@ -11,10 +11,11 @@ from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
+from reef.core.weight_layout import ReleaseFormat
 from reef.inference.http import InferenceProxyRuntime
-from reef.runtime.interfaces import InferenceBackend
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
-from reef.runtime.serving import OpenedEngines, ServingEngines
+from reef.inference.interfaces import InferenceBackend
+from reef.inference.serving import OpenedEngines, ServingEngines
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 #: The release format of a stub component that does not name one.

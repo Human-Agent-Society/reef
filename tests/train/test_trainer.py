@@ -34,8 +34,6 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import ScenarioRoot
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import TrainerSamples
@@ -43,7 +41,9 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
+from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData

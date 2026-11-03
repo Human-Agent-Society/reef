@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.execution.executor import Executor
 from reef.inference.engine_control import EngineConfig
 from reef.inference.sglang.lora_schema import adapter_scoped_prefix_cache_supported
-from reef.runtime.executor import Executor
 
 
 @dataclass(frozen=True)

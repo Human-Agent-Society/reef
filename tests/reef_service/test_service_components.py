@@ -30,7 +30,6 @@ from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
-from reef.runtime.jobs import TrainingJob
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app
@@ -42,6 +41,7 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
+from reef.train.component import TrainingJob
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.instructions import InstructionQueue
 from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker

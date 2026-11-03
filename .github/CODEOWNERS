@@ -40,7 +40,12 @@
 
 # Training execution, artifact handling, and pipeline reliability.
 /reef/train/ @hanfeiyu @MikeZheng777
-/reef/runtime/ @hanfeiyu @MikeZheng777
+/reef/execution/executor/ @hanfeiyu @MikeZheng777
+/reef/inference/interfaces.py @hanfeiyu @MikeZheng777
+/reef/inference/registry.py @hanfeiyu @MikeZheng777
+/reef/inference/serving.py @hanfeiyu @MikeZheng777
+/reef/inference/residency.py @hanfeiyu @MikeZheng777
+/reef/inference/recovery.py @hanfeiyu @MikeZheng777
 /reef/artifact/ @hanfeiyu @MikeZheng777
 /reef/artifact/components.py @Benjamin-eecs @quao627
 /recipes/openclawrl/examples/openclawrl/serve.yaml @hanfeiyu @MikeZheng777

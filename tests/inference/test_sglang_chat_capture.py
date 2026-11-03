@@ -10,9 +10,10 @@ from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact
+from reef.core.errors import inference_aborted
 from reef.inference.chat import ReasoningStreamSplitter
+from reef.inference.interfaces import InferenceArtifact
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
-from reef.runtime.interfaces import InferenceArtifact, inference_aborted
 from reef.service.streaming import stream_record
 
 
