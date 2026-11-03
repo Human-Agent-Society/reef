@@ -10,19 +10,18 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
-
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
+from reef.inference.interfaces import InferenceHandler
 from reef.observability import ExperimentLogger, ExperimentTracker
-from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer
 

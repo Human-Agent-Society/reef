@@ -19,7 +19,7 @@ Module responsibilities:
     orchestrator: Launch coordination, supervision and HTTP child entrypoint.
 
 Shared type conversion lives in ``reef.core.config``; native argument encoding
-lives in ``reef.runtime.executor.arguments``. Import those owners directly.
+lives in ``reef.execution.executor.arguments``. Import those owners directly.
 """
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend

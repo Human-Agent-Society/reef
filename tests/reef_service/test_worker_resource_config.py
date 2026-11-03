@@ -6,11 +6,11 @@ from tests.support.harness_steps import evolution_config
 
 from reef.evaluation.harness import evaluation_selection
 from reef.evaluation.harness.runner import evaluation_executor_config
+from reef.execution.executor import WorkerSpec
+from reef.execution.executor.config import executor_settings, select_executor
+from reef.execution.executor.requirements import ExecutionRequirements
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.runtime.executor import WorkerSpec
-from reef.runtime.executor.config import executor_settings, select_executor
-from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.service.deploy.execution import service_executor_config
 
 
@@ -67,7 +67,7 @@ def test_gpu_resources_and_cpu_reservations_reach_ray_without_initializing_it():
 
 
 def test_omitted_gpu_request_preserves_component_requirement(monkeypatch):
-    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("0", "1"))
+    monkeypatch.setattr("reef.execution.executor.config.visible_cuda_devices", lambda: ("0", "1"))
     selected = select_executor(
         executor_settings({}, {"workers": 2}), role="evolution", requirements=ExecutionRequirements(gpus_per_worker=1)
     )
@@ -101,10 +101,10 @@ class VisibleDeviceWorker:
 def test_mp_assigns_disjoint_gpu_masks_before_worker_construction(monkeypatch):
     import os
 
-    from reef.runtime.executor import Executor
+    from reef.execution.executor import Executor
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-first,GPU-second")
-    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("GPU-first", "GPU-second"))
+    monkeypatch.setattr("reef.execution.executor.config.visible_cuda_devices", lambda: ("GPU-first", "GPU-second"))
     settings = executor_settings({}, {"workers": 2, "resources": {"gpus_per_worker": 1}})
     selection, needs = evaluation_selection(resolve_task_scorer(scorer), settings)
     config = evaluation_executor_config(selection, needs, WorkerSpec(VisibleDeviceWorker))

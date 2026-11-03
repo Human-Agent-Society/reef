@@ -15,13 +15,12 @@ from uuid import uuid4
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from reef.core.weight_layout import WEIGHT_LAYOUTS
-from reef.inference.deployment import inference_service_for
+from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightFiles
+from reef.execution.executor.placement import ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
+from reef.inference.deployment import InferenceResources, InferenceService, inference_service_for
 from reef.inference.http import HOP_BY_HOP_HEADERS
+from reef.inference.interfaces import InferenceBackend
 from reef.inference.remote.config import CONTROL_PATH
-from reef.runtime.deployment import InferenceResources, InferenceService
-from reef.runtime.executor.placement import ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
 
 logger = logging.getLogger(__name__)
 

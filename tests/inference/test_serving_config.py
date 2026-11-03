@@ -14,7 +14,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.values import JsonValue
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.serving import ServingWorker
-from reef.runtime.interfaces import FixedEngineClients, InferenceHandler
+from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app
 from reef.storage.sql_coordination import memory_coordination

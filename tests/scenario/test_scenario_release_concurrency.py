@@ -19,12 +19,12 @@ from reef.core.errors import CommitPending
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.recipe import Recipe
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import Trainer, TrainStepResult
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop
 
 

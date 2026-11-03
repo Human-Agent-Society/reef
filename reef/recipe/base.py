@@ -8,7 +8,7 @@ backend updates model weights.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -24,20 +24,21 @@ from reef.core.reports import ReportBase
 from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.http import resolve_proxy_runtime
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
-from reef.runtime.interfaces import InferenceRuntime, TrainingMethod
-from reef.runtime.jobs import ReleaseLayout, ScenarioRoot, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
+from reef.train.component import ReleaseLayout, ScenarioRoot, TrainingComponent
 from reef.train.jobs import JobLoop
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
@@ -450,7 +451,7 @@ WEIGHTS_COMPONENT = "weights"
 class WeightTrainingRecipe(Recipe):
     """Shared recipe contract for backend algorithms that update weights.
 
-    Requires a :class:`~reef.runtime.jobs.TrainingComponent` in
+    Requires a :class:`~reef.train.component.TrainingComponent` in
     ``training_component`` (the first positional argument of every training
     recipe), which runs the recipe's training jobs.
 
@@ -663,3 +664,28 @@ class WeightTrainingRecipe(Recipe):
             )
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
+
+
+def close_runtimes(
+    training_components: Sequence[TrainingComponent], runtime: InferenceRuntime | None
+) -> list[BaseException]:
+    """Close a recipe's training components and inference runtime, and return their close errors in that order.
+
+    Admission closes first, so that no new request starts. Then the training
+    components close, and then the runtime shuts down. A failed close does not
+    stop the next one. ``None`` stands for an absent runtime.
+    """
+    if runtime is not None:
+        runtime.close_admission()
+    errors: list[BaseException] = []
+    for training_component in training_components:
+        try:
+            training_component.close()
+        except BaseException as exc:
+            errors.append(exc)
+    if runtime is not None:
+        try:
+            runtime.shutdown()
+        except BaseException as exc:
+            errors.append(exc)
+    return errors
