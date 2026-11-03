@@ -91,7 +91,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                            | submit feedback about one or more trajectories    |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/train``                                                             | enqueue one training instruction                  |
+| ``POST /reef/train``                                                             | enqueue one training request                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios``                                                          | scenario selections and harness adapter           |
 |                                                                                  | adapter                                           |
@@ -271,7 +271,7 @@ externally generated examples. Training reads no token IDs or log
 probabilities from an imported record: the training component renders the
 recorded exchange with the model's chat template.
 Reports use the same schema and reference validation as ``POST /reef/report``;
-import referenced inferences first. Training instructions use ``POST /reef/train``.
+import referenced inferences first. Training requests use ``POST /reef/train``.
 To train on ATIF trajectories that are already complete, see `Data items
 <#data-items>`__.
 
@@ -397,7 +397,7 @@ Training reads the items that a scenario uses from the data store; an item that
 leaves the scenario before a job takes it does not train. Each trajectory
 counts as one sample toward ``job_samples`` and ``buffer_size``. Job data takes
 the samples in the order they joined the scenario. A train task trains like a trajectory. In ``sft`` it trains only in
-``manual`` mode, for an instruction that gives the job's parameters (see
+``manual`` mode, for a request that gives the job's parameters (see
 `Manual training <#manual-training>`__). For the recipe side, see `Uploaded
 trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
 
@@ -494,7 +494,7 @@ Record items
 ~~~~~~~~~~~~
 
 Reef makes a record item from each inference call and report of a scenario.
-A training instruction gets no item. The item belongs to the scenario's
+A training request gets no item. The item belongs to the scenario's
 owner:
 
 - Its ID is ``<scenario>/<agent_record_id>``.
@@ -770,7 +770,7 @@ Each sample has ``sample_id``, ``kind``, ``group``, ``component`` and the
 trainer's ``train_count``. A scenario of several components needs
 ``?component=<name>``.
 
-In ``manual``, an instruction names the samples that its job trains: the
+In ``manual``, a request names the samples that its job trains: the
 ``samples`` of ``POST /reef/train`` (see `Manual training <#manual-training>`__):
 
 .. code:: bash
@@ -910,16 +910,16 @@ no task, is not stored; the service logs why.
 Manual training
 ---------------
 
-``POST /reef/train`` queues one training instruction for a scenario in
+``POST /reef/train`` queues one training request for a scenario in
 ``data.training_mode: manual``; in harness evolution, every method takes it.
-An instruction is not a record: it waits in the deployment's instructions queue
+A request is not a record: it waits in the deployment's training request queue
 until a training commit consumes it, and the commit keeps it in its
 ``training_request`` metrics. It takes the user's ``text``,
 originating ``session`` and ``artifact_id``. These fields identify the session
 and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
 requires no inference receipts or score. ``samples`` names the samples that
-the instruction's job trains (see `Choose the samples that train
+the request's job trains (see `Choose the samples that train
 <#choose-the-samples-that-train>`__).
 
 A request may also carry ``requires``: what the change needs where the
@@ -957,24 +957,24 @@ skipped. Reef never runs a check: the
 client runs the checks where the harness runs, after the person read them.
 
 The two modes differ in what starts a step and what it trains. ``auto``, the
-default, trains on traffic when ``job_samples`` samples wait, and refuses an
-instruction with HTTP 400. ``manual`` starts a step only for an instruction,
-oldest first, one per step. The step trains the samples that the instruction
+default, trains on traffic when ``job_samples`` samples wait, and refuses a
+request with HTTP 400. ``manual`` starts a step only for a request,
+oldest first, one per step. The step trains the samples that the request
 names, whatever ``job_samples``:
 
-- A weight recipe needs ``samples``, and refuses an instruction without it
-  with HTTP 400. The instruction is the request to train; its ``text`` goes
+- A weight recipe needs ``samples``, and refuses a request without it
+  with HTTP 400. Its ``text`` goes
   into the commit's ``training_request`` metrics.
-- Harness evolution runs the instruction with the traces that it names,
+- Harness evolution runs the request with the traces that it names,
   possibly none. The method reads the request next to them.
 
-A weight recipe's instruction can set the parameters of its training job with
+A weight recipe's request can set the parameters of its training job with
 ``parameters``, a JSON object of at most 16 KiB. Reef merges it into the
 recipe's parameters for the kind of the job's samples: nested objects merge
-key by key, and every other value of the instruction wins, lists included. An
-instruction cannot remove a key that the recipe sets. Reef does not read them: the
+key by key, and every other value of the request wins, lists included. A
+request cannot remove a key that the recipe sets. Reef does not read them: the
 training component checks them, as it checks the recipe's. A refused job fails
-the instruction with the component's reason. For example, after an SFT job on
+the request with the component's reason. For example, after an SFT job on
 uploaded trajectories, run an RL job on uploaded train tasks:
 
 .. code:: bash
@@ -1003,25 +1003,25 @@ only on a job of tasks. Slime takes ``method``, ``scheduling`` and
 The response is ``{agent_record_id, scenario, request_type: "train"}``,
 plus ``page_path``, the request's page with the query a browser opens it by
 (see Request page).
-An optional top-level ``agent_record_id`` names the instruction: an identical
-resend returns the queued instruction, and the same ID with another body is
+An optional top-level ``agent_record_id`` names the request: an identical
+resend returns the queued request, and the same ID with another body is
 HTTP 409. HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
 do not change a step already in flight. A step that fails with an
-instruction (a method error, for one) is not retried: the next step
-consumes the instruction with a committed row whose ``skipped`` reads
-``instruction failed`` and whose ``error`` carries the failure, and the
-queue moves on. Send the instruction again to run it again. That row
-consumes the instruction alone: the units that rode beside it
+request (a method error, for one) is not retried: the next step
+consumes the request with a committed row whose ``skipped`` reads
+``request failed`` and whose ``error`` carries the failure, and the
+queue moves on. Send the request again to run it again. That row
+consumes the request alone: the units that rode beside it
 stay held for the next job, so no failing trace is consumed unread. The
 ``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
-every step, instruction steps included, and stop automatic steps only; an
-instruction still runs past them. The existing evaluation and publication
+every step, request steps included, and stop automatic steps only; a
+request still runs past them. The existing evaluation and publication
 rules still determine whether the result becomes served.
 ``GET /reef/status`` reports ``training_mode``. Processors that take
-instructions also report ``pending_instructions`` (accepted instructions that
+requests also report ``pending_requests`` (accepted requests that
 no commit consumed yet, read from the queue).
-Committed step metrics include ``training_request`` with the instruction
+Committed step metrics include ``training_request`` with the request
 id, text, session, release id and ``requires``; the releases row of a step
 that answered a request carries, for example:
 
@@ -1185,16 +1185,16 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
 - ``error``: the error of a failed job, or the last retryable error of a
   queued job, else ``null``.
 - ``parameters``: the job's parameters, a JSON object: the recipe's
-  parameters for the kind of the job's samples, with the instruction's
+  parameters for the kind of the job's samples, with the request's
   parameters merged in. They hold the training ``method`` and the
-  ``scheduling`` when the recipe or the instruction gives them.
+  ``scheduling`` when the recipe or the request gives them.
 - ``sample_count``: the number of samples that the job trains, an integer
   from 0.
 - ``sample_kind``: ``trajectory`` or ``task``, the kind of the job's samples.
   It is ``null`` for a job with no sample.
-- ``instruction``: ``{id, text, parameters}`` of the training instruction
+- ``request``: ``{id, text, parameters}`` of the training request
   (``POST /reef/train``) that the job trains. ``parameters`` is what the
-  instruction gave, ``{}`` when it gave none. It is ``null`` for a job that
+  request gave, ``{}`` when it gave none. It is ``null`` for a job that
   the ``auto`` training mode made.
 - ``created_at``: when control added the job.
 - ``started_at``: when a training worker first took the job; ``null`` until
@@ -1226,7 +1226,7 @@ For example:
      "parameters": {"method": {"objective": "sft"}, "learning_rate": 1e-05},
      "sample_count": 8,
      "sample_kind": "trajectory",
-     "instruction": {"id": "train-1", "text": "Prefer tests first",
+     "request": {"id": "train-1", "text": "Prefer tests first",
                      "parameters": {"learning_rate": 1e-05}},
      "created_at": "2026-10-31T08:15:00.250000+00:00",
      "started_at": "2026-10-31T08:15:01.020000+00:00",
@@ -1310,11 +1310,11 @@ changed. To change the data processor's mode:
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
 The values are ``auto`` and ``manual``: ``"auto"`` starts a job whenever
 ``job_samples`` samples wait, and ``"manual"`` starts one only for an
-instruction, on the samples that it names. The change selects subsequent job
+request, on the samples that it names. The change selects subsequent job
 data; job data already reserved or running completes in its original mode.
 After a switch back, automatic jobs train the samples that no job trained,
-including those collected while manual was selected. Accepted instructions wait for manual, including
-instructions not yet read when the selector changes to auto.
+including those collected while manual was selected. Accepted requests wait for manual, including
+requests not yet read when the selector changes to auto.
 
 A Reef process runs at most one scenario that trains full weights, on a single
 thread, so preparation, remote execution, and commit never interleave. It may
@@ -1426,7 +1426,7 @@ scenario:
 - ``effective_serving_config`` maps the served component to each of its serving
   fields that has a value: the scenario's value, else the deployment's.
 - ``job_parameters`` maps a sample kind (``trajectory`` or ``task``) to the
-  recipe's parameters of a job of that kind. A training instruction's
+  recipe's parameters of a job of that kind. A training request's
   ``parameters`` merge into them. A kind that the recipe gives no parameters is
   absent.
 
@@ -2237,7 +2237,7 @@ then shows the result, the next action (``GET /reef/harness`` for an active
 release, the activate request for an inactive one), ``method_summary``, the
 patch with each file's kind of the harness tree (from the row's
 ``patch_parts``), and ``method_notes``. An unknown id, or one that is not a
-training instruction, is HTTP 404.
+training request, is HTTP 404.
 
 ``GET /reef/harness/requests/{record_id}/progress`` answers the same state as
 JSON (``Cache-Control: no-store``) for a client that polls:
@@ -2574,7 +2574,7 @@ Processing counts describe the completed attempt only; they exclude earlier fail
 ``records_read`` includes records that replay read but the pipeline ignored.
 ``samples_created`` counts new inserts, excluding duplicate writes.
 Legacy results report null counts.
-``changed`` can also mean a new training instruction, without new samples.
+``changed`` can also mean a new training request, without new samples.
 ``background=true`` means work remained active when the task finished; later tasks check it.
 
 Control removes ended tasks after ``storage.work_retention_s``, which defaults to seven days.

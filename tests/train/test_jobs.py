@@ -438,7 +438,7 @@ def train_record(record_id: str, parameters: dict, sample_id: str) -> TrainingRe
 
 
 @pytest.mark.unit
-def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruction(component, tmp_path):
+def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request(component, tmp_path):
     session = data_storage(tmp_path / "records").open("math")
     trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     task = write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path)
@@ -458,14 +458,14 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         job_loop=loop_with(component),
         training_mode="manual",
         samples=TrainerSamples(session.samples),
-        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their instruction.
+        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
         job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
         root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
 
     def train(record: TrainingRequest) -> dict:
-        pipeline.queue_instructions([record])
+        pipeline.queue_requests([record])
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         job = component.jobs[-1]
         component.statuses[job.job_id] = JobStatus(job.job_id, "finished")

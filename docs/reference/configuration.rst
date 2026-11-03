@@ -964,12 +964,12 @@ It has two values:
   <../developer-guide/processors.rst#the-next-job>`__ holds ``job_samples``
   samples: the untrained samples that it takes. ``POST /reef/train`` is
   refused.
-- ``manual``: a job starts only for a ``POST /reef/train`` instruction. The
-  job trains the samples that the instruction names (`Choose the samples that
+- ``manual``: a job starts only for a ``POST /reef/train`` request. The
+  job trains the samples that the request names (`Choose the samples that
   train <http-api.rst#choose-the-samples-that-train>`__). A weight recipe
-  needs them; the instruction text goes into the commit's
-  ``training_request`` metrics. Harness evolution runs the instruction at
-  once: the method gets the instruction and the traces that it names,
+  needs them; the request text goes into the commit's
+  ``training_request`` metrics. Harness evolution runs the request at
+  once: the method gets the request and the traces that it names,
   possibly none.
 
 Records arrive and stages make samples in both modes, so a switch from
@@ -999,7 +999,7 @@ job trains them.
 .. container:: config
 
    ``recipe.config.training_mode`` : auto
-       ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` instruction
+       ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` request
 
 ``recipe.config.job_parameters`` is an object that a weight recipe sends with
 every job, beside ``method``. The training component
@@ -1243,7 +1243,7 @@ that plays task directories (an npm ``install``) and
        skip automatic evolve steps once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
 
    ``evolution.max_failure_streak`` : 0
-       stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
+       stop automatic evolve steps after this many consecutive rejected steps, request steps included; 0 disables the limit; a request from ``POST /reef/train`` still runs while the breaker is open
 
    ``evolution.max_model_calls_per_step`` : 0
        cap the method's model calls in one step, through ``services.models`` or ``services.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
@@ -1828,7 +1828,7 @@ them with its reward model, computes the advantages and trains its loss; Reef
 records each saved rollout as a candidate. The deployment selects the built-in
 recipe ``reef.recipe.dataset:DatasetRecipe`` with ``data.training_mode:
 manual``. Its loss family, ``slime``, leaves the training signal to Slime and
-refuses every other job. Each training instruction (``POST /reef/train``)
+refuses every other job. Each training request (``POST /reef/train``)
 whose ``parameters`` hold ``dataset`` is one job:
 
 .. code:: json
@@ -2076,7 +2076,7 @@ The following names are relative to ``operations/``:
        Accepted records include incomplete-stream diagnostics; acceptance does
        not imply a trainable record or successful training.
    * - ``ingest/rejected_report_total``, ``ingest/rejected_request_total``
-     - Report schema/reference violations and invalid training instructions
+     - Report schema/reference violations and invalid training requests
        detected during dispatcher record validation.
    * - ``ingest/rejected_conflict_total``
      - Record identities reused with different content.
@@ -2214,8 +2214,7 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
 
 A feedback record becomes a ``feedback`` span inside the trace of the first
 inference it references, with ``reef.score`` and ``reef.references``; further
-references are span links. A training instruction becomes a
-``training request`` span. A committed step adds a ``training step N`` span
+references are span links. A committed step adds a ``training step N`` span
 with the commit's step, component artifact IDs, job id, consumed record counts,
 its component as ``reef.component`` when the scenario runs several trainers,
 and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
@@ -2232,7 +2231,7 @@ The stored response and the forwarded stream remain unchanged.
 
 Spans carry the exchange itself: the request messages and the reply as JSON
 in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, feedback text in
-``reef.feedback`` and instruction text in ``reef.instruction``. The backend
+``reef.feedback``. The backend
 therefore sees the scenario's traffic; point tracing only at one trusted with
 it. Export failures are reported in the service log and never
 fail record acceptance or a commit; the exporter batches spans in a background

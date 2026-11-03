@@ -371,7 +371,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
                 {"records": [imported("first"), imported("bad", {"references": ["first"]}, "report")]},
                 {"records": [imported("first"), imported("bad", {"score": 1, "references": ["missing"]}, "report")]},
                 {"records": [imported("bad", {"score": 1, "references": ["first"]}, "report"), imported("first")]},
-                {"records": [imported("first"), imported("instruction", {}, "train")]},
+                {"records": [imported("first"), imported("request", {}, "train")]},
             ]
             for body in invalid:
                 response = await client.post(endpoint, headers=HEADERS, json=body)

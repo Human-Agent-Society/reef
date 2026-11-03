@@ -135,12 +135,12 @@ def processor(**config: object) -> TrainingPipeline:
 
 
 def handed_out_names(p: TrainingPipeline) -> list[str]:
-    """The names of the tasks that the next job's data takes: in ``manual``, the oldest instruction's."""
+    """The names of the tasks that the next job's data takes: in ``manual``, the oldest training request's."""
     if p.training_mode == "auto":
         entries = p.auto_entries()
     else:
         request = next(iter(p.training_requests.values()), None)
-        entries = () if request is None else p.instruction_entries(request)
+        entries = () if request is None else p.request_entries(request)
     return [sample.metadata["task"]["name"] for _, sample in entries]
 
 
@@ -202,7 +202,7 @@ def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path
         "release_id": "r-1",
         "samples": [stage_item_id("tasks", "generated-tasks/harbor-00000-001")],
     }
-    p.queue_instructions([TrainingRequest.from_dict(payload, request_id="train-1")])
+    p.queue_requests([TrainingRequest.from_dict(payload, request_id="train-1")])
     assert p.ready(BATCH_SIZE) and handed_out_names(p) == ["harbor-00000-001"]
     assert train_job(p) == ["harbor-00000-001"]
     assert set(rollout_results(p.record2sample.task_store)) == {"harbor-00000-001"}

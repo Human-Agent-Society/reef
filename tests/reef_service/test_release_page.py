@@ -723,7 +723,7 @@ def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothin
         "checkpoint": False,
         "active": False,
         "metrics": {
-            "skipped": "instruction failed",
+            "skipped": "request failed",
             "error": error,
             "training_request": {"id": "q-1", "text": "text me"},
         },
@@ -735,14 +735,14 @@ def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothin
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     selection_result = _section(page, "Result")
     assert "see the error below before retrying" in selection_result
-    assert "<dt>Skipped</dt><dd>instruction failed</dd>" in selection_result
+    assert "<dt>Skipped</dt><dd>request failed</dd>" in selection_result
     assert (
         "<h3>Error</h3><p>RuntimeError: model call failed after 58.2 s: model endpoint returned "
         "&lt;non-text&gt; content</p>"
     ) in selection_result
     assert "<non-text>" not in page.partition("<script")[0]
     # Without an error, or with one that is not text, the step skipped: nothing failed.
-    for metrics in ({"skipped": "instruction failed"}, {"skipped": "instruction failed", "error": "  "}):
+    for metrics in ({"skipped": "request failed"}, {"skipped": "request failed", "error": "  "}):
         without = {**row, "metrics": metrics}
         assert result_of(without) == "skipped"
         assert "<h3>Error</h3>" not in build_release_page(1, [creation, without])

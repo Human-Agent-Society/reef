@@ -565,7 +565,7 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
     assert pipeline.acknowledge(data.data_id) == {"sample:t1"}
 
 
-def test_sft_gives_parameters_to_trajectory_jobs_and_trains_imported_tasks_only_by_instruction() -> None:
+def test_sft_gives_parameters_to_trajectory_jobs_and_trains_imported_tasks_only_by_request() -> None:
     recipe = SFTRecipe(**runtime_bindings())
     assert set(recipe.parameters_by_kind()) == {"trajectory"}
     assert (

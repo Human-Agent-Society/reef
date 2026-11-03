@@ -67,7 +67,7 @@ class ProducedSamples:
     """What one record selection did.
 
     Values: ``changed`` is whether it gave the trainer something new to build a job from: a new stored sample or a
-    new training instruction; ``background`` is whether background work of the stages still runs, so the samples
+    new training request; ``background`` is whether background work of the stages still runs, so the samples
     service looks again later. ``due_in_seconds`` is a non-negative finite number: the seconds until a set that waits
     for time alone is due, such as a trajectory at the end of its idle time. None means that no set waits for time.
 

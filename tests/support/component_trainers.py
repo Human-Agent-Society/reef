@@ -143,7 +143,7 @@ class JudgedAtOnce:
 
 
 class AutoOnlyThresholdJobData(ThresholdJobData):
-    """The same batches, without ``manual``: the stage takes no instruction."""
+    """The same batches, without ``manual``: the stage takes no training request."""
 
     supported_training_modes = frozenset({"auto"})
 

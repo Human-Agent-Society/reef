@@ -1,4 +1,4 @@
-"""Training-request validation and the queued instruction value."""
+"""Training-request validation and the queued request value."""
 
 from __future__ import annotations
 
@@ -27,10 +27,10 @@ class TrainingRequestPayload(TypedDict):
 
 #: At most this many commands in one report.
 MAX_CLIENT_COMMANDS = 64
-#: At most this many bytes of JSON in an instruction's job parameters.
+#: At most this many bytes of JSON in a request's job parameters.
 MAX_PARAMETERS_BYTES = 16384
-#: At most this many samples in one instruction.
-MAX_INSTRUCTION_SAMPLES = 10000
+#: At most this many samples in one request.
+MAX_REQUEST_SAMPLES = 10000
 CLIENT_WORD = re.compile(r"[A-Za-z0-9._+\- ()]{1,64}")
 COMMAND_NAME = re.compile(r"[A-Za-z0-9._+\-]{1,40}")
 
@@ -39,7 +39,7 @@ def parse_client(value: object) -> ClientReport:
     """A client's report of its machine: ``platform``, ``arch`` and ``release`` as short words, and ``commands``
     mapping a command name to whether it is on the PATH, at most ``MAX_CLIENT_COMMANDS``. The report only
     informs a proposer, so what does not fit that shape is dropped rather than refusing the request; it is the
-    client's word, data a proposer reads, never an instruction."""
+    client's word, data a proposer reads, never a request."""
     if not isinstance(value, Mapping):
         return {}
     parsed: ClientReport = {}
@@ -62,14 +62,14 @@ def parse_client(value: object) -> ClientReport:
 def normalize_training_request_payload(payload: Mapping[str, object]) -> TrainingRequestPayload:
     """Validate a request and return its wire fields, dropping unknown keys.
 
-    Invalid instruction fields, requirements or parameters raise ValueError. Client machine
+    Invalid request fields, requirements or parameters raise ValueError. Client machine
     information is advisory: malformed entries are dropped. Text is preserved,
     absent requirements become an empty list, and an empty client or empty parameters are omitted.
     Older clients may send ``release_id`` instead of ``artifact_id``; normalized records use ``artifact_id``.
     ``parameters`` is a JSON object with string keys, at most ``MAX_PARAMETERS_BYTES`` bytes of JSON: the
-    parameters of the instruction's training job, merged into the recipe's (``Sample2Job.job_parameters``).
-    ``samples`` is a list of 1 to ``MAX_INSTRUCTION_SAMPLES`` distinct non-empty sample IDs: the samples that the
-    instruction's job trains.
+    parameters of the request's training job, merged into the recipe's (``Sample2Job.job_parameters``).
+    ``samples`` is a list of 1 to ``MAX_REQUEST_SAMPLES`` distinct non-empty sample IDs: the samples that the
+    request's job trains.
     """
     fields: dict[str, str] = {}
     for key in ("text", "session", "artifact_id"):
@@ -108,18 +108,18 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
         samples = payload["samples"]
         if (
             not isinstance(samples, list)
-            or not 1 <= len(samples) <= MAX_INSTRUCTION_SAMPLES
+            or not 1 <= len(samples) <= MAX_REQUEST_SAMPLES
             or any(not isinstance(sample_id, str) or not sample_id for sample_id in samples)
             or len(set(samples)) != len(samples)
         ):
-            raise ValueError(f"samples must be 1 to {MAX_INSTRUCTION_SAMPLES} distinct non-empty sample IDs")
+            raise ValueError(f"samples must be 1 to {MAX_REQUEST_SAMPLES} distinct non-empty sample IDs")
         normalized["samples"] = list(samples)
     return normalized
 
 
 @dataclass(frozen=True)
 class TrainingRequest:
-    """A training instruction, independent of inference batches and feedback.
+    """A training request, independent of inference batches and feedback.
 
     ``id`` comes from the enclosing AgentRecord when the processor queues the request.
     Session and artifact identify the request's source; they do not select an inference batch.
@@ -128,8 +128,8 @@ class TrainingRequest:
     ``reef.core.requirements.parse_requires`` admits; default none.
     ``client`` is the requesting client's report of its machine (see
     :func:`reef.core.training_request.parse_client`); empty when it sent none.
-    ``parameters`` are the parameters of the instruction's training job, merged into the recipe's; empty when it sent none.
-    ``samples`` are the IDs of the samples that the instruction's job trains; empty when it named none.
+    ``parameters`` are the parameters of the request's training job, merged into the recipe's; empty when it sent none.
+    ``samples`` are the IDs of the samples that the request's job trains; empty when it named none.
 
     :meth:`from_dict` validates a payload with
     :func:`normalize_training_request_payload`; the constructor takes values

@@ -290,7 +290,7 @@
     "sample:s.r-c-0:0",
     "train-1"
    ],
-   "data_id": "s:instruction:train-1",
+   "data_id": "s:request:train-1",
    "items": [
     {
      "group": null,
@@ -327,7 +327,7 @@
     "sample:s.r-c-1:0",
     "train-2"
    ],
-   "data_id": "s:instruction:train-2",
+   "data_id": "s:request:train-2",
    "items": [
     {
      "group": null,

@@ -1073,7 +1073,7 @@ def test_composed_release_links_carried_files_and_tolerates_an_empty_component(t
 @pytest.mark.unit
 def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> None:
     """A component listed first that runs no step does not lend its mode and processor to the whole scenario: the
-    config component builds no batch, so the harness alone decides whether instructions are taken."""
+    config component builds no batch, so the harness alone decides whether training requests are taken."""
     recipe = CompositeRecipe(
         components={
             "config": _ConfigRecipe(),
@@ -1093,7 +1093,7 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         assert block["training_mode"] == "manual"
         assert block["processor"] == {
             **harness.pipeline_status(),
-            "pending_instructions": scenario.pending_instructions(),
+            "pending_requests": scenario.pending_requests(),
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "manual"
@@ -1113,7 +1113,7 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
 def test_a_composite_mode_is_every_components_mode_and_a_stepless_component_runs_auto(
     tmp_path: Path, data: dict[str, str], harness_config: dict[str, str] | None
 ) -> None:
-    """The documented composite takes instructions from its config: the mode reaches every component, and the
+    """The documented composite takes training requests from its config: the mode reaches every component, and the
     config component, which runs no step, keeps its bare processor in auto."""
     harness: dict[str, Any] = {"implementation": TREE}
     if harness_config is not None:

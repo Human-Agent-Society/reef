@@ -9,7 +9,7 @@ samples of each ready record set unit as data items that the scenario uses. In
 ``auto``, the next job takes the first ``buffer_size`` untrained samples in
 store order, and the rest of each group that those touch; when it holds at
 least ``job_samples`` samples, the pipeline gives its samples to this stage. In
-``manual``, an instruction names the samples of its job. The stage makes one ``JobData`` value, and Reef submits
+``manual``, a request names the samples of its job. The stage makes one ``JobData`` value, and Reef submits
 one training job for it. The training framework cuts the job's data into its
 own optimizer batches.
 

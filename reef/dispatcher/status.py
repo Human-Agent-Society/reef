@@ -77,7 +77,7 @@ class TrainingStatus:
         stepping_pipeline_status = stepping_trainer.pipeline_status()
         processor = dict(stepping_pipeline_status)
         if "manual" in stepping_trainer.pipeline.supported_training_modes:
-            processor["pending_instructions"] = current.pending_instructions()
+            processor["pending_requests"] = current.pending_requests()
         block: dict[str, Any] = {
             **current.commit_status,
             # The artifact that answers the scenario's requests now: the one that served_models names.

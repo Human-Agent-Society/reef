@@ -1,4 +1,4 @@
-"""The sample listing, the next automatic job, and instructions that name the samples that they train."""
+"""The sample listing, the next automatic job, and requests that name the samples that they train."""
 
 from __future__ import annotations
 
@@ -17,12 +17,12 @@ def ids(listing: dict) -> list[str]:
     return [sample["sample_id"] for sample in listing["samples"]]
 
 
-def instruction(record_id: str, *samples: str) -> dict:
+def train_body(record_id: str, *samples: str) -> dict:
     body = {"agent_record_id": record_id, "text": "train these", "session": "session-1", "release_id": "release-1"}
     return {**body, "samples": list(samples)} if samples else body
 
 
-def test_a_client_lists_the_samples_and_an_instruction_trains_the_ones_that_it_names(tmp_path):
+def test_a_client_lists_the_samples_and_a_request_trains_the_ones_that_it_names(tmp_path):
     recipe = UploadRecipe()
     dispatcher = dispatcher_for(tmp_path, recipe)
     train = {"x-reef-scenario": "s", **AUTH}
@@ -44,16 +44,16 @@ def test_a_client_lists_the_samples_and_an_instruction_trains_the_ones_that_it_n
             assert switched.status == 200, await switched.text()
             await upload_trajectories(client, HEADERS, "t2", "t3")
             for body in (
-                instruction("r0", "missing"),
-                {**instruction("r0"), "samples": []},
-                instruction("r0"),
-                {**instruction("r0"), "samples": ["t1", "t1"]},
+                train_body("r0", "missing"),
+                {**train_body("r0"), "samples": []},
+                train_body("r0"),
+                {**train_body("r0"), "samples": ["t1", "t1"]},
             ):
                 refused = await client.post("/reef/train", headers=train, json=body)
                 assert refused.status == 400, await refused.text()
 
             # The job trains the named samples in store order; the others wait.
-            trained = await client.post("/reef/train", headers=train, json=instruction("r1", "t3", "t1"))
+            trained = await client.post("/reef/train", headers=train, json=train_body("r1", "t3", "t1"))
             assert trained.status == 200, await trained.text()
             async with asyncio.timeout(5):
                 while not recipe.batches:
@@ -68,7 +68,7 @@ def test_a_client_lists_the_samples_and_an_instruction_trains_the_ones_that_it_n
                     await asyncio.sleep(0.01)
             assert counts == {"t1": {"": 1}, "t2": {}, "t3": {"": 1}}
             # A trained sample can train again.
-            again = await client.post("/reef/train", headers=train, json=instruction("r2", "t1"))
+            again = await client.post("/reef/train", headers=train, json=train_body("r2", "t1"))
             assert again.status == 200, await again.text()
             async with asyncio.timeout(5):
                 while len(recipe.batches) < 2:

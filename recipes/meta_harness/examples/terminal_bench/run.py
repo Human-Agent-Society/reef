@@ -184,7 +184,7 @@ def search(dispatcher: Dispatcher, scenario: Scenario, recipe: HarnessEvolutionR
     summary = write_summary(scenario, recipe, directory)
     while steps_done(scenario) < steps:
         step = steps_done(scenario) + 1
-        dispatcher.accept_instruction(
+        dispatcher.accept_request(
             scenario.name, {"text": STEP_REQUEST, "session": "", "artifact_id": ""}, request_id=f"step-{step}"
         )
         if not commit_job(scenario):
