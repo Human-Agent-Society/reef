@@ -580,8 +580,9 @@ class Trainer:
 
     def produce_samples(self) -> ProducedSamples:
         """Push every record that arrived since the last call into the pipeline and make samples of the formed record
-        sets; return whether the trainer received new input (samples or instructions), and whether background work
-        of the pipeline still runs, so the samples service comes back."""
+        sets; return whether the trainer received new input (samples or instructions), whether background work
+        of the pipeline still runs, and when a set that waits for time alone is due, so the samples service comes
+        back."""
         with self._lock:
             if not self.trains:
                 return ProducedSamples(changed=False, background=False)
@@ -592,11 +593,13 @@ class Trainer:
             before_samples = self._pipeline.stored_sample_count
             self.read_records()
             stored = self._pipeline.produce()
+            due = self._pipeline.next_due()
             return ProducedSamples(
                 changed=stored,
                 background=self._pipeline.background_jobs_running(),
                 records_read=self._data_offset - before_records,
                 samples_created=self._pipeline.stored_sample_count - before_samples,
+                due_in_seconds=None if due is None else max(0.0, due - time.monotonic()),
             )
 
     def read_records(self) -> None:

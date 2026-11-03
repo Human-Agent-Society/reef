@@ -194,7 +194,10 @@ generation contract <#task-generation-contract>`__).
 The pipeline also merges the stages' ``status()`` and metrics.
 ``background_jobs_running()`` is true while the record-to-sample stage runs a
 background job, such as a judgment or a task-generation round. The scenario's
-worker then polls at a fixed interval. ``close()`` closes both stages.
+worker then polls at a fixed interval. ``next_due()`` is the monotonic time at
+which a set that waits for time alone is due, such as an idle trajectory, or
+None. The samples service then runs the next selection at that time, without a
+new record. ``close()`` closes both stages.
 ``releasable_record_ids()`` returns
 the completed records that no held set references, and
 ``release_records(ids)`` frees their memory after a successful commit. New
@@ -430,7 +433,7 @@ A recipe's stage extends one of these classes of the ``reef.record2sample`` pack
        ``exclusive_sources=True``, a report that ends owns its inference records
    * - ``TrajectorySamples``
      - one sample per trajectory that ended without a report, after ``trajectory_idle_seconds`` without a
-       continuing call
+       continuing call, counted from the last call's ``created_at``
    * - ``JudgedSamples``
      - correlation, the judging worker, and one sample per judged record (``make_sample``)
    * - ``InferenceRecordSamples``
