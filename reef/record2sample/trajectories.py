@@ -1,8 +1,8 @@
 """Trajectories as samples: the calls of each trajectory that ended, without a report (RFC #1054).
 
 ``TrajectorySamples`` links the inference records that it reads into trajectories (``reef.core.trajectory_index``).
-A trajectory ends when its last call has had no continuing call and no retry for ``trajectory_idle_seconds``; the
-stage then forms one ``TrajectorySet`` of its calls and makes it one ATIF ``TrajectorySample`` with
+A trajectory ends when its last call has had no continuing call and no retry for ``trajectory_idle_seconds``,
+counted from the call's ``created_at``; the stage then forms one ``TrajectorySet`` of its calls and makes it one ATIF ``TrajectorySample`` with
 ``make_trajectory``. It is the stage of a method that needs no report, such as SFT on traffic or on-policy
 distillation; such a method overrides ``trajectory_sample``. Every record that is not an inference, such as a
 report, ends at once. A method with reports extends ``ReportSamples``, whose default sample is the same trajectory
@@ -74,9 +74,11 @@ class TrajectorySettings(Record2SampleSettings):
 class TrajectorySamples(Record2Sample):
     """Make one sample per trajectory whose last call had no continuing call for ``trajectory_idle_seconds``.
 
-    The stage keeps each inference record, with the monotonic time at which it read it, until its release. At each
-    ``advance``, a record that ends its trajectory (``TrajectoryIndex.is_end``) and that the stage read at least
-    ``trajectory_idle_seconds`` before forms the set of its trajectory's calls; the calls on its path that a retry
+    The stage keeps each inference record, with the time of its call, until its release. That time is the record's
+    ``created_at`` on the monotonic clock, and never later than the push, so a stage that reads old records again,
+    such as after a restart, does not wait again. At each ``advance``, a record that ends its trajectory
+    (``TrajectoryIndex.is_end``) and whose call is at least ``trajectory_idle_seconds`` old forms the set of its
+    trajectory's calls; the calls on its path that a retry
     replaced end. A trajectory that holds a call of an earlier set, as a branch of one conversation does, or a call
     that the stage released, ends without a set, with its other calls. The sample of a set is
     ``trajectory_sample``, whose source records are the trajectory's calls.
@@ -92,8 +94,8 @@ class TrajectorySamples(Record2Sample):
         self.trajectory_idle_seconds = trajectory_idle_seconds
         #: The inference records, by ID, until their release.
         self.inferences: dict[str, AgentRecord] = {}
-        #: The monotonic time at which the stage read each inference record that no set holds yet.
-        self.read_at: dict[str, float] = {}
+        #: The monotonic time of the call of each inference record that no set holds yet.
+        self.called_at: dict[str, float] = {}
         self.trajectories = TrajectoryIndex()
 
     @classmethod
@@ -121,7 +123,8 @@ class TrajectorySamples(Record2Sample):
         if record.agent_record_id in self.inferences:
             return
         self.inferences[record.agent_record_id] = record
-        self.read_at[record.agent_record_id] = time.monotonic()
+        age_seconds = max(0.0, time.time() - record.created_at)
+        self.called_at[record.agent_record_id] = time.monotonic() - age_seconds
         self.trajectories.add(record)
 
     def advance(self, now: float) -> None:
@@ -129,14 +132,14 @@ class TrajectorySamples(Record2Sample):
         super().advance(now)
         ended = [
             record_id
-            for record_id, read_at in self.read_at.items()
-            if now - read_at >= self.trajectory_idle_seconds and self.trajectories.is_end(record_id)
+            for record_id, called_at in self.called_at.items()
+            if now - called_at >= self.trajectory_idle_seconds and self.trajectories.is_end(record_id)
         ]
         for record_id in ended:
             path = self.trajectories.path(record_id)
             calls = self.trajectories.trajectory(record_id)
             for call in path:
-                self.read_at.pop(call, None)
+                self.called_at.pop(call, None)
             # The calls that a retry replaced end with the trajectory, as do all its free calls when it cannot train.
             unavailable = [call for call in calls if call not in self.inferences]
             taken = [call for call in calls if call in self.set_of_record]
@@ -155,16 +158,21 @@ class TrajectorySamples(Record2Sample):
                 TrajectorySet(set_id=("trajectory", record_id), calls=tuple(self.inferences[call] for call in calls))
             )
 
+    def next_due(self) -> float | None:
+        """The time at which the earliest waiting trajectory ends, unless a call continues it first."""
+        ends = [called_at for record_id, called_at in self.called_at.items() if self.trajectories.is_end(record_id)]
+        return min(ends) + self.trajectory_idle_seconds if ends else None
+
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
         super().release_records(agent_record_ids)
         for record_id in agent_record_ids:
             self.inferences.pop(record_id, None)
-            self.read_at.pop(record_id, None)
+            self.called_at.pop(record_id, None)
         self.trajectories.forget(agent_record_ids)
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         """The calls that wait for their trajectory to end."""
-        return {"waiting_calls": len(self.read_at)}
+        return {"waiting_calls": len(self.called_at)}
 
 
 def trajectory_set(record_set: RecordSet) -> TrajectorySet:
