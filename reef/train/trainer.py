@@ -78,6 +78,7 @@ class PendingTrainingResult:
     or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped instruction.
     ``earlier_results`` is an
     ordered, possibly empty tuple of TrainStepResult values replaced by metric annotation; duplicates are allowed.
+    Each earlier result equals ``result`` in every field except ``metrics``.
     Purpose: Trainer.run_once makes this phase. prepare_commit acknowledges its data once and creates
     PreparedTrainingResult. Annotation replaces the result while retaining its earlier identities.
     """
@@ -108,6 +109,8 @@ class PendingTrainingResult:
             isinstance(result, TrainStepResult) for result in self.earlier_results
         ):
             raise TypeError("earlier_results must be a tuple of TrainStepResult values")
+        if any(replace(earlier, metrics=self.result.metrics) != self.result for earlier in self.earlier_results):
+            raise ValueError("earlier results must differ from the result only in metrics")
 
     @property
     def data_id(self) -> str | None:
