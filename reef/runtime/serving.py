@@ -365,15 +365,17 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     def adapter_residency_status(self) -> Mapping[str, Any]:
         return self._residency.status()
 
-    def adopt(self, served: ServedArtifact) -> None:
+    def adopt(self, served: ServedArtifact) -> bool:
         """Take over the adapter that ``served`` names when the engines still report its version."""
         try:
             scenario, version = parse_adapter_name(served.model_name)
         except ValueError:
-            return
-        if version in self.versions_at_start:
-            with self._lock:
-                self._adopted[scenario] = (version, served.artifact_id)
+            return False
+        if version not in self.versions_at_start:
+            return False
+        with self._lock:
+            self._adopted[scenario] = (version, served.artifact_id)
+        return True
 
     def stop_serving(self, served: ServedArtifact) -> None:
         """Unload the adapter that ``served`` names, unless a scenario serves it again."""
