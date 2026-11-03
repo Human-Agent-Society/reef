@@ -2,7 +2,8 @@
 
 The serving inference service returns no tokens and no log-probabilities. A training component that trains tokens
 renders each ATIF trajectory sample itself with its model's chat template (``render_trajectory``), and computes the
-log-probabilities that its objective needs with its own engine.
+log-probabilities that its objective needs with its own engine. A trajectory whose calls do not extend each other's
+tokens, as with a template that drops earlier turns' reasoning, trains as several segments, one sample each.
 
 ``ChatTemplate`` is the interface of a chat template, and ``TokenizerChatTemplate`` the one of a Hugging Face
 tokenizer. The message helpers bring provider messages into the form that chat templates expect.
@@ -122,8 +123,8 @@ class RenderedTrajectory:
     Values: ``tokens`` is a non-empty list of token IDs. ``loss_mask`` holds one 0 or 1 for each token after the
     generation prompt of the first trained turn, so ``0 < len(loss_mask) < len(tokens)``: 1 on the tokens of each
     trained turn, 0 on the tokens between them. The constructor checks the lengths.
-    Purpose: ``render_trajectory`` makes it; a training component writes it into the sample's
-    ``extra.reef.training`` as ``tokens`` and ``loss_mask``.
+    Purpose: ``render_trajectory`` makes one for each segment of a trajectory; a training component writes it into
+    the sample's ``extra.reef.training`` as ``tokens`` and ``loss_mask``.
     """
 
     tokens: list[int]
@@ -147,7 +148,7 @@ def trained_turns(trajectory: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
 
     ``ValueError``: ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first
     trained step has no step before it. A trajectory that passes may still fail to render, with a chat template that
-    does not render each trained turn as a prefix of the whole conversation.
+    does not render a trained turn after its own generation prompt.
     """
     steps = trajectory.get("steps") or []
     conversation = normalize_messages_for_template(atif_messages(trajectory))
@@ -164,40 +165,47 @@ def trained_turns(trajectory: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
     return conversation, trained
 
 
-def render_trajectory(template: ChatTemplate, trajectory: Mapping[str, Any]) -> RenderedTrajectory:
-    """Render an ATIF trajectory with ``template``, with every agent step trained that is not copied context.
+def render_trajectory(template: ChatTemplate, trajectory: Mapping[str, Any]) -> tuple[RenderedTrajectory, ...]:
+    """Render an ATIF trajectory with ``template`` as the serving engine rendered each call, in one or more segments.
 
-    An agent step with ``is_copied_context: true`` (ATIF's mark for a step copied from earlier context) is context:
-    it renders, and it trains nothing. Every other agent step trains. The tools are the agent's
-    ``tool_definitions``. The tokens are the conversation up to its last trained turn; the steps after it train
-    nothing and are left out. The loss mask covers the tokens after the first trained turn's generation prompt
-    (``RenderedTrajectory``).
+    Each agent step that is not copied context trains. An agent step with ``is_copied_context: true`` (ATIF's mark
+    for a step copied from earlier context) is context: it renders, and it trains nothing. The tools are the agent's
+    ``tool_definitions``. The steps after the last trained turn train nothing and are left out.
+
+    Each trained turn renders as its call did: the conversation before it with the generation prompt, then the turn.
+    A turn continues the segment of the turn before it when its call's prompt extends that segment's tokens. Else it
+    starts a new segment, as with a template that drops earlier turns' reasoning. Each segment's loss mask covers
+    the tokens after its first generation prompt (``RenderedTrajectory``). A template that renders each turn as a
+    prefix of the whole conversation gives one segment.
 
     ``ValueError``: ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first
-    trained step has no step before it; or the chat template does not render each trained turn as a prefix of the
-    whole conversation (a template that drops earlier turns' reasoning does not).
+    trained step has no step before it; or the chat template does not render a trained turn after its own generation
+    prompt.
     """
     conversation, trained = trained_turns(trajectory)
     tools = trajectory_tools(trajectory)
-    conversation = conversation[: trained[-1] + 1]
-    tokens = template.render(conversation, tools, prompt=False)
-    spans: list[tuple[int, int]] = []
+    # Each segment is its tokens and the spans of its trained turns.
+    segments: list[tuple[list[int], list[tuple[int, int]]]] = []
     for index in trained:
-        # The turn's tokens are those between its generation prompt and its end, both prefixes of the whole.
         prompt_ids = template.render(conversation[:index], tools, prompt=True)
         turn_ids = template.render(conversation[: index + 1], tools, prompt=False)
-        prefixes = tokens[: len(prompt_ids)] == prompt_ids and tokens[: len(turn_ids)] == turn_ids
-        if not prefixes or len(turn_ids) <= len(prompt_ids):
+        if turn_ids[: len(prompt_ids)] != prompt_ids or len(turn_ids) <= len(prompt_ids):
             raise ValueError(
-                "the chat template does not render each turn as a prefix of the whole conversation, "
+                "the chat template does not render each turn as a prefix extension of its generation prompt, "
                 "so its agent turns cannot all train"
             )
-        spans.append((len(prompt_ids), len(turn_ids)))
-    prompt_length = spans[0][0]
-    loss_mask = [0] * (len(tokens) - prompt_length)
-    for start, end in spans:
-        loss_mask[start - prompt_length : end - prompt_length] = [1] * (end - start)
-    return RenderedTrajectory(tokens, loss_mask)
+        if segments and prompt_ids[: len(segments[-1][0])] == segments[-1][0]:
+            segments[-1] = (turn_ids, [*segments[-1][1], (len(prompt_ids), len(turn_ids))])
+        else:
+            segments.append((turn_ids, [(len(prompt_ids), len(turn_ids))]))
+    rendered = []
+    for tokens, spans in segments:
+        prompt_length = spans[0][0]
+        loss_mask = [0] * (len(tokens) - prompt_length)
+        for start, end in spans:
+            loss_mask[start - prompt_length : end - prompt_length] = [1] * (end - start)
+        rendered.append(RenderedTrajectory(tokens, loss_mask))
+    return tuple(rendered)
 
 
 @dataclass(frozen=True)
@@ -310,14 +318,18 @@ def rendered_job_data(data: JobData, template: ChatTemplate) -> tuple[JobData, t
     and the positions in ``data.samples`` of the trajectories that cannot render, which the result leaves out.
 
     A rendered sample gets ``tokens`` and ``loss_mask`` in its ``extra.reef.training`` and no log-probabilities: the
-    training component computes them with its own weights. A sample with a teacher request (``TeacherRequest``) also
-    gets its ``teacher_tokens``; one whose teacher sequence is longer than the request allows is left out, as is one
-    whose tokens are more than its ``extra.reef.max_tokens``, when it names a positive one. A sample with teacher
-    candidates (``teacher_candidates``) gets ``teacher_candidates``: each candidate's hint and teacher sequence; a
-    candidate whose request fails to render drops, and a sample whose candidates all drop is left out. A trajectory
-    with tokens, such as a task rollout of the component, and a task sample stay as they are. A sample renders with
-    ``template`` and the ``chat_template_kwargs`` of its last recorded request over the template's own arguments
-    (``recorded_template_arguments``), as the serving engine rendered it.
+    training component computes them with its own weights. A trajectory that renders as ``n > 1`` segments becomes
+    ``n`` consecutive samples, each with ``segment``: ``{"index": i, "count": n}`` with ``0 <= i < n``, and each with
+    the trajectory's group, reward and records. Each recipe decides how its objective counts the segments. A sample
+    with a teacher request (``TeacherRequest``) also gets its ``teacher_tokens``; one whose teacher sequence is longer
+    than the request allows is left out, as is one with a segment longer than its ``extra.reef.max_tokens``, when it
+    names a positive one. A sample with teacher candidates (``teacher_candidates``) gets ``teacher_candidates``: each
+    candidate's hint and teacher sequence; a candidate whose request fails to render drops, and a sample whose
+    candidates all drop is left out. A teacher reads one student reply, so a sample with a teacher request or teacher
+    candidates that renders as several segments is left out. A trajectory with tokens, such as a task rollout of the
+    component, and a task sample stay as they are. A sample renders with ``template`` and the ``chat_template_kwargs``
+    of its last recorded request over the template's own arguments (``recorded_template_arguments``), as the serving
+    engine rendered it.
     """
     samples: list[Sample] = []
     left_out: list[int] = []
@@ -325,42 +337,58 @@ def rendered_job_data(data: JobData, template: ChatTemplate) -> tuple[JobData, t
         if not isinstance(sample, TrajectorySample) or sample.training.get("tokens"):
             samples.append(sample)
             continue
-        arguments = recorded_template_arguments(sample)
-        sample_template = template.with_arguments(arguments) if arguments else template
-        try:
-            rendered = render_trajectory(sample_template, sample.trajectory)
-        except ValueError:
+        rendered = rendered_samples(sample, template)
+        if rendered is None:
             left_out.append(index)
-            continue
-        max_tokens = sample.metadata.get("max_tokens")
-        if isinstance(max_tokens, int) and max_tokens > 0 and len(rendered.tokens) > max_tokens:
-            left_out.append(index)
-            continue
-        teacher = TeacherRequest.of_sample(sample)
-        fields: dict[str, Any] = {"tokens": rendered.tokens, "loss_mask": rendered.loss_mask}
-        if teacher is not None:
-            teacher_tokens = teacher.teacher_tokens(sample_template, rendered)
-            if teacher_tokens is None:
-                left_out.append(index)
-                continue
-            fields["teacher_tokens"] = teacher_tokens
-        candidates = teacher_candidates(sample)
-        if candidates:
-            rendered_candidates = []
-            for hint, request in candidates:
-                # A candidate whose prompt the template cannot render drops, as a failed hint does.
-                try:
-                    candidate_tokens = request.teacher_tokens(sample_template, rendered)
-                except ValueError:
-                    continue
-                if candidate_tokens is not None:
-                    rendered_candidates.append({"hint": hint, "teacher_tokens": candidate_tokens})
-            if not rendered_candidates:
-                left_out.append(index)
-                continue
-            fields["teacher_candidates"] = rendered_candidates
-        samples.append(sample.with_training(**fields))
+        else:
+            samples.extend(rendered)
     return JobData(data.data_id, tuple(samples), request=data.request), tuple(left_out)
+
+
+def rendered_samples(sample: TrajectorySample, template: ChatTemplate) -> list[TrajectorySample] | None:
+    """The samples of ``sample`` rendered with ``template``, one for each segment, or None when it is left out
+    (``rendered_job_data``)."""
+    arguments = recorded_template_arguments(sample)
+    sample_template = template.with_arguments(arguments) if arguments else template
+    try:
+        segments = render_trajectory(sample_template, sample.trajectory)
+    except ValueError:
+        return None
+    max_tokens = sample.metadata.get("max_tokens")
+    if isinstance(max_tokens, int) and max_tokens > 0 and any(len(part.tokens) > max_tokens for part in segments):
+        return None
+    teacher = TeacherRequest.of_sample(sample)
+    candidates = teacher_candidates(sample)
+    if len(segments) > 1:
+        if teacher is not None or candidates:
+            return None
+        return [
+            sample.with_training(
+                tokens=part.tokens, loss_mask=part.loss_mask, segment={"index": index, "count": len(segments)}
+            )
+            for index, part in enumerate(segments)
+        ]
+    (rendered,) = segments
+    fields: dict[str, Any] = {"tokens": rendered.tokens, "loss_mask": rendered.loss_mask}
+    if teacher is not None:
+        teacher_tokens = teacher.teacher_tokens(sample_template, rendered)
+        if teacher_tokens is None:
+            return None
+        fields["teacher_tokens"] = teacher_tokens
+    if candidates:
+        rendered_candidates = []
+        for hint, request in candidates:
+            # A candidate whose prompt the template cannot render drops, as a failed hint does.
+            try:
+                candidate_tokens = request.teacher_tokens(sample_template, rendered)
+            except ValueError:
+                continue
+            if candidate_tokens is not None:
+                rendered_candidates.append({"hint": hint, "teacher_tokens": candidate_tokens})
+        if not rendered_candidates:
+            return None
+        fields["teacher_candidates"] = rendered_candidates
+    return [sample.with_training(**fields)]
 
 
 __all__ = [

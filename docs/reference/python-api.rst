@@ -1624,21 +1624,26 @@ it. ``reef.core.chat_rendering`` holds the shared rendering:
   ``TokenizerChatTemplate(tokenizer, template_kwargs)`` is the chat template of
   a Hugging Face tokenizer. Its ``template_kwargs`` must equal the chat
   template arguments that the serving engine renders with.
-- ``render_trajectory(template, trajectory)`` renders the conversation up to
-  its last trained turn, with the agent's ``tool_definitions`` as the tools.
-  Each agent step that is not ``is_copied_context`` trains: the loss mask is
-  1 on its tokens. It raises ``ValueError`` when the trajectory has no
-  trained step, or when the template does not render each trained turn as a
-  prefix of the whole conversation.
+- ``render_trajectory(template, trajectory)`` renders each trained turn as
+  its call rendered it: the conversation before the turn with the generation
+  prompt, then the turn. The agent's ``tool_definitions`` are the tools. Each
+  agent step that is not ``is_copied_context`` trains: the loss mask is 1 on
+  its tokens. A turn whose call's prompt extends the tokens of the turn
+  before it continues that segment. Else it starts a new segment. The result
+  is one ``RenderedTrajectory`` for each segment. It raises ``ValueError``
+  when the trajectory has no trained step, or when the template does not
+  render a turn after its own generation prompt.
 - ``TeacherRequest`` is the ``extra.reef.teacher`` value. Its
   ``teacher_tokens`` is the rendered teacher prompt followed by the student's
   reply tokens verbatim, or the student's own tokens when it names no
   messages.
 - ``rendered_job_data(data, template)`` renders each trajectory sample that
-  has no ``tokens``. It returns the job data and the positions of the samples
-  that it leaves out: a sample that cannot render, that is longer than its
-  ``max_tokens``, or whose teacher sequence is longer than its teacher
-  request allows. The Slime and Tinker components count them in the job
+  has no ``tokens``. A trajectory of several segments becomes one sample for
+  each segment, with ``segment``: ``{"index": i, "count": n}`` in its
+  ``extra.reef.training``. It returns the job data and the positions of the
+  samples that it leaves out: a sample that cannot render, that is longer
+  than its ``max_tokens``, whose teacher sequence is longer than its teacher
+  request allows, or that has a teacher and several segments. The Slime and Tinker components count them in the job
   metric ``unrenderable_samples``.
 
 Training objective
