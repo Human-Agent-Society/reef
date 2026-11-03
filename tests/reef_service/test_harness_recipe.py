@@ -68,6 +68,7 @@ from reef.evaluation.harness import (
     verifier_reward,
 )
 from reef.evaluation.harness.runner import run_task
+from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
@@ -78,7 +79,6 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobLoop
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskJobData
 from reef.service.app import create_app
 from reef.storage.samples import TrainerSamples
@@ -549,7 +549,7 @@ def test_evolution_worker_selector_is_independent_of_sandbox_selector() -> None:
 
 
 def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch) -> None:
-    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ())
+    monkeypatch.setattr("reef.execution.executor.config.visible_cuda_devices", lambda: ())
     settings = {
         "execution": {"evolution": {"backend": "ray", "resources": {"gpus_per_worker": 1}}},
         **evolution_config(),

@@ -30,10 +30,10 @@ from reef.artifact.repository import DefaultStart, FileDownload
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
-from reef.runtime.jobs import TrainingJob
 from reef.service.app import create_app
 from reef.storage.data_queue import DATA_QUEUE
 from reef.storage.work_queue import NewWork
+from reef.train.component import TrainingJob
 from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE, job_kind, job_payload
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}

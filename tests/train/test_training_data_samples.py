@@ -18,9 +18,10 @@ from reef.core.trajectories import (
     source_record_id,
     trajectory_reward,
 )
-from reef.runtime.interfaces import InferenceStream, TrainingMethod
+from reef.inference.interfaces import InferenceStream
 from reef.service.streaming import stream_record
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
 

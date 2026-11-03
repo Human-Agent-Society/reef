@@ -12,7 +12,7 @@ from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
-from reef.runtime.interfaces import FixedEngineClients, InferenceHandler
+from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.cors import configure_browser_access

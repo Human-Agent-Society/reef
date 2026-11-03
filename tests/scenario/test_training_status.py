@@ -32,13 +32,13 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
-from reef.runtime.jobs import ScenarioRoot
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer

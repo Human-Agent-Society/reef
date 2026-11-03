@@ -25,8 +25,8 @@ from pathlib import Path
 from types import FrameType
 
 from reef.core.job_data import JobData, TaskSample
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.jobs import TrainingJob
+from reef.storage.durable_files import read_json, write_json
+from reef.train.component import TrainingJob
 from reef.train.local_jobs import JOB_FILE
 from reef.train.slime_backend.component import (
     DRIVER_FILE,

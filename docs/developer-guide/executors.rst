@@ -3,14 +3,14 @@ Training components, serving and executors
 
 Reef's runtime has three boundaries. Each one has its own contract:
 
-- A **training component** (``reef.runtime.jobs.TrainingComponent``) runs
+- A **training component** (``reef.train.component.TrainingComponent``) runs
   whole training jobs with its framework's own training loop and saves
   checkpoints. Reef submits jobs and reads their status. It does not drive
   optimizer steps.
-- An **inference runtime** (``reef.runtime.interfaces.InferenceRuntime``)
+- An **inference runtime** (``reef.inference.interfaces.InferenceRuntime``)
   admits requests and serves the weights that Reef published. It never
   trains.
-- An **executor** (``reef.runtime.executor.Executor``) launches workers and
+- An **executor** (``reef.execution.executor.Executor``) launches workers and
   carries ordered control RPC, health checks and shutdown. Configuration
   selects a concrete executor; callers use the same methods.
 
@@ -127,12 +127,12 @@ Serving loads only the weights that a job saved and Reef published. It loads
 them when a scenario starts, when a committed release is activated, and when
 a person activates a release. No trainer holds a serving engine.
 
-``reef.runtime.serving`` has two runtimes over an ``InferenceBackend``:
+``reef.inference.serving`` has two runtimes over an ``InferenceBackend``:
 
 - ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
   base model. Requests name the adapter per scenario. At most
   ``adapter_capacity`` adapters are resident.
-  ``reef.runtime.residency.AdapterResidencyManager`` evicts a leaked
+  ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 - ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
@@ -165,7 +165,7 @@ dead ones), loads each scenario's active release into them, and resumes.
 Engine supervision
 ------------------
 
-``reef.runtime.recovery.InferenceControl`` pauses, resumes and recovers the
+``reef.inference.recovery.InferenceControl`` pauses, resumes and recovers the
 engines of one inference service. The engine integration implements its two
 hooks:
 
@@ -178,13 +178,13 @@ partial pause failure still fences replacement engines. Recovery stops
 monitoring and replaces dead engines. It pauses them again when generation
 was paused. A failed recovery keeps generation paused. Only ``resume`` lets
 the engines serve again. Each engine actor implements
-``reef.runtime.interfaces.InferenceEngine``, the per-engine vocabulary that
+``reef.inference.interfaces.InferenceEngine``, the per-engine vocabulary that
 the group and the backend call by name.
 
 Engine health monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.runtime.recovery.EngineHealthMonitor`` owns probe scheduling.
+``reef.inference.recovery.EngineHealthMonitor`` owns probe scheduling.
 ``pause()`` disables new checks. It waits for the active probe or retirement
 to finish before the owner can replace or terminate engines. The monitor
 discards a late probe failure after the pause begins. A drain timeout leaves
@@ -211,7 +211,7 @@ Independent SGLang backend
 ``reef/inference/sglang/`` owns the chat backend, SGLang plugin, native
 engine process, router, Ray engine groups and inference lifecycle. Native
 ``ServerArgs`` and ``launch_server`` come directly from SGLang, not from
-Slime. The runtime-load-ID value type lives in ``reef.runtime.interfaces``.
+Slime. The runtime-load-ID value type lives in ``reef.inference.interfaces``.
 
 Install ``reef-infra[sglang]`` for Python-side inference dependencies and install
 native SGLang in the selected GPU environment. This extra does not install
@@ -335,7 +335,7 @@ Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
 
 .. code:: python
 
-   from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec, resolve
+   from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec, resolve
 
    class Counter:
        def __init__(self, rank):

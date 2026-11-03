@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from reef.cli import main
-from reef.runtime.jobs import ReleaseFormat
+from reef.core.weight_layout import ReleaseFormat
 from reef.service.deploy import inference as inference_deploy
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_config

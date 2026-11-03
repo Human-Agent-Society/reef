@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from reef.core.weight_layout import ReleaseFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import config as sglang_config
 from reef.inference.sglang import deployment as sglang_deployment
@@ -15,7 +16,6 @@ from reef.inference.sglang.deployment import create_inference
 from reef.inference.sglang.launch import engine_environment
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.inference.vllm.config import VLLMConfig
-from reef.runtime.jobs import ReleaseFormat
 
 FULL = ReleaseFormat("full")
 ADAPTER = ReleaseFormat("adapter", 8, ("q_proj", "v_proj"))
@@ -178,7 +178,7 @@ import json
 import sys
 sys.modules.update(dict.fromkeys(('sglang', 'torch', 'megatron', 'slime', 'reef.train.slime_backend')))
 from reef.inference.remote.runtime import serving_engine_config
-from reef.runtime.jobs import ReleaseFormat
+from reef.train.component import ReleaseFormat
 values = serving_engine_config('sglang', model_path='model', num_gpus=1, tensor_parallel_size=1, options={},
     release_format=ReleaseFormat('adapter', 8, ('all',)), adapter_capacity=1, prefix_sharing=False,
     executor='auto', executor_options={}, environ={})

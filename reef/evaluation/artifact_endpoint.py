@@ -17,8 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import InferenceUnavailable
-from reef.runtime.interfaces import InferenceArtifact, InferenceRuntime, UpstreamStatusError
+from reef.core.errors import InferenceUnavailable, UpstreamStatusError
+from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
 
 #: The model call routes that the endpoint answers, as Reef's own inference routes do.
 MODEL_CALL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")

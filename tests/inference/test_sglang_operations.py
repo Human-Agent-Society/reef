@@ -6,12 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.execution.executor.ray import RayExecutor
+from reef.execution.executor.uniproc import UniProcExecutor
+from reef.inference.deployment import InferenceConnection
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
 from reef.inference.sglang.service import INFERENCE_PROTOCOL, SGLangInferenceService
-from reef.runtime.deployment import InferenceConnection
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.executor.uniproc import UniProcExecutor
 
 
 class Receiver:
@@ -239,9 +239,9 @@ def test_worker_reloads_full_weights_into_every_updatable_engine(monkeypatch):
 
 
 def test_engine_control_and_weight_loads_skip_encoder_groups(monkeypatch):
+    from reef.inference.recovery import InferenceControl
     from reef.inference.sglang import worker as worker_module
     from reef.inference.sglang.launch import SGLangEngineGroup, SGLangModel
-    from reef.runtime.recovery import InferenceControl
 
     calls = []
 

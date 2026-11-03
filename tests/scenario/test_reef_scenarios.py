@@ -19,12 +19,12 @@ from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.harness import HarnessLayout
-from reef.runtime.jobs import ScenarioRoot, TrainingComponent
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.jobs import JobLoopState
 
 

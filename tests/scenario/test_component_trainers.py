@@ -56,7 +56,6 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.service import SAMPLES_QUEUE
-from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.sample2job import Sample2Job
 from reef.scenario import Scenario
 from reef.scenario.scenario import validate_component_trainers
@@ -72,6 +71,7 @@ from reef.storage.commits import (
 from reef.storage.samples import consumed_sample_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ComponentTrainer, Trainer
+from reef.train.component import JobStatus, TrainingJob
 from reef.train.job_queue import JOBS_QUEUE
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline

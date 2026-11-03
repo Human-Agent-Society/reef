@@ -44,19 +44,12 @@ import aiohttp
 from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
-from reef.core.errors import ReefError
+from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusError, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
+from reef.inference.interfaces import EngineClients, InferenceArtifact, InferenceHandler
 from reef.inference.provider_protocol import SSEFrameDecoder
-from reef.runtime.interfaces import (
-    INFERENCE_ABORT_ERROR,
-    EngineClients,
-    InferenceArtifact,
-    InferenceHandler,
-    UpstreamStatusError,
-    inference_aborted,
-)
 from reef.service.streaming import (
     chat_completion_chunk_identity,
     frame_for_codex,

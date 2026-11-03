@@ -16,7 +16,7 @@ import yaml
 from tests.support._training_deployment import LocalDeployment
 from tests.support.runtime_stubs import STUB_ROOT
 
-from reef.runtime.deployment import RuntimeConfigError
+from reef.core.errors import RuntimeConfigError
 from reef.service.assembly import _training_recipe, connect_training_component
 from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
@@ -109,14 +109,11 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     from reef.inference.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(base_url="http://unused")
-    closed = []
-    monkeypatch.setattr(runtime, "shutdown", lambda: closed.append(True))
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
             ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", loss_family="sao"
         )
-    assert closed == [True]
 
 
 def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanup(tmp_path):

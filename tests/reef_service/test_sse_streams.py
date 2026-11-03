@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import SSEFrameDecoder
-from reef.runtime.interfaces import InferenceStream
 from reef.service.streaming import (
     aggregate_sse_text,
     chat_completion_chunk_identity,

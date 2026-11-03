@@ -19,12 +19,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.config import config_value, interpolate_config
-from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, TrainingComponentFactory, http_readiness_command
-from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
-from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.runtime.jobs import TrainingComponent
+from reef.core.errors import DeployConfigError, RuntimeConfigError
+from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
+from reef.execution.executor.config import role_executor_settings, select_executor
+from reef.execution.processes import http_readiness_command
 from reef.train.algos.registry import loss_family_refs
+from reef.train.component import TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import TrainingDeployment
 
 
