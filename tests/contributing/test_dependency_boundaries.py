@@ -280,8 +280,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/storage",
         "reef/artifact",
         "reef/recipe",
-        "reef/runtime",
-        "reef/surface",
+        "reef/execution",
     )
     files = [path for package in core_packages for path in sorted((REPO_ROOT / package).rglob("*.py"))]
     # A method package's public half too; its ``slime`` subpackage is the
@@ -327,7 +326,7 @@ def test_checkpoint_storage_import_does_not_require_ray() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; "
         "from reef.train.slime_backend.reef_adapters import RetentionConfig; "
-        "from reef.runtime import recovery; "
+        "from reef.inference import recovery; "
         "from reef.train.slime_backend.reef_adapters.training_job import storage"
     )
 
@@ -427,8 +426,8 @@ def test_training_jobs_and_serving_import_require_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.jobs import TrainingComponent, TrainingJob; "
-        "from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime; "
+        "from reef.train.component import TrainingComponent, TrainingJob; "
+        "from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime; "
         "from reef.train.jobs import JobLoop; "
         "from reef.train.local_jobs import LocalJobComponent"
     )
@@ -438,71 +437,38 @@ def test_inference_recovery_requires_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.recovery import InferenceControl; "
-        "from reef.runtime.recovery import EngineHealthMonitor"
+        "from reef.inference.recovery import InferenceControl; "
+        "from reef.inference.recovery import EngineHealthMonitor"
     )
 
 
-def test_runtime_coordination_never_imports_concrete_model_backends() -> None:
-    for path in sorted((REPO_ROOT / "reef/runtime").rglob("*.py")):
+def test_inference_contracts_import_only_lower_contracts_and_no_backend() -> None:
+    # Include imports inside functions: delaying an import does not make a
+    # contract depend on an integration or on a module above it.
+    allowed = {
+        "interfaces.py": (),
+        "recovery.py": (),
+        "residency.py": ("reef.inference.interfaces",),
+        "deployment.py": ("reef.inference.interfaces",),
+        "registry.py": ("reef.inference.interfaces",),
+        "serving.py": ("reef.inference.interfaces", "reef.inference.residency"),
+    }
+    for name, prefixes in allowed.items():
+        path = REPO_ROOT / "reef/inference" / name
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.inference")
+        for dependency in ("reef.train", "slime", "sglang", "vllm", "megatron"):
+            assert _imports_of(imported, dependency) == [], name
+        for target in _imports_of(imported, "reef.inference"):
+            assert any(target == prefix or target.startswith(prefix + ".") for prefix in prefixes), f"{name}: {target}"
+
+
+def test_training_contracts_and_executors_never_import_model_backends() -> None:
+    paths = [REPO_ROOT / "reef/train/component.py", *sorted((REPO_ROOT / "reef/execution/executor").rglob("*.py"))]
+    for path in paths:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         for dependency in ("reef.inference", "reef.train", "slime", "sglang", "megatron"):
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
-
-
-def test_runtime_directory_has_only_its_owned_modules() -> None:
-    root = REPO_ROOT / "reef/runtime"
-    expected = {
-        "interfaces.py",
-        "jobs.py",
-        "durable_files.py",
-        "deployment.py",
-        "recovery.py",
-        "residency.py",
-        "serving.py",
-        "executor",
-    }
-
-    assert {path.name for path in root.iterdir() if path.name != "__pycache__"} == expected
-    assert (root / "executor").is_dir()
-    assert all((root / name).is_file() for name in expected - {"executor"})
-
-
-def test_runtime_modules_follow_their_dependency_order() -> None:
-    # Include imports inside functions: delaying an import does not make a
-    # serving/deployment dependency cycle a valid module boundary.
-    allowed = {
-        "interfaces.py": (),
-        "jobs.py": (),
-        "durable_files.py": (),
-        "recovery.py": ("reef.runtime.interfaces",),
-        "residency.py": ("reef.runtime.interfaces",),
-        "deployment.py": (
-            "reef.runtime.interfaces",
-            "reef.runtime.jobs",
-            "reef.runtime.recovery",
-            "reef.runtime.executor",
-        ),
-        "serving.py": (
-            "reef.runtime.interfaces",
-            "reef.runtime.jobs",
-            "reef.runtime.recovery",
-            "reef.runtime.residency",
-            "reef.runtime.deployment",
-        ),
-        "executor": ("reef.runtime.interfaces", "reef.runtime.executor"),
-    }
-    root = REPO_ROOT / "reef/runtime"
-    for path in sorted(root.rglob("*.py")):
-        owner = path.relative_to(root).parts[0]
-        assert owner in allowed, f"unowned runtime module: {path.relative_to(REPO_ROOT)}"
-        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
-        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        for target in _imports_of(imported, "reef.runtime"):
-            assert any(
-                target == prefix or target.startswith(prefix + ".") for prefix in allowed[owner]
-            ), f"{path.relative_to(REPO_ROOT)} imports {target} against the runtime dependency order"
 
 
 def test_inference_backends_never_import_training_implementations() -> None:
@@ -513,11 +479,11 @@ def test_inference_backends_never_import_training_implementations() -> None:
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
 
 
-def test_runtime_and_inference_packages_import_without_loading_backends() -> None:
+def test_inference_and_training_contracts_import_without_loading_backends() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron', 'reef.inference.sglang'))); "
-        "import reef.runtime; import reef.inference; "
+        "import reef.inference; from reef.inference import registry, serving; from reef.train import component; "
         "assert not [name for name in sys.modules "
         "if name.startswith(('reef.inference.sglang.', 'reef.train.slime_backend'))]"
     )
@@ -580,7 +546,6 @@ def test_record_to_sample_stage_depends_only_on_contracts_below_training() -> No
     # The trainer and the recipes import the stage, so it never imports them or the generator service.
     allowed = (
         "reef.core",
-        "reef.runtime.interfaces",
         "reef.execution.jobs",
         "reef.pipeline_context",
         "reef.record2sample",

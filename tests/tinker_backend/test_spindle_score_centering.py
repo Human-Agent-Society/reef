@@ -13,13 +13,13 @@ from tests.tinker_backend.test_spindle_full import BASE, MODEL, RELEASES, SPINDL
 from reef.core.errors import DeployConfigError
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.algos.schedule import StepScheduling
+from reef.train.component import TrainingJob
+from reef.train.method import TrainingMethod
 from reef.train.task_rollouts import ChatEndpoint, TaskJobRollouts
 from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.config import ScoreCentering, SpindleFullConfig

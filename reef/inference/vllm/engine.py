@@ -15,10 +15,10 @@ from typing import Any
 
 import requests
 
+from reef.inference.interfaces import InferenceEngine
 from reef.inference.process import check_server_owner, node_address_and_port, ports_in_use, wait_ready
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.process import EngineProcess, launch_server
-from reef.runtime.interfaces import InferenceEngine
 
 logger = logging.getLogger(__name__)
 

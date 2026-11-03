@@ -22,12 +22,12 @@ from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.recipe.sft import SFTJobData, SftObjective, SFTRecipe, SFTSamples, SFTSettings
-from reef.runtime.interfaces import TrainingMethod
 from reef.sample2job import DistillJobData
 from reef.train import PipelineContext
 from reef.train.algos import registry
 from reef.train.algos.registry import ObjectiveRegistry, resolve_objective
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -482,7 +482,7 @@ def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnToke
     template = TokenizerChatTemplate(tokenizer)
 
     # The copied turn is context: in the tokens, before the prompt that the loss mask starts after.
-    rendered = render_trajectory(template, _uploaded(ASK, {**CALL, "is_copied_context": True}, ANSWER).trajectory)
+    (rendered,) = render_trajectory(template, _uploaded(ASK, {**CALL, "is_copied_context": True}, ANSWER).trajectory)
     assert rendered.tokens == [
         *ASK_IDS,
         GENERATION_PROMPT,
@@ -496,7 +496,7 @@ def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnToke
     assert rendered.loss_mask == [1] * (len(ANSWER_IDS) + 1)
 
     # A copied turn after the last trained one trains nothing either, so the sample ends before it.
-    rendered = render_trajectory(template, _uploaded(ASK, CALL, {**ANSWER, "is_copied_context": True}).trajectory)
+    (rendered,) = render_trajectory(template, _uploaded(ASK, CALL, {**ANSWER, "is_copied_context": True}).trajectory)
     assert rendered.tokens == [*ASK_IDS, GENERATION_PROMPT, *LOOK_IDS, END_OF_TURN]
     assert rendered.loss_mask == [1] * (len(LOOK_IDS) + 1)
 
@@ -525,7 +525,7 @@ def test_an_uploaded_trajectory_that_cannot_train_is_refused(steps, reason) -> N
 
 
 @pytest.mark.unit
-def test_a_template_that_changes_earlier_turns_or_a_long_sample_is_left_out_by_the_component(
+def test_a_long_sample_is_left_out_and_a_template_that_changes_earlier_turns_trains_in_segments(
     tokenizer: TurnTokenizer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The upload names the limit; the component leaves out a sample that renders longer.
@@ -540,11 +540,10 @@ def test_a_template_that_changes_earlier_turns_or_a_long_sample_is_left_out_by_t
         return ids[1:] if len(conversation) > 2 else ids
 
     monkeypatch.setattr(tokenizer, "apply_chat_template", drops_earlier_turns)
-    # The upload checks only the structure, so it accepts the trajectory; the component cannot render it.
+    # The answer's call rendered the first turn shorter, so each turn trains in a segment of its own.
     sample = _samples().uploaded_sample(_uploaded(ASK, CALL, ANSWER))
-    with pytest.raises(ValueError, match="does not render each turn as a prefix"):
-        render_trajectory(TokenizerChatTemplate(tokenizer), sample.trajectory)
-    assert _left_out(sample, tokenizer) == (0,)
+    assert len(render_trajectory(TokenizerChatTemplate(tokenizer), sample.trajectory)) == 2
+    assert _left_out(sample, tokenizer) == ()
 
 
 @pytest.mark.unit

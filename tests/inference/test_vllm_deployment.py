@@ -20,7 +20,7 @@ def base_values(**overrides):
 
 @pytest.mark.parametrize("executor", [None, "auto", "ray"])
 def test_factory_accepts_plain_input_without_starting_workers(monkeypatch, executor):
-    from reef.runtime.executor.ray import RayExecutor
+    from reef.execution.executor.ray import RayExecutor
 
     def fail_allocation(*args, **kwargs):
         raise AssertionError("factory must not allocate workers")
@@ -113,7 +113,7 @@ from reef.inference.vllm.deployment import create_inference
 service = create_inference(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
 assert service.config.options['kv_transfer_config']['kv_connector'] == 'ReefConnector'
 from reef.inference.vllm import backend, control, engine, launch, service as service_module, worker
-from reef.runtime.interfaces import InferenceEngine
+from reef.inference.interfaces import InferenceEngine
 assert engine.ReefVLLMEngine.__bases__ == (InferenceEngine,)
 assert not any(name.startswith(('slime.', 'reef.train.slime_backend.', 'reef.inference.sglang')) for name in sys.modules)
 service.close()

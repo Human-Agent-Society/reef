@@ -19,7 +19,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.artifact.artifact import Artifact
 from reef.core import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
-from reef.runtime.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
+from reef.inference.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
 from reef.service.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

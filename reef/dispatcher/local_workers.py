@@ -19,7 +19,7 @@ from threading import Event, Lock, Thread
 from typing import Literal
 
 from reef.dispatcher.errors import TrainingErrors, error_text, local_error_source
-from reef.runtime.interfaces import RuntimeContractError
+from reef.inference.interfaces import RuntimeContractError
 from reef.scenario.registry import InstanceState, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 

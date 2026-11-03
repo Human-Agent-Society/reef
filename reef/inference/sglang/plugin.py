@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
-from reef.runtime.interfaces import RuntimeLoadId
+from reef.inference.interfaces import RuntimeLoadId
 
 TOKEN_RUNTIME_LOAD_IDS_KEY = "_reef_token_runtime_load_ids"
 REEF_SGLANG_PLUGIN_ENV = "SGLANG_REEF_PLUGIN"

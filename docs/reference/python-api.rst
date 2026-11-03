@@ -30,7 +30,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | turn job data into a signal                 | `Training objective <#training-objective>`__     | weight-training methods      |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| deliver a new artifact medium               | `Surface <#surface>`__                           | only a new evolution medium  |
+| declare a new release component             | `Scenario components <#scenario-components>`__   | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | evolve a harness tree and score a task run  | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -65,8 +65,8 @@ there is no aggregate runtime:
 
 .. code:: python
 
-   from reef.runtime.interfaces import InferenceBackend, InferenceRuntime
-   from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
+   from reef.inference.interfaces import InferenceBackend, InferenceRuntime
+   from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
 
 A ``TrainingComponent`` runs bounded training jobs (see `Training jobs and
 components`_). An ``InferenceRuntime`` executes requests, owns admission, and
@@ -78,11 +78,11 @@ serve. ``InferenceEngine`` names the operations one engine actor offers, which
 ``ReefSGLangEngine`` and ``ReefVLLMEngine`` implement. The engine supervision
 hooks an inference integration also implements (``InferenceEngineGroup``,
 ``InferenceMonitor``, ``EngineHealthChecks``, ``EngineHealthTarget``) live in
-``reef/runtime/recovery.py``, next to the objects that drive them.
+``reef/inference/recovery.py``, next to the objects that drive them.
 Implementations inherit the corresponding interface and provide every abstract
 operation. SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``
 through ``EngineInferenceBackend``. ``InferenceService`` in
-``reef/runtime/deployment.py`` owns engine start and shutdown. It also requires
+``reef/inference/deployment.py`` owns engine start and shutdown. It also requires
 explicit inheritance; inference factory discovery rejects objects that only
 happen to expose similarly named methods.
 
@@ -95,7 +95,7 @@ Two other extension points have separate names and purposes:
   (``reef.train.harness_backend.component``) runs each harness step's
   ``HarnessBackend`` as one job, in the training service.
   The trainer's job size is its sample-to-job stage's ``job_samples``.
-- ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
+- ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
   ``artifact_id``, an optional ``local_path``, and ``require_token_runtime_load_ids``.
   Handlers receive no repository or snapshot locator. Runtime and recipe objects
@@ -133,7 +133,7 @@ can set ``SPLIT_REASONING = False`` (renamed from ``_SPLIT_REASONING``).
 
 Python extension contracts use abstract base classes and explicit inheritance.
 This also applies to repository factories, candidate evaluation plugins, harness
-plugins, and surface capabilities. Implement optional capabilities only when
+plugins, and component file trees. Implement optional capabilities only when
 supported: adapter weight residency, artifact activation, and request leases
 remain separate interfaces. CI rejects ``typing.Protocol``,
 ``typing_extensions.Protocol``, and ``runtime_checkable`` in all first-party
@@ -184,12 +184,12 @@ recipe to remain record-only.
 | use Reef's harness loop         | configure ``HarnessEvolutionRecipe`` with a          |
 |                                 | ``Method`` in ``evolution.method``; subclass it only |
 |                                 | when the method changes more than the tree, such as  |
-|                                 | the delivery surface                                 |
+|                                 | the files a client pulls                             |
 +---------------------------------+------------------------------------------------------+
 | evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |
-|                                 | ``build_surface()``                                  |
+|                                 | ``build_components()``                               |
 +---------------------------------+------------------------------------------------------+
-| serve an externally produced    | subclass ``Recipe``, override ``build_surface()``    |
+| serve an externally produced    | subclass ``Recipe``, override ``build_components()`` |
 | artifact                        | only                                                 |
 +---------------------------------+------------------------------------------------------+
 | evolve weights and a harness    | configure ``CompositeRecipe`` with one recipe per    |
@@ -219,16 +219,16 @@ Common members
 |                                                   |                             | component's committed releases |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
-| ``surface=..., algorithm_states=...,``            | ...]``                      | component; defaults to the     |
+| ``components=..., algorithm_states=...,``         | ...]``                      | component; defaults to the     |
 | ``task_storage=..., releases=...)``               |                             |                                |
 |                                                   |                             | single trainer ``build``       |
 |                                                   |                             | returns, bound to the          |
-|                                                   |                             | surface's one component        |
+|                                                   |                             | scenario's one component       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_surface(scenario)``                       | ``Surface``                 | the delivery contract for one  |
-|                                                   |                             | named scenario: its release    |
-|                                                   |                             | components, each with its      |
-|                                                   |                             | admission check (default       |
+| ``build_components(scenario)``                    | ``ScenarioComponents``      | the components of one named    |
+|                                                   |                             | scenario's releases, each with |
+|                                                   |                             | its kind and admission check   |
+|                                                   |                             | (default                       |
 |                                                   |                             | ``AcceptAnyArtifact()``)       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_artifact_validator()``                    | ``ArtifactValidator``       | kept from before component     |
@@ -794,6 +794,12 @@ stores`_).
        a call that no stored call names as parent; its calls are
        ``reef.core.trajectory_index.trajectory_calls`` of the path from the
        root. Reports and unknown IDs are left out.
+   * - ``groups(owner, *, kind, key, before=None, limit=1000)``
+     - The ``ItemGroup`` values of the owner's items of ``kind`` by the string
+       under the metadata ``key``: ``value`` (``None`` without a string),
+       ``item_count``, ``first_sequence``, ``last_sequence`` and the first
+       item's ``metadata``. Newest first, below ``before`` when given. The
+       default reads every page of ``query``; the SQL stores group in SQL.
    * - ``maintain()``
      - The store's periodic work. The data service calls it every 5 minutes.
        It changes no item. The default does nothing.
@@ -944,8 +950,8 @@ files that the URI names, the component's layout checks them where the source
 keeps them, and then Reef stores a copy, or a reference to a Hugging Face
 revision that cannot change. Two contracts decide what an import accepts.
 
-A component's layout is the ``layout`` of its ``ComponentSurface``, an
-``reef.surface.ArtifactLayout``. ``check(files)`` returns when ``files`` are
+A component's layout is the ``layout`` of its ``ComponentSpec``, an
+``reef.artifact.components.ArtifactLayout``. ``check(files)`` returns when ``files`` are
 an artifact in the layout of the component's releases, and the remote weights
 that they name exist. Otherwise it raises ``ValueError``, and Reef answers
 HTTP 400 before it copies anything. ``None``, the default, means that the
@@ -1618,21 +1624,26 @@ it. ``reef.core.chat_rendering`` holds the shared rendering:
   ``TokenizerChatTemplate(tokenizer, template_kwargs)`` is the chat template of
   a Hugging Face tokenizer. Its ``template_kwargs`` must equal the chat
   template arguments that the serving engine renders with.
-- ``render_trajectory(template, trajectory)`` renders the conversation up to
-  its last trained turn, with the agent's ``tool_definitions`` as the tools.
-  Each agent step that is not ``is_copied_context`` trains: the loss mask is
-  1 on its tokens. It raises ``ValueError`` when the trajectory has no
-  trained step, or when the template does not render each trained turn as a
-  prefix of the whole conversation.
+- ``render_trajectory(template, trajectory)`` renders each trained turn as
+  its call rendered it: the conversation before the turn with the generation
+  prompt, then the turn. The agent's ``tool_definitions`` are the tools. Each
+  agent step that is not ``is_copied_context`` trains: the loss mask is 1 on
+  its tokens. A turn whose call's prompt extends the tokens of the turn
+  before it continues that segment. Else it starts a new segment. The result
+  is one ``RenderedTrajectory`` for each segment. It raises ``ValueError``
+  when the trajectory has no trained step, or when the template does not
+  render a turn after its own generation prompt.
 - ``TeacherRequest`` is the ``extra.reef.teacher`` value. Its
   ``teacher_tokens`` is the rendered teacher prompt followed by the student's
   reply tokens verbatim, or the student's own tokens when it names no
   messages.
 - ``rendered_job_data(data, template)`` renders each trajectory sample that
-  has no ``tokens``. It returns the job data and the positions of the samples
-  that it leaves out: a sample that cannot render, that is longer than its
-  ``max_tokens``, or whose teacher sequence is longer than its teacher
-  request allows. The Slime and Tinker components count them in the job
+  has no ``tokens``. A trajectory of several segments becomes one sample for
+  each segment, with ``segment``: ``{"index": i, "count": n}`` in its
+  ``extra.reef.training``. It returns the job data and the positions of the
+  samples that it leaves out: a sample that cannot render, that is longer
+  than its ``max_tokens``, whose teacher sequence is longer than its teacher
+  request allows, or that has a teacher and several segments. The Slime and Tinker components count them in the job
   metric ``unrenderable_samples``.
 
 Training objective
@@ -1725,7 +1736,7 @@ kind of the data's samples, with the keys of the instruction's ``parameters``
 both kinds, and a kind that the recipe does not name when no instruction gives
 parameters. A kind that the recipe does not name never trains in ``auto``. Reef reads none of the parameters; it submits
 them to the deployment's training component, whose name is the job's
-``backend``. ``TrainingMethod`` (``reef.runtime.interfaces``) is an objective
+``backend``. ``TrainingMethod`` (``reef.train.method``) is an objective
 reference and an optional ``LearningRateSchedule``.
 
 By default, the parameters of both kinds are ``method``
@@ -1979,37 +1990,25 @@ section (`Configuration <configuration.rst#the-activation-section>`__). A rule
 of your own inherits ``ActivationRule``. Reef builds it from its config with
 the class method ``from_config(config)``.
 
-Surface
--------
+Scenario components
+-------------------
 
 .. code:: python
 
-   from reef.harness.sync import create_harness_surface
-   from reef.surface import (
-       ComponentSurface, Surface, create_config_surface, create_weight_surface,
-   )
+   from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 
-A surface binds one frozen release to its consumers.
-``WeightTrainingRecipe.build_surface()`` already calls
-``create_weight_surface(kind=...)`` with its runtime's ``served_weight_kind``,
-and ``HarnessEvolutionRecipe`` calls ``create_harness_surface(descriptor)``,
-so most methods never touch this.
+``Recipe.build_components(scenario)`` returns the components that every
+release of the scenario binds. ``WeightTrainingRecipe`` declares a
+``weights`` component of its runtime's ``served_weight_kind``, and
+``HarnessEvolutionRecipe`` declares a ``harness`` component that clients
+pull, so most methods never touch this. See `Scenario components
+<../developer-guide/components.rst>`__ for where Reef reads each field.
 
-``Surface`` is a frozen dataclass mapping each named release component to a
-``ComponentSurface``, whose capabilities are fields, not subclass identity.
-``None`` means the capability is absent, and bare ``Surface()`` is the
-complete record-only configuration. A one-component surface serves a flat
-release; a surface with several components serves a release with one
-directory per component, and ``Surface.loader`` and ``files`` route to their
-components. No surface changes an inference request: the inference routes
-forward each request to the engine that ``served_models`` names.
-
-Migration: code written before components keeps working.
-``Surface(loader=..., files=...)`` builds a one-component
-surface whose component is named ``release``; beside one component in
-``components``, those keywords replace that component's fields, as
-``dataclasses.replace`` does. A surface of several components refuses them:
-set the capabilities on each ``ComponentSurface``.
+``ScenarioComponents`` is a frozen dataclass mapping each component name to a
+``ComponentSpec``. Bare ``ScenarioComponents()`` is the complete record-only
+configuration. A release of one component is flat; a release of several
+components has one directory per component. At most one component has a
+weight kind, and at most one has ``files``.
 
 +---------------+-----------------------------+----------------------------------------------+
 | Field         | Type                        | Contract                                     |
@@ -2017,18 +2016,25 @@ set the capabilities on each ``ComponentSurface``.
 | ``validator`` | ``ArtifactValidator``       | admit the component before publication and   |
 |               |                             | activation; the default accepts any artifact |
 +---------------+-----------------------------+----------------------------------------------+
-| ``loader``    | ``ArtifactLoader | None``   | make published releases servable             |
+| ``kind``      | ``ArtifactKind | None``     | the kind of every artifact of the component; |
+|               |                             | ``model`` and ``model_adapter`` load into    |
+|               |                             | the inference runtime                        |
 +---------------+-----------------------------+----------------------------------------------+
 | ``files``     | ``FileTree | None``         | back client pulls                            |
 +---------------+-----------------------------+----------------------------------------------+
+| ``layout``    | ``ArtifactLayout | None``   | check an imported artifact; ``None`` takes   |
+|               |                             | no import                                    |
++---------------+-----------------------------+----------------------------------------------+
 
-``loader.activate(artifact, runtime, source=...)`` makes a version servable
-once it is published, and returns the runtime load ID that serves it.
+The inference runtime loads the weight component with
+``InferenceRuntime.activate_checkpoint(artifact, scenario=...)``, which returns
+the runtime load ID that serves it. No component changes an inference request:
+the inference routes forward each request to the engine that ``served_models``
+names.
 
-A surface does not decide which records train, compute candidates, execute a
-training job, or mutate the release chain. Native streaming
-behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
-record store.
+Components do not decide which records train, compute candidates, execute a
+training job, or mutate the release chain. Native streaming behavior stays
+unchanged. A method should not add an HTTP proxy or copy Reef's record store.
 
 Runtime responsibilities
 ------------------------
@@ -2084,13 +2090,13 @@ their existing training behavior.
 Startup status is available through the inference service's
 ``GET /reef/scenarios/{scenario}/inference/status`` route.
 
-``reef.runtime.serving`` holds the two runtimes for saved weights, both over an
+``reef.inference.serving`` holds the two runtimes for saved weights, both over an
 ``InferenceBackend``:
 
 * ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
   base model. A release holds the adapter in ``adapter/``. At most
   ``adapter_capacity`` adapters stay resident.
-  ``reef.runtime.residency.AdapterResidencyManager`` evicts a leaked
+  ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
@@ -2131,20 +2137,25 @@ Weight recipes hold ``training_component: TrainingComponent`` and
 
    recipe = SAORecipe(training, runtime=inference)
 
-A training deployment's runtime factory returns the ``TrainingComponent``
-alone; a serving factory returns an ``InferenceRuntime``. ``RuntimeFactory``
-and ``RuntimeRegistry`` in ``reef.runtime.deployment`` define and build both.
+A training deployment's component factory returns the ``TrainingComponent``
+alone; a serving factory returns an ``InferenceRuntime``.
+``TrainingComponentFactory`` and ``build_training_component`` in
+``reef.train.component`` define and build the first; ``RuntimeFactory`` and
+``RuntimeRegistry`` in ``reef.inference.registry`` define and build the second.
 The HTTP service builds the training component first, then the serving
 runtime that ``reef.service.deploy.serving.serving_runtime_config`` describes
 from the ``inference`` settings and the component's ``release_format``.
 
-``reef.runtime`` is a namespace package without an import facade. Its modules
-are ``interfaces`` (inference contracts, ``TrainingMethod``, runtime load
-IDs), ``jobs`` (the training component contract), ``serving`` (the
-saved-weight serving runtimes), ``residency`` (adapter residency),
-``deployment`` (runtime factories and inference service contracts) and
-``recovery`` (durable JSON files and engine supervision); ``executor/``
-contains worker transports. Concrete integrations live with their owners:
+Each side owns its contracts. The inference contracts are the modules at the
+root of ``reef.inference``: ``interfaces`` (inference contracts and runtime
+load IDs), ``deployment`` (the inference service contracts), ``registry``
+(runtime factories), ``serving`` (the saved-weight serving runtimes),
+``residency`` (adapter residency) and ``recovery`` (engine supervision).
+``reef.train.component`` holds the training component contract, and
+``reef.train.method`` holds ``TrainingMethod``. Values that both sides read
+are in ``reef.core.weight_layout`` (``ReleaseFormat``, ``WeightFiles``,
+``ReleaseWeights``). ``reef.execution.executor`` contains worker transports.
+Concrete integrations live with their owners:
 ``SlimeTrainingComponent`` in ``reef.train.slime_backend.component``,
 ``TinkerTrainingComponent`` in ``reef.train.tinker_backend.component``, and
 ``SGLangInferenceBackend`` in ``reef.inference.sglang.backend``.
@@ -2152,7 +2163,7 @@ contains worker transports. Concrete integrations live with their owners:
 Training jobs and components
 ----------------------------
 
-``reef.runtime.jobs`` defines bounded training jobs. A ``TrainingJob`` has
+``reef.train.component`` defines bounded training jobs. A ``TrainingJob`` has
 these fields:
 
 - ``job_id`` and ``backend``, the name of the training component.
@@ -2337,7 +2348,7 @@ engine setting, and ``trainer_serving_config(settings)`` the runtime config
 of the backend's own serving, or ``None`` without one.
 ``engine_weights(settings)`` is an ``EngineWeights`` for a backend whose
 releases hold no weight files: the ``ReleaseFormat`` that Reef's engines load
-and the ``ReleaseWeights`` plugin (``reef.runtime.serving``) that gives each
+and the ``ReleaseWeights`` plugin (``reef.core.weight_layout``) that gives each
 release's files. The default is ``None``: engines cannot serve such
 releases. ``ReleaseFiles``, the default plugin, reads a release's own files. ``requires_local_model``
 defaults to true; hosted integrations set it to false to preserve remote

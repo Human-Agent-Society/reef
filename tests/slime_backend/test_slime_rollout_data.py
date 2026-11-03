@@ -11,9 +11,9 @@ from dataclasses import replace
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.schedule import RolloutUnit, StepScheduling, schedule_job_data
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters import preparation
 from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
