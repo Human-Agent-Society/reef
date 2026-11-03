@@ -819,7 +819,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
         with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
         after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
-        a load does. Raise ``UnknownScenario`` for an unknown scenario.
+        a load does. ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
+        (``PipelineContext.job_parameters``), which an instruction's ``parameters`` merge into; a kind that the
+        recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
@@ -827,6 +829,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 effective_serving = current.effective_serving_config(settings.serving_config)
             except ValueError:
                 effective_serving = current.effective_serving_config(ServingConfig())
+            job_parameters = current.stepping_trainers()[0].trainer.pipeline.sample2job.context.job_parameters
             return {
                 "scenario": scenario,
                 "training_mode": current.training_mode,
@@ -835,6 +838,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "effective_activation": self.registry.effective_activation(settings),
                 "serving_config": settings.serving_config.to_json(),
                 "effective_serving_config": effective_serving,
+                "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
