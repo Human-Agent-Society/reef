@@ -28,13 +28,13 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.components import TextFileTree
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.harness.tree import HarnessTree
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.surface.files import TextFileTree
 from reef.train.backend import ArtifactTextFiles
 from reef.train.harness_backend.backend import HarnessBackend, StepProgress
 from reef.train.harness_backend.state import HarnessState

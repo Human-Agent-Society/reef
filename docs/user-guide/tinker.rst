@@ -237,7 +237,7 @@ that the manifest's ``sampler_path`` names, as ``tinker-cookbook``'s
 downloads once. A service that serves no checkpoint archives, such as Spindle,
 fails the load. The control plane loads the PEFT adapter into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
-weight surface. A rejected candidate loads nothing. A restart starts the
+scenario's ``served_models`` route. A rejected candidate loads nothing. A restart starts the
 engines again and loads each scenario's committed adapter before the scenario
 serves. The converter is pinned in the ``tinker`` extra; it brings torch and
 transformers.

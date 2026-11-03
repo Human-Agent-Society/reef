@@ -19,7 +19,7 @@ live under ``recipes/beta/`` (``coral``, ``spade``, ``autoenvscaling``,
 its recipe, processor and training objective, with the ``slime/`` subpackage
 only the training plane imports. A harness method holds its ``Method``, its
 prompts, and a scorer when it needs its own; it adds a recipe subclass only
-when it changes more than the tree, such as the delivery surface. Nothing
+when it changes more than the tree, such as the files a client pulls. Nothing
 under ``reef/`` imports a method package.
 
 Reef is organized around an application kernel and three capability domains,
@@ -39,14 +39,14 @@ composition and use paths; they are not an exhaustive Python import graph:
 
        subgraph Domains["Capability domains"]
            direction LR
-           Serving("<b>Serving</b><br/><code>runtime</code> · <code>surface</code>")
+           Serving("<b>Serving</b><br/><code>runtime</code> · <code>inference</code>")
            Evolution("<b>Evolution</b><br/><code>train</code> · <code>evaluation</code> · <code>harness</code>")
            State("<b>State</b><br/><code>artifact</code> · <code>records</code>")
        end
 
        subgraph Adapters["Concrete adapters"]
            direction LR
-           ServingAdapters("runtime adapters<br/>surface implementations")
+           ServingAdapters("runtime adapters")
            EvolutionAdapters("training backends<br/>harness adapters")
            StateAdapters("Git/LFS repositories<br/>SQLite")
        end
@@ -112,11 +112,9 @@ import a concrete integration.
 | ``reef/inference/``     | concrete inference backends, native engine control,      | training algorithms and publication        |
 |                         | request adaptation and loading saved weights             | decisions                                  |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/surface/``       | delivering a published artifact to the                   | proposing, evaluating, or                  |
-|                         | process or client that uses it                           | selecting updates                          |
-+-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/artifact/``      | artifact bytes, repositories,                            | commit policy or delivery                  |
-|                         | materialization, release heads                           | behavior                                   |
+| ``reef/artifact/``      | artifact bytes, repositories, materialization, release   | commit policy, weight loading              |
+|                         | heads, and the components a recipe declares              |                                            |
+|                         | (``components.py``)                                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the release chain           |
 |                         | descriptor), the source tree (patches, validation,       |                                            |
@@ -161,28 +159,26 @@ package's own submodules and third-party libraries):
      - ``core``
    * - ``observability``
      - ``storage``, ``core``
-   * - ``surface``
-     - ``artifact``, ``core``
    * - ``runtime``
-     - ``surface``, ``artifact``, ``core``
+     - ``artifact``, ``core``
    * - ``inference``
      - ``runtime``, ``artifact``, ``core``
    * - ``execution``
      - ``core``
    * - ``harness``
-     - ``inference``, ``execution``, ``runtime``, ``surface``, ``artifact``, ``core``
+     - ``inference``, ``execution``, ``runtime``, ``artifact``, ``core``
    * - ``evaluation``
      - ``harness``, ``execution``, ``runtime``, ``core``
    * - ``train``
      - ``evaluation``, ``harness``, ``execution``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``harness``, ``execution``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``harness``, ``execution``, ``inference``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``scenario``
-     - ``recipe``, ``train``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``recipe``, ``train``, ``inference``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``surface``, ``record2sample``, ``evaluation``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``runtime``, ``record2sample``, ``evaluation``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``cli``
      - ``service``, ``core``
 
@@ -198,7 +194,7 @@ and ``core/evaluation.py``. ``core/training_request.py`` validates training-requ
 payloads and holds the queued instruction carried by a job's data. Request
 requirements and their release-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
-with surface contracts.
+with the components a recipe declares (``artifact/components.py``).
 ``recipe/harness.py`` assembles the harness evolution backend.
 ``service/deploy/training.py`` selects the training deployment definition
 that ``training.backend`` names and assembles the services it needs;
@@ -339,9 +335,10 @@ The extension points those packages expose are in `Python API
   upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
-- Does it persist or materialize versioned bytes? Put it in
-  ``reef/artifact/``. If it decides how consumers activate those bytes, put
-  that behavior in ``reef/surface/`` instead.
+- Does it persist or materialize versioned bytes, or declare a release
+  component? Put it in ``reef/artifact/``. If it loads those bytes into an
+  engine, put that behavior in ``reef/runtime/`` or ``reef/inference/``
+  instead.
 - Does it define a backend-neutral model-service contract? Put it in
   ``reef/runtime/``, beside the training component and serving contracts.
   Put concrete inference engines and their request/control adapters in
@@ -459,8 +456,8 @@ Where the detailed rules live
 
 Each package's ``__init__`` docstring states the boundaries it holds and
 how to extend it; there are no READMEs under ``reef/``. Design pages for the
-two packages that need more than a docstring are `Surfaces
-<../developer-guide/surface.rst>`__ and `Training pipeline
+two packages that need more than a docstring are `Scenario components
+<../developer-guide/components.rst>`__ and `Training pipeline
 <../developer-guide/processors.rst>`__; the extension points every package
 exposes are in `Python API <../reference/python-api.rst>`__, and the public
 harness wire contract is `HTTP API <../reference/http-api.rst>`__. The
