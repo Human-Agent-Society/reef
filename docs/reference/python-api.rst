@@ -1733,8 +1733,9 @@ training job by the kind of the job's samples: ``trajectory`` or ``task``.
 The trainer gives them to its pipeline (``PipelineContext.job_parameters``).
 When a job's data is ready and no job runs, the pipeline's sample-to-job stage
 gives the job's parameters, ``Sample2Job.job_parameters(data)``: those of the
-kind of the data's samples, with the keys of the instruction's ``parameters``
-(``TrainingRequest.parameters``) put over them. It refuses data that holds
+kind of the data's samples, with the instruction's ``parameters``
+(``TrainingRequest.parameters``) merged in by ``reef.core.values.deep_merge``:
+nested objects merge key by key, and every other value of the instruction wins. It refuses data that holds
 both kinds, and a kind that the recipe does not name when no instruction gives
 parameters. A kind that the recipe does not name never trains in ``auto``. Reef reads none of the parameters; it submits
 them to the deployment's training component, whose name is the job's
