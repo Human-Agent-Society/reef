@@ -23,7 +23,7 @@ from typing import Any, Self
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import RecordingComponent, job_sized_stages
+from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, job_sized_stages
 from tests.support.samples_service import make_samples
 
 from recipes.beta.coral.recipe import CoralRecipe
@@ -31,7 +31,6 @@ from recipes.sdpo import SDPOReport
 from recipes.sdpo.recipe import SDPORecipe
 from recipes.tttd import TTTDGroupedRolloutReport
 from recipes.tttd.recipe import TTTDRecipe
-from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.core.training_request import normalize_training_request_payload
@@ -163,6 +162,7 @@ class StreamRun:
             job_loop=counting_jobs(),
             report_type=self.report_type,
             training_mode=self.training_mode,
+            root=STUB_ROOT,
         )
 
     def reload(self, trainer: Trainer) -> Trainer:
@@ -233,7 +233,7 @@ class StreamRun:
 # ---------------------------------------------------------------- record builders
 
 
-def inference(record_id: str, *, version: str | None = None, artifact_ref: ArtifactRef | None = None) -> AgentRecord:
+def inference(record_id: str, *, version: str | None = None) -> AgentRecord:
     """A served call; ``version`` is the artifact that served it, which the inference service records as
     ``payload.artifact_id``."""
     training: dict[str, object] = {"tokens": [1, 2, 3], "loss_mask": [0, 1, 1], "rollout_log_probs": [-0.1, -0.2]}
@@ -244,7 +244,6 @@ def inference(record_id: str, *, version: str | None = None, artifact_ref: Artif
         scenario="s",
         request_type=RequestType.INFERENCE,
         agent_record_id=record_id,
-        artifact_ref=artifact_ref,
         payload=payload,
     )
 
@@ -504,7 +503,7 @@ def ordered_steps() -> list[Step]:
 def tttd_inference(step: int, group: int, rollout: int, release: str) -> AgentRecord:
     return replace(
         inference(f"i-{step}-{group}-{rollout}"),
-        artifact_ref=ArtifactRef(f"artifact-{release}", release, None),
+        artifact_id=release,
     )
 
 
@@ -614,7 +613,7 @@ def sdpo_records(step: int, rollout: int, *, score: float, question: str = "What
             "rollout_log_probs": [-0.1, -0.2, -0.3],
             "response": {"choices": [{"message": {"role": "assistant", "content": f"Answer from {name}"}}]},
         },
-        artifact_ref=ArtifactRef("artifact-v3", "slime-v3", None),
+        artifact_id="slime-v3",
     )
     body = SDPOReport(step=step, group=0, rollout=rollout, score=score, teacher_context="").to_dict(references=(name,))
     return [

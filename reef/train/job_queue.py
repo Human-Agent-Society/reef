@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
-from reef.core.artifact_ref import ArtifactRef
+from reef.artifact.repository import DefaultStart
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.observability.base import (
@@ -43,7 +43,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
 logger = logging.getLogger(__name__)
@@ -268,12 +268,11 @@ class JobQueueComponent(TrainingComponent):
     def release_format(self) -> ReleaseFormat | None:
         return self.component.release_format
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return self.component.base_artifact_source()
+    def default_start(self) -> DefaultStart:
+        return self.component.default_start()
 
-    @property
-    def base_start(self) -> str:
-        return self.component.base_start
+    def root_start(self, root: ScenarioRoot) -> str:
+        return self.component.root_start(root)
 
     @property
     def shares_scenarios(self) -> bool:
@@ -352,10 +351,10 @@ class JobExperimentRecorder(ExperimentTracker):
         return self.tracker.operational_metrics_enabled
 
     def bind_scenario(
-        self, *, scenario: str, recipe: str, source_artifact_ref: ArtifactRef, run_segment: int
+        self, *, scenario: str, recipe: str, source_artifacts: ArtifactSelection, run_segment: int
     ) -> ExperimentLogger:
         return self.tracker.bind_scenario(
-            scenario=scenario, recipe=recipe, source_artifact_ref=source_artifact_ref, run_segment=run_segment
+            scenario=scenario, recipe=recipe, source_artifacts=source_artifacts, run_segment=run_segment
         )
 
     def correlation_metrics(self, context: TrainingExperimentContext) -> Mapping[str, Any]:

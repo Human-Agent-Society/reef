@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
-from reef.artifact.artifact import Artifact, is_local_release
 from reef.inference.chat import (
     CapturedGeneration,
     ChatCall,
@@ -27,7 +26,7 @@ from reef.inference.chat import (
     stream_ids,
 )
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.runtime.interfaces import InferenceStream
+from reef.runtime.interfaces import InferenceArtifact, InferenceStream
 
 SGLANG_GENERATE_PATH = "/generate"
 #: ``meta_info`` entries that hold per-token tensors; they feed the training block, never a client.
@@ -116,7 +115,7 @@ class SGLangGenerateClient(NativeGenerateClient):
                 native_payload[key] = request[key]
         return native_payload
 
-    def parse(self, artifact: Artifact, response: Mapping[str, Any]) -> CapturedGeneration:
+    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
         normalized = normalize_native_response(artifact, dict(response))
         meta = normalized["meta_info"]
         text = normalized.get("text")
@@ -143,9 +142,9 @@ class SGLangGenerateClient(NativeGenerateClient):
         return FunctionCallParser([Tool.model_validate(tool) for tool in tools], parser_name)
 
 
-def normalize_native_response(artifact: Artifact, response: dict[str, Any]) -> dict[str, Any]:
+def normalize_native_response(artifact: InferenceArtifact, response: dict[str, Any]) -> dict[str, Any]:
     """Require scheduler-stamped per-token versions, or SGLang's engine version for a local release."""
-    exact_runtime_load_ids_required = not is_local_release(artifact.ref.release_id)
+    exact_runtime_load_ids_required = artifact.require_token_runtime_load_ids
     meta = response.get("meta_info")
     if not isinstance(meta, Mapping):
         raise ValueError("SGLang /generate response lacks meta_info")
@@ -260,7 +259,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
-        rollout_continuation: bool = False,
         client: NativeGenerateClient | None = None,
         request_headers: RequestHeadersFactory | None = None,
     ) -> None:
@@ -274,11 +272,12 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
             chat_template_kwargs=chat_template_kwargs,
-            rollout_continuation=rollout_continuation,
             request_headers=request_headers,
         )
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
         self._validate_stream_path(path)
         call = self._chat_call(path, payload)
         # Force the scheduler to flush every available decode step. This is a
@@ -312,7 +311,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         stream: InferenceStream,
         upstream: InferenceStream,
         relay: ChatStreamRelay,
-        artifact: Artifact,
+        artifact: InferenceArtifact,
         call: ChatCall,
         chat_id: str,
         message_id: str,

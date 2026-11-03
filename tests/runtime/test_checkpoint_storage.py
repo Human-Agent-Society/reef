@@ -3,11 +3,14 @@ from __future__ import annotations
 import multiprocessing
 import os
 from collections import namedtuple
+from functools import partial
+from multiprocessing.synchronize import Event
 from pathlib import Path
 
 import pytest
 
 from reef.runtime import durable_files as durable_io
+from reef.train.slime_backend.reef_adapters import preflight
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
 from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
@@ -60,6 +63,16 @@ def _storage(
         critic_root=root / "megatron-critic" if critic else None,
         critic_save_interval=critic_save_interval,
     )
+
+
+def enter_storage_lock(root: Path, attempting: Event, entered: Event) -> None:
+    """Open the parent's checkpoint paths in a fresh process and signal lock acquisition."""
+    storage = CheckpointStorage(
+        RetentionConfig(), hf_template=str(root / "hf" / "{rollout_id}"), megatron_root=root / "megatron"
+    )
+    attempting.set()
+    with storage._locked():
+        entered.set()
 
 
 def _complete(storage: CheckpointStorage, rollout_id: int, *, reward=None) -> None:
@@ -329,23 +342,22 @@ class TestCheckpointStorage:
 
     def test_storage_lock_serializes_processes(self, tmp_path: Path) -> None:
         storage = _storage(tmp_path)
-        context = multiprocessing.get_context("fork")
-        go, attempting, entered = (context.Event() for _ in range(3))
-
-        def enter() -> None:
-            go.wait()
-            attempting.set()
+        # Pytest workers have background threads; fork can inherit their locked synchronization state.
+        context = multiprocessing.get_context("spawn")
+        attempting, entered = (context.Event() for _ in range(2))
+        process = context.Process(target=enter_storage_lock, args=(storage.root, attempting, entered))
+        try:
             with storage._locked():
-                entered.set()
-
-        process = context.Process(target=enter, daemon=True)
-        process.start()
-        with storage._locked():
-            go.set()
-            assert attempting.wait(5) and not entered.wait(0.1)
-        assert entered.wait(5)
-        process.join(5)
-        assert process.exitcode == 0
+                process.start()
+                assert attempting.wait(30)
+                assert not entered.wait(0.1)
+            assert entered.wait(30)
+            process.join(30)
+            assert process.exitcode == 0
+        finally:
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
 
     def test_unknown_and_symlinked_entries_are_protected_and_never_deleted(self, tmp_path: Path) -> None:
         storage = _storage(tmp_path)
@@ -475,12 +487,24 @@ def slime_args(tmp_path: Path, **values) -> SlimeArguments:
 
 
 @pytest.mark.unit
-def test_preflight_pins_the_storage_paths_and_gives_a_critic_its_own_root(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("free_bytes", [1 << 30, 0])
+def test_preflight_checks_free_space_and_pins_actor_and_critic_paths(
+    tmp_path: Path, monkeypatch, free_bytes: int
+) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        preflight,
+        "CheckpointStorage",
+        partial(CheckpointStorage, disk_usage=lambda path: Usage(1 << 30, (1 << 30) - free_bytes, free_bytes)),
+    )
     _write_bytes(tmp_path / "source-hf", 10)
     args = slime_args(
         tmp_path, save="checkpoints/megatron", use_critic=True, hf_checkpoint=str(tmp_path / "source-hf")
     )
+    if free_bytes == 0:
+        with pytest.raises(RuntimeError, match="filesystem free-space floor"):
+            prepare_checkpoint_storage(args, RetentionConfig())
+        return
     storage = prepare_checkpoint_storage(args, RetentionConfig())
     assert args.save == str(storage.megatron_root) == str(tmp_path / "checkpoints" / "megatron")
     assert args.save_hf == storage.hf_template

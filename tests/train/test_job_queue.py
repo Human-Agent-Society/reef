@@ -9,10 +9,12 @@ from typing import Any
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import STUB_ROOT
 
-from reef.artifact import BaseArtifactSource
-from reef.core.artifact_ref import ArtifactRef
+from reef.artifact import DefaultStart
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData, TaskSample
+from reef.core.snapshot import SnapshotRef
 from reef.core.training_request import TrainingRequest
 from reef.observability.base import (
     ExperimentRun,
@@ -20,7 +22,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.work_queue import NewWork
 from reef.train.job_queue import (
@@ -56,11 +58,10 @@ class StepComponent(LocalJobComponent):
     def release_format(self) -> ReleaseFormat:
         return ReleaseFormat("full")
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource()
+    def default_start(self) -> DefaultStart:
+        return DefaultStart()
 
-    @property
-    def base_start(self) -> str:
+    def root_start(self, root: ScenarioRoot) -> str:
         return "steps:base"
 
     def import_start(self, release: Path) -> str:
@@ -117,7 +118,11 @@ def worked(tmp_path):
 def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the_queue(worked):
     queue, component, _worker = worked
     view = JobQueueComponent(component, queue)
-    assert (view.name, view.base_start, view.release_format) == ("steps", "steps:base", ReleaseFormat("full"))
+    assert (view.name, view.root_start(STUB_ROOT), view.release_format) == (
+        "steps",
+        "steps:base",
+        ReleaseFormat("full"),
+    )
 
     view.submit(job("j1"))
     view.submit(job("j1"))  # a second submit of one ID does nothing
@@ -266,9 +271,11 @@ class RunTracker(ExperimentTracker):
 
 
 def job_event(job_id: str | None) -> TrainingExperimentEvent:
-    ref = ArtifactRef(content_id="s", release_id="r1", parent_release_id=None)
-    context = TrainingExperimentContext(scenario="s", recipe="recipe", step=1, source_artifact_ref=ref)
-    return TrainingExperimentEvent(context, ref, {}, "committed", training_job_id=job_id)
+    ref = SnapshotRef(revision="r1", parent_revision=None)
+    context = TrainingExperimentContext(
+        scenario="s", recipe="recipe", step=1, source_artifacts=ArtifactSelection({"weights": ref.revision})
+    )
+    return TrainingExperimentEvent(context, context.source_artifacts, {}, "committed", training_job_id=job_id)
 
 
 @pytest.mark.unit

@@ -46,7 +46,7 @@ Run the loop
 This runs the serving half of the loop against a hosted provider, on a laptop,
 with no GPU.
 
-.. steps::
+.. container:: steps
 
    #. **Install.** Follow the laptop path in `Installation
       <installation.rst>`__.

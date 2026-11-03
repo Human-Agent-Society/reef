@@ -51,13 +51,15 @@ def owned_pair(events: list[str]) -> tuple[RecordingComponent, RecordingRuntime]
 
 
 def dispatcher_for(recipe: Recipe, tmp_path) -> Dispatcher:
+    """Exercise dispatcher ownership without the inference worker's separate runtime lifecycle."""
     initial = tmp_path / "initial"
     initial.mkdir()
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial),
+        InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        components=frozenset({"control", "training"}),
     )
 
 

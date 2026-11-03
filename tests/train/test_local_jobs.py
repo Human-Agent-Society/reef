@@ -12,10 +12,10 @@ from typing import Any
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.artifact import BaseArtifactSource
+from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
 from reef.runtime.durable_files import write_json
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train import local_jobs
 from reef.train.local_jobs import CHECKPOINTS_FILE, JOB_FILE, RESULT_FILE, LocalJobComponent
 
@@ -48,11 +48,10 @@ class GatedComponent(LocalJobComponent):
     def release_format(self) -> ReleaseFormat:
         return ReleaseFormat("full")
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource()
+    def default_start(self) -> DefaultStart:
+        return DefaultStart()
 
-    @property
-    def base_start(self) -> str:
+    def root_start(self, root: ScenarioRoot) -> str:
         return "gated:base"
 
     def import_start(self, release: Path) -> str:

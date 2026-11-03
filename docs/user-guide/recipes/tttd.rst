@@ -37,16 +37,30 @@ and the circle-packing problems for 26 and 32 circles.
 How one step runs
 -----------------
 
-.. flow::
-   :loop: use the committed adapter for the next search step
+.. container:: flow
 
-   Select parents :: PUCT chooses one parent for each group
-   Generate rollouts :: each group samples sibling programs
-   Evaluate and report :: the task judge returns one score per rollout
-   Complete the grid :: Reef waits for every configured coordinate
-   Train the adapter :: Slime and Megatron perform one optimizer step
-   Publish weights :: SGLang loads the scenario's new LoRA revision
-   Commit search state :: the controller records the matching PUCT archive
+   Select parents
+       PUCT chooses one parent for each group
+
+   Generate rollouts
+       each group samples sibling programs
+
+   Evaluate and report
+       the task judge returns one score per rollout
+
+   Complete the grid
+       Reef waits for every configured coordinate
+
+   Train the adapter
+       Slime and Megatron perform one optimizer step
+
+   Publish weights
+       SGLang loads the scenario's new LoRA revision
+
+   Commit search state
+       the controller records the matching PUCT archive
+
+   :Loop: use the committed adapter for the next search step
 
 The harness chooses ``groups_per_step`` parent candidates and samples
 ``rollouts_per_group`` programs from each parent. A prompt contains the task
@@ -103,13 +117,22 @@ the record-to-sample stage. ``TTTDJobData`` reads the grid from
        config:
          job_samples: 512       # the grid: groups_per_step x rollouts_per_group
 
-.. config::
+.. container:: config
 
-   pipeline.record2sample.config.groups_per_step | 8 | comparison groups in one step; at least one.
-   pipeline.record2sample.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
-   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
-   pipeline.record2sample.config.accept_multi_turn_policy_samples | false | train a report's trajectory of several model calls as one multi-turn sample; otherwise the report trains only the trajectory's last call.
-   pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
+   ``pipeline.record2sample.config.groups_per_step`` : 8
+       comparison groups in one step; at least one.
+
+   ``pipeline.record2sample.config.rollouts_per_group`` : 64
+       siblings per group; at least two, since a group of one has no relative reward.
+
+   ``pipeline.record2sample.config.max_staleness`` : 0
+       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+
+   ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
+       train a report's trajectory of several model calls as one multi-turn sample; otherwise the report trains only the trajectory's last call.
+
+   ``pipeline.sample2job.config.job_samples`` : required
+       the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
 
 The config of ``TTTDJobData`` has only ``job_samples`` and ``buffer_size``. One job's data
 is always one complete grid: the pipeline stores a complete grid as one group
@@ -252,17 +275,34 @@ starts. Slime's ``--global-batch-size`` and
 ``pipeline.sample2job.config.job_samples`` in that file must equal
 ``groups_per_step x rollouts_per_group``.
 
-.. config::
+.. container:: config
 
-   pipeline.record2sample.config.groups_per_step | 8 | parent candidates selected for one step, in ``serve.yaml``.
-   pipeline.record2sample.config.rollouts_per_group | 64 | sibling rollouts sampled from each parent, in ``serve.yaml``.
-   training.steps | 1 | search and optimizer steps, in ``serve.yaml``; the Slime command reads it as ``--num-rollout``.
-   training.max_new_tokens | 26000 | maximum completion length, in ``serve.yaml``.
-   MAX_WORKERS | 512 | concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
-   enable_thinking | True | Qwen3 chat-template thinking mode, in ``harness/harbor_agent.py``.
-   TTTD_SEQ_LENGTH | 30000 | training and serving context length; ``run.sh`` sets it per task, ``32768`` for packing, beside ``TTTD_MAX_TOKENS_PER_GPU`` and ``TTTD_LOG_PROBS_CHUNK_SIZE``.
-   num_gpus | 2 | the actor's GPU count in ``serve.yaml``; ``inference.num-gpus`` gives the two serving engines their own two GPUs. Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
-   TTTD_STATE_DIR | work/erdos_min_overlap | the durable state root, exported by ``run.sh`` as an absolute path because Ray workers and Git resolve a relative one from their own directories.
+   ``pipeline.record2sample.config.groups_per_step`` : 8
+       parent candidates selected for one step, in ``serve.yaml``.
+
+   ``pipeline.record2sample.config.rollouts_per_group`` : 64
+       sibling rollouts sampled from each parent, in ``serve.yaml``.
+
+   ``training.steps`` : 1
+       search and optimizer steps, in ``serve.yaml``; the Slime command reads it as ``--num-rollout``.
+
+   ``training.max_new_tokens`` : 26000
+       maximum completion length, in ``serve.yaml``.
+
+   ``MAX_WORKERS`` : 512
+       concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
+
+   ``enable_thinking`` : True
+       Qwen3 chat-template thinking mode, in ``harness/harbor_agent.py``.
+
+   ``TTTD_SEQ_LENGTH`` : 30000
+       training and serving context length; ``run.sh`` sets it per task, ``32768`` for packing, beside ``TTTD_MAX_TOKENS_PER_GPU`` and ``TTTD_LOG_PROBS_CHUNK_SIZE``.
+
+   ``num_gpus`` : 2
+       the actor's GPU count in ``serve.yaml``; ``inference.num-gpus`` gives the two serving engines their own two GPUs. Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
+
+   ``TTTD_STATE_DIR`` : work/erdos_min_overlap
+       the durable state root, exported by ``run.sh`` as an absolute path because Ray workers and Git resolve a relative one from their own directories.
 
 The reference grid contains ``8 x 64 = 512`` rollouts per optimizer step.
 Training starts after all configured coordinates have arrived. Completion length and the

@@ -8,14 +8,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact, SnapshotRef
+from reef.artifact.components import ScenarioComponents
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
+from reef.core.served_models import ScenarioModel
+from reef.core.serving_config import ServingConfig
+from reef.core.snapshot import RootSource
+from reef.core.values import JsonValue
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import InferenceRuntime
@@ -26,10 +32,12 @@ from reef.scenario.releases import ServedBesideArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
-from reef.surface.base import Surface
 from reef.train.instructions import ScenarioInstructions
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainStepResult
+
+#: The keys of a ``Scenario.harness_snapshot_rows`` row that hold private storage locators.
+SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot"})
 
 
 @dataclass(frozen=True)
@@ -41,7 +49,7 @@ class ScenarioCapabilities:
     - ``serve_beside`` is True exactly when ``Scenario.serve`` can serve an artifact beside the active release: the
       store keeps a durable commit history, and the scenario has no runtime-loaded component, no runtime, or a
       runtime that serves artifacts on request (``InferenceRuntime.serves_artifacts_on_request``).
-    - ``evaluate`` holds the components whose artifacts an artifact evaluation can run, in surface order: each
+    - ``evaluate`` holds the components whose artifacts an artifact evaluation can run, in declaration order: each
       component with a kind, when no component is a ``harness_plugin`` and the runtime serves artifacts on request;
       else it is empty.
     - ``train_from`` holds the components whose trainer can start from an artifact (``Trainer.can_train_from``), in
@@ -85,6 +93,7 @@ class Scenario:
         name: str,
         binding: ScenarioBinding,
         repository: Repository,
+        root_source: RootSource,
         store: ScenarioStore,
         trainers: tuple[ComponentTrainer, ...],
         scenario_step: int = 0,
@@ -107,17 +116,19 @@ class Scenario:
         )
         self._name = name
         self._binding = binding
-        self._surface = binding.surface
+        self._components = binding.components
+        self._serving_config = ServingConfig()
         self._store = store
         self._closed = False
         #: Every trainer of this scenario with the component it evolves, in recipe order.
-        self.trainers = validate_component_trainers(trainers, binding.surface)
+        self.trainers = validate_component_trainers(trainers, binding.components)
         self._artifact_chain = ArtifactReleaseChain(repository)
         self._committer = ScenarioCommitter(
             name=name,
             binding=binding,
             artifacts=self._artifact_chain,
             trainers=self.trainers,
+            root_source=root_source,
             scenario_step=scenario_step,
             store=store,
             recovered_head_record=recovered_head_record,
@@ -153,6 +164,39 @@ class Scenario:
         self._committer.activation_rule = rule
 
     @property
+    def serving_config(self) -> ServingConfig:
+        """The serving fields that this scenario sets over the deployment's values (RFC #1097)."""
+        return self._serving_config
+
+    def effective_serving_config(self, config: ServingConfig) -> dict[str, dict[str, JsonValue]]:
+        """The serving fields of each component that has some, with their effective values under ``config``.
+
+        Only the component that the scenario's inference runtime serves (``ScenarioComponents.loaded_component``) has serving
+        fields; ``InferenceRuntime.serving_config`` gives them. ``ValueError`` when ``config`` sets a field of
+        another component, or a field or value that the runtime refuses.
+        """
+        component = self._components.loaded_component
+        runtime = self._binding.runtime
+        effective: dict[str, dict[str, JsonValue]] = {}
+        if component is not None and runtime is not None and runtime.serves_requests:
+            effective[component] = runtime.serving_config(config.component(component))
+        unknown = sorted(set(config.overrides) - set(effective))
+        if unknown:
+            raise ValueError(f"no serving fields for components {unknown}: the scenario serves {sorted(effective)}")
+        return effective
+
+    def set_serving_config(self, config: ServingConfig) -> None:
+        """Serve with ``config`` from the next serving request on; ``ValueError`` as ``effective_serving_config``
+        gives, and then the scenario keeps its config."""
+        self.effective_serving_config(config)
+        self._serving_config = config
+
+    def served_serving_config(self) -> dict[str, JsonValue]:
+        """The override that a serving request carries to inference: the one of the served component."""
+        component = self._components.loaded_component
+        return {} if component is None else self._serving_config.component(component)
+
+    @property
     def report_type(self) -> type[ReportBase] | None:
         """The recipe's declared report contract, enforced at ingress when set."""
         return self._binding.report_type
@@ -161,10 +205,9 @@ class Scenario:
     def repository(self) -> Repository:
         """The release chain's scenario-scoped artifact repository.
 
-        The public read path to the repository base, the active release (``current``) and the chain tip
-        (``checkpoint``);
-        mutation goes through Scenario methods so it stays serialized with
-        activation and commit.
+        The public read path to the root release (``start_artifact``), the active release (``current``) and the
+        chain tip (``checkpoint``); mutation goes through Scenario methods so it stays serialized with activation
+        and commit.
         """
         return self._artifact_chain.repository
 
@@ -203,9 +246,9 @@ class Scenario:
         return self._committer.step
 
     @property
-    def surface(self) -> Surface:
-        """The serving surface built for this scenario."""
-        return self._surface
+    def components(self) -> ScenarioComponents:
+        """The components that every release of this scenario binds (``Recipe.build_components``)."""
+        return self._components
 
     @property
     def training_mode(self) -> str:
@@ -213,13 +256,13 @@ class Scenario:
         return self.stepping_trainers()[0].trainer.pipeline.training_mode
 
     def evaluation_refusal(self, component: str) -> str | None:
-        """Why this scenario cannot evaluate an artifact of ``component``, a component that its surface declares
+        """Why this scenario cannot evaluate an artifact of ``component``, a component that the scenario declares
         with a kind; None when it can.
 
         Reef evaluates a model artifact (``RFC #959``): the artifacts hold no harness, and the runtime answers each
         call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``).
         """
-        kinds = {name: declared.kind for name, declared in self._surface.components.items()}
+        kinds = {name: declared.kind for name, declared in self._components.components.items()}
         if kinds[component] == "harness_plugin":
             return "Reef does not evaluate a harness artifact yet (RFC #959, step 2)"
         if "harness_plugin" in kinds.values():
@@ -234,13 +277,14 @@ class Scenario:
 
     def capabilities(self) -> ScenarioCapabilities:
         """The artifact operations that this scenario can run (``ScenarioCapabilities``)."""
-        surface, runtime = self._surface, self.runtime
+        components, runtime = self._components, self.runtime
         on_request = runtime is not None and runtime.serves_artifacts_on_request
         return ScenarioCapabilities(
-            serve_beside=self._store.durable and (surface.loader_component is None or runtime is None or on_request),
+            serve_beside=self._store.durable
+            and (components.loaded_component is None or runtime is None or on_request),
             evaluate=tuple(
                 name
-                for name, component in surface.components.items()
+                for name, component in components.components.items()
                 if component.kind is not None and self.evaluation_refusal(name) is None
             ),
             train_from=tuple(
@@ -300,12 +344,21 @@ class Scenario:
         for a long evaluation.
         """
         trainer = self.trainer_for(component)
-        self.refresh_instructions()
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
             # The staleness check measures data against the weights that serve; a scenario that loads no weights
             # serves one fixed model, so its data never goes stale.
-            weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
-            serving = self.serving_artifact_id() if weights_load else None
+            runtime = self.runtime
+            weights_load = self._binding.components.loaded_component is not None and runtime is not None
+            serving = self.served_artifact_id() if weights_load else None
+            if (
+                weights_load
+                and runtime is not None
+                and runtime.serves_requests
+                and self._binding.served_models is not None
+                and serving != self.serving_artifact_id()
+            ):
+                return None
+            self.refresh_instructions()
             return trainer.run_once(serving_artifact_id=serving)
 
     def pending_instructions(self) -> int:
@@ -324,21 +377,37 @@ class Scenario:
             self.instructions.give(component_trainer.trainer for component_trainer in self.trainers)
 
     def served_component(self) -> str | None:
-        """The component whose artifact the runtime serves: the component that the runtime loads, or the only
-        component; None when the scenario has several components and the runtime loads none of them."""
-        loader = self._binding.surface.loader_component
-        if loader is not None:
-            return loader
+        """The loaded component, the pulled file component, or the sole component; None when several could serve."""
+        loaded = self._binding.components.loaded_component
+        if loaded is not None:
+            return loaded
+        files = self._binding.components.files_component
+        if files is not None:
+            return files
         names = self._committer.component_names()
         return names[0] if len(names) == 1 else None
 
     def serving_artifact_id(self) -> str:
-        """The artifact that answers this scenario's requests now: the active artifact of ``served_component``,
-        or the active release for a scenario whose model is no Reef artifact or whose store keeps no commit
-        history to name the active artifact."""
+        """The selected artifact of the served component; several components cannot name one artifact."""
         component = self.served_component()
-        active = None if component is None or not self.store.durable else self.artifact_status()[component]["active"]
-        return active or self.current_artifact_ref().release_id
+        if component is None:
+            raise ReefError(f"scenario {self.name!r} has no unique component for inference")
+        active = self.artifact_status()[component]["active"] if self.store.durable else None
+        if active is not None:
+            return active
+        return self.repository.resolve(self.current_snapshot()).component(component).artifact_id
+
+    def served_artifact_id(self) -> str | None:
+        """The artifact that serves requests, or None before inference publishes a route.
+
+        Standalone scenarios activate their own runtime, so their selected artifact is also their served artifact.
+        Training uses this identity while a newly selected artifact still starts.
+        """
+        routes = self._binding.served_models
+        if routes is None:
+            return self.serving_artifact_id() if self._binding.activates_runtime else None
+        served = routes.read(ScenarioModel(self.name))
+        return None if served is None else served.artifact_id
 
     def replay_retained(
         self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
@@ -361,19 +430,90 @@ class Scenario:
         """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)
 
-    def releases(self) -> tuple[dict[str, Any], ...]:
-        """Committed releases, newest first; the scenario step is read under the same lock as the commit history."""
-        with self.release_queries.publication_lock:
-            return self.release_queries.releases(self._committer.step)
-
-    def artifacts(self) -> tuple[dict[str, Any], ...]:
-        """Each component's artifacts, newest first, with each component's active one marked."""
+    def artifact_rows(self) -> tuple[dict[str, Any], ...]:
+        """Internal artifact catalog, including the storage locators needed to materialize each artifact."""
         with self.release_queries.publication_lock:
             return self.release_queries.artifacts(self._committer.step, self._committer.component_names())
 
-    def current_artifact_ref(self) -> ArtifactRef:
-        """The active release."""
+    def artifacts(self) -> tuple[dict[str, Any], ...]:
+        """Public artifact catalog, with opaque artifact identities and component-specific parent links."""
+        with self.release_queries.publication_lock:
+            parents = self.release_queries.artifact_parents(self._committer.step, self._committer.component_names())
+            return tuple(
+                {
+                    **{key: value for key, value in row.items() if key != "snapshot"},
+                    "parent_artifact_id": parents.get(row["artifact_id"]),
+                }
+                for row in self.artifact_rows()
+            )
+
+    def harness_rows(self) -> list[dict[str, Any]]:
+        """Public harness history, newest first: ``harness_snapshot_rows`` without ``SNAPSHOT_ROW_KEYS``."""
+        return [
+            {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
+            for row in self.harness_snapshot_rows()
+        ]
+
+    def harness_snapshot_rows(self) -> list[dict[str, Any]]:
+        """Internal harness history, newest first: publication and training rows with private storage locators.
+
+        Each row identifies its harness artifact and its component parent. Other
+        components' publications and job-submission events do not add harness rows.
+        The locators (``SNAPSHOT_ROW_KEYS``) serve the legacy HTTP catalog only, as ``artifact_rows`` does.
+        """
+        with self.release_queries.publication_lock:
+            component = self.components.files_component
+            harness = [row for row in self.artifact_rows() if self.components.single or row["component"] == component]
+            by_snapshot = {row["snapshot"].revision: row for row in harness}
+            by_artifact = {row["artifact_id"]: row for row in harness}
+            manifests = self.release_queries.manifests(self._committer.step)
+
+            def artifact_of(revision: str | None) -> dict[str, Any] | None:
+                if revision is None or revision in by_snapshot:
+                    return None if revision is None else by_snapshot[revision]
+                return by_artifact.get((manifests.get(revision) or {}).get(str(component)))
+
+            parents = {row["artifact_id"]: row["parent_artifact_id"] for row in self.artifacts()}
+            kept: list[dict[str, Any]] = []
+            for row in self.release_queries.snapshot_rows(self._committer.step):
+                metrics = row.get("metrics") or {}
+                job = metrics.get("training_job")
+                if isinstance(job, Mapping) and (
+                    job.get("event") == "submitted" or not set(metrics) - {"training_job", "training_request"}
+                ):
+                    continue
+                if row["checkpoint"] and row["snapshot"].revision not in by_snapshot:
+                    continue
+                if not row["checkpoint"] and row.get("component") not in (None, component):
+                    continue
+                artifact = artifact_of(row["snapshot"].revision)
+                if artifact is None:
+                    continue
+                parent = artifact_of(artifact["snapshot"].parent_revision)
+                kept.append(
+                    {
+                        **row,
+                        "artifact_id": artifact["artifact_id"],
+                        "parent_artifact_id": parents[artifact["artifact_id"]],
+                        "component": artifact["component"],
+                        "active": row["checkpoint"] and artifact["active"],
+                        "activated": artifact["activated"],
+                        "artifact_snapshot": artifact["snapshot"],
+                        "parent_snapshot": None if parent is None else parent["snapshot"],
+                    }
+                )
+            return kept
+
+    def current_snapshot(self) -> SnapshotRef:
+        """The private storage or local-view locator of the current component selection."""
         return self._artifact_chain.current
+
+    def artifact_selection(self, ref: SnapshotRef | None = None) -> ArtifactSelection:
+        """Return the complete component-to-artifact-ID mapping for independent serving workers."""
+        with self.release_queries.publication_lock:
+            return self.repository.selection(
+                self.current_snapshot() if ref is None else ref, self._committer.component_names()
+            )
 
     def resume_training_starts(self) -> None:
         """Give each trainer the training start of a ``train_from`` record that its own training commits do not hold yet."""
@@ -383,6 +523,10 @@ class Scenario:
     def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Make ``artifact_id`` serve as ``component``; see :meth:`ScenarioCommitter.activate`."""
         return self._committer.activate(artifact_id, component)
+
+    def restore(self, step: int) -> Mapping[str, str]:
+        """Restore the full component selection after ``step`` without changing training starts."""
+        return self._committer.restore(step)
 
     def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.serve`."""
@@ -417,24 +561,24 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self._committer.artifact_status()
 
-    def artifact_release_ref(self, artifact_id: str, component: str | None = None) -> tuple[str, ArtifactRef]:
+    def artifact_snapshot(self, artifact_id: str, component: str | None = None) -> tuple[str, SnapshotRef]:
         """The component that ``artifact_id`` names and the ref of the release that minted it, without materializing
-        the release; see :meth:`ScenarioCommitter.artifact_release_ref`."""
+        the release; see :meth:`ScenarioCommitter.artifact_snapshot`."""
         with self.release_queries.publication_lock:
-            return self._committer.artifact_release_ref(artifact_id, component)
+            return self._committer.artifact_snapshot(artifact_id, component)
 
     def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
         """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
         with self.release_queries.publication_lock:
             return self._committer.resolve_artifact(artifact_id, component)
 
-    def sync_release(
-        self, artifact: Artifact, *, component: str, expected_release_id: str, metrics: Mapping[str, Any]
-    ) -> ArtifactRef:
+    def sync_artifact(
+        self, artifact: Artifact, *, component: str, expected_selection: ArtifactSelection, metrics: Mapping[str, Any]
+    ) -> ComponentArtifact:
         """Make a person's merged ``component`` tree active and the training start; see
-        :meth:`ScenarioCommitter.sync_release`."""
-        return self._committer.sync_release(
-            artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+        :meth:`ScenarioCommitter.sync_artifact`."""
+        return self._committer.sync_artifact(
+            artifact, component=component, expected_selection=expected_selection, metrics=metrics
         )
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
@@ -462,24 +606,24 @@ class Scenario:
 
 
 def validate_component_trainers(
-    trainers: tuple[ComponentTrainer, ...], surface: Surface
+    trainers: tuple[ComponentTrainer, ...], components: ScenarioComponents
 ) -> tuple[ComponentTrainer, ...]:
-    """Check that the trainers match the surface: each names a component it serves, and a surface serving
+    """Check that the trainers match ``components``: each names a declared component, and a scenario that declares
     no component has exactly one trainer, bound to ``records``."""
     if not trainers or any(not isinstance(component_trainer, ComponentTrainer) for component_trainer in trainers):
         raise ReefError("a scenario requires at least one ComponentTrainer")
     names = [component_trainer.component for component_trainer in trainers]
     if len(set(names)) != len(names):
         raise ReefError(f"scenario trainers must evolve distinct components, not {names}")
-    if not surface.names:
+    if not components.names:
         if names != [RECORDS_COMPONENT]:
             raise ReefError(
                 f"a scenario serving no component has one trainer bound to {RECORDS_COMPONENT!r}, not {names}"
             )
         return trainers
-    unknown = [name for name in names if name not in surface.names]
+    unknown = [name for name in names if name not in components.names]
     if unknown:
-        raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")
+        raise ReefError(f"scenario trainers name components the scenario does not serve: {unknown}")
     return trainers
 
 

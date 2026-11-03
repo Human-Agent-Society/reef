@@ -22,10 +22,8 @@ __all__ = ["fake_git_lfs"]
 def publication_case(tmp_path, request):
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
     recipe = meta_harness_recipe(tmp_path, chat)
-    # The base release holds the seed, as a deployment's does.
-    initial = tmp_path / "initial"
-    recipe.seed.write(initial)
-    memory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "memory")
+    # A new scenario's root release holds the recipe's seed, as a deployment's does.
+    memory = InMemoryRepositoryBackend.factory(directory=tmp_path / "memory")
 
     if request.param == "git":
         # The commit protocol, not Git LFS, is under test here; tests/artifact covers real LFS.
@@ -38,7 +36,6 @@ def publication_case(tmp_path, request):
             tmp_path / "artifacts.git",
             work_dir=tmp_path / "work",
             cache_dir=tmp_path / "cache",
-            base=recipe.base_artifact_source(),
         )
 
     return recipe, factory, chat, tmp_path / "records"
@@ -56,7 +53,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
     )
     try:
         scenario = dispatcher.get_or_create_scenario("selected-commit")
-        head = scenario.current_artifact_ref()
+        head = scenario.current_snapshot()
         report_once(scenario, "1")
         result = checkpoint_result(scenario)
         # The state after the job's submission, which the failed checkpoint commit keeps.
@@ -68,7 +65,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
         append = journal.append
 
         def fail(record):
-            assert scenario.current_artifact_ref() == head
+            assert scenario.current_snapshot() == head
             assert scenario.repository.backend.current() == head
             raise RuntimeError("journal unavailable")
 
@@ -77,19 +74,19 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
             with pytest.raises(RuntimeError, match="journal unavailable"):
                 scenario.commit(result)
         assert scenario.trainer.state == previous
-        assert scenario.current_artifact_ref() == scenario.repository.backend.current() == head
+        assert scenario.current_snapshot() == scenario.repository.backend.current() == head
         assert len(scenario.store.history()) == 1
         if recovery == "retry":
 
             def durable_append(record):
-                assert scenario.current_artifact_ref() == scenario.repository.backend.current() == head
+                assert scenario.current_snapshot() == scenario.repository.backend.current() == head
                 return append(record)
 
             monkeypatch.setattr(journal, "append", durable_append)
             scenario.commit(result)
             assert scenario.scenario_step == 2
             assert scenario.trainer.state == result.state
-            assert scenario.current_artifact_ref() == scenario.repository.backend.current() != head
+            assert scenario.current_snapshot() == scenario.repository.backend.current() != head
             assert len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
@@ -105,7 +102,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
         scenario = restarted.get_or_create_scenario("selected-commit")
         assert scenario.trainer.state == (result.state if recovery == "retry" else previous)
         assert scenario.scenario_step == (2 if recovery == "retry" else 1)
-        assert scenario.current_artifact_ref() == scenario.repository.backend.current()
+        assert scenario.current_snapshot() == scenario.repository.backend.current()
         assert len(chat.prompts) == 1
     finally:
         restarted.close()
@@ -122,7 +119,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
     )
     try:
         scenario = dispatcher.get_or_create_scenario("stale-artifact-head")
-        old_head = scenario.current_artifact_ref()
+        old_head = scenario.current_snapshot()
         report_once(scenario, "1")
         result = checkpoint_result(scenario)
 
@@ -133,17 +130,17 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
             patch.setattr(scenario.repository.backend, "commit_release", unavailable)
             scenario.commit(result)
         assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
-        committed_head = scenario.current_artifact_ref()
+        committed_head = scenario.current_snapshot()
         assert committed_head != old_head
         assert scenario.repository.backend.current() == old_head
+        assert scenario.repository.checkpoint_artifact == committed_head
         sync = scenario.commit_status["artifact_head_sync"]
         assert sync == {
             "state": "pending",
-            "release_id": committed_head.release_id,
             "error": "backend pointer unavailable",
         }
         assert dispatcher.build_training_status()["scenarios"]["stale-artifact-head"]["artifact_head_sync"] == sync
-        assert scenario.store.history()[-1].artifact_ref == committed_head
+        assert scenario.store.history()[-1].snapshot == committed_head
     finally:
         dispatcher.close()
     restarted = Dispatcher(
@@ -157,7 +154,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
     try:
         scenario = restarted.get_or_create_scenario("stale-artifact-head")
         assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
-        assert scenario.current_artifact_ref() == scenario.repository.backend.current() == committed_head
+        assert scenario.current_snapshot() == scenario.repository.backend.current() == committed_head
         assert len(scenario.store.history()) == 2 and len(chat.prompts) == 1
     finally:
         restarted.close()
@@ -174,7 +171,7 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
     )
     try:
         scenario = dispatcher.get_or_create_scenario("no-journal")
-        head = scenario.current_artifact_ref()
+        head = scenario.current_snapshot()
 
         def unexpected(*args, **kwargs):
             pytest.fail("a non-journaled publication must commit its backend head directly")
@@ -186,10 +183,10 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
 
         assert not scenario.store.durable
         assert scenario.trainer.state == result.state
-        assert scenario.current_artifact_ref() == scenario.repository.backend.current() != head
+        assert scenario.current_snapshot() == scenario.repository.backend.current() != head
+        assert scenario.repository.checkpoint_artifact == scenario.current_snapshot()
         assert scenario.commit_status["artifact_head_sync"] == {
             "state": "synchronized",
-            "release_id": scenario.current_artifact_ref().release_id,
             "error": None,
         }
     finally:
@@ -223,8 +220,8 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
         scenario.commit(result)
 
         assert scenario.scenario_step == 2 and len(chat.prompts) == 1
-        assert scenario.current_artifact_ref() == committed.artifact_ref
-        assert scenario.repository.resolve(committed.artifact_ref).local_path.is_dir()
+        assert scenario.current_snapshot() == committed.snapshot
+        assert scenario.repository.resolve(committed.snapshot).local_path.is_dir()
         assert len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
@@ -246,13 +243,16 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         competing_path = records.parent / "competing-artifact"
         competing_path.mkdir()
         (competing_path / "foreign.txt").write_text("another writer's artifact")
-        competing = Artifact.local(competing_path, metadata=backend.metadata())
+        metadata = dict(backend.metadata())
+        # This writer publishes new bytes, so it cannot carry the root's component IDs.
+        metadata.pop("components", None)
+        competing = Artifact.local(competing_path, metadata=metadata)
         commit_release = backend.commit_release
         unrelated = None
 
         def conflict_after_journal(ref, *, expected_parent):
             nonlocal unrelated
-            assert scenario.store.history()[-1].artifact_ref == ref
+            assert scenario.store.history()[-1].snapshot == ref
             unrelated = backend.publish(competing, expected_parent=expected_parent)
             return commit_release(ref, expected_parent=expected_parent)
 
@@ -265,11 +265,11 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         committed = scenario.store.history()[-1]
         assert scenario.scenario_step == committed.step == 2
         assert scenario.trainer.state == committed.algorithm_state == result.state
-        assert scenario.current_artifact_ref() == committed.artifact_ref
-        assert backend.current() == unrelated
+        assert scenario.current_snapshot() == committed.snapshot
+        assert backend.current() == unrelated, scenario.commit_status
         assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
-        assert scenario.commit_status["artifact_head_sync"]["release_id"] == committed.artifact_ref.release_id
-        assert unrelated not in (old_head, committed.artifact_ref)
+        assert scenario.repository.checkpoint_artifact == committed.snapshot
+        assert unrelated not in (old_head, committed.snapshot)
         with pytest.raises(ArtifactConflict):
             scenario.repository.synchronize_checkpoint()
         assert backend.current() == unrelated and len(scenario.store.history()) == 2

@@ -15,8 +15,8 @@ from tests.support.runtime_stubs import runtime_bindings
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import ArtifactRef
-from reef.artifact.files import directory_content_id
+from reef.artifact.artifact import SnapshotRef
+from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
@@ -36,7 +36,7 @@ class UriBackend(InMemoryRepositoryBackend):
     """An in-memory repository that names each release's directory with a ``file`` URI, as an object store names it
     with an ``s3`` URI."""
 
-    def release_uri(self, ref: ArtifactRef) -> str:
+    def release_uri(self, ref: SnapshotRef) -> str:
         return self.materialize(ref).local_path.as_uri() + "/"
 
 
@@ -55,16 +55,13 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
     records.
     """
     root = tmp_path / name
-    initial = root / "initial"
-    initial.mkdir(parents=True)
-    (initial / "model.txt").write_text("w0")
     runtime = ImportingComponent(root / "exported")
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(root / "records", task_files=task_files)
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
-        UriBackend.factory(initial, root=root / "repository"),
+        UriBackend.factory(directory=root / "repository"),
         local_artifact_dir=root / "staged",
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
@@ -117,13 +114,12 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             item = await library_item(other_cell, item_id)
             assert item["metadata"]["origin"] == {
                 "scenario": "math",
-                "release_id": imported["release_id"],
                 "artifact_id": imported["artifact_id"],
             }
             assert item["metadata"]["scenarios"] == {}
             content = item["content"]
             assert (content["component"], content["kind"]) == (imported["component"], "model")
-            assert content["content_id"] == directory_content_id(source)
+            assert "content_id" not in content
             assert content["source_uri"].startswith("file://") and content["source_uri"].endswith("/")
             # The scenario lists the artifact, so the library keeps its item.
             refused = await client.delete(f"{DATA}/{item_id}")
@@ -134,7 +130,8 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             into = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
             assert into.status == 201, await into.text()
             receipt = await into.json()
-            assert receipt["content_id"] == directory_content_id(source)
+            copied = await library_item(client, f"other/{receipt['artifact_id']}")
+            assert "content_id" not in copied["content"]
             listed = (await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]
             assert listed[0]["source"] == {"uri": content["source_uri"], "version": "", "item": item_id}
             # The import is an artifact of "other", so it enters the library too.
@@ -169,7 +166,8 @@ def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
 
 @pytest.mark.integration
 def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path) -> None:
-    """RFC #1062: the item is imported, and the import is the scenario's active artifact and its training start.
+    """RFC #1062, RFC #1070: the item is the scenario's root release, so it is the active artifact and the training
+    start, and the creation row names the item as its source.
 
     A process trains one scenario, so each new scenario has a Cell of its own; the Cells share the data store.
     """
@@ -186,9 +184,9 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
             await library_item(client, item_id)
             upload = weights(tmp_path / "upload", b"w10")
             assert (await client.post(DATA, json=upload_item("upload-1", upload))).status == 201
-        for name, item, content_id in (
-            ("from-scenario", item_id, directory_content_id(source)),
-            ("from-upload", "upload-1", directory_content_id(upload)),
+        for name, item, expected_checksum in (
+            ("from-scenario", item_id, directory_checksum(source)),
+            ("from-upload", "upload-1", directory_checksum(upload)),
         ):
             async with client_of(cells[name], tmp_path) as client:
                 created = await client.post(
@@ -200,24 +198,33 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert answer == {
                     "scenario": name,
                     "owner": "acme",
-                    "release_id": started,
-                    "content_id": content_id,
+                    "components": {imported["component"]: started},
                     "artifact_id": started,
                 }
                 scenario = cells[name].get_or_create_scenario(name)
                 assert scenario is not None
+                assert (
+                    directory_checksum(
+                        scenario.repository.resolve(scenario.repository.require_current_artifact()).local_path
+                    )
+                    == expected_checksum
+                )
                 assert scenario.artifact_status() == {
                     imported["component"]: {"active": started, "training_start": started}
                 }
                 listed = (await (await client.get(f"/reef/scenarios/{name}/artifacts")).json())["artifacts"]
-                assert [row["source"]["item"] for row in listed if row["artifact_id"] == started] == [item]
+                (root,) = [row for row in listed if row["artifact_id"] == started]
+                assert root["operation"] == "creation" and root["parent_artifact_id"] is None
+                assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
+                # The root is the only release: no default start was written first.
+                assert len(scenario.release_queries.snapshot_rows(scenario.scenario_step)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(
                     "/reef/scenarios", json={"name": name, "owner": "acme", "artifact_id": "missing"}
                 )
                 assert again.status == 200, await again.text()
-                assert await again.json() == {key: value for key, value in answer.items() if key != "artifact_id"}
+                assert await again.json() == answer
 
     try:
         asyncio.run(run())
@@ -228,7 +235,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
 
 @pytest.mark.integration
 def test_a_refused_start_leaves_no_scenario(tmp_path: Path) -> None:
-    """A start that the import refuses answers as the import route does, and deletes the scenario it made."""
+    """A start that the import refuses answers as the import route does, and registers no scenario."""
     dispatcher = cell(tmp_path, "cell-a")
 
     async def run() -> None:

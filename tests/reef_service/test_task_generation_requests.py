@@ -65,6 +65,7 @@ class GeneratingRecipe(UploadRecipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         settings = GeneratedTaskSettings(
             rounds=3, description="shell tasks", source_tag="source=session", source_records_per_round=1
@@ -88,6 +89,7 @@ class GeneratingRecipe(UploadRecipe):
             training_mode=self.training_mode,
             task_storage=task_storage,
             samples=samples,
+            root=root,
         )
 
 

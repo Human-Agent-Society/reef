@@ -27,7 +27,7 @@ from reef.artifact import (
     HuggingFaceRevisionFiles,
     S3Reader,
     SourceFiles,
-    directory_content_id,
+    directory_checksum,
     read_reference,
 )
 
@@ -85,13 +85,13 @@ def tree(directory: Path) -> list[str]:
 
 
 @pytest.mark.unit
-def test_the_content_id_names_the_files_and_their_paths_only(tmp_path: Path) -> None:
+def test_the_checksum_covers_the_files_and_their_paths_only(tmp_path: Path) -> None:
     files = {"config.json": b"{}", "adapter/weights.bin": b"w"}
-    first = directory_content_id(write_tree(tmp_path / "a", files))
-    assert first.startswith("content:")
-    assert directory_content_id(write_tree(tmp_path / "b", files)) == first
-    assert directory_content_id(write_tree(tmp_path / "c", {**files, "config.json": b"{ }"})) != first
-    assert directory_content_id(write_tree(tmp_path / "d", {"config.json": b"{}", "weights.bin": b"w"})) != first
+    first = directory_checksum(write_tree(tmp_path / "a", files))
+    assert first.startswith("sha256:")
+    assert directory_checksum(write_tree(tmp_path / "b", files)) == first
+    assert directory_checksum(write_tree(tmp_path / "c", {**files, "config.json": b"{ }"})) != first
+    assert directory_checksum(write_tree(tmp_path / "d", {"config.json": b"{}", "weights.bin": b"w"})) != first
     # Paths sort by their components, as pathlib sorts them, so an existing artifact keeps its content ID.
     root = write_tree(tmp_path / "e", {"a-b": b"1", "a/b": b"2"})
     listed = [
@@ -99,7 +99,7 @@ def test_the_content_id_names_the_files_and_their_paths_only(tmp_path: Path) -> 
         for path in sorted(root.rglob("*"))
         if path.is_file()
     ]
-    assert directory_content_id(root) == f"content:{hashlib.sha256(json.dumps(listed).encode()).hexdigest()}"
+    assert directory_checksum(root) == f"sha256:{hashlib.sha256(json.dumps(listed).encode()).hexdigest()}"
 
 
 @pytest.mark.unit
@@ -107,7 +107,7 @@ def test_a_file_uri_opens_an_absolute_directory_without_a_version(tmp_path: Path
     source = write_tree(tmp_path / "source", {"config.json": b"{}", "sub/weights.bin": b"w"})
     files = ArtifactSources.from_setting(()).open(source.as_uri())
     assert (files.version, files.reference, files.paths()) == ("", None, ("config.json", "sub/weights.bin"))
-    assert directory_content_id(copied(files, tmp_path / "target")) == files.content_id()
+    assert directory_checksum(copied(files, tmp_path / "target")) == files.checksum()
     for uri in ("file://relative/path", (tmp_path / "missing").as_uri()):
         with pytest.raises(ValueError, match="absolute directory"):
             FileReader().open(uri)
@@ -272,7 +272,7 @@ def test_revision_files_are_the_hub_listing_and_download_only_what_is_read(tmp_p
     local = write_tree(tmp_path / "local", files)
     assert remote.paths() == DirectoryFiles(local).paths()
     # The same bytes get the content ID of a copy; only the file below the LFS size is downloaded, to hash it.
-    assert remote.content_id() == directory_content_id(local)
+    assert remote.checksum() == directory_checksum(local)
     assert hub.downloads == ["config.json"]
     assert remote.read_bytes("sub/tokenizer.json") == b"tokenizer-bytes"
     with pytest.raises(FileNotFoundError):
@@ -304,7 +304,7 @@ def test_a_commit_is_kept_by_reference_and_a_branch_is_copied_at_its_commit(
     # A branch can move, so it is copied, at the commit it named when it was opened.
     branch = reader.open("hf://org/model@main")
     assert branch.version == COMMIT and branch.reference is None
-    assert directory_content_id(copied(branch, tmp_path / "copy")) == pinned.content_id()
+    assert directory_checksum(copied(branch, tmp_path / "copy")) == pinned.checksum()
 
 
 @pytest.mark.unit

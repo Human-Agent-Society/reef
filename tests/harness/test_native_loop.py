@@ -45,7 +45,7 @@ from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
 from reef.harness.runners.native.host import NativeHost
-from reef.harness.runners.native.release_client import ReleaseClient
+from reef.harness.runners.native.release_client import ArtifactClient
 from reef.harness.runners.native.selftools import SelfTools, ServeState
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TaskResult
@@ -323,11 +323,11 @@ class _Trial(ServeState):
         self.tried: list[TreePatch] = []
 
     @property
-    def client(self) -> ReleaseClient:
+    def client(self) -> ArtifactClient:
         raise AssertionError("trying a patch reads no release")
 
     @property
-    def release_id(self) -> str | None:
+    def artifact_id(self) -> str | None:
         return "r1"
 
     @property
@@ -804,7 +804,7 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
         assert _typed(streamed, "session")[0]["loop"] is None
         log = server.sessions_dir / serve.SERVE_LOG
         reef.release("r2", {**graph_only, **SEED_LOOP_FILE}, parent="r1")
-        _wait(lambda: any(m["release_id"] == "r2" for m in _typed(_events(log), "harness/mount")))
+        _wait(lambda: any(m["artifact_id"] == "r2" for m in _typed(_events(log), "harness/mount")))
         second, streamed = _turn(server, "second")
         assert second["exit"] == 0 and second["text"] == "two"
         assert [e["type"] for e in streamed] == [
@@ -824,10 +824,10 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
             "turn/end",
         ]
         header = _typed(streamed, "session")[0]
-        assert header["loop"] == "main" and header["graph"] == "main" and header["release_id"] == "r2"
+        assert header["loop"] == "main" and header["graph"] == "main" and header["artifact_id"] == "r2"
         assert _typed(streamed, "loop/enter") == [{"name": "main"}]
         reef.release("r3", graph_only, parent="r2")
-        _wait(lambda: any(m["release_id"] == "r3" for m in _typed(_events(log), "harness/mount")))
+        _wait(lambda: any(m["artifact_id"] == "r3" for m in _typed(_events(log), "harness/mount")))
         third, streamed = _turn(server, "third", session=second["session"])
         assert third["exit"] == 0 and third["text"] == "three" and third["turn"] == 2
         assert (

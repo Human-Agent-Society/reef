@@ -90,7 +90,7 @@ def merge_requires(base: Sequence[Mapping[str, Any]], added: Sequence[Mapping[st
     return merged
 
 
-def _row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+def row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     """The ``training_request.requires`` items of one release's gate metrics; empty when the step read no request."""
     request = metrics.get("training_request") if isinstance(metrics, Mapping) else None
     requires = request.get("requires") if isinstance(request, Mapping) else None
@@ -99,38 +99,38 @@ def _row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     return [dict(item) for item in requires if isinstance(item, Mapping) and isinstance(item.get("name"), str)]
 
 
-def _chain(rows: Sequence[Mapping[str, Any]], release_id: str | None) -> list[Mapping[str, Any]]:
-    """The content chain of ``release_id`` through the catalog ``rows``, newest first.
+def artifact_chain(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -> list[Mapping[str, Any]]:
+    """The content chain of ``artifact_id`` through the catalog ``rows``, newest first.
 
     ``rows`` come oldest first, as ``GET /reef/harness/releases`` lists
     them, and the row that published an id is its oldest row; the chain
     continues at each row's parent."""
     published: dict[str, Mapping[str, Any]] = {}
     for row in rows:
-        if isinstance(row, Mapping) and isinstance(row.get("release_id"), str):
-            published.setdefault(row["release_id"], row)
+        if isinstance(row, Mapping) and isinstance(row.get("artifact_id"), str):
+            published.setdefault(row["artifact_id"], row)
     chain: list[Mapping[str, Any]] = []
     seen: set[str] = set()
-    current = release_id
+    current = artifact_id
     while isinstance(current, str) and current in published and current not in seen:
         seen.add(current)
         chain.append(published[current])
-        current = published[current].get("parent_release_id")
+        current = published[current].get("parent_artifact_id")
     return chain
 
 
-def required_by(rows: Sequence[Mapping[str, Any]], release_id: str | None) -> list[dict[str, Any]]:
+def required_by(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -> list[dict[str, Any]]:
     """What a release needs from the person: every ``training_request.requires`` item over its chain, by name.
 
     A request's items are per release, so a later release whose request
     named nothing still carries the extension an earlier one added. The
-    walk starts at ``release_id`` and follows its chain through the
+    walk starts at ``artifact_id`` and follows its chain through the
     catalog ``rows``. Names keep the order of their oldest definition and
     the newest definition of a name wins. The one rule for the manifest and
     the release pages."""
     merged: dict[str, dict[str, Any]] = {}
-    for row in reversed(_chain(rows, release_id)):
-        for item in _row_requires(row.get("metrics")):
+    for row in reversed(artifact_chain(rows, artifact_id)):
+        for item in row_requires(row.get("metrics")):
             merged[item["name"]] = item
     return list(merged.values())
 

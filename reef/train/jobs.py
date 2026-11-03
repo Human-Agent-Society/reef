@@ -57,7 +57,7 @@ class JobLoopState:
     """The state a weight trainer commits: where the next job starts, the running job, and the jobs that ended.
 
     ``start`` is the start of the next job as the training component reads
-    it, a non-empty string; a new trainer starts at ``TrainingComponent.base_start``. ``job`` is the
+    it, a non-empty string; a new trainer starts at ``TrainingComponent.root_start``. ``job`` is the
     running job, or ``None``. ``finished_jobs`` is the number of jobs that
     ended, finished or failed, a non-negative int. ``last_job`` is the outcome
     of the last of them, and it is ``None`` exactly when ``finished_jobs`` is

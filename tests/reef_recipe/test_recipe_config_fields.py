@@ -12,7 +12,7 @@ from dataclasses import KW_ONLY, dataclass
 import pytest
 import yaml
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from reef.core.config import config_arguments
 from reef.evaluation.activation import AlwaysActivate
@@ -242,7 +242,7 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
         {"sample2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
     recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=stages)
-    trainer = recipe.build("scenario", SQLiteRecordStore())
+    trainer = recipe.build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
 
     assert isinstance(trainer.pipeline.record2sample, ThresholdSamples)
     assert isinstance(trainer.pipeline.sample2job, ThresholdJobData)
@@ -273,7 +273,7 @@ def test_the_default_recipe_sends_the_configured_job_parameters_with_every_job()
 @pytest.mark.unit
 def test_a_weight_recipe_without_job_samples_fails_its_build() -> None:
     with pytest.raises(RecipeConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
-        StagedRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore())
+        StagedRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
 
 
 @pytest.mark.unit
@@ -297,9 +297,9 @@ def test_default_build_requires_processor_and_objective_declarations() -> None:
             return PipelineSpec(sample2job=ThresholdJobData)
 
     with pytest.raises(TypeError, match=r"declares no sample2job.*pipeline_spec\(\).*override build"):
-        NoSample2JobRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore())
+        NoSample2JobRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
     with pytest.raises(TypeError, match=r"declares no objective.*registered objective name.*'module:Objective'"):
-        NoObjectiveRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore())
+        NoObjectiveRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
 
 
 @pytest.mark.unit

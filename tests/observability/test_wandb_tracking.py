@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
 from reef.observability.base import (
     ExperimentRun,
     TrainFromExperimentEvent,
@@ -77,7 +77,7 @@ def _context(
         scenario=scenario,
         recipe="openclawrl",
         step=step,
-        source_artifact_ref=ArtifactRef(content_id="math", release_id="artifact:7", parent_release_id="artifact:6"),
+        source_artifacts=ArtifactSelection({"weights": "artifact:7"}),
         run_segment=run_segment,
         run_step=run_step,
         backend="ExampleTrainingBackend",
@@ -94,7 +94,7 @@ def _event(
 ) -> TrainingExperimentEvent:
     return TrainingExperimentEvent(
         context=_context(scenario=scenario, step=step, run_segment=run_segment, run_step=run_step),
-        produced_artifact_ref=ArtifactRef(content_id="math", release_id="artifact:8", parent_release_id="artifact:7"),
+        produced_artifacts=ArtifactSelection({"weights": "artifact:8"}),
         metrics={"train/loss": 0.25, "reward": 0.8, "selection": {"score": 1.0, "label": "ok"}},
         outcome="committed",
         training_job_id="job-7",
@@ -155,12 +155,7 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
             "backend": None,
             "model": "Qwen/test",
             "run_segment": 0,
-            "source_artifact": {
-                "kind": "artifact",
-                "content_id": "math",
-                "release_id": "artifact:7",
-                "parent_release_id": "artifact:6",
-            },
+            "source_artifact_ids": {"weights": "artifact:7"},
         },
         "backend": {},
         "training": {"global_batch_size": 2, "lr": 1e-6},
@@ -174,8 +169,8 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
     assert logged["train/loss"] == pytest.approx(0.25)
     assert logged["selection/score"] == pytest.approx(1.0)
     assert "selection/label" not in logged
-    assert logged["reef/source_release_id"] == "artifact:7"
-    assert logged["reef/produced_release_id"] == "artifact:8"
+    assert logged["reef/source_artifact_ids"] == {"weights": "artifact:7"}
+    assert logged["reef/produced_artifact_ids"] == {"weights": "artifact:8"}
     assert not {"reef/source_runtime_load_id", "reef/produced_runtime_load_id"} & logged.keys()
     assert logged["reef/training_job_id"] == "job-7"
     assert logged["reef/checkpoint_path"] == "/checkpoints/hf/7"
@@ -214,7 +209,7 @@ def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> N
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            start_artifact_ref=_context().source_artifact_ref,
+            start_artifacts=_context().source_artifacts,
         )
     )
 
@@ -237,7 +232,7 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
     logger = tracker.bind_scenario(
         scenario="math",
         recipe="openclawrl",
-        source_artifact_ref=_context().source_artifact_ref,
+        source_artifacts=_context().source_artifacts,
         run_segment=0,
     )
 
@@ -261,7 +256,7 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            start_artifact_ref=_context().source_artifact_ref,
+            start_artifacts=_context().source_artifacts,
         )
     )
     logger.log({"accepted": 1}, namespace="processor")
@@ -298,7 +293,7 @@ def test_disabled_and_failed_tracking_never_fail_training() -> None:
     component_logger = logging_tracker.bind_scenario(
         scenario=context.scenario,
         recipe=context.recipe,
-        source_artifact_ref=context.source_artifact_ref,
+        source_artifacts=context.source_artifacts,
         run_segment=0,
     )
     component_logger.log({"training/error": 1}, namespace="operations")
@@ -416,7 +411,7 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
     scenario_logger = tracker.bind_scenario(
         scenario=context.scenario,
         recipe=context.recipe,
-        source_artifact_ref=context.source_artifact_ref,
+        source_artifacts=context.source_artifacts,
         run_segment=0,
     )
     before = time.time()
@@ -434,7 +429,7 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
             recipe=context.recipe,
             step=8,
             run_segment=0,
-            start_artifact_ref=context.source_artifact_ref,
+            start_artifacts=context.source_artifacts,
         )
     )
     scenario_logger.log({"records/unread_count": 0}, namespace="operations")

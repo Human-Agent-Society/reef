@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import RecordingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -83,6 +84,7 @@ class LearningRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -93,6 +95,7 @@ class LearningRecipe(Recipe):
             experiment_logger=experiment_logger,
             report_type=self.report_type,
             training_mode=self.training_mode,
+            root=root,
         )
 
 
@@ -112,11 +115,9 @@ class EchoHandler(InferenceHandler):
 
 
 def dispatcher_for(tmp_path, recipe):
-    initial = tmp_path / "initial"
-    initial.mkdir()
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )
@@ -151,6 +152,7 @@ def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
         async with TestClient(
             TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
         ) as client:
+            await wait_for_inference(client, "s", headers=HEADERS)
             response = await client.post(
                 endpoint, headers=HEADERS, json={"messages": [{"role": "user", "content": text}]}
             )
@@ -232,6 +234,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                 "/reef/records", headers=HEADERS, json=imported("offline-0", inference_payload("changed"))
             )
             assert conflict.status == 409
+            await wait_for_inference(client, "s", headers=HEADERS)
             for index in range(2):
                 text = f"online-{index}"
                 response = await client.post(

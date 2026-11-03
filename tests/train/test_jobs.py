@@ -9,17 +9,18 @@ from pathlib import Path
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 
-from reef.artifact import Artifact, BaseArtifactSource
+from reef.artifact import Artifact, DefaultStart
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.pipeline_context import PipelineContext
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.sample2job import Sample2Job
 from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -46,11 +47,10 @@ class FakeComponent(TrainingComponent):
     def release_format(self) -> ReleaseFormat:
         return ReleaseFormat("full")
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource()
+    def default_start(self) -> DefaultStart:
+        return DefaultStart()
 
-    @property
-    def base_start(self) -> str:
+    def root_start(self, root: ScenarioRoot) -> str:
         return "fake:base"
 
     def import_start(self, release: Path) -> str:
@@ -378,7 +378,9 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
             sample2job=ThresholdJobData(context, None, 1),
         )
 
-    trainer = Trainer.build("math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component))
+    trainer = Trainer.build(
+        "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), root=STUB_ROOT
+    )
     [ended] = stages
     make_samples(trainer)
     submitted = trainer.run_once()
@@ -443,6 +445,7 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         samples=TrainerSamples(session.samples),
         # The recipe gives trajectory jobs SFT; task jobs take their parameters from their instruction.
         job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
+        root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
 

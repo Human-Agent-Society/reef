@@ -32,8 +32,8 @@ from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
+from reef.core.values import JsonValue
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
-from reef.surface.base import AdapterWeightRuntime
 
 # -- Identities and errors ----------------------------------------------------
 
@@ -421,6 +421,35 @@ class InferenceStream:
             await self._close()
 
 
+@dataclass(frozen=True)
+class InferenceArtifact:
+    """The selected component identity and request-time requirements for inference.
+
+    ``artifact_id`` is a nonempty component ID. ``local_path`` is None or a
+    Path supplied by local evaluation. ``require_token_runtime_load_ids`` is
+    a bool: true requires engine stamps for each generated token; false
+    permits a fixed local model's stamp. This value contains no storage locator.
+    Serving and evaluation construct it; handlers read its fields without I/O.
+    """
+
+    artifact_id: str
+    local_path: Path | None = None
+    require_token_runtime_load_ids: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact_id, str) or not self.artifact_id:
+            raise ValueError("inference requires a nonempty artifact_id")
+        if self.local_path is not None and not isinstance(self.local_path, Path):
+            raise TypeError("inference local_path must be a Path or None")
+        if not isinstance(self.require_token_runtime_load_ids, bool):
+            raise TypeError("require_token_runtime_load_ids must be a bool")
+
+    @classmethod
+    def from_artifact(cls, artifact: Artifact) -> InferenceArtifact:
+        """Copy identity and available path; only unpublished local artifacts permit unstamped tokens."""
+        return cls(artifact.artifact_id, artifact.local_path, not artifact.ref.local)
+
+
 class InferenceHandler(ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
@@ -437,7 +466,7 @@ class InferenceHandler(ABC):
         raise ValueError(f"{cls.__name__} does not support deployment configuration")
 
     @abstractmethod
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return the provider response for one native request payload."""
 
     def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
@@ -445,7 +474,34 @@ class InferenceHandler(ABC):
         (``ServedArtifact.model_name``). The default names it as the request's ``model``."""
         return {**payload, "model": model_name}
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    def serving_config(self, override: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """The request fields that a scenario may set (RFC #1097), with their effective values under ``override``.
+
+        ``override`` maps field names to the values that one scenario sets. The result maps each field that has a
+        value to its value: the override's value when it sets the field, else the handler's own value. A field with
+        neither value has no key. ``ValueError`` when ``override`` sets a field that the handler does not have, or a
+        value that the field does not take. The default handler has no field: it gives ``{}`` for an empty
+        ``override`` and refuses any other.
+        """
+        if override:
+            raise ValueError(f"{type(self).__name__} has no serving fields; got {sorted(override)}")
+        return {}
+
+    def request_payload(
+        self, payload: Mapping[str, Any], *, serving_config: Mapping[str, JsonValue]
+    ) -> dict[str, Any]:
+        """The provider request body that the engine receives for the client's body ``payload``, before
+        ``address_model``: a new dict, with the values that the handler sets itself, such as fixed sampling values.
+
+        ``serving_config`` is the override of the scenario that the request is for, which its runtime's
+        ``serving_config`` accepted. The handler applies the fields of it that are its own and leaves the rest,
+        which the runtime applies to the engine. The inference service sends the body and records it.
+        ``ValueError`` for a body that the handler refuses. The default is ``payload`` unchanged."""
+        return dict(payload)
+
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
         """Return a stream for one native request payload.
 
         Custom handlers that only implement buffered inference keep working: the
@@ -464,7 +520,7 @@ class EngineClients(ABC):
     """The handlers that reach the engines that ``served_models`` names.
 
     Purpose: an inference replica asks for the handler of each ``ServedArtifact`` it serves; the deployment's
-    engine configuration, or the engines that a control process runs, decide which one it is.
+    engine configuration, or the engines that an inference process runs, decide which one it is.
     """
 
     @abstractmethod
@@ -489,7 +545,7 @@ class FixedEngineClients(EngineClients):
 # -- Runtime contracts --------------------------------------------------------
 
 
-class InferenceRuntime(AdapterWeightRuntime):
+class InferenceRuntime(ABC):
     """Own inference requests, serving weights and admission.
 
     An InferenceHandler executes individual requests. This runtime owns that
@@ -507,6 +563,11 @@ class InferenceRuntime(AdapterWeightRuntime):
         self._inference_admission = InferenceAdmissionController()
 
     # -- Requests
+
+    @property
+    def serves_requests(self) -> bool:
+        """Whether this runtime supports model requests. False keeps offline training deployments out of startup."""
+        return True
 
     @property
     def base_url(self) -> str:
@@ -537,6 +598,19 @@ class InferenceRuntime(AdapterWeightRuntime):
         """
         return self.inference_handler if url == self.base_url else None
 
+    @abstractmethod
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        """Serve the published release ``artifact``; return the runtime load ID that serves it.
+
+        Reef calls it at a commit that activates a release, at an activation
+        and at a start, before traffic routes to the release. ``scenario`` names
+        the release's scenario exactly when the runtime serves a separate
+        adapter per scenario (``per_scenario_adapters``). A raise leaves the
+        runtime serving what it served before. A runtime that loads weights
+        makes a new runtime load ID for each load; a runtime that loads
+        nothing, such as a proxy, returns the release ID.
+        """
+
     def served_model_name(self, scenario: str) -> str:
         """The name under which the engine serves ``scenario``'s weights now; ``model_path`` unless a runtime serves
         each scenario under its own name."""
@@ -547,7 +621,7 @@ class InferenceRuntime(AdapterWeightRuntime):
         outside this process: the engine's HTTP(S) ``base_url`` and ``served_model_name``.
 
         None when the engine has no such address or name, so an inference service cannot reach it without this
-        runtime; control then writes no ``served_models`` row for it.
+        runtime; startup then fails instead of publishing a route.
         """
         name = self.served_model_name(scenario)
         if not name:
@@ -558,19 +632,38 @@ class InferenceRuntime(AdapterWeightRuntime):
             # The base URL is no HTTP(S) URL that another process can call.
             return None
 
-    def open(self) -> None:
-        """Take control of the engines, before control adopts or activates anything; a second call does nothing.
+    def serving_config(self, override: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """The serving fields that a scenario may set (RFC #1097), with their effective values under ``override``.
 
-        Only the process that runs control calls it. Every other process builds the same runtime and never opens
-        it, so it changes no engine and only sends requests through ``inference_handler``. The default does
-        nothing: a runtime that controls no engine has nothing to open.
+        As ``InferenceHandler.serving_config``, over the fields of the engine and of the handler: ``override`` maps
+        field names to one scenario's values, and the result maps each field that has a value to the override's
+        value, else the deployment's. ``ValueError`` names a field that neither has, or a value that its field does
+        not take. Control calls it without opening the runtime. The default has the handler's fields only.
         """
+        return self.inference_handler.serving_config(override)
 
-    def adopt(self, served: ServedArtifact) -> None:
-        """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
-        runtime existed (a control restart): when the engine still serves it, the next activation of the same
-        artifact loads nothing. The default can tell nothing about the engine, so the next activation loads."""
+    def apply_serving_config(self, scenario: str, override: Mapping[str, JsonValue]) -> None:
+        """Make the engine fields of ``override``, which ``serving_config`` accepted, hold for ``scenario``: for the
+        engine that serves it now, and for each engine that starts for it later. A field that ``override`` does not
+        set takes the deployment's value again. The inference worker calls it before each activation and when only
+        the override changed, so a second call with the same values changes nothing. The default has no engine
+        field and does nothing; the handler applies request fields to each request."""
         return
+
+    def open(self) -> None:
+        """Open the engines before the inference worker adopts or activates artifacts. A second call does nothing.
+
+        Other service processes build the same runtime without opening it. The default has no engine to open.
+        """
+        return
+
+    def adopt(self, served: ServedArtifact) -> bool:
+        """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
+        runtime existed (an inference worker restart), and return whether the engine still serves it. Then the route
+        stays while the new owner serves the scenario again, and the next activation of the same artifact loads
+        nothing. The default can tell nothing about the engine: it returns False, so the route goes until the
+        scenario serves again, and the next activation loads."""
+        return False
 
     def stop_serving(self, served: ServedArtifact) -> None:
         """Stop serving ``served``, which no ``served_models`` row names any more: the engine frees what it holds

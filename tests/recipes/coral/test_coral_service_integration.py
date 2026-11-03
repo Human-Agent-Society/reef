@@ -19,6 +19,7 @@ import pytest
 reef_service = pytest.importorskip("reef.service.app", reason="requires a reef checkout")
 
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 
 from recipes.beta.coral.journal import CallJournal
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
@@ -95,12 +96,10 @@ async def _post_through(mw, scope, body: bytes):
 
 @pytest.mark.unit
 def test_full_loop_against_real_reef_service(tmp_path):
-    initial = tmp_path / "initial"
-    initial.mkdir()
     # The runtime's engine has an HTTP address, so the scenario has a served model; the stub answers for it.
     dispatcher = Dispatcher(
         Recipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -111,6 +110,7 @@ def test_full_loop_against_real_reef_service(tmp_path):
         reef_client = TestClient(TestServer(reef_service.create_app(dispatcher, inference_handler=_EchoBackend())))
         await reef_client.start_server()
         try:
+            await wait_for_inference(reef_client, "coral-demo")
             journal = CallJournal(tmp_path / "calls.jsonl")
             mw = ReefGatewayMiddleware(
                 _HttpForwarder(reef_client),

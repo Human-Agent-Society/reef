@@ -29,6 +29,7 @@ from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
+    InferenceArtifact,
     InferenceHandler,
     InferenceRuntime,
     InferenceStream,
@@ -48,7 +49,7 @@ def checkpoint_sampler_path(
 ) -> str | None:
     """The sampler that a release's checkpoint manifest names; ``None`` for the base model's own weights.
 
-    A LoRA's base artifact holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
+    A LoRA's default start holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
     Under full-parameter training (``full``), a release without a manifest has the base model's weights: the
     component's base, a reference to the base revision, or an import of the base's files (RFC #996).
     ``ValueError``: the release is not materialized; it has no manifest and is not full-parameter, or refers to
@@ -201,7 +202,7 @@ class TinkerInferenceHandler(InferenceHandler):
         self._sampler = sampler
         self._model = model
 
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Sample from the sampler that the request's ``model`` names (``address_model``)."""
         if path != "/v1/chat/completions":
             raise UpstreamStatusError("Tinker supports /v1/chat/completions", status=400)
@@ -211,7 +212,9 @@ class TinkerInferenceHandler(InferenceHandler):
         sampler_path, version = self._runtime.sampler_load(str(payload.get("model") or self._model))
         return sample_chat(self._sampler, sampler_path, payload, model=self._model, runtime_load_id=version)
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
         return chat_stream(await self.inference(artifact, path, payload), payload)
 
 

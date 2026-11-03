@@ -191,13 +191,22 @@ Each stage reads only its own ``config``.
        global-batch-size: "${training.config.global_batch_size}"
        disable-compute-advantages-and-returns: true
 
-.. config::
+.. container:: config
 
-   pipeline.record2sample.config.target | demonstration | ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
-   pipeline.record2sample.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The training component leaves a longer sample out and counts it in ``unrenderable_samples``. 0 disables the limit. Set it to the trainer's sequence length.
-   pipeline.sample2job.config.job_samples | required | the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
-   pipeline.sample2job.config.buffer_size | ``job_samples`` | the most samples that one job takes. Later samples wait in the sample store for the next jobs.
-   training.config.global_batch_size | none | the samples in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
+   ``pipeline.record2sample.config.target`` : demonstration
+       ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
+
+   ``pipeline.record2sample.config.max_tokens`` : 0
+       the maximum tokens in a sample, prompt and target together. The training component leaves a longer sample out and counts it in ``unrenderable_samples``. 0 disables the limit. Set it to the trainer's sequence length.
+
+   ``pipeline.sample2job.config.job_samples`` : required
+       the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
+
+   ``pipeline.sample2job.config.buffer_size`` : ``job_samples``
+       the most samples that one job takes. Later samples wait in the sample store for the next jobs.
+
+   ``training.config.global_batch_size`` : none
+       the samples in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
 
 A hybrid-thinking template such as Qwen3.5's or Qwen3.8's renders thinking
 mode unless ``enable_thinking`` is false: Qwen3.8 opens the system prompt with

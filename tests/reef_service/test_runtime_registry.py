@@ -4,8 +4,9 @@ import asyncio
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 
-from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import Artifact, InMemoryRepositoryBackend, SnapshotRef
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
@@ -93,11 +94,9 @@ inference:
         raise AssertionError("recipe resolution must not probe the runtime")
 
     monkeypatch.setattr("urllib.request.urlopen", unexpected_probe)
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = Dispatcher(
         build_named_recipe("qwen", config_directory=recipes),
-        InMemoryRepositoryBackend.factory(initial),
+        InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -130,11 +129,9 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 return _Backend()
 
             def activate_checkpoint(self, artifact, *, scenario=None) -> str:
-                return artifact.ref.release_id
+                return artifact.ref.revision
 
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        backend_factory = InMemoryRepositoryBackend.factory(initial)
+        backend_factory = InMemoryRepositoryBackend.factory()
         dispatchers = {
             recipe: Dispatcher(
                 Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
@@ -151,6 +148,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
             client = TestClient(TestServer(create_app(dispatcher)))
             await client.start_server()
             try:
+                await wait_for_inference(client, scenario)
                 response = await client.post(
                     "/v1/chat/completions",
                     headers={"x-reef-scenario": scenario},
@@ -167,15 +165,13 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "/v1/messages"])
 def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path) -> None:
-    """The ``none`` runtime has no HTTP engine address, so control writes no served_models row: every call is 404."""
+    """The ``none`` runtime schedules no inference startup and serves no model."""
 
     async def run() -> None:
         runtime = RuntimeRegistry().build({"type": "none"}, model_path="model")
-        initial = tmp_path / "initial"
-        initial.mkdir()
         dispatcher = Dispatcher(
             Recipe(name="sft", runtime=runtime),
-            InMemoryRepositoryBackend.factory(initial),
+            InMemoryRepositoryBackend.factory(),
             scenario_storage=SQLiteScenarioStorage(),
             coordination=memory_coordination(),
         )
@@ -183,9 +179,10 @@ def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
+            assert (await client.get("/reef/scenarios/roleplay/inference/status")).status == 404
             response = await client.post(path, headers={"x-reef-scenario": "roleplay"}, json={"messages": []})
             assert response.status == 404, await response.text()
-            assert "scenario 'roleplay' serves no model 'active'" in await response.text()
+            assert "has no inference startup request" in await response.text()
         finally:
             await client.close()
 
@@ -217,7 +214,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(ArtifactRef("id", "version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
             )
@@ -230,7 +227,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             }
 
             stream = await runtime.inference_handler.inference_stream(
-                Artifact(ArtifactRef("id", "version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
             )
@@ -272,7 +269,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(ArtifactRef("id", "rev", None), None),
+                Artifact(SnapshotRef("rev", None), None),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},
             )

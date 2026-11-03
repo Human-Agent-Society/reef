@@ -36,10 +36,8 @@ receive the job's data.
 
 from __future__ import annotations
 
-import json
 import math
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -51,7 +49,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.repository import BaseArtifactSource, ModelDirectory
+from reef.artifact.repository import DefaultStart, ModelDirectory
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
@@ -63,10 +61,17 @@ from reef.runtime.interfaces import (
     learning_rate_metrics,
     resolve_learning_rate_schedule_state,
 )
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.algos.registry import job_training, resolve_objective
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.checkpoints import (
+    START_STATE,
+    SlimeRound,
+    SlimeStart,
+    check_schedule_state,
+    write_rollout_start,
+)
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings, save_root
 from reef.train.slime_backend.distill import DistillAlgorithm
@@ -96,8 +101,6 @@ from reef.train.slime_backend.rollout_group import (
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
 
-#: A start directory's description of the weights a later job continues from.
-START_STATE = "start.json"
 #: The rollout a job trains and the job's optimizer steps through it, written before the workers train it.
 ROLLOUT_FILE = "rollout.json"
 #: The rollouts of a task job, in its job directory.
@@ -120,33 +123,13 @@ SLIME_NATIVE_FAMILY = "slime"
 NO_ROLLOUT_ENGINES = "--rollout-num-gpus=0"
 
 
-def check_objective_state(objective: str | None, algorithm_state: Mapping[str, Any], owner: str) -> None:
-    """Raise unless ``algorithm_state`` is a JSON object and ``objective`` names its objective exactly when it is non-empty."""
-    if not isinstance(algorithm_state, Mapping):
-        raise TypeError(f"{owner}.algorithm_state must be a mapping")
-    try:
-        json.dumps(dict(algorithm_state), allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{owner}.algorithm_state must encode as JSON: {exc}") from exc
-    if objective is not None and (not isinstance(objective, str) or not objective):
-        raise ValueError(f"{owner}.objective must be a non-empty string or None")
-    if (objective is None) != (not algorithm_state):
-        raise ValueError(f"{owner}.objective names the objective of a non-empty state, and only of one")
-
-
-def check_schedule_state(value: object, name: str) -> None:
-    """Raise ``TypeError`` unless ``value`` is a ``LearningRateScheduleState`` or ``None``."""
-    if value is not None and not isinstance(value, LearningRateScheduleState):
-        raise TypeError(f"{name} must be a LearningRateScheduleState or None")
-
-
 @dataclass(frozen=True)
 class WorkerTrainingSettings:
     """The loss family and learning-rate schedule state that the actor workers train with.
 
     ``loss_family`` is the name of a bound loss family, non-empty.
     ``schedule_state`` is the job's schedule progress, or ``None`` for Slime's
-    configured scheduler. ``SlimeTrainingComponent.train_and_save`` makes the
+    configured scheduler. ``SlimeJobRunner.train_and_save`` makes the
     value for each rollout; a value unequal to the workers' current one sends
     a worker switch with the rollout's data.
     """
@@ -158,100 +141,6 @@ class WorkerTrainingSettings:
         if not isinstance(self.loss_family, str) or not self.loss_family:
             raise ValueError("WorkerTrainingSettings.loss_family must be a non-empty string")
         check_schedule_state(self.schedule_state, "WorkerTrainingSettings.schedule_state")
-
-
-@dataclass(frozen=True)
-class SlimeStart:
-    """What a job continues from: the weights' rollout, the objective's state, and the schedule.
-
-    ``rollout_id`` is the non-negative rollout whose checkpoint holds the
-    weights, or ``None`` for the weights the workers loaded when they first
-    started, before they saved any rollout. ``objective`` names the objective
-    whose state ``algorithm_state`` (a mapping that encodes as a JSON object)
-    is; it is ``None`` exactly when the state is empty. A job continues that
-    state only when it trains the same objective; another objective starts
-    with an empty state. ``schedule_state`` is the learning-rate schedule's
-    progress, or ``None`` for Slime's configured scheduler. A start
-    directory keeps the value in ``start.json``; ``record_rollout`` writes
-    it, and ``check_job`` and ``run`` read it.
-    """
-
-    rollout_id: int | None
-    objective: str | None
-    algorithm_state: Mapping[str, Any]
-    schedule_state: LearningRateScheduleState | None
-
-    def __post_init__(self) -> None:
-        if self.rollout_id is not None and (
-            isinstance(self.rollout_id, bool) or not isinstance(self.rollout_id, int) or self.rollout_id < 0
-        ):
-            raise ValueError("SlimeStart.rollout_id must be a non-negative int or None")
-        check_objective_state(self.objective, self.algorithm_state, "SlimeStart")
-        check_schedule_state(self.schedule_state, "SlimeStart.schedule_state")
-
-    def write(self, directory: Path) -> None:
-        write_json(
-            directory / START_STATE,
-            {
-                "rollout_id": self.rollout_id,
-                "objective": self.objective,
-                "algorithm_state": dict(self.algorithm_state),
-                "schedule_state": None if self.schedule_state is None else self.schedule_state.to_dict(),
-            },
-        )
-
-    @classmethod
-    def read(cls, directory: Path) -> SlimeStart:
-        """Read the start in ``directory``; raise ``ValueError`` for a directory that holds none."""
-        value = read_json(directory / START_STATE)
-        if value is None:
-            raise ValueError(f"{directory} is not a Slime start: it has no {START_STATE}")
-        schedule = value["schedule_state"]
-        return cls(
-            value["rollout_id"],
-            value["objective"],
-            value["algorithm_state"],
-            None if schedule is None else LearningRateScheduleState.from_dict(schedule),
-        )
-
-    def state_for(self, objective: str) -> Mapping[str, Any]:
-        """The objective state a job of ``objective`` continues: this start's state for the same objective, else empty."""
-        return self.algorithm_state if self.objective == objective else {}
-
-
-@dataclass(frozen=True)
-class SlimeRound:
-    """One rollout of a job: the run of optimizer steps that the workers train and save as one checkpoint.
-
-    ``rollout_id`` is the non-negative id that names the rollout's Megatron
-    iteration and Hugging Face export. ``step`` is the job's optimizer steps
-    up to the end of the rollout, a positive int. ``schedule_state`` is the learning-rate
-    schedule's progress before the rollout and ``next_schedule`` after it:
-    both are ``None`` (Slime's configured scheduler), or both are set.
-    ``objective`` and ``algorithm_state`` are the
-    objective state that the rollout's start records, with the same
-    condition as in ``SlimeStart``: the job's next state on its last rollout,
-    and the state of the job's start on an earlier one. ``run`` makes the
-    value; ``train_and_save`` and ``record_rollout`` read it.
-    """
-
-    rollout_id: int
-    step: int
-    schedule_state: LearningRateScheduleState | None
-    next_schedule: LearningRateScheduleState | None
-    objective: str | None
-    algorithm_state: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        if isinstance(self.rollout_id, bool) or not isinstance(self.rollout_id, int) or self.rollout_id < 0:
-            raise ValueError("SlimeRound.rollout_id must be a non-negative int")
-        if isinstance(self.step, bool) or not isinstance(self.step, int) or self.step <= 0:
-            raise ValueError("SlimeRound.step must be a positive int")
-        check_schedule_state(self.schedule_state, "SlimeRound.schedule_state")
-        check_schedule_state(self.next_schedule, "SlimeRound.next_schedule")
-        if (self.schedule_state is None) != (self.next_schedule is None):
-            raise ValueError("SlimeRound has a schedule before and after the rollout, or neither")
-        check_objective_state(self.objective, self.algorithm_state, "SlimeRound")
 
 
 class SlimeJobs(LocalJobComponent):
@@ -274,7 +163,7 @@ class SlimeJobs(LocalJobComponent):
         root = self.root_of(args)
         self.root = root
         self.starts_root = root / "reef-starts"
-        # The start of the startup weights, the untrained checkpoint that the base artifact holds.
+        # The start of the startup weights, the untrained checkpoint that the default start holds.
         self.base_start_dir = self.starts_root / "base"
         if not (self.base_start_dir / START_STATE).exists():
             SlimeStart(None, None, {}, None).write(self.base_start_dir)
@@ -305,40 +194,66 @@ class SlimeJobs(LocalJobComponent):
             "adapter", int(self.args.megatron_lora_rank), tuple(sglang_lora_target_modules(self.args))
         )
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """The startup weights as a release: the model directory, or with LoRA an adapter whose weights are zero.
-
-        Full-weight releases are Hugging Face checkpoints, so the base artifact
-        is ``hf_checkpoint`` itself. LoRA releases hold the adapter in
-        ``adapter/``, so the base artifact holds the untrained adapter there:
-        every LoRA weight is zero, so it serves the startup weights unchanged.
-        """
+    @property
+    def default_start_inputs(self) -> dict[str, str]:
+        """The configuration that decides the startup weights: the model, and with LoRA the adapter's settings."""
         model = Path(self.args.hf_checkpoint).expanduser().resolve()
         if not self.lora:
-            return BaseArtifactSource(model_files=ModelDirectory(model), inputs={"model": str(model)})
+            return {"model": str(model)}
         from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
+
+        return {
+            "model": str(model),
+            "lora_rank": str(self.args.megatron_lora_rank),
+            "lora_alpha": str(self.args.megatron_lora_alpha),
+            "lora_target_modules": ",".join(sorted(sglang_lora_target_modules(self.args))),
+        }
+
+    def default_start(self) -> DefaultStart:
+        """The startup weights as a release: the model directory, or with LoRA an adapter whose weights are zero.
+
+        Full-weight releases are Hugging Face checkpoints, so the default start
+        is ``hf_checkpoint`` itself. LoRA releases hold the adapter in
+        ``adapter/``, so the default start holds the untrained adapter there:
+        every LoRA weight is zero, so it serves the startup weights unchanged.
+        """
+        inputs = self.default_start_inputs
+        if not self.lora:
+            return DefaultStart(model_files=ModelDirectory(Path(inputs["model"])), inputs=inputs)
         from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
 
         release = self.base_start_dir / "release"
         if not (release / ADAPTER_DIR).is_dir():
             save_untrained_lora_adapter(self.args, release / ADAPTER_DIR)
-        return BaseArtifactSource(
-            model_files=ModelDirectory(release),
-            inputs={
-                "model": str(model),
-                "lora_rank": str(self.args.megatron_lora_rank),
-                "lora_alpha": str(self.args.megatron_lora_alpha),
-                "lora_target_modules": ",".join(sorted(sglang_lora_target_modules(self.args))),
-            },
-        )
+        return DefaultStart(model_files=ModelDirectory(release), inputs=inputs)
 
     @property
     def base_start(self) -> str:
+        """The start of the startup weights, which the workers load when they first start."""
         return str(self.base_start_dir)
 
     @property
     def starts_from_releases(self) -> bool:
         return False
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        """The startup weights, when ``root`` holds the default start of this configuration; else ``ValueError``.
+
+        Slime's workers load ``hf_checkpoint`` when they start and cannot load a release, so they train a scenario
+        only when its root came from the same configured inputs.
+        """
+        configured = self.default_start_inputs
+        if root.source.kind != "default" or dict(root.source.inputs) != configured:
+            started = (
+                f"the item {root.source.item!r}"
+                if root.source.kind == "item"
+                else f"the inputs {dict(root.source.inputs)!r}"
+            )
+            raise ValueError(
+                f"Slime trains the weights that it starts with, from the inputs {configured!r}, but the scenario's root "
+                f"release came from {started}; create the scenario again with this configuration"
+            )
+        return self.base_start
 
     def import_start(self, release: Path) -> str:
         raise ValueError(
@@ -824,19 +739,7 @@ class SlimeJobRunner(SlimeJobs):
         if hf.is_symlink() or not hf.is_dir():
             raise RuntimeError(f"checkpoint is missing or unsafe: {hf}")
         self.next_rollout_id = max(self.next_rollout_id, rollout.rollout_id + 1)
-        start_dir = self.starts_root / f"rollout_{rollout.rollout_id}"
-        release = hf
-        if self.lora:
-            # Serving loads an adapter from a release's adapter/ directory.
-            release = start_dir / "release"
-            shutil.rmtree(release, ignore_errors=True)
-            shutil.copytree(hf, release / ADAPTER_DIR)
-        SlimeStart(
-            rollout.rollout_id,
-            rollout.objective,
-            rollout.algorithm_state,
-            schedule_state,
-        ).write(start_dir)
+        start_dir, release = write_rollout_start(self.starts_root, hf, rollout, schedule_state, lora=self.lora)
         self.loaded_rollout_id = rollout.rollout_id
         self.save_checkpoint(directory, SavedCheckpoint(rollout.step, str(start_dir), str(release), metrics))
 

@@ -5,185 +5,171 @@ import tempfile
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 
 from reef.artifact.artifact import (
+    ARTIFACT_ID_METADATA_KEY,
     Artifact,
     ArtifactConflict,
     ArtifactMaterializationError,
     ArtifactNotFound,
     ArtifactPublicationError,
-    ArtifactRef,
+    SnapshotRef,
+    artifact_components,
+    content_metadata,
 )
+from reef.artifact.files import directory_checksum
 from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
 
 
 class _InMemoryStorage:
-    def __init__(self, bootstrap_path: Path, root: Path | None) -> None:
-        source = Path(bootstrap_path)
-        if not source.is_dir():
-            raise ArtifactNotFound(f"bootstrap artifact directory does not exist: {source}")
-        self.root = Path(root) if root is not None else Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
+    def __init__(self, directory: Path | None) -> None:
+        self.root = Path(directory) if directory is not None else Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
         self.root.mkdir(parents=True, exist_ok=True)
-        self.lock = Lock()
-        self.refs: dict[str, ArtifactRef] = {}
+        self.lock = RLock()
+        self.refs: dict[str, SnapshotRef] = {}
         self.paths: dict[str, Path] = {}
         self.metadata: dict[str, dict[str, object]] = {}
-        self.head = self.copy_artifact(
-            source,
-            parent_release_id=None,
-            content_id=f"content:{uuid.uuid4().hex}",
-        )
-        self.base = self.head
+        #: The snapshot that each artifact ID is bound to.
+        self.artifacts: dict[str, SnapshotRef] = {}
 
-    def copy_artifact(
-        self,
-        source: Path,
-        *,
-        parent_release_id: str | None,
-        content_id: str | None = None,
-    ) -> ArtifactRef:
-        release_id = uuid.uuid4().hex
-        destination = self.root / release_id
+    def copy_artifact(self, source: Path, *, parent_revision: str | None) -> SnapshotRef:
+        revision = uuid.uuid4().hex
+        destination = self.root / revision
         try:
             shutil.copytree(source, destination)
         except OSError as exc:
             raise ArtifactPublicationError(f"failed to copy artifact into repository from {source}: {exc}") from exc
-        ref = ArtifactRef(
-            content_id=content_id or f"content:{release_id}",
-            release_id=release_id,
-            parent_release_id=parent_release_id,
-        )
-        self.refs[release_id] = ref
-        self.paths[release_id] = destination
+        ref = SnapshotRef(revision=revision, parent_revision=parent_revision)
+        self.refs[revision] = ref
+        self.paths[revision] = destination
         return ref
 
 
 class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
-    """One scenario's releases in process memory, over a base artifact copied from ``bootstrap_path``."""
+    """One scenario's releases in process memory, with their files under ``directory`` (a new temporary
+    directory when ``None``)."""
 
-    def __init__(
-        self,
-        scenario: str,
-        bootstrap_path: Path,
-        *,
-        root: Path | None = None,
-    ) -> None:
+    def __init__(self, scenario: str, *, directory: Path | None = None) -> None:
         if not scenario:
             raise ValueError("scenario must be non-empty")
-        self._storage = _InMemoryStorage(bootstrap_path, root)
+        self._storage = _InMemoryStorage(directory)
         self.root = self._storage.root
-        self._current: ArtifactRef | None = None
+        self._current: SnapshotRef | None = None
         self._metadata: dict[str, object] | None = None
 
     @classmethod
-    def factory(
-        cls,
-        bootstrap_path: Path,
-        *,
-        root: Path | None = None,
-    ) -> CachedRepositoryBackendFactory:
-        return _InMemoryRepositoryBackendFactory(cls, bootstrap_path, root)
+    def factory(cls, *, directory: Path | None = None) -> CachedRepositoryBackendFactory:
+        return _InMemoryRepositoryBackendFactory(cls, directory)
 
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
-        if release_id == "base":
-            return self._storage.base
-        if release_id is None or release_id == "head":
-            return self._storage.head
-        ref = self._storage.refs.get(release_id)
+    def resolve_snapshot(self, revision: str) -> SnapshotRef:
+        ref = self._storage.refs.get(revision)
         if ref is not None:
             return ref
-        raise ArtifactNotFound(f"release does not exist: {release_id}")
+        raise ArtifactNotFound(f"release does not exist: {revision}")
 
-    def fork(
-        self,
-        release_id: str | None = None,
-        *,
-        metadata: Mapping[str, object] | None = None,
-    ) -> ArtifactRef:
+    def index_snapshot(self, ref: SnapshotRef) -> None:
+        """Add immutable ID bindings for a previously stored snapshot."""
+        with self._storage.lock:
+            self.bind_artifact_ids(self.materialize(ref))
+
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
+        with self._storage.lock:
+            ref = self._storage.artifacts.get(artifact_id)
+        if ref is None:
+            raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
+        return ref
+
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        snapshot = self.materialize(ref)
+        component = artifact_components(snapshot)[artifact_id]
+        files = snapshot if component is None else snapshot.component(component)
+        if files.local_path is None:
+            raise ArtifactPublicationError("stored artifacts require local files")
+        return directory_checksum(files.local_path), content_metadata(snapshot, component)
+
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        with self._storage.lock:
+            existing = self._storage.artifacts.get(artifact_id)
+            if existing is None:
+                self._storage.artifacts[artifact_id] = ref
+            return existing
+
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
+        if root.local_path is None or not root.local_path.is_dir():
+            raise ArtifactPublicationError("a root release needs an existing local artifact directory")
         with self._storage.lock:
             if self._current is not None:
                 return self._current
-            selected = self.resolve_release(release_id)
-            ref = self._storage.copy_artifact(
-                self._storage.paths[selected.release_id],
-                parent_release_id=selected.release_id,
-                content_id=selected.content_id,
-            )
+            ref = self._storage.copy_artifact(root.local_path, parent_revision=None)
+            stored_metadata = {**root.storage_metadata, **dict(metadata)}
+            self._storage.metadata[ref.revision] = stored_metadata
+            self.bind_artifact_ids(self.materialize(ref))
             self._current = ref
-            self._metadata = dict(metadata or {})
-            self._storage.metadata[ref.release_id] = dict(self._metadata)
+            self._metadata = dict(stored_metadata)
             return ref
 
     def metadata(self) -> Mapping[str, object] | None:
         if self._current is None:
             return None
-        return dict(self._metadata or {})
+        return {key: value for key, value in (self._metadata or {}).items() if key != ARTIFACT_ID_METADATA_KEY}
 
-    def current(self) -> ArtifactRef:
+    def current(self) -> SnapshotRef:
         if self._current is None:
             raise ArtifactNotFound("repository has no current artifact")
         return self._current
 
-    def materialize(self, ref: ArtifactRef) -> Artifact:
-        path = self._storage.paths.get(ref.release_id)
+    def materialize(self, ref: SnapshotRef) -> Artifact:
+        path = self._storage.paths.get(ref.revision)
         if path is None or not path.is_dir():
-            raise ArtifactMaterializationError(f"release does not exist: {ref.release_id}")
-        return Artifact(ref, None, local_path=path, metadata=self._storage.metadata.get(ref.release_id))
+            raise ArtifactMaterializationError(f"release does not exist: {ref.revision}")
+        return Artifact(ref, None, local_path=path, metadata=self._storage.metadata.get(ref.revision))
 
     def publish(
         self,
         artifact: Artifact,
         *,
-        expected_parent: ArtifactRef,
+        expected_parent: SnapshotRef,
         advance_head: bool = True,
-    ) -> ArtifactRef:
+    ) -> SnapshotRef:
         if artifact.local_path is None or not artifact.local_path.is_dir():
             raise ArtifactPublicationError("artifact ref must contain an existing local artifact directory")
         with self._storage.lock:
             current = self.current()
-            if current.release_id != expected_parent.release_id:
+            if current.revision != expected_parent.revision:
                 raise ArtifactConflict(
-                    f"repository is at {current.release_id}, not expected parent {expected_parent.release_id}"
+                    f"repository is at {current.revision}, not expected parent {expected_parent.revision}"
                 )
             ref = self._storage.copy_artifact(
                 artifact.local_path,
-                parent_release_id=current.release_id,
-                content_id=artifact.ref.content_id,
+                parent_revision=current.revision,
             )
-            self._storage.metadata[ref.release_id] = dict(artifact.metadata)
+            self._storage.metadata[ref.revision] = artifact.storage_metadata
+            self.bind_artifact_ids(self.materialize(ref))
             # advance_head=False mints a pending release the head does not move to.
             if advance_head:
                 self._current = ref
-                self._metadata = dict(artifact.metadata)
-                self._storage.head = ref
+                self._metadata = artifact.storage_metadata
             return ref
 
-    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._storage.lock:
             current = self.current()
-            if self._storage.refs.get(ref.release_id) != ref or ref.parent_release_id != expected_parent.release_id:
+            if self._storage.refs.get(ref.revision) != ref or ref.parent_revision != expected_parent.revision:
                 raise ArtifactPublicationError("committed release differs from its staged identity or parent")
             if current == ref:
                 return
             if current != expected_parent:
                 raise ArtifactConflict("repository head changed before the staged release was committed")
             self._current = ref
-            self._metadata = dict(self._storage.metadata[ref.release_id])
-            self._storage.head = ref
+            self._metadata = dict(self._storage.metadata[ref.revision])
 
 
 class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):
-    def __init__(
-        self,
-        backend_type: type[InMemoryRepositoryBackend],
-        bootstrap_path: Path,
-        root: Path | None,
-    ) -> None:
+    def __init__(self, backend_type: type[InMemoryRepositoryBackend], directory: Path | None) -> None:
         super().__init__()
         self._backend_type = backend_type
-        self._bootstrap_path = Path(bootstrap_path)
-        self._root = None if root is None else Path(root)
+        self._directory = None if directory is None else Path(directory)
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
-        return self._backend_type(scenario, self._bootstrap_path, root=self._root)
+        return self._backend_type(scenario, directory=self._directory)

@@ -112,7 +112,7 @@ def dispatcher(tmp_path, *, experiment_tracker=None):
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("w0")
     runtime = ImportingComponent(tmp_path / "exported")
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     value = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
         backend_factory,

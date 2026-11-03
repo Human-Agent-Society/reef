@@ -25,6 +25,7 @@ from tests.support.harness_service import (
     job_backend,
     report_once,
     run_step,
+    seed_root,
 )
 from tests.support.harness_steps import (
     COMPONENT,
@@ -83,7 +84,7 @@ from reef.service.app import create_app
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
@@ -109,8 +110,8 @@ def flat(scores: list[dict[str, object]]) -> list[object]:
     return [score for task in scores for score in task["scores"]]
 
 
-def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
-    return ComponentReleases(TreeReleases(recipe.seed), COMPONENT)
+def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
+    return ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
 
 
 def backend_of(recipe: HarnessEvolutionRecipe) -> HarnessBackend:
@@ -145,7 +146,7 @@ def test_recipe_resolves_by_dotted_reference() -> None:
 def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -> None:
     built = from_config(evolution_config())
     assert isinstance(built.method, IdleMethod) and isinstance(built.scorer, FixedScorer)
-    assert built.collector is None and built.seed == HarnessTree({}) and built.base_artifact_source().files == {}
+    assert built.collector is None and built.seed == HarnessTree({}) and built.default_start().files == {}
     collecting = from_config(
         evolution_config(
             method={"module": f"{SUPPORT}:IdleMethod", "config": {}},
@@ -272,7 +273,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
         evaluation=evaluation, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
     )
     built = from_config(settings, runtime=runtime())
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built))
+    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     try:
         backend = job_backend(trainer)
         selection = built.build_policy(backend)
@@ -295,7 +296,7 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
 
 def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committed_releases(tmp_path: Path) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built))
+    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     # The trainer submits each step as a job of the recipe's harness component.
     assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is built.harness_component
     assert isinstance(built.harness_component, HarnessTrainingComponent)
@@ -303,7 +304,7 @@ def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committe
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
     trainer.close()
     with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed releases"):
-        built.build("demo", SQLiteRecordStore())
+        built.build("demo", SQLiteRecordStore(), root=seed_root(built))
 
 
 def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
@@ -321,7 +322,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     assert built.scenario_state_dirs("demo") == (state / "demo",)
     records = SQLiteRecordStore()
     for scenario in ("demo", "other"):
-        trainer = built.build(scenario, records, releases=releases_for(built))
+        trainer = built.build(scenario, records, releases=releases_for(built), root=seed_root(built))
         backend = job_backend(trainer)
         root = state / scenario / COMPONENT
         assert backend.history.root == root / "history" and backend.records.root == root / "steps"
@@ -332,11 +333,11 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
 # -- the seed ------------------------------------------------------------------------------------
 
 
-def test_the_seed_is_a_directory_whose_tree_is_the_base_release(tmp_path: Path) -> None:
+def test_the_seed_is_a_directory_whose_tree_is_the_root_release(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     PI_SEED.write(seed)
     built = from_config(evolution_config(seed=str(seed)))
-    assert built.seed == PI_SEED and built.base_artifact_source().files == dict(PI_SEED.files)
+    assert built.seed == PI_SEED and built.default_start().files == dict(PI_SEED.files)
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed must be a string"):
         from_config(evolution_config(seed=["rules.md"]))
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed: harness tree directory .* does not exist"):
@@ -422,12 +423,11 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
             scenario="s",
             releases=releases_for(built),
             eval_samples=TrainerSamples(samples),
-            seed=built.seed,
             layout=get_adapter("pi").layout,
         )
 
         def evaluation_tasks() -> list[str]:
-            tasks = loop.harness_parameters(batch, JobLoopState("base:x"))["evaluation_tasks"]
+            tasks = loop.harness_parameters(batch, JobLoopState("start"))["evaluation_tasks"]
             prepared = backend.prepare_step(
                 batch, HarnessState().to_json(), 0, head=head_of(backend), seed_tasks=tuple(tasks)
             )
@@ -442,7 +442,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         (second,) = samples.add_tasks((write_task(root, "held-2"),), "eval")
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
         with pytest.raises(RecipeConfigError, match="needs the sample store"):
-            built.build("s", SQLiteRecordStore(), releases=releases_for(built))
+            built.build("s", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     retired = {"tasks": [], "task_store": "imported-tasks"}
     with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
         from_config(evolution_config(evaluation=retired), runtime=runtime())
@@ -480,7 +480,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         return built
 
     def trainer_of(recipe: HarnessEvolutionRecipe) -> Trainer:
-        return recipe.build("demo", SQLiteRecordStore(), releases=releases_for(recipe))
+        return recipe.build("demo", SQLiteRecordStore(), releases=releases_for(recipe), root=seed_root(recipe))
 
     records = trainer_of(
         from_config(
@@ -1017,7 +1017,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
     built = harness_recipe(
         tmp_path, lambda workspace, services: next(patches, None), activation=PluginReference(NeverActivate, {})
     )
-    factory = harness_repository(tmp_path, built.base_artifact_source().files)
+    factory = harness_repository(tmp_path)
 
     def open_dispatcher() -> Dispatcher:
         return Dispatcher(
@@ -1033,10 +1033,10 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
     try:
         scenario = dispatcher.get_or_create_scenario("review")
         assert scenario is not None
-        served = scenario.current_artifact_ref()
+        served = scenario.current_snapshot()
         run_step(scenario, "1")
         tip = scenario.repository.require_checkpoint_artifact()
-        assert tip != served and scenario.current_artifact_ref() == served
+        assert tip != served and scenario.current_snapshot() == served
     finally:
         dispatcher.close()
 
@@ -1045,7 +1045,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
         recovered = reopened.get_or_create_scenario("review")
         assert recovered is not None
         assert recovered.repository.require_checkpoint_artifact() == tip
-        assert recovered.current_artifact_ref() == served
+        assert recovered.current_snapshot() == served
     finally:
         reopened.close()
 
@@ -1064,19 +1064,19 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
     try:
         scenario = dispatcher.get_or_create_scenario("review")
         assert scenario is not None
-        head_before = scenario.current_artifact_ref()
+        head_before = scenario.current_snapshot()
         result = run_step(scenario, "1")
         assert result.changed_kinds == {"rules"}
         record = last_made(scenario)
         assert record.operation == "training" and record.activated is False and record.checkpoint is True
-        assert scenario.current_artifact_ref() == head_before
+        assert scenario.current_snapshot() == head_before
         row = scenario.artifacts()[0]
-        assert row["release_id"] == row["artifact_id"] == record.artifact_ref.release_id
+        assert row["artifact_id"] == scenario.repository.resolve(record.snapshot).artifact_id
         assert row["active"] is False
-        tree = scenario.surface.files
-        held_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
+        components = scenario.components
+        held_files = components.read_files(scenario.resolve_artifact(row["artifact_id"])[1])
         assert any("marker" in text for text in held_files.values())
-        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
+        served_files = components.read_files(scenario.repository.resolve(scenario.current_snapshot()))
         assert not any("marker" in text for text in served_files.values())
 
         async def activate() -> None:
@@ -1090,7 +1090,7 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
                     "/reef/scenarios/review/activate", json={"artifact_id": row["artifact_id"]}
                 )
                 assert activated.status == 200
-                assert (await activated.json())["release_id"] == row["release_id"]
+                assert (await activated.json())["artifact_id"] == row["artifact_id"]
                 missing = await client.post("/reef/scenarios/review/activate", json={"artifact_id": "missing"})
                 assert missing.status == 404
                 listed = await client.get("/reef/scenarios/review/artifacts")
@@ -1099,11 +1099,11 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
                 await client.close()
 
         asyncio.run(activate())
-        assert scenario.current_artifact_ref() == record.artifact_ref
-        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
+        assert scenario.current_snapshot() == record.snapshot
+        served_files = components.read_files(scenario.repository.resolve(scenario.current_snapshot()))
         assert any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
-        assert last.operation == "activate" and last.artifact_ref == record.artifact_ref
+        assert last.operation == "activate" and last.snapshot == record.snapshot
         assert scenario.artifacts()[0]["active"] is True
     finally:
         dispatcher.close()
@@ -1137,14 +1137,14 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
             coordination=memory_coordination(),
         )
 
-    def rules_of(scenario, release_id: str) -> str:
-        """Every file text of the release ``release_id``, joined: the rules render into one of them."""
-        files = scenario.surface.files.read_files(scenario.release_queries.artifact_for_version(release_id))
+    def rules_of(scenario, artifact_id: str) -> str:
+        """Every file text of ``artifact_id``, joined: the rules render into one of them."""
+        files = scenario.components.read_files(scenario.resolve_artifact(artifact_id)[1])
         return "".join(files.values())
 
     first_recipe = recipe("r1", "r2")
     # One repository across the restart, as a durable backend keeps it.
-    factory = harness_repository(tmp_path, first_recipe.base_artifact_source().files)
+    factory = harness_repository(tmp_path)
     dispatcher = open_dispatcher(first_recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("start")
@@ -1153,14 +1153,17 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
             result = run_step(scenario, suffix)
             assert result.artifact is not None
         second, first = scenario.artifacts()[:2]
-        assert second["active"] and "marker r2" in rules_of(scenario, second["release_id"])
+        assert second["active"] and "marker r2" in rules_of(scenario, second["artifact_id"])
 
         started = dispatcher.train_from("start", first["artifact_id"])
         assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
         # What serves stays the second release.
-        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         record = scenario.store.history()[-1]
-        assert (record.operation, record.artifact_ref.release_id) == ("train_from", first["release_id"])
+        assert (record.operation, scenario.repository.resolve(record.snapshot).artifact_id) == (
+            "train_from",
+            first["artifact_id"],
+        )
     finally:
         dispatcher.close()
 
@@ -1169,14 +1172,17 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
     try:
         scenario = restarted.get_or_create_scenario("start")
         assert scenario is not None
-        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
         # chain tip, the second release.
         result = run_step(scenario, "3")
         assert result.artifact is not None
         newest = last_made(scenario)
-        assert newest.made_artifact and newest.artifact_ref.parent_release_id == second["release_id"]
-        evolved = rules_of(scenario, newest.artifact_ref.release_id)
+        assert (
+            newest.made_artifact
+            and newest.snapshot.parent_revision == scenario.resolve_artifact(second["artifact_id"])[1].ref.revision
+        )
+        evolved = rules_of(scenario, scenario.repository.resolve(newest.snapshot).artifact_id)
         assert "marker r1" in evolved and "marker r3" in evolved and "marker r2" not in evolved
     finally:
         restarted.close()
@@ -1213,30 +1219,30 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
 
     first_recipe = recipe("r1")
     # One repository across the restart, as a durable backend keeps it.
-    factory = harness_repository(tmp_path, first_recipe.base_artifact_source().files)
+    factory = harness_repository(tmp_path)
     dispatcher = open_dispatcher(first_recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("sync")
         assert scenario is not None
         assert run_step(scenario, "1").artifact is not None
-        trained = last_made(scenario).artifact_ref.release_id
+        trained = last_made(scenario).snapshot.revision
         # The person's tree: the seed's rules with a line of their own, without the trained marker.
         person = tmp_path / "person"
         PI_SEED.apply(TreePatch(changed_rules("Answer briefly.\nmarker person\n"))).write(person)
-        synced = dispatcher.sync_release(
+        synced = dispatcher.sync_artifact(
             "sync",
             Artifact.local(person),
             component=COMPONENT,
-            expected_release_id=scenario.current_artifact_ref().release_id,
+            expected_selection=scenario.artifact_selection(),
             metrics={"sync": {"files": 2}},
         )
         record = scenario.store.history()[-1]
-        assert (record.operation, record.artifact_ref, record.component) == ("sync", synced, None)
+        assert (record.operation, record.snapshot, record.component) == ("sync", scenario.current_snapshot(), None)
         assert record.checkpoint and record.activates and record.metrics["sync"] == {"files": 2}
-        assert scenario.current_artifact_ref() == synced
+        assert scenario.artifact_selection().components[COMPONENT] == synced.artifact_id
         assert scenario.artifact_status()[COMPONENT] == {
-            "active": synced.release_id,
-            "training_start": synced.release_id,
+            "active": synced.artifact_id,
+            "training_start": synced.artifact_id,
         }
     finally:
         dispatcher.close()
@@ -1245,17 +1251,15 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
     try:
         scenario = restarted.get_or_create_scenario("sync")
         assert scenario is not None
-        assert scenario.current_artifact_ref().release_id == synced.release_id
-        assert scenario.artifact_status()[COMPONENT]["training_start"] == synced.release_id
+        assert scenario.artifact_selection().components[COMPONENT] == synced.artifact_id
+        assert scenario.artifact_status()[COMPONENT]["training_start"] == synced.artifact_id
         # The next step evolves the synced tree: r2 joins the person's line, and r1 is not there. A sync is
         # published beside the chain, so the step publishes on the chain tip, the trained release.
         result = run_step(scenario, "2")
         assert result.artifact is not None
         newest = last_made(scenario)
-        assert newest.made_artifact and newest.artifact_ref.parent_release_id == trained
-        files = scenario.surface.files.read_files(
-            scenario.release_queries.artifact_for_version(newest.artifact_ref.release_id)
-        )
+        assert newest.made_artifact and newest.snapshot.parent_revision == trained
+        files = scenario.components.read_files(scenario.release_queries.artifact_for_version(newest.snapshot.revision))
         evolved = "".join(files.values())
         assert "marker person" in evolved and "marker r2" in evolved and "marker r1" not in evolved
     finally:
@@ -1290,7 +1294,7 @@ def test_a_publish_keeps_the_source_tree_and_the_jobs_tree_is_the_next_start(tmp
         # The job's kept tree outlives the commit: the next job starts from it.
         assert source is not None and source.is_dir()
         assert scenario.trainer.state["start"] == str(source)
-        committed = scenario.repository.resolve(scenario.current_artifact_ref())
+        committed = scenario.repository.resolve(scenario.current_snapshot())
         assert (committed.local_path / "rules.md").read_text() == "marker rules\n"
     finally:
         dispatcher.close()
@@ -1312,7 +1316,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     leak = TreePatch({"config/models.json": json.dumps({"providers": {"leak": {"apiKey": key}}}) + "\n"})
     patches = iter((leak,))
     built = harness_recipe(tmp_path, lambda workspace, services: next(patches, None))
-    repository = harness_repository(tmp_path, built.base_artifact_source().files)
+    repository = harness_repository(tmp_path)
     agent_record_dir = tmp_path / "agent-record"
 
     def dispatcher() -> Dispatcher:

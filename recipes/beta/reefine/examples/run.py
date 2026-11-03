@@ -43,6 +43,7 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlencode
 
 from reef_client import ReefClient, ReefClientError
 
@@ -162,7 +163,7 @@ def harness_manifest(client):
 
 
 def ensure_scenario(client):
-    """Create the scenario on its base release if it does not exist yet; its harness manifest."""
+    """Create the scenario, with its root release, if it does not exist yet; its harness manifest."""
     client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     return harness_manifest(client)
 
@@ -214,12 +215,13 @@ def requires_of(items):
 # -- the client: ask, install --------------------------------------------------------------------------------
 
 
-def installed_release():
-    """The release id of the tree under work/harness, from the release metadata file the install wrote."""
+def installed_artifact():
+    """The ID of the installed artifact, or None when nothing is installed. Install again to replace an older install."""
     try:
-        return json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8")).get("release_id")
+        metadata = json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return metadata.get("artifact_id")
 
 
 def unmet(items):
@@ -247,14 +249,14 @@ def unmet(items):
     return missing
 
 
-def install(release_id=None):
-    """Render the active release (or ``release_id``) for pi with a model binding at this Reef, into work/harness.
+def install(artifact_id=None):
+    """Render the active release (or ``artifact_id``) for pi with a model binding at this Reef, into work/harness.
 
-    Return the release id, or None when the release requires something this machine lacks.
+    Return the artifact ID, or None when the artifact requires something this machine lacks.
     """
     client = service_client()
     ensure_scenario(client)
-    query = "?form=source" + (f"&release_id={release_id}" if release_id else "")
+    query = "?" + urlencode({"form": "source", **({"artifact_id": artifact_id} if artifact_id else {})})
     manifest = client.get(f"/reef/harness{query}", extra_headers=scenario_headers())
     requires = manifest.get("requires") or []
     say(f"requires: {requires_of(requires)}")
@@ -276,10 +278,10 @@ def install(release_id=None):
         target = INSTALL_ROOT / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    record = {"release_id": manifest["release_id"], "files": sorted(files)}
+    record = {"artifact_id": manifest["artifact_id"], "files": sorted(files)}
     (INSTALL_ROOT / RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    say(f"installed release {manifest['release_id']} at {INSTALL_ROOT}")
-    return manifest["release_id"]
+    say(f"installed artifact {manifest['artifact_id']} at {INSTALL_ROOT}")
+    return manifest["artifact_id"]
 
 
 def ask(text):
@@ -290,7 +292,7 @@ def ask(text):
     screens, a mode that takes no instructions) is a stop, with the service's
     answer saying why."""
     say(f"ask: POST /reef/train {text!r}")
-    payload = {"text": text, "session": SCENARIO, "release_id": installed_release() or ""}
+    payload = {"text": text, "session": SCENARIO, "artifact_id": installed_artifact() or ""}
     try:
         answer, _ = service_client().post("/reef/train", SCENARIO, payload)
     except ReefClientError as exc:
@@ -329,8 +331,8 @@ def wait_for_step(client, text, before, deadline):
         for row in steps[shown:]:
             metrics = row.get("metrics") or {}
             whose = "" if request_text_of(row) in (None, text) else "; an earlier request's step"
-            release = str(row.get("release_id"))[:12]
-            say(f"step {metrics.get('steps', '?')}: {result_of(row)} (release {release}){whose}")
+            artifact_id = str(row.get("artifact_id"))[:12]
+            say(f"step {metrics.get('steps', '?')}: {result_of(row)} (artifact {artifact_id}){whose}")
         shown = max(shown, len(steps))
         for row in steps[before:]:
             if request_text_of(row) == text:
@@ -354,8 +356,8 @@ def activate(client, rows, row, run_dir):
     answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/activate", SCENARIO, body)
     if answer.get("artifact_id") != row["artifact_id"]:
         raise SystemExit(f"reef answered the activation without artifact {row['artifact_id']}: {answer}")
-    say(f"activated: release {answer['release_id']} is the active release")
-    return answer["release_id"]
+    say(f"activated: artifact {answer['artifact_id']} is active")
+    return answer["artifact_id"]
 
 
 # -- the show session -----------------------------------------------------------------------------------------
@@ -446,8 +448,8 @@ def demo(mode):
     run_dir.mkdir(parents=True)
     record_path = WORK / f"{mode}-{stamp}.json"
     record = {"mode": mode, "model": MODEL, "scenario": SCENARIO, "request": text, "started_at": time.time()}
-    installed_before = installed_release()
-    say(f"installed before the ask: release {installed_before}")
+    installed_before = installed_artifact()
+    say(f"installed before the ask: artifact {installed_before}")
     before = len(training_rows(catalog_rows(client)))
     started = time.monotonic()
     record["request_id"] = ask(text)

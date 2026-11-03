@@ -53,7 +53,7 @@ QUERY = {"scenario": SCENARIO, "key": KEY}
 
 def _record(text: str = TEXT, requires: list | None = None) -> dict:
     """The agent record as ``Dispatcher.read_record`` answers it for a ``POST /reef/train`` instruction."""
-    payload = {"text": text, "session": SESSION, "release_id": "rel-0", "requires": requires or []}
+    payload = {"text": text, "session": SESSION, "artifact_id": "rel-0", "requires": requires or []}
     return {
         "sequence": 1,
         "agent_record_id": RECORD_ID,
@@ -66,13 +66,12 @@ def _record(text: str = TEXT, requires: list | None = None) -> dict:
     }
 
 
-def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-0", **rest) -> dict:
+def _row(metrics: dict, *, artifact_id: str = "rel-1", parent: str | None = "rel-0", **rest) -> dict:
     """A catalog row of a one-component scenario, where the artifact id is the release id; activated unless
     ``rest`` says otherwise."""
     return {
-        "release_id": release_id,
-        "artifact_id": release_id,
-        "parent_release_id": parent,
+        "artifact_id": artifact_id,
+        "parent_artifact_id": parent,
         "operation": "training",
         "checkpoint": True,
         "active": False,
@@ -83,7 +82,7 @@ def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-
     }
 
 
-CREATION = _row({}, release_id="rel-0", parent=None, operation="creation")
+CREATION = _row({}, artifact_id="rel-0", parent=None, operation="creation")
 #: The creation while it serves: a newer release that passed the checks then waits for activation.
 SERVED_CREATION = {**CREATION, "active": True}
 
@@ -100,7 +99,7 @@ PARTS = {"rules.md": "rules", "extensions/notify.ts": "extension", "skills/old/S
 def _answered(**extra) -> dict:
     """The metrics of the row that answered the request, the trainer's ``training_request`` stamp included, and the
     part of each path its patch writes."""
-    request = {"id": RECORD_ID, "text": TEXT, "session": SESSION, "release_id": "rel-0", "requires": []}
+    request = {"id": RECORD_ID, "text": TEXT, "session": SESSION, "artifact_id": "rel-0", "requires": []}
     parts = {path: PARTS[path] for path in extra.get("patch", {}) if path in PARTS}
     return {"steps": 1, "training_request": request, "patch_parts": parts, **extra}
 
@@ -133,7 +132,7 @@ def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> 
     for href in re.findall(r'href="([^"]+)"', page):
         assert re.match(r"^/reef/harness/releases/\d+/page(\?|$)", href.replace("&amp;", "&")), href
     # A catalog with no active release leaves the crumb as text rather than a broken link.
-    inactive_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, activated=False)]
+    inactive_only = [_row(_answered(selected=True), artifact_id="rel-0", parent=None, activated=False)]
     bare = request_page(_record(), inactive_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
 
@@ -150,7 +149,7 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
     assert f'<p class="text">{TEXT}</p>' in request
     assert f'<dt>Request ID</dt><dd class="id">{RECORD_ID}</dd>' in request
     assert f'<dt>Session</dt><dd class="id">{SESSION}</dd>' in request
-    assert '<dt>Base release</dt><dd class="id">rel-0</dd>' in request
+    assert '<dt>Base artifact</dt><dd class="id">rel-0</dd>' in request
     assert '<time datetime="1970-01-01T00:16:40+00:00">01 Jan 1970, 00:16:40 UTC</time>' in request
     progress = _section(page, "Progress")
     assert '<span class="queued">Queued</span>' in progress
@@ -201,8 +200,8 @@ def test_a_settled_selected_request_carries_the_result_the_patch_and_the_link_wi
     assert _sections(page) == ["Request", "Result", "What changed"]
     selection_result = _section(page, "Result")
     assert '<span class="selected">Published</span>' in selection_result
-    assert "Published as release rel-1. GET /reef/harness serves it from now on." in selection_result
-    assert '<dt>Release</dt><dd class="id">rel-1</dd>' in selection_result
+    assert "Published as artifact rel-1. GET /reef/harness serves it from now on." in selection_result
+    assert '<dt>Artifact</dt><dd class="id">rel-1</dd>' in selection_result
     assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in selection_result
     assert "<h3>Error</h3>" not in selection_result
     changed = _section(page, "What changed")
@@ -239,18 +238,26 @@ def test_a_settled_selected_request_carries_the_result_the_patch_and_the_link_wi
 
 
 def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is_active() -> None:
-    inactive = _row(_answered(selected=True, patch=PATCH), activated=False)
+    inactive = _row(
+        _answered(selected=True, patch=PATCH),
+        artifact_id="artifact:123456789abc",
+        release_id="storage:unrelated",
+        activated=False,
+    )
     page = request_page(_record(), [SERVED_CREATION, inactive], now=1_100.0)
     assert '<span class="inactive">Waiting for activation</span>' in page
     assert "Proposed changes" in _sections(page)
-    assert "Release rel-1 is ready but does not serve yet." in page
+    assert "Artifact 12345678 is ready but does not serve yet." in page
+    assert "storage:unrelated" not in page
     assert REFRESH not in page
     # The next action is the activate call, runnable as it stands with the scenario header.
-    activate_call = html.escape(f'POST /reef/scenarios/{SCENARIO}/activate {json.dumps({"artifact_id": "rel-1"})}')
+    activate_call = html.escape(
+        f'POST /reef/scenarios/{SCENARIO}/activate {json.dumps({"artifact_id": "artifact:123456789abc"})}'
+    )
     assert f"<h3>Read this page, then activate it</h3><code>{activate_call}</code>" in page
     page = request_page(_record(), [CREATION, {**inactive, "active": True, "activated": True}], now=1_100.0)
     assert '<span class="selected">Published</span>' in page
-    assert "Published as release rel-1" in page
+    assert "Published as artifact 12345678" in page
     assert "What changed" in _sections(page) and "activate it</h3>" not in page
 
 
@@ -313,7 +320,7 @@ def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_its_candidat
         failed_stage="evaluating",
         patch=PATCH,
     )
-    failed = _row(metrics, release_id="rel-0")
+    failed = _row(metrics, artifact_id="rel-0")
     page = request_page(_record(), [CREATION, failed], now=1_100.0)
     result = _section(page, "Result")
     assert "The step failed during its evaluation" in result and "before evaluation" not in result
@@ -327,7 +334,7 @@ def test_a_settled_request_shows_what_the_method_said_and_why_a_step_failed() ->
     method raised shows the error in the Result."""
     summary = "Terminus has no session, so a mode cannot be entered.\n\nHow to use: nothing to use."
     skipped = _row(
-        _answered(skipped=UNCHANGED, method_summary=summary, method_notes={"declined": True}), release_id="rel-0"
+        _answered(skipped=UNCHANGED, method_summary=summary, method_notes={"declined": True}), artifact_id="rel-0"
     )
     page = request_page(_record(), [CREATION, skipped], now=1_100.0)
     assert REFRESH not in page and '<span class="skipped">No changes</span>' in page
@@ -341,7 +348,7 @@ def test_a_settled_request_shows_what_the_method_said_and_why_a_step_failed() ->
     # A published step without either shows the result and the change alone.
     plain = request_page(_record(), [CREATION, _row(_answered(selected=True, patch=PATCH))], now=1_100.0)
     assert _sections(plain) == ["Request", "Result", "What changed"]
-    failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison method"), release_id="rel-0")
+    failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison method"), artifact_id="rel-0")
     page = request_page(_record(), [CREATION, failed], now=1_100.0)
     assert '<span class="failed">Failed</span>' in page
     assert "The step failed before evaluation. Nothing was published" in _section(page, "Result")
@@ -356,7 +363,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_method
         {"name": "<x>", "kind": "service", "prompt": "Sign in to <x>"},
     ]
     method = {"method_summary": "<b>failed</b>", "method_notes": {"uncovered": ["<i>off</i>"]}}
-    row = _row(_answered(skipped=UNCHANGED, **method), release_id="rel-0")
+    row = _row(_answered(skipped=UNCHANGED, **method), artifact_id="rel-0")
     page = request_page(
         _record(text=text, requires=requires),
         [CREATION, row],
@@ -444,7 +451,7 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
         client = TestClient(TestServer(create_app(dispatcher, tokens="secret")))
         await client.start_server()
         try:
-            body = {"text": TEXT, "session": SESSION, "release_id": "rel-0"}
+            body = {"text": TEXT, "session": SESSION, "artifact_id": "rel-0"}
             response = await client.post("/reef/train", headers=headers, json=body)
             assert response.status == 200, await response.text()
             answer = await response.json()
@@ -537,7 +544,7 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             else:
                 assert settled["state"] == "selected"
                 assert '<span class="selected">Published</span>' in page
-                assert "Published as release " in page and "<code>GET /reef/harness</code>" in page
+                assert "Published as artifact " in page and "<code>GET /reef/harness</code>" in page
                 assert '<span class="tag operation-write">write</span><span class="node-id">rules.md</span>' in page
             assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in page
 

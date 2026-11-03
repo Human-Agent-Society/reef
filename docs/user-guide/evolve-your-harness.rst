@@ -7,7 +7,24 @@ model weights stay fixed, so it needs no GPU and works with a closed model
 endpoint. It fits when the problem is in the text around the model, not when
 the model cannot do the task.
 
-A deployment chooses three things:
+You evolve a harness in four stages:
+
+#. **Start Reef with a recipe.** ``reef serve -c deployment.yaml`` starts the
+   service. The deployment chooses the agent, the method and the evaluation
+   (see the table below).
+#. **Connect your agent.** ``reef-client harness connect`` installs the active
+   release as your agent's own plugin. It also sends the agent's model calls
+   through Reef.
+#. **Use the agent and score it.** Use the agent as you always do, and score
+   sessions with ``POST /reef/report``. When enough scored sessions wait, a
+   training step changes the harness and evaluates the change. The offline
+   way uses uploaded tasks in place of sessions.
+#. **Get the new release.** Reef stores each selected change as a new release.
+   Your next agent session syncs first: it sends back the files you changed
+   and installs the active release. A deployment can make a new release wait
+   for a person (see `Activate an inactive release`_).
+
+`Quickstart`_ gives the commands. The deployment chooses three things:
 
 .. list-table::
    :header-rows: 1
@@ -25,21 +42,20 @@ A deployment chooses three things:
 How it works
 ------------
 
-.. diagram::
-   :caption: The client installs the active release as the agent's own plugin, beside the person's own configuration, and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports or of uploaded train tasks, and makes a selected candidate the new head, which the activation rule activates.
+.. figure:: ../assets/harness-architecture-light.svg
+   :alt: Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces
 
-   <img class="fig-light" src="../assets/harness-architecture-light.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
-   <img class="fig-dark" src="../assets/harness-architecture-dark.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
+   What runs on your machine and in Reef. The numbers match the steps below.
 
 .. list-table::
    :header-rows: 1
    :widths: 8 92
 
    * - Step
-     - What happens (the numbers of the figure)
+     - What happens
    * - 1
      - ``reef-client harness run`` installs the active release and starts the
-       agent on the person's own configuration plus the release.
+       agent with your own configuration plus the release.
    * - 2
      - The agent's model calls go to ``/reef/scenarios/<scenario>/v1/*``.
        Reef forwards and records each one. When the agent exits, the client
@@ -48,20 +64,20 @@ How it works
      - The person, or a program that checks the work, scores the session with
        ``POST /reef/report``.
    * - 4
-     - When ``job_samples`` traces wait (``pipeline.sample2job.config``,
-       default 1), a training step starts.
+     - When ``job_samples`` traces wait (default 1), a training step starts
+       (see `Step data`_).
    * - 5
-     - The method edits a copy of the head, the training start: the newest
-       release that a step kept or that a sync committed (``step(context)``).
+     - The method edits a copy of the head: the newest release that a step
+       selected or that a sync committed (see `Choose or write a method`_).
    * - 6
      - Reef checks the new tree. An unchanged or invalid tree skips the step.
    * - 7
      - The candidate and the head play the same tasks, and the policy
-       compares their scores.
+       compares their scores (see `Evaluation: the publication policy`_).
    * - 8
-     - A selected candidate becomes a new release and the new head. The
-       activation rule serves it at once, or leaves it inactive until a
-       person activates it.
+     - A selected candidate becomes a new release and the new head. It serves
+       at once, or waits until a person activates it (see `Activate an
+       inactive release`_).
 
 Two ways to evolve
 ~~~~~~~~~~~~~~~~~~
@@ -86,7 +102,10 @@ Both ways feed the same training step (4 to 8).
      - every adapter with an npm ``install``
    * - Recipes
      - ACE, ReasoningBank, GEPA (AIME example)
-     - GEPA with ``TrainTaskJobData``, Meta-Harness (Terminal-Bench example)
+     - GEPA with ``TrainTaskJobData``
+
+A method can also learn from neither. Meta-Harness searches against fixed
+evaluation tasks, and a training request starts each step (`Step data`_).
 
 Quickstart
 ----------
@@ -94,9 +113,7 @@ Quickstart
 You need a Reef checkout (`Laptop, no GPU
 <../getting-started/installation.rst#laptop-no-gpu>`__), ``pip install
 reef-client``, a model endpoint that can call tools, and Node with ``npm``.
-The offline way also needs Docker. At startup, the deployment installs the
-adapter's pinned agent under ``~/.local/share/reef-harness/<adapter>``, or
-uses ``evolution.binary``. The tutorial's deployment listens on
+The offline way also needs Docker. The tutorial's deployment listens on
 ``127.0.0.1:8901`` without a token; with one, add ``-H "Authorization:
 Bearer $REEF_TOKEN"`` to each ``curl``.
 
@@ -251,45 +268,18 @@ adapter guide gives each adapter's `render paths
 <../developer-guide/harness-adapters.rst#render-paths>`__ and `model binding
 checks <../developer-guide/harness-adapters.rst#model-binding-checks>`__.
 
-The loop
---------
-
-``T`` is a harness tree, and ``A`` is the deployment's adapter.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 14 60 26
-
-   * - Part
-     - What it does
-     - Details
-   * - Data
-     - Records and uploaded tasks give ``D``, one step's traces or train
-       tasks.
-     - `Step data`_
-   * - Evolve
-     - ``method(T, D, s) = (T', s')``: the candidate ``T'`` and the method's
-       new state.
-     - `Write a harness method <../developer-guide/write-a-harness-method.rst>`__
-   * - Evaluation
-     - Runs of ``T'`` and ``T`` on the same tasks; the policy selects or
-       rejects ``T'``.
-     - `Evaluation: the publication policy`_
-   * - Release
-     - A selected ``T'`` becomes a git release and the head; the activation
-       rule decides whether it serves.
-     - `Activate an inactive release`_
-   * - Sync
-     - A client installs ``render_A(T)`` and sends back what a session
-       changed; Reef merges it onto the active release and commits a sync, which
-       serves at once and becomes the training start.
-     - `Use a published tree`_
+How a step runs
+---------------
 
 Step data
 ~~~~~~~~~
 
 A step starts when ``pipeline.sample2job.config.job_samples`` traces wait
 (default 1). One trace is one scored report, with every model call it names.
+In ``manual`` mode (``recipe.config.training_mode: manual``), a training
+request starts each step instead: ``POST /reef/train`` with a ``text`` that
+the method reads as an instruction (`Manual training
+<../reference/http-api.rst#manual-training>`__). The step needs no trace.
 To learn from inference traffic without reports, name the inference stage;
 each call is then one unscored trace:
 
@@ -312,10 +302,9 @@ split of the scenario's imported tasks:
 - The eval split is the evaluation's task source. The stage needs a scorer
   and task directories (see `Task directories`_).
 
-Upload tasks as task items whose metadata names the scenario in the ``train``
-or ``eval`` split (`Create task items
-<../reference/http-api.rst#create-task-items>`__), or import them with the
-deployment's ``task-import`` section.
+Upload the tasks as in `Offline: learn from uploaded tasks`_ (`Create task
+items <../reference/http-api.rst#create-task-items>`__), or import them with
+the deployment's ``task-import`` section.
 
 Evaluation: the publication policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -425,14 +414,7 @@ The deployment's ``evolution.adapter`` decides the agent; ``GET
 .. code:: bash
 
    pip install reef-client
-   reef-client harness connect --reef http://127.0.0.1:8900
-
-.. flow::
-   :loop: each run starts on the active release
-
-   connect :: sets the machine up, once
-   run :: syncs, starts the agent with its model calls on Reef, and sends its changes when it exits
-   Reef* :: records each model call; steps publish releases
+   reef-client harness connect --reef http://127.0.0.1:8901
 
 .. list-table::
    :header-rows: 1
@@ -485,10 +467,8 @@ Reef never reads your own configuration, and evaluates each release without
 it. Your configuration still reaches the model calls that Reef records, such
 as your rules and the names of your skills.
 
-A client of its own uses ``GET /reef/harness`` (``?release_id=`` for an
-older release, ``?form=source``, or ``?form=client&service_url=&root=`` for
-the plugin and its commands) and ``POST /reef/harness/import``, which
-commits a sync (see `HTTP API
+A client of your own reads a release with ``GET /reef/harness`` and commits a
+sync with ``POST /reef/harness/import`` (see `HTTP API
 <../reference/http-api.rst#importing-a-harness>`__).
 
 Activate an inactive release
@@ -521,25 +501,6 @@ activation, and `Train from an artifact
 <operate.rst#train-from-an-artifact>`__ describes how to make the steps train
 from another release.
 
-Serve the harness as a resident process
----------------------------------------
-
-The native agent can run as one process that follows the scenario's active
-release and mounts each new one between two steps:
-
-.. code:: bash
-
-   mkdir -p reef-harness/native
-   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "%s", "model": "qwen3-8b"}\n' \
-     "${REEF_TOKEN:-reef-no-token}" > reef-harness/native/models.json
-   reef-native serve --tree ./reef-harness --scenario harness-evolve-demo &
-   reef-native turn --tree ./reef-harness -p "fix the failing test in auth.py"
-
-``--follow pinned`` waits for ``reef-native mount <release_id>`` instead of
-mounting each new active release. The process runs tree code with your privileges, outside
-the evaluation's sandbox. See `Run and serve modes
-<../developer-guide/harness-adapters.rst#run-and-serve-modes>`__.
-
 Choose or write a method
 ------------------------
 
@@ -556,9 +517,9 @@ The deployment names one method in ``evolution.method``:
      - A reflection model rewrites one file from a minibatch's feedback.
      - ``compare``, mean
    * - `Meta-Harness <../../recipes/meta_harness/README.md>`__
-     - A model reads every earlier candidate and its scores, and writes a new
-       tree.
-     - ``compare``
+     - On each training request, a model reads every earlier candidate and its
+       scores, and writes a new tree.
+     - ``compare``, mean
    * - `ACE <../../recipes/ace/README.md>`__
      - A reflector and a curator edit a playbook in ``rules.md``.
      - ``none``

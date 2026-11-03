@@ -14,10 +14,11 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import threshold_pipeline
-from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend
+from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
 from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeReleases, changed_rules, harness_recipe
-from tests.support.runtime_stubs import RecordingComponent, StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples as produce_samples
+from tests.support.serving import wait_for_serving
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 from tests.train.test_reef_trainer_contracts import ExampleJobData
 
@@ -38,7 +39,7 @@ from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.backend import ComponentReleases, ReleaseFiles
+from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.instructions import ScenarioInstructions
 from reef.train.jobs import JobLoop
@@ -160,6 +161,7 @@ def build(records, instructions):
             pipeline_factory=partial(processor, job_samples=job_samples),
             job_loop=JobLoop(component, scenario="s"),
             training_mode=mode,
+            root=STUB_ROOT,
         )
         trainers.append(trainer)
         return trainer
@@ -205,7 +207,9 @@ def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
 
 def _trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
-    return recipe.build("s", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT))
+    return recipe.build(
+        "s", records, releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
+    )
 
 
 @pytest.mark.parametrize("processor", [reports_pipeline, records_pipeline])
@@ -731,7 +735,9 @@ def test_a_stored_hybrid_mode_loads_the_scenario_with_the_recipe_default(tmp_pat
 def _committed_row(dispatcher, text):
     """The metrics of the step that answered the instruction ``text``, newest first; a job's submission names the
     instruction too, and is passed over."""
-    for row in dispatcher.get_or_create_scenario("s").releases():
+    for row in dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+        dispatcher.get_or_create_scenario("s").scenario_step
+    ):
         metrics = row.get("metrics") or {}
         if metrics.get("training_job", {}).get("event") == "submitted":
             continue
@@ -921,9 +927,7 @@ def test_a_logless_scenario_ends_a_failed_instructions_job_and_runs_the_next_ins
         entered.set()
         release.wait(10)
 
-    initial = tmp_path / "initial"
-    initial.mkdir(parents=True, exist_ok=True)
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = Dispatcher(
         recipe_in("manual", tmp_path, method),
         factory,
@@ -999,6 +1003,7 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         component = self.training_component
         return Trainer.build(
@@ -1010,12 +1015,17 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             experiment_logger=experiment_logger,
             samples=samples,
             training_mode=self.training_mode,
+            root=root,
         )
 
 
 def _job_events(dispatcher):
     """The (instruction text, job event) of every committed row, oldest first."""
-    rows = reversed(dispatcher.get_or_create_scenario("s").releases())
+    rows = reversed(
+        dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+            dispatcher.get_or_create_scenario("s").scenario_step
+        )
+    )
     return [
         (metrics.get("training_request", {}).get("text"), metrics["training_job"]["event"])
         for row in rows
@@ -1058,14 +1068,19 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
         (job.data.request.text, [source_record_id(sample) for sample in job.data.samples])
         for job in component.submitted
     ] == [("one", ["a"]), ("two", ["b"])]
-    releases = dispatcher.get_or_create_scenario("s").releases()
+    releases = dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+        dispatcher.get_or_create_scenario("s").scenario_step
+    )
     failed = next(
         row["metrics"] for row in releases if row.get("metrics", {}).get("training_job", {}).get("event") == "failed"
     )
     assert failed["training_job"]["error"] == "RuntimeError: job failed"
     # Only the second job saved a checkpoint, and its release now serves.
-    assert runtime.served == "w2"
+    wait_for_serving(dispatcher, "s")
     scenario = dispatcher.get_or_create_scenario("s")
+    assert runtime.served == "w2"
+    assert scenario.served_artifact_id() == scenario.repository.resolve(scenario.current_snapshot()).artifact_id
+    assert (scenario.repository.resolve(scenario.current_snapshot()).local_path / "model.txt").read_text() == "w2"
     assert scenario.trainer.pipeline.training_mode == "manual"
     assert scenario.trainer.pending_instructions() == 0
 
@@ -1121,6 +1136,7 @@ def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again
         pipeline_factory=partial(threshold_pipeline, job_samples=1),
         job_loop=JobLoop(component, scenario="s"),
         training_mode="manual",
+        root=STUB_ROOT,
     )
     failure(records, "a")
     make_samples(trainer)
@@ -1156,7 +1172,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         seen.append(asked(workspace)[0])
 
     recipe = recipe_in("manual", tmp_path, method, max_steps=1)
-    head = ReleaseFiles("base", dict(recipe.seed.files))
+    head = ArtifactTextFiles("base", dict(recipe.seed.files))
     trainer = _trainer(recipe, records)
     file(instructions, "one")
     file(instructions, "two")
@@ -1309,46 +1325,45 @@ def test_manual_gives_each_instruction_the_failures_that_the_client_inserted(rec
 @pytest.mark.parametrize("mode", ["auto", "manual"])
 def test_every_mode_keeps_the_samples_beyond_the_buffer_for_later_jobs(caplog, mode):
     # A trace job takes one sample by default, and the default buffer holds the data of one job.
-    processor = reports_pipeline(PipelineContext("s", training_mode=mode))
-    assert processor.buffer_size == 1
+    with closing(reports_pipeline(PipelineContext("s", training_mode=mode))) as processor:
+        assert processor.buffer_size == 1
 
-    def fail(index):
-        processor.push(inference(f"inf-{index}"))
-        processor.push(
-            AgentRecord.create(
-                scenario="s",
-                request_type=RequestType.REPORT,
-                payload={"score": 0, "references": [f"inf-{index}"]},
-                agent_record_id=f"rep-{index}",
+        def fail(index):
+            processor.push(inference(f"inf-{index}"))
+            processor.push(
+                AgentRecord.create(
+                    scenario="s",
+                    request_type=RequestType.REPORT,
+                    payload={"score": 0, "references": [f"inf-{index}"]},
+                    agent_record_id=f"rep-{index}",
+                )
             )
-        )
 
-    with caplog.at_level(logging.WARNING, logger="reef.train.pipeline"):
-        for index in range(20):
-            fail(index)
-    # Every ready unit goes to the sample store, which consumes its records; nothing is released untrained.
-    assert processor.record2sample.ready_units == {}
-    retention = processor.releasable_record_ids()
-    assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
-    assert not caplog.records
-    if mode == "manual":
-        # The client chooses the oldest sample for each instruction.
-        processor.insert_into_buffer(sample_ids_of(processor, "inf-0"))
-        processor.queue_instructions([request("do-it")])
-    reserved = processor.build_job_data(1)
-    fail(20)
-    fail(21)
-    # The handed-out job data keeps the oldest sample; the samples beyond the buffer wait for later jobs.
-    assert [source_record_id(sample) for sample in reserved.samples] == ["inf-0"]
-    instruction_ids = {"do-it"} if mode == "manual" else set()
-    assert processor.acknowledge(reserved.data_id) == frozenset({"sample:rep-0:0", *instruction_ids})
-    if mode == "manual":
-        processor.insert_into_buffer(sample_ids_of(processor, "inf-1"))
-        processor.queue_instructions([request("do-it"), request("again")])
-    following = processor.build_job_data(1)
-    assert [source_record_id(sample) for sample in following.samples] == ["inf-1"]
-    assert len(processor.held) == 21
-    processor.close()
+        with caplog.at_level(logging.WARNING, logger="reef.train.pipeline"):
+            for index in range(20):
+                fail(index)
+        # Every ready unit goes to the sample store, which consumes its records; nothing is released untrained.
+        assert processor.record2sample.ready_units == {}
+        retention = processor.releasable_record_ids()
+        assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
+        assert not [record for record in caplog.records if record.name == "reef.train.pipeline"]
+        if mode == "manual":
+            # The client chooses the oldest sample for each instruction.
+            processor.insert_into_buffer(sample_ids_of(processor, "inf-0"))
+            processor.queue_instructions([request("do-it")])
+        reserved = processor.build_job_data(1)
+        fail(20)
+        fail(21)
+        # The handed-out job data keeps the oldest sample; the samples beyond the buffer wait for later jobs.
+        assert [source_record_id(sample) for sample in reserved.samples] == ["inf-0"]
+        instruction_ids = {"do-it"} if mode == "manual" else set()
+        assert processor.acknowledge(reserved.data_id) == frozenset({"sample:rep-0:0", *instruction_ids})
+        if mode == "manual":
+            processor.insert_into_buffer(sample_ids_of(processor, "inf-1"))
+            processor.queue_instructions([request("do-it"), request("again")])
+        following = processor.build_job_data(1)
+        assert [source_record_id(sample) for sample in following.samples] == ["inf-1"]
+        assert len(processor.held) == 21
 
 
 def test_manual_collects_the_failures_each_instruction_step_carries(tmp_path, open_dispatcher):

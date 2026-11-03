@@ -291,10 +291,7 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
-        # The base artifact is the training component's untrained checkpoint.
-        "context": RepositoryBackendContext(
-            work_dir=Path("/state/work"), cache_dir=Path("/state/cache"), base=component.base_artifact_source()
-        ),
+        "context": RepositoryBackendContext(work_dir=Path("/state/work"), cache_dir=Path("/state/cache")),
     }
 
 
@@ -503,6 +500,9 @@ class AdapterInference(StubInferenceRuntime):
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         return f"adapter:{scenario}:{self.served}"
 
+    def served_model_name(self, scenario: str) -> str:
+        return f"adapter:{scenario}:{self.served}"
+
     def serve(self, artifact: Artifact) -> str:
         return super().serve(artifact.materialize())
 
@@ -512,15 +512,13 @@ class AdapterInference(StubInferenceRuntime):
 def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter(
     tmp_path, monkeypatch, per_scenario_adapters
 ) -> None:
+    synchronization_timeout_seconds = 30
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("w0")
     component = HeldJobComponent(tmp_path / "checkpoints")
     runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, runtime)),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -532,10 +530,15 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         return (await response.json())["scenarios"]["math"]
 
     async def wait_for(client: TestClient, finished_jobs: int, running: bool) -> dict:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + synchronization_timeout_seconds
         while time.monotonic() < deadline:
             block = await math_status(client)
-            if block["finished_jobs"] == finished_jobs and (block["training_job"] is not None) == running:
+            if (
+                block["finished_jobs"] == finished_jobs
+                and (block["training_job"] is not None) == running
+                and block["served_artifact_id"]
+                == dispatcher.get_or_create_scenario("math").artifact_status()["weights"]["active"]
+            ):
                 return block
             await asyncio.sleep(0.01)
         pytest.fail(f"status did not reach {finished_jobs} finished jobs: {block}")
@@ -543,7 +546,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher))) as client:
             dispatcher.get_or_create_scenario("math")
-            idle = await math_status(client)
+            idle = await wait_for(client, finished_jobs=0, running=False)
             assert (idle["training_job"], idle["finished_jobs"]) == (None, 0)
             assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
             assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters
@@ -552,7 +555,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             dispatcher.accept_record(report(1))
             running = await wait_for(client, finished_jobs=0, running=True)
             # The training service hands the queued job to the component on its own thread.
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + synchronization_timeout_seconds
             while not component.submitted and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
             (job,) = component.submitted

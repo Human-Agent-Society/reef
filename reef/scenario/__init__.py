@@ -4,13 +4,13 @@ A scenario owns one runtime binding, trainer, artifact chain, and store session.
 The modules follow these responsibilities:
 
 - ``scenario`` exposes operations on one instance; ``binding`` freezes its
-  deployment-selected admission, surface, runtime, and inference backend.
+  deployment-selected components with their admission checks, and the runtime.
 - ``registry`` owns loaded instances, per-scenario locks, and scenario
   archival coordination. It keeps each scenario's settings through the
   injected storage. It asks its ``admission.ScenarioAdmission`` before it
   creates or loads a scenario; the dispatcher unloads an idle scenario to free a load slot.
-- ``factory`` registers the base artifact, validates release selectors,
-  opens storage, reconciles committed state, synchronizes and
+- ``factory`` writes a new scenario's root release (the recipe's default
+  start, or an artifact item), opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.
   It returns a complete ``Scenario`` and closes owned resources on failure.
 - ``committer`` orders commits, activations, new training starts, retries, and artifact publication

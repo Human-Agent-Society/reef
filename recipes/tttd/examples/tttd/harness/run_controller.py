@@ -52,7 +52,7 @@ class TTTDRunIdentity:
 class ScenarioTrainingFailure:
     step: int
     reason: str
-    release_ids: tuple[str, ...]
+    artifact_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -150,7 +150,7 @@ class ReefTrainingStatusClient(TrainingStatusReader):
                 raise RuntimeError(f"Reef status for scenario {scenario!r} has an invalid processor failure")
             failed_step = failure.get("step")
             reason = failure.get("reason")
-            versions = failure.get("release_ids")
+            versions = failure.get("artifact_ids")
             if (
                 not isinstance(failed_step, int)
                 or isinstance(failed_step, bool)
@@ -165,7 +165,7 @@ class ReefTrainingStatusClient(TrainingStatusReader):
                 ScenarioTrainingFailure(
                     step=failed_step,
                     reason=reason,
-                    release_ids=tuple(versions),
+                    artifact_ids=tuple(versions),
                 )
             )
         # The last commit's job outcome: a failed job ends with event "failed" and its error.
@@ -437,7 +437,7 @@ class TTTDRunController:
                 failure = next((item for item in last.failed_steps if item.step == failed_rollout), None)
                 if failure is not None:
                     raise TTTDRunStateError(
-                        f"TTTD step {failure.step} failed ({failure.reason}); releases={list(failure.release_ids)!r}"
+                        f"TTTD step {failure.step} failed ({failure.reason}); artifacts={list(failure.artifact_ids)!r}"
                     )
                 if last.finished_jobs > expected_step:
                     raise TTTDRunStateError(

@@ -201,7 +201,6 @@ class RunService:
         scenario: str,
         recipe_name: str,
         recipe: HarnessEvolutionRecipe,
-        bootstrap_tree: Path,
         run_dir: Path,
         upstream_url: str,
         upstream_key: str,
@@ -215,7 +214,7 @@ class RunService:
         self.base_url = f"http://127.0.0.1:{port}"
         self.dispatcher = Dispatcher(
             recipe,
-            InMemoryRepositoryBackend.factory(bootstrap_tree, root=run_dir / "artifacts"),
+            InMemoryRepositoryBackend.factory(directory=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
             scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
             coordination=memory_coordination(),
@@ -518,16 +517,11 @@ def main() -> None:
     key = provider_key()
     WORK.mkdir(parents=True, exist_ok=True)
     recipe_name, recipe = load_recipe(tasks, api_key=key, seed=args.seed, trainset_size=len(trainset))
-    bootstrap = WORK / "bootstrap"
-    if not bootstrap.is_dir():
-        # The base release holds the source tree, as every harness release does.
-        recipe.seed.write(bootstrap)
     with worker_runtime(recipe):
         service = RunService(
             scenario=SCENARIO,
             recipe_name=recipe_name,
             recipe=recipe,
-            bootstrap_tree=bootstrap,
             run_dir=WORK,
             upstream_url=aime.OPENAI_BASE_URL,
             upstream_key=key,

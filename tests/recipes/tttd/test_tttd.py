@@ -7,11 +7,10 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
 from recipes.tttd.objective import TttdObjective
-from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
@@ -40,13 +39,13 @@ def _inference(
     agent_record_id: str,
     token: int,
     *,
-    artifact_ref: ArtifactRef | None = None,
+    artifact_id: str | None = None,
 ) -> AgentRecord:
     return AgentRecord.create(
         scenario="discovery",
         request_type=RequestType.INFERENCE,
         agent_record_id=agent_record_id,
-        artifact_ref=artifact_ref,
+        artifact_id=artifact_id,
         payload={
             "input_ids": [10, 11],
             "response": {
@@ -164,7 +163,10 @@ def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict
 def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
     def build(job_samples: int) -> Trainer:
         return Trainer.build(
-            "discovery", SQLiteRecordStore(), pipeline_factory=lambda context: _processor(job_samples=job_samples)
+            "discovery",
+            SQLiteRecordStore(),
+            pipeline_factory=lambda context: _processor(job_samples=job_samples),
+            root=STUB_ROOT,
         )
 
     build(6).close()
@@ -269,16 +271,16 @@ def test_tttd_does_not_mix_complete_groups_from_different_steps() -> None:
 
 
 @pytest.mark.unit
-def test_tttd_accepts_one_durable_release_id() -> None:
+def test_tttd_accepts_one_artifact_id() -> None:
     processor = _processor()
-    artifact_ref = ArtifactRef("artifact-1", "checkpoint-1", None)
+    artifact_id = "checkpoint-1"
     for group in range(2):
         for rollout in range(3):
             processor.push(
                 _inference(
                     f"i-0-{group}-{rollout}",
                     100 + group * 3 + rollout,
-                    artifact_ref=artifact_ref,
+                    artifact_id=artifact_id,
                 )
             )
             processor.push(_report(0, group, rollout, float(group + rollout)))
@@ -287,7 +289,7 @@ def test_tttd_accepts_one_durable_release_id() -> None:
 
 
 @pytest.mark.unit
-def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
+def test_tttd_rejects_and_releases_a_step_spanning_artifact_ids(caplog) -> None:
     processor = _processor()
     with caplog.at_level("WARNING", logger="recipes.tttd.processor"):
         for group in range(2):
@@ -297,18 +299,18 @@ def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
                     _inference(
                         f"i-0-{group}-{rollout}",
                         100 + group * 3 + rollout,
-                        artifact_ref=ArtifactRef(f"artifact-{version}", version, None),
+                        artifact_id=version,
                     )
                 )
                 processor.push(_report(0, group, rollout, float(group + rollout)))
 
     assert not processor.ready(6)
-    assert "span releases" in caplog.text
+    assert "span artifacts" in caplog.text
     assert processor.status()["failed_steps"] == [
         {
             "step": 0,
-            "reason": "mixed_release_ids",
-            "release_ids": ["checkpoint-1", "checkpoint-2"],
+            "reason": "mixed_artifact_ids",
+            "artifact_ids": ["checkpoint-1", "checkpoint-2"],
         }
     ]
     retention = processor.releasable_record_ids()

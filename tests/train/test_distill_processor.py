@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 from tests.support.chat_templates import CharTemplate
 
-from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TeacherRequest, rendered_job_data
 from reef.core.plugins import PluginConfigError
@@ -57,7 +56,7 @@ def inference_record(agent_record_id: str, *, question: str = QUESTION) -> Agent
         request_type=RequestType.INFERENCE,
         payload=payload,
         agent_record_id=agent_record_id,
-        artifact_ref=ArtifactRef(content_id="science", release_id="slime-v3", parent_release_id=None),
+        artifact_id="slime-v3",
     )
 
 

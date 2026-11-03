@@ -1,7 +1,7 @@
 """The harness backend's step: from the head tree and the method's workspace to a published, rejected or skipped step.
 
 Each step runs through the phases the trainer runs (``backend_step``) on an
-in-memory commit history whose base release is the pi seed; the test
+in-memory commit history whose root release is the pi seed; the test
 records a published tree as the next release, as the scenario committer
 does. Tasks run the fake pi binary, whose score prefers rules that hold
 the marker.
@@ -75,7 +75,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
     result = backend_step(backend, data(1), HarnessState().to_json())
     # The step names the tree kinds its patch changes; the scenario's activation rule decides from them.
     assert result.metrics["selected"] is True and set(result.metrics["patch_parts"].values()) == {"rules"}
-    assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_release_id"] == "base"
+    assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_artifact_id"] == "base"
     assert result.metrics["method_summary"] == "added the marker" and result.metrics["method_notes"] == {
         "why": "it scores"
     }

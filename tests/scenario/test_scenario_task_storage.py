@@ -9,12 +9,12 @@ from pathlib import Path
 from tests.support._threshold_processor import threshold_pipeline
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.components import ScenarioComponents
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface
 from reef.train.pipeline import TrainingPipeline
 
 
@@ -36,7 +36,7 @@ def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path
     recipe = ContextRecipe()
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -57,7 +57,7 @@ def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sampl
         trainers = CompositeRecipe(components={"first": first, "second": second}).build_trainers(
             "math",
             session.records,
-            surface=Surface(),
+            components=ScenarioComponents(),
             algorithm_states={},
             task_storage=session.tasks,
             samples=session.samples,

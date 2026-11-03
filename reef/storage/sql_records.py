@@ -36,7 +36,6 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
-from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.atif_payloads import (
     AtifCall,
     CallShape,
@@ -47,7 +46,9 @@ from reef.core.atif_payloads import (
     canonical_json,
     provider_payload,
 )
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.errors import ReefError
+from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
+from reef.core.serving_config import ServingConfig
 from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent, call_key, sha256_text, trajectory_calls
 from reef.storage.records import (
     AppendResult,
@@ -58,9 +59,21 @@ from reef.storage.records import (
     StoredRecord,
 )
 from reef.storage.scenario import ScenarioSettings
+from reef.storage.segments import SegmentLine, SegmentPartition
 
 #: The most values in one SQL ``IN`` list, below the variable limit of every supported SQLite build.
 IN_LIST_SIZE = 500
+
+
+#: The columns that place a row's content in a segment, NULL for content in the row itself.
+SEGMENT_COLUMNS = ("segment_id", "segment_offset", "segment_length")
+
+
+def row_line(row: RowMapping) -> SegmentLine | None:
+    """The segment line of a row with the ``SEGMENT_COLUMNS``, or None for a row that holds its own content."""
+    if row["segment_id"] is None:
+        return None
+    return SegmentLine(row["segment_id"], int(row["segment_offset"]), int(row["segment_length"]))
 
 
 def batches[T](values: Iterable[T], size: int = IN_LIST_SIZE) -> Iterable[list[T]]:
@@ -128,14 +141,25 @@ class ScopedTable:
         return and_(true(), *(self.table.c[key] == value for key, value in self.scope.items()))
 
 
-def trajectory_node_table(metadata: MetaData, name: str, *scope_columns: Column[str]) -> Table:
+def trajectory_node_table(metadata: MetaData, name: str, *scope_columns: Column[str], segments: bool = False) -> Table:
     """Define the node table of ``TrajectoryNodes`` in ``metadata``, named ``name``.
 
     ``scope_columns`` are the columns of a store's namespace: none in a database of one store, ``storage_id`` in the
     PostgreSQL record database, ``owner`` in the data store. Each node is unique by them and ``node_sequence``, and
-    an index finds the nodes of a scenario by ``list_sha256``.
+    an index finds the nodes of a scenario by ``list_sha256``. With ``segments``, the table also has the
+    ``SEGMENT_COLUMNS``, and ``entries_json`` and ``call_json`` are NULL in a node that a segment holds.
     """
     scope_names = [column.name for column in scope_columns]
+    segment_columns = (
+        (
+            Column("segment_id", Text),
+            Column("segment_offset", BigInteger),
+            Column("segment_length", BigInteger),
+            Index(f"{name}_by_segment", *scope_names, "segment_id"),
+        )
+        if segments
+        else ()
+    )
     return Table(
         name,
         metadata,
@@ -148,11 +172,12 @@ def trajectory_node_table(metadata: MetaData, name: str, *scope_columns: Column[
         Column("list_sha256", String(64), nullable=False),
         Column("reply_count", BigInteger, nullable=False),
         Column("reply_sha256", String(64)),
-        Column("entries_json", Text, nullable=False),
+        Column("entries_json", Text, nullable=segments),
         Column("shape_json", Text),
-        Column("call_json", Text, nullable=False),
+        Column("call_json", Text, nullable=segments),
         Column("body_bytes", BigInteger, nullable=False),
         Column("record_count", BigInteger, nullable=False),
+        *segment_columns,
         Index(f"{name}_by_prefix", *scope_names, "scenario", "list_sha256"),
         Index(f"{name}_by_record", *scope_names, "scenario", "agent_record_id"),
     )
@@ -198,6 +223,21 @@ class NodeContent(NamedTuple):
         )
 
 
+def node_line(entries_json: str, shape_json: str | None, call_json: str) -> str:
+    """The segment line of a trajectory node: one JSON object of its entries, its root shape or null, and its call."""
+    return f'{{"call":{call_json},"entries":{entries_json},"shape":{shape_json or "null"}}}'
+
+
+def node_texts(line: str) -> tuple[str, str | None, str]:
+    """The ``entries_json``, ``shape_json`` and ``call_json`` of a node from its segment line (``node_line``)."""
+    node = json.loads(line)
+    return (
+        canonical_json(node["entries"]),
+        None if node["shape"] is None else canonical_json(node["shape"]),
+        canonical_json(node["call"]),
+    )
+
+
 @dataclass(frozen=True)
 class TrajectoryNodes:
     """The trajectory nodes of one store's records, in one scoped node table (RFC #1054).
@@ -221,6 +261,10 @@ class TrajectoryNodes:
     * ``record_count`` is 1 while the node's record is stored, plus the number of child nodes. A node whose count
       reaches 0 is deleted, so a node stays while a stored record needs its entries.
 
+    ``segments`` is None, or the segment partition of a table with the ``SEGMENT_COLUMNS``. There, a node whose
+    ``entries_json`` is NULL keeps its ``entries_json``, ``shape_json`` and ``call_json`` in a segment line
+    (``node_line``).
+
     Purpose: a SQL store makes it for its scope. The store adds a node when it writes a record (``add``), reads the
     ATIF calls of records back (``contents``) and releases the nodes of records that it deletes (``release``), in
     the same transaction. Writers of one scope must be serialized: ``add`` reads the candidate parents before it
@@ -228,6 +272,7 @@ class TrajectoryNodes:
     """
 
     nodes: ScopedTable
+    segments: SegmentPartition | None = None
 
     def add(
         self,
@@ -320,19 +365,38 @@ class TrajectoryNodes:
     def contents(self, connection: Connection, node_sequences: Iterable[int]) -> dict[int, NodeContent]:
         """The content of each node of ``node_sequences``: the entries of its path, its root's shape and its call."""
         wanted = set(node_sequences)
+        columns = ("entries_json", "shape_json", "call_json")
+        rows = self.paths(connection, wanted, *columns, *(SEGMENT_COLUMNS if self.segments is not None else ()))
+        texts: dict[int, tuple[str, str | None, str]] = {}
+        packed: dict[int, SegmentLine] = {}
+        for row in rows:
+            sequence = int(row["node_sequence"])
+            if row["entries_json"] is not None:
+                texts[sequence] = (row["entries_json"], row["shape_json"], row["call_json"])
+                continue
+            line = None if self.segments is None else row_line(row)
+            if line is None:
+                raise ReefError(f"trajectory node {sequence} is in a segment, but the store has no segment store")
+            packed[sequence] = line
+        if packed and self.segments is not None:
+            for sequence, text in zip(packed, self.segments.read_text(list(packed.values())), strict=True):
+                texts[sequence] = node_texts(text)
         paths: dict[int, tuple[tuple[str, ...], str]] = {}
         contents: dict[int, NodeContent] = {}
         # A parent has a smaller sequence than its children, so it comes first.
-        for row in self.paths(connection, wanted, "entries_json", "shape_json", "call_json"):
+        for row in rows:
             sequence = int(row["node_sequence"])
             parent = row["parent_sequence"]
+            entries_json, shape_json, call_json = texts[sequence]
             if parent is None:
-                paths[sequence] = ((row["entries_json"],), row["shape_json"])
+                if shape_json is None:
+                    raise ValueError(f"the root node {sequence} has no shape")
+                paths[sequence] = ((entries_json,), shape_json)
             else:
-                above, shape_json = paths[int(parent)]
-                paths[sequence] = ((*above, row["entries_json"]), shape_json)
+                above, root_shape_json = paths[int(parent)]
+                paths[sequence] = ((*above, entries_json), root_shape_json)
             if sequence in wanted:
-                contents[sequence] = NodeContent(*paths[sequence], row["call_json"])
+                contents[sequence] = NodeContent(*paths[sequence], call_json)
         return contents
 
     def release(self, connection: Connection, node_sequences: Iterable[int]) -> None:
@@ -625,18 +689,18 @@ class SQLRecordRetention:
 def content_sha256(item: AgentRecord) -> str:
     """The retry fingerprint of a record: the SHA-256 of its canonical content without ``created_at``.
 
-    The content holds the whole payload, so the fingerprint does not depend on how a store splits the payload,
-    and the fingerprints in older stores stay valid. A client retrying with its own agent_record_id regenerates
+    The content holds the whole payload and the artifact ID, so its fingerprint
+    does not depend on how a store splits the payload. A client retrying with its own agent_record_id regenerates
     the timestamp, so a timestamp difference alone must dedup, not conflict.
     """
-    artifact = item.artifact_ref
+    artifact = item.artifact_id
     content = {
         "agent_record_id": item.agent_record_id,
         "scenario": item.scenario,
         "request_type": item.request_type.value,
         "payload_json": SQLRecordStore._json(dict(item.payload)),
         "references_json": SQLRecordStore._json(item.references),
-        "artifact_json": None if artifact is None else SQLRecordStore._json(encode_artifact_ref(artifact)),
+        "artifact_json": None if artifact is None else SQLRecordStore._json(artifact),
     }
     return hashlib.sha256(SQLRecordStore._json(content).encode("utf-8")).hexdigest()
 
@@ -699,10 +763,10 @@ class SQLRecordStore(RecordStore):
     @classmethod
     def _encode(cls, item: AgentRecord) -> tuple[EncodedRecord, CallKey | None]:
         """The row of ``item``, and its payload as an ATIF call."""
-        artifact = item.artifact_ref
+        artifact = item.artifact_id
         artifact_json = None
         if artifact is not None:
-            artifact_json = cls._json(encode_artifact_ref(artifact))
+            artifact_json = cls._json(artifact)
         key = call_key(item.payload)
         shape = None if key is None else call_shape(item.payload)
         encoded = EncodedRecord(
@@ -729,9 +793,6 @@ class SQLRecordStore(RecordStore):
         records: list[AgentRecord] = []
         for row in rows:
             raw_artifact = json.loads(row["artifact_json"]) if row["artifact_json"] is not None else None
-            artifact = None
-            if raw_artifact is not None:
-                artifact = decode_artifact_ref(raw_artifact)
             if row["message_field"] is not None:
                 payload = provider_payload(contents[int(row["sequence"])].atif_call())
             else:
@@ -744,7 +805,7 @@ class SQLRecordStore(RecordStore):
                     payload=payload,
                     created_at=row["created_at"],
                     references=tuple(json.loads(row["references_json"])),
-                    artifact_ref=artifact,
+                    artifact_id=decode_record_artifact_id(raw_artifact, payload),
                 )
             )
         return tuple(records)
@@ -760,6 +821,13 @@ class SQLRecordStore(RecordStore):
     def _content(cls, encoded: EncodedRecord) -> dict[str, object]:
         """The encoded fields that define row content, excluding ``created_at`` (``content_sha256``)."""
         return {name: value for name, value in encoded._asdict().items() if name != "created_at"}
+
+    def matches_content(self, connection: Connection, row: RowMapping, encoded: EncodedRecord) -> bool:
+        """Compare retry content after translating an older row's artifact locator to its ID."""
+        stored = self.row_content(row)
+        if stored.artifact_json != encoded.artifact_json:
+            stored, _ = self._encode(self._decode(connection, [row])[0])
+        return self._content(stored) == self._content(encoded)
 
     def append(self, item: AgentRecord) -> AgentRecord:
         return self.append_result(item).item
@@ -799,7 +867,7 @@ class SQLRecordStore(RecordStore):
             )
             if row is None:
                 return None
-            if self._content(self.row_content(row)) != self._content(encoded):
+            if not self.matches_content(connection, row, encoded):
                 raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
             return self._decode(connection, [row])[0]
 
@@ -862,7 +930,7 @@ class SQLRecordStore(RecordStore):
                     .mappings()
                     .first()
                 )
-                if existing is not None and self._content(self.row_content(existing)) != self._content(encoded):
+                if existing is not None and not self.matches_content(connection, existing, encoded):
                     raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
                 self._insert(
                     connection,
@@ -894,7 +962,7 @@ class SQLRecordStore(RecordStore):
             .mappings()
             .first()
         )
-        if existing is None or self._content(self.row_content(existing)) != self._content(encoded):
+        if existing is None or not self.matches_content(connection, existing, encoded):
             raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
         stored = self._decode(connection, [existing])[0]
         live = self._live_records.get(item.agent_record_id)
@@ -1143,6 +1211,7 @@ class SQLRecordStore(RecordStore):
             artifact_evaluation=values.get("artifact_evaluation"),
             activation=values.get("activation"),
             owner=values.get("owner"),
+            serving_config=ServingConfig.from_json(values.get("serving_config", {})),
         )
 
     def write_settings(self, settings: ScenarioSettings) -> None:
@@ -1155,6 +1224,7 @@ class SQLRecordStore(RecordStore):
             ),
             "activation": None if settings.activation is None else dict(settings.activation),
             "owner": settings.owner,
+            "serving_config": settings.serving_config.to_json() or None,
         }
         rows = [
             {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}

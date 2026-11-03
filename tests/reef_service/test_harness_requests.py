@@ -11,18 +11,19 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher
+from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher, seed_root
 from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
 from tests.support.samples_service import make_samples
 
 from reef.core.plugins import PluginReference
-from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires
+from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires, required_by
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
+from reef.scenario import Scenario
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
@@ -79,11 +80,11 @@ def request_rows(scenario) -> list[dict]:
     return sorted(rows, key=lambda row: row["step"])
 
 
-async def committed(scenario, count: int, seconds: float = 30.0) -> list[dict]:
-    """The request rows once ``count`` of them are committed; the worker runs the steps on its own thread."""
+async def committed(scenario: Scenario, count: int, seconds: float = 30.0) -> list[dict]:
+    """Return ``count`` request rows after the current training job finishes committing."""
     for _ in range(int(seconds / 0.05)):
         rows = request_rows(scenario)
-        if len(rows) >= count:
+        if len(rows) >= count and not scenario.trainer.job_running and not scenario.trainer.has_pending_commit:
             return rows
         await asyncio.sleep(0.05)
     raise AssertionError(f"{count} request step(s) did not commit in {seconds}s: {request_rows(scenario)}")
@@ -113,7 +114,7 @@ def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_
             assert response.status == 200, await response.text()
             (row,) = await committed(scenario, 1)
             request = row["metrics"]["training_request"]
-            assert request["text"] == "run tests first" and request["release_id"] == "rel-3"
+            assert request["text"] == "run tests first" and request["artifact_id"] == "rel-3"
             assert request["session"] == "3f1c2a9d0b7e"
             # A request carries its requires list everywhere it goes, empty when the person named nothing.
             assert request["requires"] == []
@@ -136,7 +137,7 @@ def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_
 
 
 def test_training_request_parses_requires_and_names_the_first_bad_item() -> None:
-    base = {"text": "text me when you are blocked", "session": "s", "release_id": "r"}
+    base = {"text": "text me when you are blocked", "session": "s", "artifact_id": "r"}
     plain = TrainingRequest.from_dict(base)
     assert plain.requires == () and plain.to_dict() == {**base, "requires": []}
     items = [
@@ -183,7 +184,7 @@ def test_training_request_parses_requires_and_names_the_first_bad_item() -> None
 def test_an_env_item_names_a_shell_identifier_in_its_check_else_its_name() -> None:
     """A change reads the variable an env item names from the environment, so the check when present, else the
     name, is a shell identifier; the other kinds keep a command as their check."""
-    base = {"text": "text me when you are blocked", "session": "s", "release_id": "r"}
+    base = {"text": "text me when you are blocked", "session": "s", "artifact_id": "r"}
     named = [{"name": "twilio.sid", "kind": "env", "check": "TWILIO_SID"}, {"name": "SMTP2", "kind": "env"}]
     assert TrainingRequest.from_dict({**base, "requires": named}).to_dict()["requires"] == named
     for requires, message in (
@@ -449,7 +450,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
 ) -> None:
     """The backend's dict wins, since it carries what the method added; a step the backend skipped before it
     merged the list gets the request as accepted, requires included."""
-    payload = {"text": "text me", "session": "session-1", "release_id": "release-1", "requires": REQUIRES}
+    payload = {"text": "text me", "session": "session-1", "artifact_id": "release-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
 
     def adding(workspace, services):
@@ -462,7 +463,12 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
         (tmp_path / str(index)).mkdir()
         recipe = manual_recipe(tmp_path / str(index), method)
         records = SQLiteRecordStore()
-        trainer = recipe.build("agents", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT))
+        trainer = recipe.build(
+            "agents",
+            records,
+            releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT),
+            root=seed_root(recipe),
+        )
         try:
             trainer.queue_instructions([TrainingRequest.from_dict(payload, request_id="ask-1")])
             make_samples(trainer)
@@ -476,7 +482,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
 
 
 def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) -> None:
-    """The seed's base release requires nothing; the release a request with two items published carries them;
+    """The seed's root release requires nothing; the release a request with two items published carries them;
     the manifest of each carries that release's own list."""
 
     def method(workspace, services):
@@ -621,10 +627,10 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
             waiting = await client.get("/reef/harness", params={"release_id": inactive["release_id"]}, headers=headers)
             assert (await waiting.json())["requires"] == REQUIRES
             response = await client.post(
-                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["release_id"]}
+                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["artifact_id"]}
             )
             assert response.status == 200
-            assert (await response.json())["release_id"] == inactive["release_id"]
+            assert (await response.json())["artifact_id"] == inactive["artifact_id"]
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["release_id"] == inactive["release_id"] and head["requires"] == REQUIRES
             assert head["evaluation"] == inactive["metrics"]
@@ -684,3 +690,31 @@ def test_a_binary_item_names_the_program_and_its_check_stays_optional() -> None:
     # An empty check is refused for a binary as for any other kind.
     with pytest.raises(ValueError, match=r"requires\[0\]\.check"):
         parse_requires([{"name": "pdftotext", "kind": "binary", "check": "   "}])
+
+
+def test_requirements_follow_component_artifact_parents_instead_of_snapshot_order() -> None:
+    rows = [
+        {
+            "artifact_id": "artifact:root",
+            "parent_artifact_id": None,
+            "release_id": "storage:root",
+            "metrics": {"training_request": {"requires": [{"name": "ROOT", "kind": "env"}]}},
+        },
+        {
+            "artifact_id": "artifact:sibling",
+            "parent_artifact_id": "artifact:root",
+            "release_id": "storage:sibling",
+            "metrics": {"training_request": {"requires": [{"name": "SIBLING", "kind": "env"}]}},
+        },
+        {
+            "artifact_id": "artifact:selected",
+            "parent_artifact_id": "artifact:root",
+            "release_id": "storage:selected",
+            "parent_release_id": "storage:sibling",
+            "metrics": {"training_request": {"requires": [{"name": "SELECTED", "kind": "env"}]}},
+        },
+    ]
+    assert required_by(rows, "artifact:selected") == [
+        {"name": "ROOT", "kind": "env"},
+        {"name": "SELECTED", "kind": "env"},
+    ]

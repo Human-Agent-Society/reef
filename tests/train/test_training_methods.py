@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
 
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.runtime.interfaces import (
@@ -124,7 +124,7 @@ def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> No
     recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=ONE_SAMPLE_JOBS)
     sft = {"method": TrainingMethod("sft").to_dict()}
     assert recipe.parameters_by_kind() == {"trajectory": sft, "task": sft}
-    trainer = recipe.build("scenario", SQLiteRecordStore())
+    trainer = recipe.build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
     stage = trainer.pipeline.sample2job
     assert stage.job_parameters(batch("b")) == stage.job_parameters(task("t")) == sft
     assert stage.experiment_config() == {"job_parameters": {"trajectory": sft, "task": sft}}
@@ -144,7 +144,9 @@ def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default
 
     component = StubTrainingComponent()
     trainer = SupervisedThenPolicy(**runtime_bindings(component), pipeline_stages=ONE_SAMPLE_JOBS).build(
-        "scenario", SQLiteRecordStore()
+        "scenario",
+        SQLiteRecordStore(),
+        root=STUB_ROOT,
     )
     loop, stage = trainer.job_loop, trainer.pipeline.sample2job
     assert loop is not None

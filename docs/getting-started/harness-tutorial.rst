@@ -1,10 +1,9 @@
 Tutorial: evolve your agent's harness
 =====================================
 
-.. page::
-   :for: anyone who wants Reef to improve the coding agent they already use
-   :needs: a Reef checkout (`Laptop, no GPU <installation.rst#laptop-no-gpu>`__), Node.js with ``npm``, and an API key for a model that can call tools
-   :outcome: Reef running, your agent connected to it, and a training step that Reef ran from your feedback
+:For: anyone who wants Reef to improve the coding agent they already use
+:Before you start: a Reef checkout (`Laptop, no GPU <installation.rst#laptop-no-gpu>`__), Node.js with ``npm``, and an API key for a model that can call tools
+:You will have: Reef running, your agent connected to it, and a training step that Reef ran from your feedback
 
 A coding agent's harness is everything around the model: its rules, skills,
 commands and settings. Reef learns a better harness from how the agent does
@@ -14,14 +13,24 @@ stays as it is.
 In this tutorial you start Reef, connect the pi agent to it, use the agent,
 tell Reef how a session went, and see what Reef does with it.
 
-.. flow::
-   :loop: your next session starts on the new version
+.. container:: flow
 
-   Use :: you run the agent; its model calls go through Reef
-   Record :: Reef keeps each call and the feedback on it
-   Evolve* :: a method edits a copy of the harness
-   Evaluate :: the copy and the current version run the same tasks
-   Publish :: a better copy becomes the current version
+   Use
+       you run the agent; its model calls go through Reef
+
+   Record
+       Reef keeps each call and the feedback on it
+
+   **Evolve**
+       a method edits a copy of the harness
+
+   Evaluate
+       the copy and the current version run the same tasks
+
+   Publish
+       a better copy becomes the current version
+
+   :Loop: your next session starts on the new version
 
 What runs where
 ---------------
@@ -29,27 +38,12 @@ What runs where
 Two programs share the work. ``reef-client`` runs on your machine, next to
 the agent. Reef runs as a service, on the same machine or on a server.
 
-.. diagram::
-   :caption: The client installs Reef's version beside your own configuration and sends back what a session changed. Reef records the calls, evolves the harness, and publishes versions.
+.. figure:: ../assets/harness-tutorial-overview-light.svg
+   :alt: What runs where: your agent and reef-client on your machine; the method and the releases in Reef
 
-   <div class="fig-lane">
-     <div class="fig-group">
-       <span class="fig-group-label">Your machine</span>
-       <div class="fig-node">Your agent<span class="fig-node-caption">with your own settings, rules and skills</span></div>
-       <div class="fig-node">reef-client<span class="fig-node-caption">installs and syncs Reef's version</span></div>
-     </div>
-     <div class="fig-edge">
-       <span>model calls, changed files</span>
-       <svg class="fig-arrow fig-arrow-next" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"/><path d="m13 7 5 5-5 5"/></svg>
-       <svg class="fig-arrow fig-arrow-back" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H6"/><path d="m11 7-5 5 5 5"/></svg>
-       <span>answers, new versions</span>
-     </div>
-     <div class="fig-group">
-       <span class="fig-group-label">Reef</span>
-       <div class="fig-node fig-emphasis">Method<span class="fig-node-caption">proposes a new version</span></div>
-       <div class="fig-node">Releases<span class="fig-node-caption">every version, in Git</span></div>
-     </div>
-   </div>
+   The client installs Reef's version beside your own configuration and sends
+   back what a session changed. Reef records the calls, evolves the harness,
+   and publishes versions.
 
 Each version of the harness is a *harness tree*: a directory of text files
 such as ``rules.md`` and ``skills/<name>/SKILL.md``. Reef stores every
@@ -126,13 +120,22 @@ What Reef does next
 This deployment starts a training step for each report. The step does not
 change the head directly. It makes a candidate and tests it first.
 
-.. flow::
+.. container:: flow
 
-   Copy :: the method gets a copy of the head and your session
-   Edit* :: it writes new rules from what went wrong
-   Check :: Reef refuses files the agent cannot read
-   Evaluate :: candidate and head run the same tasks
-   Decide :: the better one is the head
+   Copy
+       the method gets a copy of the head and your session
+
+   **Edit**
+       it writes new rules from what went wrong
+
+   Check
+       Reef refuses files the agent cannot read
+
+   Evaluate
+       candidate and head run the same tasks
+
+   Decide
+       the better one is the head
 
 A winning candidate becomes the new head, and your next ``pi`` session
 starts on it. List the steps and their results:

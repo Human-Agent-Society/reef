@@ -90,8 +90,9 @@ run reflected from the same parents on the same problems and reached 46.67%, and
 its seed-1 run gained the official 12 points.
 
 [Meta-Harness](meta_harness/README.md) searches complete harness trees
-using all retained candidates and scores. Its population is the scenario's
-history of candidates, scores and rollout records, and the `compare` policy with
+using all retained candidates and their scores on fixed evaluation tasks. A
+training request starts each step. Its population is the scenario's history
+of candidates, scores and run records, and the `compare` policy with
 `statistic: mean` publishes a strict mean-score improvement. See the
 [Terminal-Bench example](meta_harness/examples/terminal_bench/README.md),
 [results](meta_harness/RESULTS.md), and selected harness.

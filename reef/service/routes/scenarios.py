@@ -51,6 +51,17 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
         )
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
+    async def operation_list(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.dispatcher.read_commits,
+            request.match_info["scenario"],
+            after_step=int(request.query.get("after_step", "0")),
+            limit=int(request.query.get("limit", "50")),
+            record_ids=tuple(request.query.getall("record_id", [])),
+        )
+        result["operations"] = result.pop("commits")
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
     async def record_detail(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
             request_service.dispatcher.read_record,
@@ -76,6 +87,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
     app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
+    app.router.add_get("/reef/scenarios/{scenario}/operations", operation_list)
     app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
     app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
 
@@ -87,8 +99,8 @@ def register_scenario_writes(
     evaluations: ArtifactEvaluations,
     imports: ArtifactImports,
 ) -> None:
-    """The changes of scenarios, which only control makes: create (from the base, or from an artifact item through
-    ``imports``), update, delete, activate, serve, train from an artifact, and cancel a job."""
+    """The changes of scenarios, which only control makes: create (from the default start, or from an artifact item
+    through ``imports``), update, delete, activate, serve, train from an artifact, and cancel a job."""
 
     async def create_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
@@ -112,30 +124,33 @@ def register_scenario_writes(
         if component is not None and artifact_id is None:
             raise web.HTTPBadRequest(text="component names where artifact_id lands: give artifact_id too")
         dispatcher = request_service.dispatcher
-        scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name)
+        target = None if component is None else component.strip()
+        # An existing scenario keeps its root: creation is idempotent.
+        item_id = artifact_id.strip() if isinstance(artifact_id, str) and not dispatcher.has_scenario(name) else None
+        if item_id is not None:
+            # The root release holds the item, read from the owner whose data items the scenario uses (RFC #1028).
+            scenario, created = await asyncio.to_thread(
+                imports.create_from_item, dispatcher, name, owner or name, target, item_id
+            )
+        else:
+            scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name)
         if owner is not None:
-            # The owner whose data items the scenario uses (RFC #1028); the default is the scenario's own name.
+            # The default owner is the scenario's own name.
             await asyncio.to_thread(dispatcher.set_scenario_owner, name, owner)
-        started: dict[str, object] | None = None
-        if created and artifact_id is not None:
-            # An existing scenario keeps its start: creation is idempotent.
-            target = None if component is None else component.strip()
-            started = await asyncio.to_thread(imports.start_scenario, dispatcher, name, target, artifact_id.strip())
-        current = scenario.repository.require_current_artifact()
+        components = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
         answer: dict[str, object] = {
             "scenario": scenario.name,
             "owner": dispatcher.scenario_owner(name),
-            "release_id": current.release_id,
-            "content_id": current.content_id,
+            "components": components,
         }
-        if started is not None:
-            answer["artifact_id"] = started["artifact_id"]
+        if len(components) == 1:
+            answer["artifact_id"] = next(iter(components.values()))
         return web.json_response(answer, status=201 if created else 200)
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if not payload or set(payload) - {"training_mode", "artifact_evaluation", "activation"}:
-            raise ValueError("expected training_mode, artifact_evaluation or activation settings")
+        if not payload or set(payload) - {"training_mode", "artifact_evaluation", "activation", "serving_config"}:
+            raise ValueError("expected training_mode, artifact_evaluation, activation or serving_config settings")
         if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
             raise ValueError("expected training_mode 'auto' or 'manual'")
         name = request.match_info["scenario"]
@@ -149,6 +164,10 @@ def register_scenario_writes(
         }
         if changes:
             result.update(await asyncio.to_thread(evaluations.configure, name, changes))
+        if "serving_config" in payload:
+            result.update(
+                await asyncio.to_thread(request_service.dispatcher.set_serving_config, name, payload["serving_config"])
+            )
         return web.json_response(result)
 
     async def delete_scenario(request: web.Request) -> web.Response:
@@ -175,8 +194,6 @@ def register_scenario_writes(
                 "scenario": scenario,
                 "component": activated.component,
                 "artifact_id": activated.artifact_id,
-                "release_id": activated.release_id,
-                "content_id": activated.content_id,
             }
         )
 
@@ -189,10 +206,19 @@ def register_scenario_writes(
                 "scenario": scenario,
                 "component": served.component,
                 "artifact_id": served.artifact_id,
-                "release_id": served.release_id,
-                "content_id": served.content_id,
             }
         )
+
+    async def restore_selection(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        if set(payload) != {"step"}:
+            raise ValueError("restore takes one step naming the scenario selection to restore")
+        step = payload["step"]
+        if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+            raise ValueError("restore step must be a non-negative integer")
+        scenario = request.match_info["scenario"]
+        components = await asyncio.to_thread(request_service.dispatcher.restore, scenario, step)
+        return web.json_response({"scenario": scenario, "components": dict(components)})
 
     async def stop_serving_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
@@ -205,7 +231,6 @@ def register_scenario_writes(
                 "scenario": scenario,
                 "component": stopped.component,
                 "artifact_id": stopped.artifact_id,
-                "release_id": stopped.release.release_id,
             }
         )
 
@@ -231,6 +256,7 @@ def register_scenario_writes(
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/activate", activate_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/restore", restore_selection)
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)

@@ -16,7 +16,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable
 from reef.runtime.deployment import RuntimeFactory
-from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceRuntime
+from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceArtifact, InferenceHandler, InferenceRuntime
 
 #: The response body of every inference request.
 UNAVAILABLE_MESSAGE = (
@@ -30,7 +30,7 @@ NULL_INFERENCE_URL = "none://no-inference-engine"
 class NullInferenceHandler(InferenceHandler):
     """A request handler that refuses every request with :class:`InferenceUnavailable`."""
 
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise InferenceUnavailable(UNAVAILABLE_MESSAGE)
 
 
@@ -41,6 +41,10 @@ class NullInferenceRuntime(InferenceRuntime):
         super().__init__(base_url=NULL_INFERENCE_URL, inference_timeout_s=inference_timeout_s)
         self._handler = NullInferenceHandler()
         self._model_path = model_path
+
+    @property
+    def serves_requests(self) -> bool:
+        return False
 
     @property
     def inference_handler(self) -> InferenceHandler:
@@ -59,7 +63,7 @@ class NullInferenceRuntime(InferenceRuntime):
         raise InferenceUnavailable(UNAVAILABLE_MESSAGE)
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        return artifact.ref.release_id
+        return artifact.artifact_id
 
 
 class NullRuntimeFactory(RuntimeFactory):

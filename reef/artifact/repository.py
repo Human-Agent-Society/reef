@@ -16,16 +16,19 @@ from time import monotonic
 from typing import Any, Self
 
 from reef.artifact.artifact import (
-    LOCAL_RELEASE_PREFIX,
+    LOCAL_SNAPSHOT_PREFIX,
     Artifact,
     ArtifactConflict,
     ArtifactPublicationError,
-    ArtifactRef,
     ArtifactRepository,
+    SnapshotRef,
+    artifact_components,
 )
-from reef.artifact.composite import compose_release
+from reef.artifact.composite import compose_release, link_or_copy
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
+from reef.core.snapshot import SELECTION_VIEW_PREFIX
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,65 @@ class FileDownload:
 class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
 
-    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
+    @abstractmethod
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
+        """The stored snapshot that ``artifact_id`` is bound to in this repository.
+
+        Raise ``ArtifactNotFound`` when this repository has no binding for the ID.
+        """
+
+    def resolve_artifact(self, artifact_id: str) -> Artifact:
+        """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path.
+
+        Raise ``ArtifactNotFound`` when this repository has no binding for the ID.
+        """
+        snapshot = self.materialize(self.artifact_snapshot(artifact_id))
+        components = artifact_components(snapshot)
+        if artifact_id not in components:
+            raise ArtifactPublicationError(f"artifact binding does not contain {artifact_id!r}")
+        component = components[artifact_id]
+        return snapshot if component is None else snapshot.component(component)
+
+    @abstractmethod
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        """Bind ``artifact_id`` to the stored snapshot ``ref`` unless it is bound already.
+
+        Return the snapshot that ``artifact_id`` was bound to before, or None when this call bound it. A binding
+        never changes.
+        """
+
+    @abstractmethod
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        """A value of the files, and the metadata (``content_metadata``), of the artifact ``artifact_id`` in ``ref``.
+
+        Two snapshots give equal values for an artifact exactly when they hold the same files and metadata for it.
+        """
+
+    def bind_artifact_ids(self, snapshot: Artifact) -> None:
+        """Bind each artifact ID in the stored ``snapshot`` to it, before a head moves to it.
+
+        ``snapshot`` needs its metadata, not its files. An ID bound to a snapshot with the same content keeps that
+        binding. Raise ``ArtifactConflict`` for an ID bound to other content. IDs bound before a failure stay
+        bound, so a repeated call completes the rest.
+        """
+        for artifact_id in artifact_components(snapshot):
+            bound = self.bind_artifact_id(artifact_id, snapshot.ref)
+            if (
+                bound is not None
+                and bound != snapshot.ref
+                and self.artifact_content(bound, artifact_id) != self.artifact_content(snapshot.ref, artifact_id)
+            ):
+                raise ArtifactConflict(f"artifact {artifact_id!r} already names different files or metadata")
+
+    @abstractmethod
+    def index_snapshot(self, ref: SnapshotRef) -> None:
+        """Bind the component IDs in an older snapshot for lookup by artifact ID.
+
+        Repeated calls preserve existing bindings. Conflicting files or metadata
+        raise ``ArtifactConflict`` without changing an existing binding.
+        """
+
+    def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
         """Every file of the release ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
         seconds; the backend lists and signs them without materializing the release.
 
@@ -71,7 +132,7 @@ class RepositoryBackend(ArtifactRepository):
         """
         return None
 
-    def release_uri(self, ref: ArtifactRef) -> str | None:
+    def release_uri(self, ref: SnapshotRef) -> str | None:
         """The URI of the directory of the release ``ref``, as ``ArtifactSources`` reads it, ending with ``/``.
 
         Another scenario imports the release from this URI, also in another deployment that can read the backend's
@@ -81,38 +142,39 @@ class RepositoryBackend(ArtifactRepository):
         return None
 
     @abstractmethod
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
-        """The release ``release_id`` names: a release ID, ``"base"`` for the repository's base artifact, or
-        ``"head"`` (also ``None``) for the newest release published in the repository.
+    def resolve_snapshot(self, revision: str) -> SnapshotRef:
+        """The stored snapshot that the backend revision ``revision`` names in this repository.
 
         Raise ``ArtifactNotFound`` for a release the repository does not hold.
         """
 
     @abstractmethod
-    def fork(
-        self,
-        release_id: str | None = None,
-        *,
-        metadata: Mapping[str, object] | None = None,
-    ) -> ArtifactRef: ...
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
+        """Register the scenario with ``root`` as its root release, and return the scenario's head.
+
+        ``root`` is an unpublished artifact whose ``local_path`` is a directory. When the scenario has no head, the
+        backend stores the files of ``root`` as a release with no parent, with its artifact IDs and ``metadata``, and makes that release the head in one atomic step. When the scenario has a head, also one
+        that another caller registered first, the backend stores nothing and returns that head. Raise
+        ``ArtifactPublicationError`` when the files cannot be stored.
+        """
 
     @abstractmethod
     def metadata(self) -> Mapping[str, object] | None: ...
 
     @abstractmethod
-    def current(self) -> ArtifactRef: ...
+    def current(self) -> SnapshotRef: ...
 
     @abstractmethod
-    def materialize(self, ref: ArtifactRef) -> Artifact: ...
+    def materialize(self, ref: SnapshotRef) -> Artifact: ...
 
     @abstractmethod
     def publish(
         self,
         artifact: Artifact,
         *,
-        expected_parent: ArtifactRef,
+        expected_parent: SnapshotRef,
         advance_head: bool = True,
-    ) -> ArtifactRef: ...
+    ) -> SnapshotRef: ...
 
 
 class StagedReleaseRepositoryBackend(RepositoryBackend):
@@ -124,7 +186,7 @@ class StagedReleaseRepositoryBackend(RepositoryBackend):
     """
 
     @abstractmethod
-    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         """Advance a staged durable release after the scenario commits it.
 
         Implementations must accept an already-current release so recovery can
@@ -150,11 +212,11 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
 
 
 class BaseModelFiles(ABC):
-    """The model files of a base artifact, which a process makes only when a repository imports them.
+    """The model files of a default start, which a process makes only when a scenario's root release holds them.
 
-    Purpose: a recipe gives a value in ``BaseArtifactSource.model_files``. A repository backend calls ``directory``
-    only when it imports the base into a repository that has none. Thus a process that opens only repositories that
-    have a base makes no model files.
+    Purpose: a training component gives a value in ``DefaultStart.model_files``. ``ScenarioFactory`` calls
+    ``directory`` only when it creates a scenario from the default start. Thus a process that only opens scenarios
+    makes no model files.
     """
 
     @abstractmethod
@@ -181,8 +243,8 @@ class ModelDirectory(BaseModelFiles):
 
 
 @dataclass(frozen=True)
-class BaseArtifactSource:
-    """The content of a repository's base artifact, and the configuration that the content comes from.
+class DefaultStart:
+    """The content of a new scenario's root release when the scenario starts from the deployment's configuration.
 
     Values:
 
@@ -193,10 +255,10 @@ class BaseArtifactSource:
     - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
       configured model and the checksum of the configured seed.
 
-    Purpose: a recipe makes the value (``Recipe.base_artifact_source``). A repository backend imports it as the
-    base artifact of a repository that has none; only that import reads the model files. A repository that has a
-    base opens only when its base came from equal ``inputs``. Thus Reef reads the configuration once, to make the
-    base, and a process that opens only repositories that have a base makes no model files.
+    Purpose: a recipe makes the value (``Recipe.default_start``). ``ScenarioFactory`` writes it as the root release
+    of a scenario that it creates without an artifact item; only that write reads the model files. The root records
+    ``inputs`` in its ``RootSource``, so a training component that cannot import a release (Slime) can compare
+    them with its own configuration.
     """
 
     files: Mapping[str, str] = field(default_factory=dict)
@@ -208,20 +270,25 @@ class BaseArtifactSource:
         for relative in self.files:
             path = PurePosixPath(relative)
             if not relative or path.is_absolute() or ".." in path.parts:
-                raise ValueError(f"base artifact file {relative!r} must be a relative path inside the release")
+                raise ValueError(f"default start file {relative!r} must be a relative path inside the release")
         if self.model_files is None and self.model_component is not None:
             raise ValueError("model_component names where model files go, so it requires model_files")
         if self.model_component is not None:
             validate_component_name(self.model_component)
         for name, value in self.inputs.items():
             if not isinstance(name, str) or not name or not isinstance(value, str) or not value:
-                raise ValueError(f"base artifact input {name!r} must map a non-empty name to a non-empty string")
+                raise ValueError(f"default start input {name!r} must map a non-empty name to a non-empty string")
 
-    @property
-    def content_id(self) -> str:
-        """The content ID of the base artifact that this source makes. Equal ``inputs`` give equal content IDs."""
-        digest = hashlib.sha256(json.dumps(dict(self.inputs), sort_keys=True).encode()).hexdigest()
-        return f"content:{digest}"
+    def write(self, directory: Path) -> None:
+        """Write the start's files into the empty directory ``directory``: the model files under ``model_component``
+        as hard links where the file system allows, and each of ``files`` at its path."""
+        if self.model_files is not None:
+            target = directory if self.model_component is None else directory / self.model_component
+            shutil.copytree(self.model_files.directory(), target, dirs_exist_ok=True, copy_function=link_or_copy)
+        for relative, text in self.files.items():
+            path = directory / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -229,13 +296,11 @@ class RepositoryBackendContext:
     """The deployment values that a configured factory gets in addition to its own config.
 
     ``work_dir`` and ``cache_dir`` are ``storage.artifact_work_dir`` and
-    ``storage.artifact_cache_dir``. ``base`` is the content of the recipe's
-    base artifact; every new scenario starts from it.
+    ``storage.artifact_cache_dir``.
     """
 
     work_dir: Path
     cache_dir: Path
-    base: BaseArtifactSource = field(default_factory=BaseArtifactSource)
 
 
 class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
@@ -314,7 +379,7 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
 
         After this the factory answers ``has_registration`` false and
         ``list_registrations`` without the name, so a later create under the
-        same name starts from the base artifact. Content-addressed storage
+        same name registers a new root release. Content-addressed storage
         the scenario shared with others stays.
         """
         with self._lock:
@@ -337,19 +402,22 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
 
 
 class Repository(ArtifactRepository):
-    """Scenario-scoped release chain and persistence facade."""
+    """Scenario-scoped release chain and persistence facade.
+
+    ``start_artifact`` is the scenario's root release, the release that the scenario was created with.
+    """
 
     def __init__(
         self,
         backend: RepositoryBackend,
-        base_artifact: ArtifactRef,
+        start_artifact: SnapshotRef,
         *,
-        current_artifact: ArtifactRef | None = None,
-        checkpoint_artifact: ArtifactRef | None = None,
+        current_artifact: SnapshotRef | None = None,
+        checkpoint_artifact: SnapshotRef | None = None,
         local_dir: Path | None = None,
     ) -> None:
         self._backend = backend
-        self._base_artifact = base_artifact
+        self._start_artifact = start_artifact
         self._current_artifact = current_artifact
         self._checkpoint_artifact = checkpoint_artifact
         # Guards every mutation of the (current, checkpoint) head pair so the
@@ -357,11 +425,13 @@ class Repository(ArtifactRepository):
         # lock-free: a ref read is atomic under the GIL and readers must not
         # be serialized behind a publish.
         self._head_lock = Lock()
-        # Non-checkpointed pull-surface releases remain process-local. Keep
+        # Non-checkpointed releases of pulled files remain process-local. Keep
         # every staged artifact addressable for snapshot and activation reads; a
         # single "latest local" slot would make an older snapshot dangle as
         # soon as the next release is staged.
         self._local_artifacts: dict[str, Artifact] = {}
+        self.selections: dict[str, ArtifactSelection] = {}
+        self.selection_lock = Lock()
         self._process_id = uuid.uuid4().hex
         self._temporary_directory = None
         if local_dir is None:
@@ -379,19 +449,19 @@ class Repository(ArtifactRepository):
     def backend(self) -> RepositoryBackend:
         return self._backend
 
-    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
+    def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
         """The backend's ``file_downloads`` of the durable release ``ref``; None for a release staged on this host,
         which only the local copy holds."""
-        if ref.release_id in self._local_artifacts:
+        if ref.revision in self._local_artifacts:
             return None
         return self.backend.file_downloads(ref, expires_in_seconds)
 
-    def release_uri(self, ref: ArtifactRef) -> str | None:
+    def release_uri(self, ref: SnapshotRef) -> str | None:
         """The backend's ``release_uri`` of the durable release ``ref``; None for a release staged on this host.
 
         Raise ``ValueError`` when the backend gives a URI that does not end with ``/``.
         """
-        if ref.release_id in self._local_artifacts:
+        if ref.revision in self._local_artifacts:
             return None
         uri = self.backend.release_uri(ref)
         if uri is not None and not uri.endswith("/"):
@@ -399,28 +469,28 @@ class Repository(ArtifactRepository):
         return uri
 
     @property
-    def base_artifact(self) -> ArtifactRef:
-        return self._base_artifact
+    def start_artifact(self) -> SnapshotRef:
+        return self._start_artifact
 
     @property
-    def current_artifact(self) -> ArtifactRef | None:
+    def current_artifact(self) -> SnapshotRef | None:
         return self._current_artifact
 
     @property
-    def checkpoint_artifact(self) -> ArtifactRef | None:
+    def checkpoint_artifact(self) -> SnapshotRef | None:
         return self._checkpoint_artifact
 
-    def require_current_artifact(self) -> ArtifactRef:
+    def require_current_artifact(self) -> SnapshotRef:
         if self._current_artifact is None:
             raise ArtifactPublicationError("repository has no current artifact")
         return self._current_artifact
 
-    def require_checkpoint_artifact(self) -> ArtifactRef:
+    def require_checkpoint_artifact(self) -> SnapshotRef:
         if self._checkpoint_artifact is None:
             raise ArtifactPublicationError("repository has no checkpoint artifact")
         return self._checkpoint_artifact
 
-    def activate(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
+    def activate(self, ref: SnapshotRef, *, expected: SnapshotRef) -> None:
         """Make ``ref`` the active artifact; the checkpoint and the backend head stay where they are.
 
         No storage I/O runs: the commit history records the activation, and
@@ -431,14 +501,14 @@ class Repository(ArtifactRepository):
         with self._head_lock:
             if self._current_artifact != expected:
                 raise ArtifactConflict(
-                    f"active artifact moved from {expected.release_id} to "
-                    f"{None if self._current_artifact is None else self._current_artifact.release_id}; "
-                    f"refusing to activate {ref.release_id}"
+                    f"active artifact moved from {expected.revision} to "
+                    f"{None if self._current_artifact is None else self._current_artifact.revision}; "
+                    f"refusing to activate {ref.revision}"
                 )
             self._current_artifact = ref
 
     def install_checkpoint(
-        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
+        self, ref: SnapshotRef, *, expected: SnapshotRef, expected_checkpoint: SnapshotRef, activate: bool
     ) -> None:
         """Install an already-committed release as the checkpoint, the chain tip, without storage I/O. When
         ``activate`` is true, also make it the active artifact (``current``)."""
@@ -454,9 +524,9 @@ class Repository(ArtifactRepository):
         checkpoint = self.require_checkpoint_artifact()
         if self.backend.current() == checkpoint:
             return
-        if checkpoint.parent_release_id is None:
+        if checkpoint.parent_revision is None:
             raise ArtifactConflict("a committed checkpoint without a parent cannot repair a different head")
-        parent = self.backend.resolve_release(checkpoint.parent_release_id)
+        parent = self.backend.resolve_snapshot(checkpoint.parent_revision)
         self.require_staged_commit_support().commit_release(checkpoint, expected_parent=parent)
 
     def require_staged_commit_support(self) -> StagedReleaseRepositoryBackend:
@@ -464,29 +534,83 @@ class Repository(ArtifactRepository):
             raise ArtifactPublicationError("repository backend must implement StagedReleaseRepositoryBackend")
         return self.backend
 
-    def fork(self, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
-        ref = self.backend.fork(self.base_artifact.release_id, metadata=metadata)
-        with self._head_lock:
-            self._current_artifact = ref
-            self._checkpoint_artifact = ref
-        return ref
-
-    def materialize(self, ref: ArtifactRef) -> Artifact:
-        local = self._local_artifacts.get(ref.release_id)
+    def materialize(self, ref: SnapshotRef) -> Artifact:
+        local = self._local_artifacts.get(ref.revision)
         if local is not None and local.ref == ref:
             return local
+        selection = self.selections.get(ref.revision)
+        if selection is not None:
+            materialized = self.select(selection)
+            if materialized.ref == ref:
+                return materialized
+            return Artifact(ref, self, local_path=materialized.local_path, metadata=materialized.storage_metadata)
         return self.backend.materialize(ref).with_repository(self)
 
-    def resolve(self, ref: ArtifactRef) -> Artifact:
+    def resolve(self, ref: SnapshotRef) -> Artifact:
         """Resolve an artifact reference to an Artifact materialized at a local path."""
         return self.materialize(ref)
+
+    def selection(self, ref: SnapshotRef, names: tuple[str, ...]) -> ArtifactSelection:
+        """The artifact ID of each of ``names`` in the snapshot ``ref``.
+
+        A selection view answers from the selection it was composed from, without materializing; a stored
+        snapshot is materialized and answers from its components.
+        """
+        selected = self.selections.get(ref.revision)
+        if selected is not None:
+            return selected
+        artifact = self.resolve(ref)
+        return ArtifactSelection({name: artifact.component(name).artifact_id for name in names})
+
+    def select(self, selection: ArtifactSelection) -> Artifact:
+        """Materialize existing component artifacts as a local view without publishing or moving any storage head.
+
+        The deterministic private cache key lets an operation record name the view during recovery. Its complete
+        selection must be persisted with that record; the cache key alone cannot recover its files.
+        """
+        if len(selection.components) == 1:
+            artifact_id = next(iter(selection.components.values()))
+            return self.backend.resolve_artifact(artifact_id).with_repository(self)
+        # Readers can materialize the same recovered view concurrently. Only its first reader builds the tree.
+        # This lock is separate from head movement, which never waits for file I/O.
+        with self.selection_lock:
+            digest = hashlib.sha256(json.dumps(selection.to_dict(), sort_keys=True).encode()).hexdigest()
+            cache_key = f"{SELECTION_VIEW_PREFIX}{digest}"
+            cached = self._local_artifacts.get(cache_key)
+            if cached is not None:
+                return cached
+            components = {
+                name: self.backend.resolve_artifact(artifact_id) for name, artifact_id in selection.components.items()
+            }
+            destination = self.local_root / self._process_id / digest
+            composed = compose_release(components, directory=destination)
+            artifact = Artifact(
+                SnapshotRef(cache_key, None),
+                self,
+                local_path=destination,
+                metadata=composed.metadata,
+            )
+            self._local_artifacts[cache_key] = artifact
+            self.selections[cache_key] = selection
+            return artifact
+
+    def remember_selection(self, ref: SnapshotRef, selection: ArtifactSelection) -> None:
+        """Register the recorded selection view ``ref`` without composing its files; other snapshots need nothing."""
+        if not ref.selection_view:
+            return
+        existing = self.selections.get(ref.revision)
+        if existing is not None and existing != selection:
+            raise ArtifactPublicationError("stored selections disagree for the same local view")
+        # Older cache keys included storage locators. Keep them as recovery aliases;
+        # select() derives filesystem paths only from the canonical component mapping.
+        self.selections[ref.revision] = selection
 
     def stage(
         self,
         step: int,
         artifact: Artifact,
         *,
-        parent: ArtifactRef,
+        parent: SnapshotRef,
     ) -> Artifact:
         if artifact.local_path is None:
             raise ArtifactPublicationError("staged artifact requires local_path")
@@ -503,37 +627,36 @@ class Repository(ArtifactRepository):
         step: int,
         components: Mapping[str, Artifact],
         *,
-        parent: ArtifactRef,
+        parent: SnapshotRef,
     ) -> Artifact:
         """Compose several components straight into a staged local release; one copy, not two."""
         destination = self.local_root / self._process_id / uuid.uuid4().hex
         composed = compose_release(components, directory=destination)
         return self.register_staged(step, composed, destination, parent=parent)
 
-    def register_staged(self, step: int, source: Artifact, destination: Path, *, parent: ArtifactRef) -> Artifact:
-        """Record the tree staged at ``destination`` as a local release carrying ``source``'s content id and metadata."""
+    def register_staged(self, step: int, source: Artifact, destination: Path, *, parent: SnapshotRef) -> Artifact:
+        """Record the tree staged at ``destination`` as a local snapshot with ``source``'s artifact IDs and metadata."""
         staged = Artifact(
-            ArtifactRef(
-                content_id=source.ref.content_id,
-                release_id=f"{LOCAL_RELEASE_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",
-                parent_release_id=parent.release_id,
+            SnapshotRef(
+                revision=f"{LOCAL_SNAPSHOT_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",
+                parent_revision=parent.revision,
             ),
             self,
             local_path=destination,
-            metadata=source.metadata,
+            metadata=source.storage_metadata,
         )
-        self._local_artifacts[staged.ref.release_id] = staged
+        self._local_artifacts[staged.ref.revision] = staged
         return staged
 
     def publish(
         self,
         artifact: Artifact,
         *,
-        expected_parent: ArtifactRef,
+        expected_parent: SnapshotRef,
         metadata: Mapping[str, object] | None = None,
         advance_heads: bool = True,
         activate: bool = True,
-    ) -> ArtifactRef:
+    ) -> SnapshotRef:
         """Publish ``artifact`` as the next release.
 
         ``advance_heads`` moves the chain tip, the checkpoint ref, and the one
@@ -550,7 +673,7 @@ class Repository(ArtifactRepository):
                     artifact.ref,
                     self,
                     local_path=artifact.local_path,
-                    metadata=metadata,
+                    metadata={**artifact.storage_metadata, **dict(metadata)},
                 )
             ),
             expected_parent=expected_parent,
@@ -565,8 +688,9 @@ class Repository(ArtifactRepository):
         return ref
 
     def discard(self, artifact: Artifact) -> None:
-        if self._local_artifacts.get(artifact.ref.release_id) is artifact:
-            self._local_artifacts.pop(artifact.ref.release_id, None)
+        if self._local_artifacts.get(artifact.ref.revision) is artifact:
+            self._local_artifacts.pop(artifact.ref.revision, None)
+            self.selections.pop(artifact.ref.revision, None)
         path = artifact.local_path
         artifact.discard()
         if path is not None:

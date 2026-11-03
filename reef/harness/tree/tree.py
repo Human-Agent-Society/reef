@@ -129,10 +129,12 @@ class HarnessTree:
         return cls(files)
 
     def write(self, directory: Path) -> None:
-        """Write every file of the tree under ``directory``, which must be absent or empty."""
+        """Write every file of the tree under ``directory``, which must be absent or empty; the directory exists after,
+        also for the empty tree."""
         root = Path(directory)
         if root.exists() and any(root.iterdir()):
             raise ValueError(f"cannot write a harness tree into {root}: the directory is not empty")
+        root.mkdir(parents=True, exist_ok=True)
         for relative, text in self.files.items():
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)

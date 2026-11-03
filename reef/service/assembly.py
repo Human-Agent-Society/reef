@@ -55,6 +55,7 @@ from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -294,8 +295,20 @@ def default_served_url(host: str, port: int) -> str:
     return f"http://[{bound}]:{port}" if literal.version == 6 else f"http://{bound}:{port}"
 
 
+def build_segment_store(settings: ServiceConfig) -> SegmentStore | None:
+    """The segment store that ``storage.segment_backend`` names, in ``<agent_record_dir>/segments``, or None."""
+    directory = Path(settings.agent_record_dir) / "segments"
+    if settings.segment_backend is None:
+        return None
+    if settings.segment_backend == "local":
+        return LocalSegmentStore(directory)
+    reference = SegmentStore.reference(settings.segment_backend, setting="storage.segment_backend")
+    return SegmentStore.referenced_class(reference).from_config(reference.config, directory=directory)
+
+
 def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> DataStore:
-    """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it.
+    """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it, and owning the
+    segment store of ``storage.segment_backend``.
 
     Unset follows ``storage.record_backend``: ``postgres`` uses ``storage.record_database_url`` and the schema
     ``reef_data``, and ``sqlite`` or a plugin record backend uses ``sqlite``, in ``<agent_record_dir>/data``.
@@ -304,16 +317,25 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     choice = settings.data_store
     if choice is None:
         choice = "postgres" if settings.record_backend == "postgres" else "sqlite"
-    if choice == "postgres":
-        return PostgresDataStore(
-            _require_non_empty(settings.record_database_url, "reef.record_database_url"), task_files
+    segments = build_segment_store(settings)
+    try:
+        if choice == "postgres":
+            return PostgresDataStore(
+                _require_non_empty(settings.record_database_url, "reef.record_database_url"),
+                task_files,
+                segments=segments,
+            )
+        if choice == "sqlite":
+            return SQLiteDataStore(directory / "data", task_files, segments)
+        reference = DataStore.reference(choice, setting="storage.data_store")
+        return DataStore.referenced_class(reference).from_config(
+            reference.config, directory=directory, task_files=task_files, segments=segments
         )
-    if choice == "sqlite":
-        return SQLiteDataStore(directory / "data", task_files)
-    reference = DataStore.reference(choice, setting="storage.data_store")
-    return DataStore.referenced_class(reference).from_config(
-        reference.config, directory=directory, task_files=task_files
-    )
+    except BaseException:
+        # The data store owns the segment store after it exists. Until then, this code closes it.
+        if segments is not None:
+            segments.close()
+        raise
 
 
 def open_service_coordination(settings: ServiceConfig) -> Coordination:
@@ -365,6 +387,26 @@ def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, Tas
     return storage, task_files
 
 
+def build_artifact_backend(settings: ServiceConfig) -> ConfigurableRepositoryBackendFactory:
+    """Build the artifact backend shared by control and inference."""
+    artifact_backend = (
+        {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
+        if settings.artifact_backend == "git_lfs"
+        else settings.artifact_backend
+    )
+    reference = ConfigurableRepositoryBackendFactory.reference(artifact_backend, setting="storage.artifact_backend")
+    factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
+    context = RepositoryBackendContext(
+        work_dir=Path(settings.artifact_work_dir), cache_dir=Path(settings.artifact_cache_dir)
+    )
+    try:
+        backend_factory = factory_class.from_config(reference.config, context=context)
+    except Exception as error:
+        error.add_note(f"while building storage.artifact_backend {factory_class.__name__}")
+        raise
+    return backend_factory
+
+
 def build_dispatcher(
     settings: ServiceConfig,
     *,
@@ -406,6 +448,7 @@ def build_dispatcher(
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
     data_store: DataStore | None = None
+    dispatcher: Dispatcher | None = None
     try:
         scenario_storage, task_files = open_scenario_storage(settings)
         data_store = build_data_store(settings, task_files)
@@ -424,26 +467,7 @@ def build_dispatcher(
         record_storage = scenario_storage
         # Each scenario's session opens with copies of the data items that the scenario uses.
         scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
-        artifact_backend = (
-            {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
-            if settings.artifact_backend == "git_lfs"
-            else settings.artifact_backend
-        )
-        reference = ConfigurableRepositoryBackendFactory.reference(
-            artifact_backend, setting="storage.artifact_backend"
-        )
-        factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
-        # Every scenario starts from the recipe's base artifact: the base model, the base harness, or both.
-        context = RepositoryBackendContext(
-            work_dir=Path(settings.artifact_work_dir),
-            cache_dir=Path(settings.artifact_cache_dir),
-            base=recipe.base_artifact_source(),
-        )
-        try:
-            backend_factory = factory_class.from_config(reference.config, context=context)
-        except Exception as error:
-            error.add_note(f"while building storage.artifact_backend {factory_class.__name__}")
-            raise
+        backend_factory = build_artifact_backend(settings)
         if not isinstance(settings.training_settings, Mapping):
             raise ValueError("training must be an object")
         experiment_tracker = build_experiment_tracker(
@@ -502,18 +526,23 @@ def build_dispatcher(
             )
         return dispatcher
     except BaseException:
-        # The data store first: the scenario storage closes the task file store that it shares.
-        if data_store is not None:
+        if dispatcher is not None:
+            # The dispatcher owns these resources now; its workers must stop before their stores close.
             with suppress(Exception):
-                data_store.close()
-        if scenario_storage is not None:
-            with suppress(Exception):
-                scenario_storage.close()
-        close_runtimes(recipe.job_components(), recipe.runtime)
-        if experiment_tracker is not None:
-            with suppress(Exception):
-                experiment_tracker.close()
-        coordination.close()
+                dispatcher.close()
+        else:
+            # The data store first: the scenario storage closes the task file store that it shares.
+            if data_store is not None:
+                with suppress(Exception):
+                    data_store.close()
+            if scenario_storage is not None:
+                with suppress(Exception):
+                    scenario_storage.close()
+            close_runtimes(recipe.job_components(), recipe.runtime)
+            if experiment_tracker is not None:
+                with suppress(Exception):
+                    experiment_tracker.close()
+            coordination.close()
         raise
 
 

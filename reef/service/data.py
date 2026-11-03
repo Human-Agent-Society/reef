@@ -89,11 +89,14 @@ class DataAccess:
 
 def item_json(item: StoredItem, *, content: bool) -> dict[str, Any]:
     """An item as JSON: ``{id, sequence, digest, metadata}``, and ``content`` when asked (null for a task)."""
+    metadata = dict(item.metadata)
+    if "origin" in metadata:
+        metadata["origin"] = {key: value for key, value in metadata["origin"].items() if key != "release_id"}
     value: dict[str, Any] = {
         "id": item.item_id,
         "sequence": item.sequence,
         "digest": item.digest,
-        "metadata": dict(item.metadata),
+        "metadata": metadata,
     }
     if content:
         value["content"] = None if item.content is None else dict(item.content)
@@ -289,20 +292,50 @@ def create_task_directories(
 
 
 def query_items(
-    data: DataAccess, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int
+    data: DataAccess, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int, content: bool
 ) -> dict[str, Any]:
-    """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, without content.
+    """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, each item with its
+    content when ``content`` (``item_json``), else without.
 
     ``next`` is the ``after`` of the next page, or null after the last item.
     """
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
     checked_kind = None if kind is None else KINDS[kind]
-    found = data.require_store().query(owner, kind=checked_kind, scenario=scenario, after=after, limit=limit)
+    found = data.require_store().query(
+        owner, kind=checked_kind, scenario=scenario, after=after, limit=limit, content=content
+    )
     return {
         "owner": owner,
-        "items": [item_json(item, content=False) for item in found],
+        "items": [item_json(item, content=content) for item in found],
         "next": found[-1].sequence if len(found) == limit else None,
+    }
+
+
+def group_items(
+    data: DataAccess, owner: str, *, kind: str | None, key: str, before: int | None, limit: int
+) -> dict[str, Any]:
+    """The groups of the items of ``owner`` and ``kind`` by the metadata key ``key`` (``DataStore.groups``), newest
+    first: ``{owner, groups, next}``. Each group is ``{value, item_count, first_sequence, last_sequence, metadata}``.
+
+    ``next`` is the ``before`` of the next page, or null after the last group.
+    """
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
+    found = data.require_store().groups(owner, kind=KINDS[kind], key=key, before=before, limit=limit)
+    return {
+        "owner": owner,
+        "groups": [
+            {
+                "value": group.value,
+                "item_count": group.item_count,
+                "first_sequence": group.first_sequence,
+                "last_sequence": group.last_sequence,
+                "metadata": dict(group.metadata),
+            }
+            for group in found
+        ],
+        "next": found[-1].first_sequence if len(found) == limit else None,
     }
 
 

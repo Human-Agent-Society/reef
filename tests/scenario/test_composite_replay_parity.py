@@ -33,7 +33,7 @@ from tests.support.component_trainers import (
 from tests.support.samples_service import make_samples
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
@@ -156,12 +156,13 @@ class _Recipe(_TwoTrainerRecipe):
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         pipelines = dict(self.pipelines)
         # Each trainer reads the stored samples of its component, so a rebuilt trainer finds the samples made live.
@@ -177,6 +178,7 @@ class _Recipe(_TwoTrainerRecipe):
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
                     samples=None if samples is None else TrainerSamples(samples, component),
+                    root=root,
                 ),
             )
             for component, backend in self.backends.items()
@@ -191,7 +193,7 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
     backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     return Dispatcher(
         _Recipe(backends=backends, pipelines=tuple(pipelines.items())),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         # Loading a scenario wakes its workers: held, they leave every step to the test.
@@ -413,7 +415,7 @@ def _tttd_inference(record_id: str, release: str) -> AgentRecord:
         scenario="agent",
         request_type=RequestType.INFERENCE,
         agent_record_id=record_id,
-        artifact_ref=ArtifactRef(content_id=f"c-{release}", release_id=release, parent_release_id=None),
+        artifact_id=release,
         payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
     )
 
@@ -472,5 +474,5 @@ def test_a_tttd_step_failed_on_two_releases_stays_failed_after_a_reload(tmp_path
     of it."""
     live = _tttd_failed_step(tmp_path / "live", reload=False)
     rebuilt = _tttd_failed_step(tmp_path / "rebuilt", reload=True)
-    assert live[1] == [{"step": 0, "reason": "mixed_release_ids", "release_ids": ["rel-1", "rel-2"]}]
+    assert live[1] == [{"step": 0, "reason": "mixed_artifact_ids", "artifact_ids": ["rel-1", "rel-2"]}]
     assert live[2] is None and rebuilt == live

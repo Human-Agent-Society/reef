@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import tarfile
 import time
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlencode
 
@@ -20,14 +23,16 @@ from tests.support.trajectory_uploads import dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
-from reef.core.artifact_ref import ArtifactRef
-from reef.core.evaluation import ArtifactEvaluationRequest, PolicyModel
+from reef.artifact.components import ComponentSpec, ScenarioComponents
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
+from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.harness.adapters import get_adapter
-from reef.harness.sync import create_harness_surface
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tasks.rollouts import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
@@ -36,7 +41,6 @@ from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_weight_surface
 from reef.train.trainer import ComponentTrainer
 
 TOKEN = "artifact-evaluation-test-token"
@@ -93,23 +97,24 @@ class WeightRecipe(Recipe):
 
     harness: bool = False
 
-    def build_surface(self, scenario: str) -> Surface:
-        weights = create_weight_surface(kind=self.runtime.served_weight_kind)
-        if not self.harness:
-            return weights
-        return Surface({**weights.components, **create_harness_surface(get_adapter("pi")).components})
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        components = {"weights": ComponentSpec(kind=self.runtime.served_weight_kind)}
+        if self.harness:
+            components[HARNESS_COMPONENT] = ComponentSpec(files=HarnessFiles(get_adapter("pi")), kind="harness_plugin")
+        return ScenarioComponents(components)
 
     def build_trainers(
         self,
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return tuple(
             ComponentTrainer(
@@ -120,9 +125,10 @@ class WeightRecipe(Recipe):
                     algorithm_state=algorithm_states.get(name),
                     task_storage=task_storage,
                     samples=samples,
+                    root=root,
                 ),
             )
-            for name in surface.names
+            for name in components.names
         )
 
 
@@ -145,6 +151,9 @@ class ModelCallingLab(TaskLab):
         )
         await asyncio.to_thread(lambda: urllib.request.urlopen(request, timeout=10).read())
         return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
 
 
 def archive(root: Path, *names: str) -> bytes:
@@ -365,10 +374,15 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_th
 
             # A commit that publishes a checkpoint is a new artifact: Reef adds its rollouts to the evaluations
             # queue, and the evaluation workers run them.
+            with dispatcher.locked_scenario("s") as scenario:
+                snapshot = next(
+                    row["snapshot"] for row in scenario.artifact_rows() if row["artifact_id"] == artifact_id
+                )
             commit = CommitRecord(
                 scenario="s",
                 step=1,
-                artifact_ref=ArtifactRef(f"c-{artifact_id}", artifact_id, None),
+                snapshot=snapshot,
+                selection=ArtifactSelection({"weights": artifact_id}),
                 checkpoint=True,
                 algorithm_state={},
                 high_water_sequence=0,
@@ -387,7 +401,7 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_th
             # Without settings, a new artifact is not evaluated.
             off = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"artifact_evaluation": None})
             assert (await off.json())["artifact_evaluation"] is None
-            assert evaluations.evaluate_new(NewArtifact("s", artifact_id, None)) is None
+            assert evaluations.evaluate_new(NewArtifact("s", artifact_id, None, "r")) is None
 
     asyncio.run(run())
 
@@ -405,7 +419,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
     recipe = WeightRecipe(runtime=ReleaseRuntime(), activation=activation_reference({"module": "never"}))
     (tmp_path / "initial").mkdir()
     # The in-memory repository keeps its registrations in its factory: a restart reuses it.
-    factory = InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository")
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = dispatcher_for(tmp_path, recipe, factory)
 
     async def run() -> None:
@@ -417,6 +431,8 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "artifact_evaluation": None,
                 "activation": None,
                 "effective_activation": {"module": "never", "config": {}},
+                "serving_config": {},
+                "effective_serving_config": {"weights": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": rule})
@@ -523,17 +539,17 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
     try:
         session = storage.open("s")
         step = {"algorithm_state": {}, "high_water_sequence": 0, "high_water_offset": 0, "scenario": "s"}
-        published = CommitRecord(step=1, artifact_ref=ArtifactRef("c1", "a1", None), checkpoint=True, **step)
-        kept = CommitRecord(step=2, artifact_ref=ArtifactRef("c1", "a1", None), checkpoint=False, **step)
+        published = CommitRecord(step=1, snapshot=SnapshotRef("a1", None), checkpoint=True, **step)
+        kept = CommitRecord(step=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
         session.commit_step(expected_step=0, commit=published)
         session.commit_step(expected_step=1, commit=kept)
-        assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None)
+        assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None, "a1")
         assert new_artifacts.queue.empty(), "a step that publishes nothing reports no artifact"
         # An activation, even one that publishes a composed release, and a new training start make no artifact.
         operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
         activation = CommitRecord(
             step=3,
-            artifact_ref=ArtifactRef("c2", "a2", "a1"),
+            snapshot=SnapshotRef("a2", "a1"),
             checkpoint=False,
             operation="activate",
             component="harness",
@@ -541,7 +557,7 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
             **operation,
         )
         start = CommitRecord(
-            step=4, artifact_ref=ArtifactRef("c1", "a1", None), checkpoint=False, operation="train_from", **operation
+            step=4, snapshot=SnapshotRef("a1", None), checkpoint=False, operation="train_from", **operation
         )
         session.commit_step(expected_step=2, commit=activation)
         session.commit_step(expected_step=3, commit=start)
@@ -550,3 +566,73 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
     finally:
         storage.close()
     assert new_artifacts.queue.get_nowait() is None, "the observer closes with the storage"
+
+
+@pytest.mark.parametrize(
+    ("component", "selected", "expected"),
+    [
+        (None, {"weights": "artifact:weights"}, [NewArtifact("s", "artifact:weights", None, "storage:snapshot")]),
+        (
+            "harness",
+            {"weights": "artifact:carried", "harness": "artifact:new"},
+            [NewArtifact("s", "artifact:new", "harness", "storage:snapshot")],
+        ),
+        (
+            None,
+            {"weights": "artifact:weights", "harness": "artifact:harness"},
+            [
+                NewArtifact("s", "artifact:weights", "weights", "storage:snapshot"),
+                NewArtifact("s", "artifact:harness", "harness", "storage:snapshot"),
+            ],
+        ),
+    ],
+)
+def test_automatic_evaluation_uses_published_artifact_ids(component, selected, expected) -> None:
+    observer = NewArtifacts()
+    commit = CommitRecord(
+        scenario="s",
+        step=1,
+        snapshot=SnapshotRef("storage:snapshot", None),
+        checkpoint=True,
+        algorithm_state={},
+        high_water_sequence=0,
+        high_water_offset=0,
+        component=component,
+        selection=ArtifactSelection(selected),
+    )
+    observer.record_committed(commit)
+    assert [observer.queue.get_nowait() for _ in expected] == expected
+    assert observer.queue.empty()
+
+
+def test_automatic_evaluation_skips_a_component_that_an_earlier_commit_made(monkeypatch) -> None:
+    catalog = (
+        {"artifact_id": "artifact:new", "snapshot": SnapshotRef("storage:2", "storage:1")},
+        {"artifact_id": "artifact:carried", "snapshot": SnapshotRef("storage:1", None)},
+    )
+
+    class Catalog:
+        def artifact_rows(self) -> tuple[dict[str, object], ...]:
+            return catalog
+
+    class Dispatcher:
+        queue = None
+
+        def stored_settings(self, scenario: str) -> SimpleNamespace:
+            return SimpleNamespace(artifact_evaluation={"settings": "stored"})
+
+        @contextlib.contextmanager
+        def locked_scenario(self, scenario: str) -> Iterator[Catalog]:
+            yield Catalog()
+
+    evaluations = ArtifactEvaluations(Dispatcher())  # type: ignore[arg-type]
+    accepted: list[str] = []
+    monkeypatch.setattr(
+        ArtifactEvaluationSettings, "from_json", staticmethod(lambda stored: SimpleNamespace(component=None))
+    )
+    monkeypatch.setattr(
+        evaluations, "accept", lambda scenario, artifact_id, settings, state: accepted.append(artifact_id)
+    )
+    evaluations.evaluate_new(NewArtifact("s", "artifact:carried", None, "storage:2"))
+    evaluations.evaluate_new(NewArtifact("s", "artifact:new", None, "storage:2"))
+    assert accepted == ["artifact:new"]

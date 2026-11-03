@@ -87,13 +87,13 @@ def test_scenario_domain_does_not_depend_on_recipes() -> None:
 
 
 def test_core_package_does_not_depend_on_artifacts() -> None:
-    # The pure identity types (ArtifactRef and friends) live in reef.core;
+    # The pure identity types (SnapshotRef and friends) live in reef.core;
     # reef.artifact builds on them, never the other way around.
 
     for name in (
         "reef.core",
         "reef.core.records_types",
-        "reef.core.artifact_ref",
+        "reef.core.snapshot",
         "reef.core.errors",
     ):
         module = importlib.import_module(name)
@@ -191,6 +191,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
                 "reef.storage.record_items",
                 "reef.storage.records",
                 "reef.storage.samples",
+                "reef.storage.served_models",
                 "reef.storage.scenario",
                 "reef.storage.tasks",
                 "reef.storage.work_queue",
@@ -222,9 +223,10 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
+        "reef.storage.segments": ("reef.core",),
         "reef.storage.samples": ("reef.core", "reef.storage.tasks"),
         "reef.storage.item_kinds": ("reef.core", "reef.storage.tasks"),
-        "reef.storage.data": ("reef.core", "reef.storage.item_kinds", "reef.storage.tasks"),
+        "reef.storage.data": ("reef.core", "reef.storage.item_kinds", "reef.storage.segments", "reef.storage.tasks"),
         "reef.storage.evaluations": ("reef.core",),
         "reef.storage.scenario": (
             "reef.core",
@@ -250,11 +252,12 @@ def test_scenario_state_enters_only_through_injected_storage() -> None:
     for path in sorted((REPO_ROOT / "reef/scenario").rglob("*.py")):
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        # Records, commits and settings all enter through the injected ScenarioStorage.
+        # Scenario state and served routes enter through injected storage readers.
         storage_imports = set(_imports_of(imported, "reef.storage")) - set(
             _imports_of(imported, "reef.storage.records")
             + _imports_of(imported, "reef.storage.scenario")
             + _imports_of(imported, "reef.storage.commits")
+            + ["reef.storage.served_models.ServedModels"]
         )
         assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
         for dependency in ("sqlite3", "sqlalchemy", "alembic"):
@@ -278,7 +281,6 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/artifact",
         "reef/recipe",
         "reef/runtime",
-        "reef/surface",
     )
     files = [path for package in core_packages for path in sorted((REPO_ROOT / package).rglob("*.py"))]
     # A method package's public half too; its ``slime`` subpackage is the

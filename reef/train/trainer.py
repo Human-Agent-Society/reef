@@ -31,6 +31,7 @@ from reef.pipeline_context import PipelineContext
 from reef.record2sample.reports import ReportContext
 from reef.record2sample.requested_generation import RequestedRoundResult, RequestedTaskGeneration
 from reef.record2sample.service import ProducedSamples
+from reef.runtime.jobs import ScenarioRoot
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -104,6 +105,7 @@ class Trainer:
         *,
         pipeline_factory: Callable[[PipelineContext], TrainingPipeline],
         job_loop: JobLoop | None = None,
+        root: ScenarioRoot | None = None,
         algorithm_state: Mapping[str, Any] | None = None,
         report_type: type[ReportBase] | None = None,
         experiment_logger: ExperimentLogger | None = None,
@@ -124,7 +126,12 @@ class Trainer:
         the kind of its samples (``PipelineContext.job_parameters``); the
         pipeline's stage gives them with each job's data. ``None`` gives
         every kind empty parameters, so the training component's defaults
-        apply.
+        apply. ``algorithm_state`` is the trainer's committed state, or
+        ``None`` for a trainer that has none. Such a trainer that trains
+        starts its first job from ``root``, its scenario's root release
+        (``TrainingComponent.root_start``); ``root`` is then required, and a
+        root that the component cannot start from raises
+        ``TrainingStartRefused``.
         """
         trains = job_loop is not None
         pipeline = pipeline_factory(
@@ -149,14 +156,23 @@ class Trainer:
                 f"{type(stage).__name__} has no job_samples: set pipeline.sample2job.config.job_samples, "
                 "the fewest samples one training job trains"
             )
-        default_state: Mapping[str, Any] = (
-            # A new trainer starts from the base artifact's start: the untrained checkpoint, or the seed tree.
-            {}
-            if job_loop is None
-            else JobLoopState(job_loop.component.base_start).to_dict()
-        )
-        initial_state = dict(default_state if algorithm_state is None else algorithm_state)
         try:
+            initial_state: dict[str, Any]
+            if algorithm_state is not None:
+                initial_state = dict(algorithm_state)
+            elif job_loop is None:
+                initial_state = {}
+            elif root is None:
+                raise ValueError(f"a new trainer of scenario {scenario!r} starts from the scenario's root: give root")
+            else:
+                try:
+                    start = job_loop.component.root_start(root)
+                except ValueError as exc:
+                    raise TrainingStartRefused(
+                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.revision}: "
+                        f"{exc}"
+                    ) from exc
+                initial_state = JobLoopState(start).to_dict()
             trainer = cls(
                 scenario=scenario,
                 records=records,
@@ -554,9 +570,16 @@ class Trainer:
             # Another samples process can have stored the samples of later records since this trainer loaded;
             # the records that stored samples consumed never form a record set again.
             self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
+            before_records = self._data_offset
+            before_samples = self._pipeline.stored_sample_count
             self.read_records()
             stored = self._pipeline.produce()
-            return ProducedSamples(changed=stored, background=self._pipeline.background_jobs_running())
+            return ProducedSamples(
+                changed=stored,
+                background=self._pipeline.background_jobs_running(),
+                records_read=self._data_offset - before_records,
+                samples_created=self._pipeline.stored_sample_count - before_samples,
+            )
 
     def read_records(self) -> None:
         """Push every record after the record cursor into the pipeline and move the cursor. The samples service
@@ -760,7 +783,7 @@ class Trainer:
         """
         tree = artifact.local_path
         if tree is None:
-            raise TrainingStartRefused(f"artifact {artifact.ref.release_id!r} has no local files to train from")
+            raise TrainingStartRefused(f"artifact {artifact.ref.revision!r} has no local files to train from")
         with self._lock:
             if self._pending is not None:
                 raise CommitPending("cannot set the training start while a training result waits for its commit")

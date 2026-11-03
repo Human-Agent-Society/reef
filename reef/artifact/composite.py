@@ -8,13 +8,7 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
-from reef.artifact.artifact import (
-    LOCAL_RELEASE_PREFIX,
-    Artifact,
-    ArtifactPublicationError,
-    ArtifactRef,
-    is_local_release,
-)
+from reef.artifact.artifact import LOCAL_SNAPSHOT_PREFIX, Artifact, ArtifactPublicationError, SnapshotRef
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
 
 
@@ -35,12 +29,11 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
 
     Released files are immutable, so a carried-forward component is
     hard-linked rather than copied where the filesystem allows; a component
-    whose source has no directory yet (a base release that seeded nothing for
+    whose source has no directory yet (a default start that seeded nothing for
     it) composes as an empty directory. The result is a process-local
-    artifact whose ``content_id`` derives from the component content ids, so
-    republishing the same combination keeps one content identity. A
-    component from a published release keeps its ``artifact_id``; a staged
-    one is new in the composed release. Each
+    view of those components, with no content identity of its own.
+    Every component keeps its independently allocated ``artifact_id``, including
+    an unpublished component. Each
     component keeps its own metadata in the manifest; a component's
     release-level manifest key, if it was itself a flat release, is not nested.
     """
@@ -54,9 +47,9 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
         if source.local_path is None:
             raise ArtifactPublicationError(f"component {name!r} has no local content to compose")
         metadata = {key: value for key, value in source.metadata.items() if key != COMPONENTS_METADATA_KEY}
-        # A staged component is new in this release; a published one is carried forward under its own identity.
-        carried = None if is_local_release(source.ref.release_id) else source.artifact_id
-        entries[name] = ComponentEntry(content_id=source.ref.content_id, metadata=metadata, artifact_id=carried)
+        # Composition changes the layout, never the identity of its components.
+        carried = source.artifact_id
+        entries[name] = ComponentEntry(metadata=metadata, artifact_id=carried)
         try:
             if source.local_path.is_dir():
                 shutil.copytree(source.local_path, directory / name, copy_function=link_or_copy)
@@ -69,11 +62,7 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
             ) from exc
     manifest = ReleaseComponents(entries)
     return Artifact(
-        ArtifactRef(
-            content_id=manifest.content_id,
-            release_id=f"{LOCAL_RELEASE_PREFIX}{uuid.uuid4().hex}",
-            parent_release_id=None,
-        ),
+        SnapshotRef(revision=f"{LOCAL_SNAPSHOT_PREFIX}{uuid.uuid4().hex}", parent_revision=None),
         None,
         local_path=directory,
         metadata={COMPONENTS_METADATA_KEY: manifest.to_dict()},

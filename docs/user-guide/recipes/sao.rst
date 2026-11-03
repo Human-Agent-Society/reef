@@ -32,13 +32,21 @@ arrives, without waiting for siblings and without a barrier, and
 job of one optimizer step. It can be used
 for a stream of tasks where each attempt gets its own score.
 
-.. flow::
-   :loop: the next attempt runs on the updated weights
+.. container:: flow
 
-   Rollout :: one attempt at a task
-   Feedback :: a score reported against the rollout's receipt
-   Step* :: train once ``job_samples`` scored rollouts have accumulated
-   Version :: publish the updated weights to the engine
+   Rollout
+       one attempt at a task
+
+   Feedback
+       a score reported against the rollout's receipt
+
+   **Step**
+       train once ``job_samples`` scored rollouts have accumulated
+
+   Version
+       publish the updated weights to the engine
+
+   :Loop: the next attempt runs on the updated weights
 
 How Reef implements it
 ----------------------
@@ -99,12 +107,19 @@ config:
      config:
        global_batch_size: 8
 
-.. config::
+.. container:: config
 
-   pipeline.sample2job.config.job_samples | required | rollouts (one per prompt) per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
-   training.config.global_batch_size | rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
-   pipeline.record2sample.config.accept_multi_turn_policy_samples | false | true trains every call of a report's trajectory, every reply; false trains only the reply of the trajectory's last call, with the earlier turns as context.
-   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+   ``pipeline.sample2job.config.job_samples`` : required
+       rollouts (one per prompt) per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+
+   ``training.config.global_batch_size``
+       rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
+
+   ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
+       true trains every call of a report's trajectory, every reply; false trains only the reply of the trajectory's last call, with the earlier turns as context.
+
+   ``pipeline.record2sample.config.max_staleness`` : 0
+       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 A ``batch-size`` key in ``recipe.config`` or in
 ``pipeline.sample2job.config`` is an unknown key: the recipe or the scenario's

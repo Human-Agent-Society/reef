@@ -130,7 +130,8 @@ class QueueWorker(ServiceWorker):
     - ``WorkLeaseLost``: the item stays with the worker that holds it now;
     - any other error: the item fails as retryable, until it uses up its attempts.
 
-    A store error ends the round, and the worker looks again after ``poll_seconds``.
+    A store error ends the round, and the worker looks again after ``poll_seconds``. Each item that ends
+    ``failed`` here, including an expired item with no attempts left, gets one warning in the log.
     """
 
     permanent_errors: tuple[type[Exception], ...] = (ValueError,)
@@ -165,6 +166,10 @@ class QueueWorker(ServiceWorker):
         """React to ``item``, which finished with ``result``; the default does nothing."""
         return
 
+    def finish_item(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
+        """Commit the result. A worker can include its output writes in this transaction."""
+        self.queue.finish(self.queue_name, item.id, self.worker_id, dict(result))
+
     def start(self) -> None:
         if self.thread is not None:
             return
@@ -188,9 +193,16 @@ class QueueWorker(ServiceWorker):
             if not took:
                 self.stopped.wait(self.poll_seconds)
 
+    def requeue_expired(self) -> None:
+        """Return the expired items of every queue (``WorkQueue.requeue_expired``) and log a warning for each one
+        that failed because it has no attempts left."""
+        for item in self.queue.requeue_expired():
+            if item.state == "failed":
+                log_failed_item(item)
+
     def run_once(self) -> bool:
         """Take one item and run it; return whether there was one."""
-        self.queue.requeue_expired()
+        self.requeue_expired()
         item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
         if item is None:
             return False
@@ -198,7 +210,7 @@ class QueueWorker(ServiceWorker):
             with LeaseExtender(self.queue, item, self.worker_id) as extender:
                 self.queue.start(self.queue_name, item.id, self.worker_id)
                 result = self.run_item(item, extender.lease_lost)
-            self.queue.finish(self.queue_name, item.id, self.worker_id, dict(result))
+            self.finish_item(item, result)
         except WorkLeaseLost:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return True
@@ -216,11 +228,21 @@ class QueueWorker(ServiceWorker):
         return True
 
     def fail(self, item: WorkItem, error: str, *, retryable: bool) -> None:
-        """Fail ``item`` with ``error``; nothing happens when another worker holds it now."""
+        """Fail ``item`` with ``error`` (``WorkQueue.fail``) and log a warning when it failed for good; nothing
+        happens when another worker holds it now."""
         try:
-            self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable)
+            failed = self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable)
         except WorkLeaseLost:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
+            return
+        if failed.state == "failed":
+            log_failed_item(failed)
+
+
+def log_failed_item(item: WorkItem) -> None:
+    """Log one warning for ``item``, a work item that failed for good: its queue, ID, scenario and error. The
+    payload stays out of the log."""
+    logger.warning("work item %s/%s of scenario %s failed: %s", item.queue, item.id, item.scenario, item.error)
 
 
 @dataclass
@@ -254,11 +276,17 @@ class ServiceWorkers:
                 worker.start()
 
     def stop(self) -> None:
-        """Stop every worker, the last added first, and empty the group."""
+        """Stop every worker, the last added first, and empty the group. Raise the first stop error after all attempts."""
         with self.lock:
             workers, self.workers, self.started = list(self.workers), [], False
+        errors: list[BaseException] = []
         for worker in reversed(workers):
-            worker.stop()
+            try:
+                worker.stop()
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
 
 __all__ = [

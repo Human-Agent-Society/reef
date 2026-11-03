@@ -5,13 +5,12 @@ where they are. There are two kinds of artifact item of an owner ``o``.
 
 * The item of an artifact that a scenario ``s`` of ``o`` lists (``Scenario.artifacts``). Let ``a`` be that row. Its
   item has the ID ``<s>/<a.artifact_id>``, unique within ``o`` because a scenario name has no ``/`` and an artifact
-  ID is unique within its scenario. Its metadata is ``kind: artifact`` and ``origin: {scenario: s, release_id,
-  artifact_id}`` of ``a``. Its content is ``{source_uri, kind, component, content_id}``: ``component`` and
-  ``content_id`` of ``a``, ``kind`` the ``ArtifactKind`` of the component (null when the surface declares none), and
+  ID is unique within its scenario. Its metadata is ``kind: artifact`` and ``origin: {scenario: s, artifact_id}``
+  of ``a``. Its content is ``{source_uri, kind, component}``: ``component`` of ``a``, ``kind`` the ``ArtifactKind`` of the component (null when the scenario declares none), and
   ``source_uri`` the URI of the component's files in the scenario's repository (``Repository.release_uri``), or null
   when the repository gives none.
 * An item that a client creates for files that it stored, such as an upload. It has no ``origin``. Its content
-  holds a ``source_uri``, a non-empty string, and may hold ``kind`` and ``content_id``; ``component`` is null.
+  holds a ``source_uri``, a non-empty string, and may hold ``kind``; ``component`` is null.
 
 ``scenarios`` is empty for every artifact item: a scenario uses one by importing its ``source_uri``
 (``ArtifactImports.import_item``), which makes a new artifact of that scenario.
@@ -40,7 +39,6 @@ def artifact_item(scenario: str, row: Mapping[str, Any], kind: str | None, sourc
         "source_uri": source_uri,
         "kind": kind,
         "component": row["component"],
-        "content_id": row["content_id"],
     }
     check_artifact_content(content, made_by_scenario=True)
     return NewItem(
@@ -48,7 +46,7 @@ def artifact_item(scenario: str, row: Mapping[str, Any], kind: str | None, sourc
         content,
         {
             "kind": "artifact",
-            "origin": {"scenario": scenario, "release_id": row["release_id"], "artifact_id": row["artifact_id"]},
+            "origin": {"scenario": scenario, "artifact_id": row["artifact_id"]},
         },
     )
 

@@ -11,13 +11,13 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.snapshot import SnapshotRef
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
@@ -39,7 +39,7 @@ def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
     return CommitRecord(
         scenario=scenario,
         step=step,
-        artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,
@@ -183,7 +183,7 @@ def operation_commit(step: int, operation: str) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=commit().artifact_ref,
+        snapshot=commit().snapshot,
         checkpoint=False,
         algorithm_state=None,
         high_water_sequence=0,
@@ -326,6 +326,34 @@ def test_conflicting_sessions_have_only_one_winner(open_storage):
         assert len(first.history()) == 1
     first_factory.close()
     second_factory.close()
+
+
+@pytest.mark.parametrize("write", [False, True], ids=["reader", "writer"])
+def test_memory_sessions_wait_for_another_sessions_transaction(write: bool) -> None:
+    with (
+        closing(SQLiteScenarioStorage()) as storage,
+        closing(storage.open("math")) as first,
+        closing(storage.open("math")) as second,
+    ):
+        records = first.records
+        assert isinstance(records, SQLiteRecordStore)
+        started = Event()
+        item = record("concurrent")
+
+        def append() -> None:
+            started.set()
+            second.records.append(item)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with records._transaction(write=write) as connection:
+                # Shared-cache reads lock the table until their transaction ends.
+                connection.exec_driver_sql("SELECT agent_record_id FROM agent_record").fetchall()
+                pending = pool.submit(append)
+                assert started.wait(5)
+                with pytest.raises(TimeoutError):
+                    pending.result(timeout=0.1)
+            pending.result(timeout=5)
+        assert first.records.get("math", item.agent_record_id) == item
 
 
 def test_session_refreshes_cached_history_after_another_writer(open_storage):

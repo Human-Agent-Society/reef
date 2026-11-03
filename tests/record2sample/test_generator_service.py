@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,7 +23,6 @@ from reef_client.client import ReefClientError
 
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
 from reef.execution.sandbox.task_environment import (
     HARBOR_E2B_NAMES,
@@ -31,7 +30,7 @@ from reef.execution.sandbox.task_environment import (
     EnvironmentVariableProbe,
     ModuleProbe,
 )
-from reef.harness.tasks.rollouts import RolloutTurn, TaskRollout, TaskRolloutRunner, rewards_of
+from reef.harness.tasks.rollouts import ReefEvalLab, RolloutTurn, TaskRollout, TaskRolloutRunner, rewards_of
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import (
     Designer,
@@ -443,6 +442,13 @@ def test_a_check_and_a_second_rollout_job_run_while_a_rollout_job_waits(tmp_path
     assert len(first) == len(second) == 1
 
 
+def task_directory(path: Path) -> Path:
+    """A Harbor task directory at ``path``: one ``task.toml``, enough for the rollout runner to accept it."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "task.toml").write_text('version = "1.0"\n')
+    return path
+
+
 def test_the_task_rollouts_keep_at_most_concurrency_rollouts_of_all_requests_in_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -457,14 +463,19 @@ def test_the_task_rollouts_keep_at_most_concurrency_rollouts_of_all_requests_in_
         in_flight -= 1
         return TaskRollout(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
 
+    async def build(self: ReefEvalLab, task_path: Path, *, overrides: Mapping[str, object]) -> str:
+        return ""
+
     monkeypatch.setattr(TaskRolloutRunner, "run_async", rollout)
+    monkeypatch.setattr(ReefEvalLab, "build_environment", build)
     task_rollouts = ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, concurrency=2)
+    task_path = task_directory(tmp_path / "t")
 
     async def two_runs() -> list[tuple[TaskRollout, ...]]:
         arguments = {"scenario": "s", "model": "m", "arm": "plain", "count": 3}
         return await asyncio.gather(
             *(
-                task_rollouts.run_rollouts(tmp_path / "t", extra_instruction_paths=(), tags={}, **arguments)
+                task_rollouts.run_rollouts(task_path, extra_instruction_paths=(), tags={}, **arguments)
                 for _ in range(2)
             )
         )
@@ -489,12 +500,18 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
     assert harbor_arguments[harbor_arguments.index("-e") + 1] == "e2b"
     assert HarborChecks().environment == "docker"
     environments: list[str] = []
+    build_environments: list[object] = []
 
     async def rollout(self: TaskRolloutRunner, task_path: Path) -> TaskRollout:
         environments.append(self.environment)
         return TaskRollout(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
 
+    async def build(self: ReefEvalLab, task_path: Path, *, overrides: Mapping[str, object]) -> str:
+        build_environments.append(overrides["environment"])
+        return ""
+
     monkeypatch.setattr(TaskRolloutRunner, "run_async", rollout)
+    monkeypatch.setattr(ReefEvalLab, "build_environment", build)
     rollout_arguments = {
         "scenario": "s",
         "model": "m",
@@ -503,12 +520,14 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
         "extra_instruction_paths": (),
         "tags": {},
     }
+    task_path = task_directory(tmp_path / "t")
     for generator_rollouts in (
         ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path),
         ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b"),
     ):
-        asyncio.run(generator_rollouts.run_rollouts(tmp_path / "t", **rollout_arguments))  # type: ignore[arg-type]
+        asyncio.run(generator_rollouts.run_rollouts(task_path, **rollout_arguments))  # type: ignore[arg-type]
     assert environments == ["docker", "docker", "e2b", "e2b"]
+    assert build_environments == [{"type": "e2b"}], "Docker builds one image at a time, so it gets no build first"
     assert HarborChecks(environment="e2b").environment == "e2b"
     # An environment the generator cannot probe is refused.
     for environment in ("", "modal"):
@@ -830,7 +849,7 @@ def source_records() -> tuple[AgentRecord, ...]:
             request_type=RequestType.INFERENCE,
             payload={"messages": [{"role": "user", "content": "Recover the service port from its state file."}]},
             created_at=123.0,
-            artifact_ref=ArtifactRef("content", "release", None),
+            artifact_id="release",
         ),
         AgentRecord.create(
             agent_record_id="original-report",

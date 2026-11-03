@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.support.runtime_stubs import RecordingComponent
+from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core.training_request import normalize_training_request_payload
@@ -11,7 +11,8 @@ from reef.sample2job import Sample2Job
 from reef.storage.records import RecordConflict
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.instructions import InstructionQueue
+from reef.storage.work_queue import NewWork
+from reef.train.instructions import INSTRUCTIONS_QUEUE, InstructionQueue, instruction_kind
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -63,6 +64,7 @@ def test_a_trainer_gets_the_queued_instructions_and_a_commit_settles_the_one_it_
         pipeline_factory=lambda context: TrainingPipeline(context, sample2job=InstructionJobData(context, None, 1)),
         job_loop=JobLoop(component, scenario="s"),
         training_mode="manual",
+        root=STUB_ROOT,
     )
     instructions = InstructionQueue(memory_coordination().work_queue).of("s")
     try:
@@ -85,3 +87,14 @@ def test_a_trainer_gets_the_queued_instructions_and_a_commit_settles_the_one_it_
     finally:
         trainer.close()
         records.close()
+
+
+def test_retrying_an_instruction_written_before_artifact_identity_keeps_its_item():
+    queue = memory_coordination().work_queue
+    legacy = {"text": "one", "session": "s-1", "release_id": "r-1", "requires": []}
+    original = queue.add(NewWork(INSTRUCTIONS_QUEUE, "one", "s", instruction_kind("s"), legacy, serial_key="s"))
+    instructions = InstructionQueue(queue).of("s")
+    assert instructions.file("one", payload("one")) == original
+    assert instructions.queued()[0].artifact_id == "r-1"
+    with pytest.raises(RecordConflict, match="different content"):
+        instructions.file("one", payload("changed"))

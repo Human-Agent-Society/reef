@@ -216,6 +216,7 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, s
             scenario=ROLLOUT_SCENARIO,
             request_type=RequestType.INFERENCE,
             payload={**turn.request, "response": dict(turn.response), "artifact_id": start},
+            artifact_id=start,
         )
         for turn in rollout.turns
     )

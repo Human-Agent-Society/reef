@@ -23,7 +23,7 @@ def artifact_directory(dispatcher: Dispatcher, scenario: str, artifact_id: str, 
     """
     with dispatcher.locked_scenario(scenario) as current:
         selected, release = current.resolve_artifact(artifact_id, component)
-        view = current.surface.component_artifact(release.materialize(), selected.component).materialize()
+        view = current.components.component_artifact(release.materialize(), selected.component).materialize()
     if view.local_path is None:
         raise ValueError(f"artifact {artifact_id!r} of {scenario!r} has no local files")
     return view.local_path
@@ -43,10 +43,10 @@ def artifact_files(
     if not 1 <= expires_in_seconds <= MAX_DOWNLOAD_URL_SECONDS:
         raise ValueError(f"expires_in must be 1 to {MAX_DOWNLOAD_URL_SECONDS} seconds")
     with dispatcher.locked_scenario(scenario) as current:
-        selected, ref = current.artifact_release_ref(artifact_id, component)
+        selected, ref = current.artifact_snapshot(artifact_id, component)
         downloads = current.repository.file_downloads(ref, expires_in_seconds)
         # A release of several components keeps each one in a directory named after it.
-        prefix = "" if current.surface.single else f"{selected}/"
+        prefix = "" if current.components.single else f"{selected}/"
     if downloads is not None:
         files = [
             {

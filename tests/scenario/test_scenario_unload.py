@@ -64,6 +64,7 @@ class StepRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -73,6 +74,7 @@ class StepRecipe(Recipe):
             job_loop=None if self.backend is None else JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            root=root,
         )
 
 
@@ -89,7 +91,7 @@ def make_dispatcher(
     (initial / "model.txt").write_text("initial", encoding="utf-8")
     return Dispatcher(
         StepRecipe(backend=backend),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,
@@ -141,7 +143,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
     dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
         before = trained(dispatcher, "math", 1)
-        releases = before.releases()
+        releases = before.release_queries.snapshot_rows(before.scenario_step)
 
         # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
         wait_for(lambda: dispatcher.unload_if_idle("math"))
@@ -152,7 +154,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
         after = dispatcher.get_or_create_scenario("math")
         assert after is not None and after is not before
         assert after.scenario_step == 3
-        assert after.releases() == releases
+        assert after.release_queries.snapshot_rows(after.scenario_step) == releases
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)

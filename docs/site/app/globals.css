@@ -408,24 +408,6 @@ html[data-theme="dark"] .fig-diagram .fig-dark { display: block; }
 .fig-flow-stage.fig-emphasis .fig-flow-title { color: var(--diagram-emphasis-text); }
 .fig-flow-stage.fig-emphasis .fig-flow-caption { color: color-mix(in srgb, var(--diagram-emphasis-text) 78%, transparent); }
 .fig-flow-loop { margin-top: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 14px; }
-.fig-lane { display: flex; align-items: center; justify-content: center; gap: 12px; }
-.fig-node { padding: 12px 16px; color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; background: var(--background); font-size: 14px; font-weight: 600; line-height: 1.35; text-align: center; }
-.fig-node .fig-node-caption { margin-top: 2px; display: block; color: var(--muted); font-size: 13px; font-weight: 400; }
-.fig-node.fig-emphasis { color: var(--diagram-emphasis-text); border-color: var(--diagram-emphasis-border); background: var(--diagram-emphasis); }
-.fig-node.fig-emphasis .fig-node-caption { color: color-mix(in srgb, var(--diagram-emphasis-text) 78%, transparent); }
-.fig-group { position: relative; padding: 34px 16px 16px; display: flex; align-items: center; gap: 12px; border: 1px dashed color-mix(in srgb, var(--diagram-emphasis-border) 65%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
-.fig-group-label { position: absolute; top: 10px; right: 16px; left: 16px; overflow: hidden; color: var(--muted); font-size: 13px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
-.fig-edge { display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 13px; line-height: 1.4; text-align: center; }
-.ownership-map { display: grid; gap: 14px; }
-.ownership-step-label { color: var(--foreground); font-size: 14px; font-weight: 600; line-height: 1.4; }
-.ownership-scope { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.ownership-continue { gap: 3px; }
-.ownership-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.ownership-group { min-width: 0; padding: 12px; border: 1px dashed color-mix(in srgb, var(--diagram-emphasis-border) 65%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
-.ownership-group-title { margin-bottom: 10px; color: var(--muted); font-size: 13px; font-weight: 600; line-height: 1.4; }
-.ownership-packages { display: grid; gap: 8px; }
-.ownership-map .fig-node { padding: 10px 12px; }
-.ownership-map .fig-node code { padding: 0; color: inherit; border: 0; background: transparent; font-size: 13px; }
 .markdown-body .config-card { margin: 24px 0 32px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--card); box-shadow: var(--shadow-sm); font-size: 14px; line-height: 1.6; }
 .config-row { padding: 12px 16px; display: grid; grid-template-columns: minmax(130px, max-content) 1fr; gap: 4px 20px; border-bottom: 1px solid color-mix(in srgb, var(--border) 62%, transparent); scroll-margin-top: 92px; }
 .config-row:last-child { border-bottom: 0; }
@@ -494,12 +476,10 @@ html[data-theme="dark"] .fig-diagram .fig-dark { display: block; }
 @media (max-width: 720px) {
   .markdown-body .mermaid-diagram svg { min-width: 600px; }
   .markdown-body .mermaid-diagram { background: linear-gradient(90deg, var(--card) 45%, transparent) left center / 32px 100% no-repeat local, linear-gradient(270deg, var(--card) 45%, transparent) right center / 32px 100% no-repeat local, radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--foreground) 28%, transparent), transparent) left center / 14px 100% no-repeat scroll, radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--foreground) 28%, transparent), transparent) right center / 14px 100% no-repeat scroll, var(--card); }
-  .fig-flow-track, .fig-lane, .fig-group { flex-direction: column; align-items: stretch; }
-  .fig-group { padding-top: 16px; }
-  .fig-group-label { position: static; white-space: normal; text-align: center; }
-  .fig-flow-track .fig-arrow-next, .fig-lane .fig-arrow-next, .fig-group .fig-arrow-next, .fig-lane .fig-arrow-back, .fig-group .fig-arrow-back { transform: rotate(90deg); }
+  .fig-flow-track { flex-direction: column; align-items: stretch; }
+  .fig-flow-track .fig-arrow-next { transform: rotate(90deg); }
   .fig-flow-loop { text-align: center; }
-  .config-row, .ownership-scope, .ownership-groups { grid-template-columns: 1fr; }
+  .config-row { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {

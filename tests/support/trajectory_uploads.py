@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestClient
 
 from tests.support.runtime_stubs import RecordingComponent
 
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.repository import RepositoryBackendFactory
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
@@ -100,6 +100,11 @@ class UploadRecipe(Recipe):
     batch_stage: type[Sample2Job] = UploadJobData
     task_stage: type[NoSamples] = NoSamples
     batches: list[JobData] = field(default_factory=list)
+    #: The content of a new scenario's root release.
+    start: DefaultStart = field(default_factory=DefaultStart)
+
+    def default_start(self) -> DefaultStart:
+        return self.start
 
     def build(
         self,
@@ -111,6 +116,7 @@ class UploadRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -120,6 +126,7 @@ class UploadRecipe(Recipe):
                 context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, 2)
             ),
             job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
+            root=root,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
@@ -140,7 +147,7 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files)
     dispatcher = Dispatcher(
         recipe,
-        factory or InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        factory or InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
         data_store=data,

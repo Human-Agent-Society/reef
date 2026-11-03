@@ -126,7 +126,7 @@ class NextAction:
     place: str
 
 
-def next_action(scenario: str, release_id: str, selection_result: str, requires: Sequence[str]) -> NextAction | None:
+def next_action(scenario: str, artifact_id: str, selection_result: str, requires: Sequence[str]) -> NextAction | None:
     """The next action of a settled step: activate a release that is not active, or pull an active one.
 
     ``requires`` names what the release needs where the harness runs (see
@@ -136,7 +136,7 @@ def next_action(scenario: str, release_id: str, selection_result: str, requires:
     if selection_result == "inactive":
         return NextAction(
             "Read this page, then activate it",
-            (f'POST /reef/scenarios/{scenario}/activate {{"artifact_id": "{release_id}"}}',),
+            (f'POST /reef/scenarios/{scenario}/activate {{"artifact_id": "{artifact_id}"}}',),
             "The scenario's activation rule did not make this release active; activating it serves it.",
         )
     if selection_result != "selected":
@@ -245,7 +245,7 @@ def request_html(record: Mapping[str, object]) -> str:
         f'<p class="text">{escape(payload.get("text"))}</p>',
         '<details class="request-meta"><summary>Session and request details</summary><dl class="metadata">',
         f'<div><dt>Session</dt><dd class="id">{escape(payload.get("session") or "Not provided")}</dd></div>',
-        f'<div><dt>Base release</dt><dd class="id">{escape(payload.get("release_id") or "Not provided")}</dd></div>',
+        f'<div><dt>Base artifact</dt><dd class="id">{escape(payload.get("artifact_id", payload.get("release_id")) or "Not provided")}</dd></div>',
         f'<div class="record-id"><dt>Request ID</dt><dd class="id">{escape(record["agent_record_id"])}</dd></div>',
     ]
     filed = record.get("created_at")
@@ -289,12 +289,12 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
 
 def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[str, object]) -> str:
     """What the result means for the person who asked."""
-    release = str(row.get("release_id") or "-")[:8]
+    artifact_id = str(row.get("artifact_id") or "-").removeprefix("artifact:")[:8]
     if selection_result == "selected":
-        return f"Published as release {release}. GET /reef/harness serves it from now on."
+        return f"Published as artifact {artifact_id}. GET /reef/harness serves it from now on."
     if selection_result == "inactive":
         return (
-            f"Release {release} is ready but does not serve yet. The scenario's activation rule left it for a "
+            f"Artifact {artifact_id} is ready but does not serve yet. The scenario's activation rule left it for a "
             "person to review and activate."
         )
     if selection_result == "rejected":
@@ -314,11 +314,13 @@ def result_html(
     metrics = metrics if isinstance(metrics, Mapping) else {}
     selection_result = result_of(row)
     parts = [
-        f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
-        f"<p>{escape(meaning(selection_result, row, metrics))}</p></div>",
+        (
+            f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
+            f"<p>{escape(meaning(selection_result, row, metrics))}</p></div>"
+        ),
         '<dl class="fact-list">',
         f"<div><dt>Version</dt><dd>v{step}</dd></div>",
-        f'<div><dt>Release</dt><dd class="id">{escape(row.get("release_id"))}</dd></div>',
+        f'<div><dt>Artifact</dt><dd class="id">{escape(row.get("artifact_id"))}</dd></div>',
         "</dl>",
     ]
     note = floor_tasks_note(metrics)
@@ -328,9 +330,9 @@ def result_html(
         parts.append(f'<div class="failure"><h3>Error</h3><p>{escape(metrics["error"])}</p></div>')
     # Carry the scenario and the page key to the version page.
     href = step_href(step, link_query)
-    release_id = row.get("release_id")
-    requires = [item["name"] for item in required_by(rows, release_id if isinstance(release_id, str) else None)]
-    action = next_action(scenario, str(release_id or ""), selection_result, requires)
+    artifact_id = row.get("artifact_id")
+    requires = [item["name"] for item in required_by(rows, artifact_id if isinstance(artifact_id, str) else None)]
+    action = next_action(scenario, str(artifact_id or ""), selection_result, requires)
     if action is not None:
         commands = "".join(f"<code>{escape(command)}</code>" for command in action.commands)
         parts.append(

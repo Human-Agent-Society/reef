@@ -68,8 +68,7 @@ harness = ReefTTTDiscoverHarness(
     MyProblem(),
     "task instruction",
     scenario="my-single-discovery-problem",
-    recipe="tttd",
-    release_id="checkpoint-v42",  # optional starting checkpoint
+    artifact_id="artifact:example",  # optional artifact already served by the scenario
     model="reef",
 )
 best = harness.run(steps=50)
@@ -79,7 +78,9 @@ best = harness.run(steps=50)
 and PUCT mechanics. Its overridden `_rollout` method contains the four actual
 integration changes in one place:
 
-1. Send inference through a scenario-scoped Reef endpoint.
+1. Send inference through a scenario-scoped Reef endpoint. An optional
+   `artifact_id` selects an artifact the scenario already serves. Omit it to use
+   the active artifact.
 2. Retain the returned `agent_record_id` as the generation receipt.
 3. After the existing evaluator computes a reward, send a Reef report that
    references that exact inference receipt.
@@ -265,8 +266,8 @@ tokens or log-probabilities: the training component renders each rollout with
 the model's chat template, and the actor computes the old-policy
 log-probabilities with the weights of the step's start. With
 `max_staleness: 0` these are the weights that sampled the grid. Slime refuses
-`--use-rollout-logprobs`. Reef's weight surface names the scenario's own
-adapter revision on every request; the harness never selects one and the
+`--use-rollout-logprobs`. Reef routes every request to the scenario's own
+adapter revision; the harness never selects one and the
 backend never injects a fallback.
 
 New Slime configs should use the

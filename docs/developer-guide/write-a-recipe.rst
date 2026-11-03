@@ -65,7 +65,7 @@ to publish it.
 Before you write one
 --------------------
 
-If an existing recipe's processor, objective, and surface already match your method, change its config instead. Re-read
+If an existing recipe's processor, objective, and components already match your method, change its config instead. Re-read
 `Choosing a recipe <../user-guide/recipes.rst>`__.
 
 Build one
@@ -73,12 +73,19 @@ Build one
 
 A weight recipe is four pieces plus the class that binds them.
 
-.. config::
+.. container:: config
 
-   training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch, Ray, or Slime import.
-   pipeline stages | the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
-   report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
-   recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``parameters_by_kind()`` gives each training job's parameters by the kind of its samples
+   ``training objective``
+       a ``TrainingObjective`` declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch, Ray, or Slime import.
+
+   ``pipeline stages``
+       the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
+
+   ``report type``
+       the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
+
+   ``recipe class``
+       a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``parameters_by_kind()`` gives each training job's parameters by the kind of its samples
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
 ``recipes/sao/`` is the smallest cookbook implementation and the one to read
@@ -207,7 +214,8 @@ name it.
   reference for an objective from another package, such as the built-in
   `SFT <../user-guide/recipes/sft.rst>`__ objective above.
 - To train again from the base weights with no training state, call
-  ``POST /reef/scenarios/{scenario}/train-from`` with the base artifact.
+  ``POST /reef/scenarios/{scenario}/train-from`` with the scenario's root
+  release, when it holds the default start.
 - The parameters can also give the optional ``scheduling`` parameter, an object
   of ``epochs`` (a positive int, default 1), ``shuffle`` (default ``false``),
   ``remainder`` (``"partial"``, the default, ``"drop"`` or ``"error"``) and

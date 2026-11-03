@@ -36,9 +36,10 @@ from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
-from reef.scenario.factory import ScenarioFactory
+from reef.scenario.factory import ItemStart, ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.storage.served_models import ServedModels
 from reef.train.instructions import InstructionQueue
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,7 @@ class ScenarioRegistry:
         admission: ScenarioAdmission | None = None,
         lifecycle: ScenarioLifecycle | None = None,
         activates_runtime: bool = True,
+        served_models: ServedModels | None = None,
         instructions: InstructionQueue | None = None,
     ) -> None:
         self._storage = scenario_storage
@@ -146,6 +148,7 @@ class ScenarioRegistry:
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
             activates_runtime=activates_runtime,
+            served_models=served_models,
             instructions=instructions,
         )
         self._backend_factory = backend_factory
@@ -241,7 +244,7 @@ class ScenarioRegistry:
     def get_or_create(
         self,
         scenario: str,
-        release_id: str | None = None,
+        start: ItemStart | None = None,
         *,
         allow_implicit_creation: bool | None = None,
     ) -> Scenario | None:
@@ -249,16 +252,19 @@ class ScenarioRegistry:
 
         A missing scenario is created when ``allow_implicit_creation`` is true
         (defaulting to the registry's deployment flag); otherwise ``None`` is
-        returned so the caller can surface an unknown-scenario error.
+        returned so the caller can surface an unknown-scenario error. A
+        created scenario's root release holds the artifact item ``start``, or
+        the recipe's default start when ``start`` is ``None``
+        (``ScenarioFactory.load_or_create``).
         """
         if allow_implicit_creation is None:
             allow_implicit_creation = self._allow_implicit_creation
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, release_id)
+            return self._resolve(scenario, start)
 
-    def get_loaded(self, scenario: str, release_id: str | None = None) -> Scenario | None:
+    def get_loaded(self, scenario: str) -> Scenario | None:
         """The loaded instance, or None: nothing is created or recovered, and the scenario's lock is not taken.
 
         An evaluation rollout's call resolves this way. A delete or a
@@ -268,7 +274,6 @@ class ScenarioRegistry:
         """
         current = self.get_optional(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, release_id)
             self.touch(scenario)
         return current
 
@@ -295,9 +300,7 @@ class ScenarioRegistry:
             current = loaded.get(name)
             row: dict[str, Any] = {"scenario": name, "loaded": current is not None}
             if current is not None:
-                ref = current.repository.require_current_artifact()
-                row["release_id"] = ref.release_id
-                row["content_id"] = ref.content_id
+                row["components"] = current.artifact_selection().artifact_ids
             if adapter is not None:
                 row["adapter"] = adapter
             rows.append(row)
@@ -388,6 +391,21 @@ class ScenarioRegistry:
             current.set_activation_rule(rule)
         return stored_activation
 
+    def set_serving_config(self, scenario: str, update: Mapping[str, object]) -> Scenario:
+        """Change the stored serving config of an existing scenario by ``update`` (``ServingConfig.updated``),
+        check it with the scenario's runtime, and serve with it from the next serving request on.
+
+        ``ValueError`` for an update that the config or the runtime refuses; then nothing is stored.
+        """
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            settings = self._storage.read_settings(scenario)
+            config = settings.serving_config.updated(update)
+            current.effective_serving_config(config)
+            self._storage.write_settings(scenario, replace(settings, serving_config=config))
+            current.set_serving_config(config)
+            return current
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self._storage.read_settings(scenario)
@@ -413,7 +431,7 @@ class ScenarioRegistry:
         for the records after their recovered progress.
         """
         with self.lock_for(scenario):
-            recovered = self._scenario_factory.load_or_create(scenario, None)
+            recovered = self._scenario_factory.load_or_create(scenario)
             self.apply_stored_settings(recovered)
             with self._lock:
                 dropped = self._scenarios.get(scenario)
@@ -471,15 +489,17 @@ class ScenarioRegistry:
             return tuple(self._scenarios.values())
 
     def apply_stored_settings(self, instance: Scenario) -> None:
-        """Select the training mode and the activation rule a person stored for the scenario on a newly built
-        instance.
+        """Select the training mode, the activation rule and the serving config a person stored for the scenario
+        on a newly built instance.
 
         A mode the recipe no longer supports, or that Reef no longer has (such as
         ``hybrid``), keeps the recipe's default, so the scenario still loads and
         a person can select another mode. A scenario
         whose rule is ``evaluated`` without ``artifact_evaluation`` loads with a
-        warning: it activates no new artifact. Any other failure closes the
-        instance.
+        warning: it activates no new artifact. A serving config that the runtime
+        now refuses loads with a warning: the scenario serves with the
+        deployment's values, and the stored config stays for a person to change.
+        Any other failure closes the instance.
         """
         settings = self._storage.read_settings(instance.name)
         try:
@@ -495,6 +515,14 @@ class ScenarioRegistry:
                     )
             rule = self.activation_rule(settings)
             instance.set_activation_rule(rule)
+            try:
+                instance.set_serving_config(settings.serving_config)
+            except ValueError as exc:
+                logger.warning(
+                    "Scenario %r serves with the deployment's values: its stored serving config is refused (%s)",
+                    instance.name,
+                    exc,
+                )
         except BaseException:
             instance.close()
             raise
@@ -504,22 +532,17 @@ class ScenarioRegistry:
                 instance.name,
             )
 
-    def _resolve(
-        self,
-        scenario: str,
-        release_id: str | None,
-    ) -> Scenario:
+    def _resolve(self, scenario: str, start: ItemStart | None) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, release_id)
             self.touch(scenario)
             return current
         if not self._scenario_factory.has_registration(scenario):
             self.check_creation(scenario)
         self.take_load_slot(scenario)
         try:
-            current = self._scenario_factory.load_or_create(scenario, release_id)
+            current = self._scenario_factory.load_or_create(scenario, start)
             self.apply_stored_settings(current)
         finally:
             with self._lock:

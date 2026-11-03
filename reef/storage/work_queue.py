@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from reef.core.errors import ReefError
-from reef.core.values import require_text
+from reef.core.values import JsonValue, require_text
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,6 @@ WorkState = Literal["queued", "assigned", "running", "finished", "failed"]
 WORK_STATES: tuple[WorkState, ...] = ("queued", "assigned", "running", "finished", "failed")
 FINAL_STATES: frozenset[str] = frozenset({"finished", "failed"})
 HELD_STATES: frozenset[str] = frozenset({"assigned", "running"})
-
-#: JSON-compatible values that a work item carries.
-JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
 class WorkConflict(ReefError):
@@ -66,9 +63,10 @@ class WorkItem:
     - ``progress`` is a tuple of JSON objects in the order a worker added them.
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
-    - ``metadata`` is a JSON object of facts about the item that a reader of the item records after it exists
-      (``WorkQueue.set_metadata``), such as the experiment run that records a training job. It is not an input of
-      the work, so no worker reads it.
+    - ``metadata`` is a JSON object of facts about the item that are not inputs of the work, so no worker reads it.
+      A reader of the item records one after the item exists (``WorkQueue.set_metadata``), such as the experiment
+      run that records a training job. A store can record one when it adds the item, such as the automatic retry
+      count of a serving request (``ServedModelsWriter.request``).
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
       change.
 
@@ -233,10 +231,12 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def delete_final(self, *, finished_before: float) -> int:
-        """Delete every final item of every queue whose ``ended_at`` is before ``finished_before``; return how many.
+        """Delete final items whose ``ended_at`` is before ``finished_before``; return how many.
 
         A reader of a final item, such as the trainer of a job, reads it within the retention that control keeps,
-        so a deleted item is one that no reader needs."""
+        so a deleted item is one that no reader needs.
+        Keep each scenario's newest serving request: its status remains readable until another selection replaces it.
+        """
 
     @abstractmethod
     def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
@@ -330,6 +330,44 @@ class WorkQueue(ABC):
     def items(self, queue: str, *, scenario: str | None = None, kind: str | None = None) -> tuple[WorkItem, ...]:
         """The items of ``queue``, optionally of one scenario and kind, in ``created_sequence`` order."""
 
+    def page(
+        self,
+        queue: str,
+        *,
+        scenario: str,
+        state: str | None = None,
+        before_sequence: int | None = None,
+        limit: int = 50,
+    ) -> tuple[WorkItem, ...]:
+        """Return up to ``limit`` items, newest first, of one scenario and optional state.
+
+        Exclude sequences at or above ``before_sequence`` when given. The limit is 1 to 1000;
+        the cursor is positive. Raise ValueError for an invalid state, limit, or cursor.
+        """
+        check_page(state, before_sequence, limit)
+        rows = self.items(queue, scenario=scenario)
+        return tuple(
+            item
+            for item in reversed(rows)
+            if (state is None or item.state == state)
+            and (before_sequence is None or item.created_sequence < before_sequence)
+        )[:limit]
+
+    def counts(self, queue: str, *, scenario: str) -> Mapping[str, int]:
+        """Return each work state's non-negative item count for this queue and scenario, including zero counts."""
+        counts: dict[str, int] = dict.fromkeys(WORK_STATES, 0)
+        for item in self.items(queue, scenario=scenario):
+            counts[item.state] += 1
+        return counts
+
+
+def check_page(state: str | None, before_sequence: int | None, limit: int) -> None:
+    """Raise ValueError for an unknown state, a limit outside 1 to 1000, or a cursor below 1 (``WorkQueue.page``)."""
+    if state is not None and state not in WORK_STATES:
+        raise ValueError("unknown work state")
+    if not 1 <= limit <= 1000 or (before_sequence is not None and before_sequence < 1):
+        raise ValueError("limit must be 1 to 1000 and before must be positive")
+
 
 def clock(now: float | None) -> float:
     """``now``, or the current time when it is None."""
@@ -390,6 +428,7 @@ __all__ = [
     "WorkLeaseLost",
     "WorkQueue",
     "WorkState",
+    "check_page",
     "clock",
     "is_finite_time",
 ]

@@ -143,9 +143,9 @@ Everything under `./work`, and a rerun resumes from it:
 - `heldout/{frozen,selected}/example-NNNN.json` - one checkpoint per test
   run, keyed by the problem and the tree it ran on; a checkpoint written
   for a different tree is refused, never folded into the score.
-- `seed/`, `bootstrap/`, `served/`, `selected/` - the seed tree the recipe
-  boots from, the base release's tree, and the source trees the last round
-  and the test pass pulled.
+- `seed/`, `served/`, `selected/` - the seed tree the recipe boots from,
+  which the scenario's root release holds, and the source trees the last
+  round and the test pass pulled.
 - `summary.json` - validation seed and selected means from the archive, both
   test scores, the candidate count, the metric calls, and the retained official
   numbers beside them.

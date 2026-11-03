@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import DefaultStart
 from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, HuggingFaceRevisionFiles, read_reference
 from reef.runtime.jobs import ReleaseFormat
 from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
@@ -32,7 +32,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     - the base: a reference to the base revision (``REFERENCE_FILE``), which ``base/`` holds; a job from it starts a
       new model with the base's own weights (``FreshStart``). ``base/`` is written on first use: before the training
-      process runs jobs, or when a repository imports the base artifact (``prepared_base``);
+      process runs jobs, or when a new scenario's root release holds the default start (``prepared_base``);
     - a saved checkpoint: a manifest of all the parameters (``lora_rank`` null) of the base model on the
       configured service, whose ``state_path`` a job restores, beside a reference to the commit of
       ``config.release_repo`` that holds the checkpoint's weights, which ``exporter`` made.
@@ -62,7 +62,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         if base_model != self._revision.repo:
             raise ValueError(f"the base model {base_model} is not the repo of the base {self._revision.uri}")
         #: The content ID of the base's files, read from the Hub at the first import.
-        self.base_content_id: str | None = None
+        self.base_checksum: str | None = None
         super().__init__(base_model, config, client, sampler=sampler, score_centering=config.score_centering_settings)
 
     @property
@@ -82,8 +82,8 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     def prepare_base(self) -> None:
         """Write the reference to the configured base when ``base/`` holds no reference or another one.
 
-        The base start is a function of ``base`` alone, so it follows the configuration. A scenario whose repository
-        was made from another base still does not open: its base artifact's inputs differ (``BaseArtifactSource``).
+        The base start is a function of ``base`` alone, so it follows the configuration. A scenario whose root release
+        refers to another base cannot train: ``import_start`` refuses that reference.
         """
         if read_reference(self._base) != self._revision:
             self._base.mkdir(parents=True, exist_ok=True)
@@ -106,10 +106,10 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
             raise ValueError(f"the start {directory} holds {named}, not the base {self._revision.uri}")
         return FreshStart(self._model)
 
-    def base_artifact_source(self) -> BaseArtifactSource:
+    def default_start(self) -> DefaultStart:
         """The base's release: the reference to the base revision."""
         inputs = {"model": self._revision.uri, "service": str(self._config.base_url)}
-        return BaseArtifactSource(model_files=TinkerBaseFiles(self), inputs=inputs)
+        return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
 
     def check_release(self, files: ArtifactFiles) -> None:
         """A full-parameter manifest of this component's model and service whose state resolves, or the base's files."""
@@ -121,7 +121,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
             weights = HuggingFaceRevisionFiles(revision.repo, revision.commit).paths()
             if "config.json" not in weights or not any(path.endswith(".safetensors") for path in weights):
                 raise ValueError(f"{revision.uri} holds no full weights: config.json and safetensors")
-        elif files.content_id() != self.base_files_id():
+        elif files.checksum() != self.base_files_id():
             raise ValueError(
                 f"the {self.name} training component trains only its base {self._revision.uri}: an import of full "
                 "weights holds the base's files, or a manifest of a full-parameter checkpoint of it"
@@ -139,6 +139,6 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     def base_files_id(self) -> str:
         """The content ID of the base's files on the Hub, listed once."""
-        if self.base_content_id is None:
-            self.base_content_id = HuggingFaceRevisionFiles(self._revision.repo, self._revision.commit).content_id()
-        return self.base_content_id
+        if self.base_checksum is None:
+            self.base_checksum = HuggingFaceRevisionFiles(self._revision.repo, self._revision.commit).checksum()
+        return self.base_checksum

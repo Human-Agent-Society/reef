@@ -156,8 +156,8 @@ font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace}
 """
 
 
-def short_id(release_id: Any) -> str:
-    return str(release_id)[:8] if release_id else "-"
+def short_id(artifact_id: Any) -> str:
+    return str(artifact_id).removeprefix("artifact:")[:8] if artifact_id else "-"
 
 
 def text_items(value: Any) -> list[str]:
@@ -218,7 +218,7 @@ def served_step(rows: Sequence[Mapping[str, Any]]) -> int | None:
     return next((index for index, row in enumerate(rows) if row.get("active")), None)
 
 
-def before_release_id(row: Mapping[str, Any]) -> str | None:
+def before_artifact_id(row: Mapping[str, Any]) -> str | None:
     """The release the step ran on: the parent of a release the step made, the release a rejected or skipped step
     ran on.
 
@@ -226,10 +226,10 @@ def before_release_id(row: Mapping[str, Any]) -> str | None:
     on, so its parent would be one release too far back."""
     selection_result = result_of(row)
     if selection_result in ("selected", "inactive"):
-        parent = row.get("parent_release_id")
+        parent = row.get("parent_artifact_id")
         return str(parent) if parent else None
     if selection_result in ("rejected", "skipped", "failed"):
-        return str(row.get("release_id") or "") or None
+        return str(row.get("artifact_id") or "") or None
     return None
 
 
@@ -361,7 +361,7 @@ def why_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
             f"<p class=\"text\">{escape(request['text'])}</p>"
             f'<p class="origin"><span>Request <span class="id">{escape(request.get("id"))}</span></span>'
             f'<span>Session <span class="id">{escape(request.get("session"))}</span></span>'
-            f'<span>Filed on release <span class="id">{escape(request.get("release_id"))}</span></span></p>'
+            f'<span>Filed on artifact <span class="id">{escape(request.get("artifact_id", request.get("release_id")))}</span></span></p>'
         )
     return "<p>A failure in the job data; no request asked for this step.</p>"
 
@@ -378,12 +378,12 @@ def notes_html(metrics: Mapping[str, Any]) -> str:
     return card("Method notes", f"<pre>{escape(notes)}</pre>\n") if notes else ""
 
 
-def diff_block(path: str, before: str, after: str, before_id: str | None, release_id: Any) -> str:
+def diff_block(path: str, before: str, after: str, before_id: str | None, artifact_id: Any) -> str:
     lines = difflib.unified_diff(
         before.splitlines(),
         after.splitlines(),
         fromfile=f"{path} ({short_id(before_id)})",
-        tofile=f"{path} ({short_id(release_id)})",
+        tofile=f"{path} ({short_id(artifact_id)})",
         lineterm="",
     )
     rendered = []
@@ -418,7 +418,7 @@ def changed_file_html(
         operation, body = "write", f"<pre>{escape(after)}</pre>"
     elif path in before_files:
         before = before_files[path]
-        operation, body = "update", diff_block(path, before, after, before_release_id(row), row.get("release_id"))
+        operation, body = "update", diff_block(path, before, after, before_artifact_id(row), row.get("artifact_id"))
     else:
         operation, body = "create", f"<pre>{escape(after)}</pre>"
     return (
@@ -553,7 +553,7 @@ def setup_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequenc
     carried: list[Mapping[str, Any]] = []
     if result_of(row) not in ("rejected", "skipped", "failed"):
         names = {item.get("name") for item in own}
-        carried = [item for item in required_by(rows, row.get("release_id")) if item.get("name") not in names]
+        carried = [item for item in required_by(rows, row.get("artifact_id")) if item.get("name") not in names]
     refused_requires = request.get("refused_requires")
     refused = (
         [entry for entry in refused_requires if isinstance(entry, Mapping) and isinstance(entry.get("item"), Mapping)]
@@ -578,22 +578,22 @@ def setup_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequenc
     return "".join(parts) + tail
 
 
-def ran_on(other: Mapping[str, Any], release_id: Any) -> bool:
-    """Whether ``other`` is a child of ``release_id``: a step evaluated on it, or a sync whose release has it as
+def ran_on(other: Mapping[str, Any], artifact_id: Any) -> bool:
+    """Whether ``other`` is a child of ``artifact_id``: a step evaluated on it, or a sync whose release has it as
     parent."""
-    if not release_id:
+    if not artifact_id:
         return False
     if other.get("operation") == "sync":
-        return other.get("parent_release_id") == release_id
+        return other.get("parent_artifact_id") == artifact_id
     # Not the parent: a rejected or skipped row carries the id of the release it ran on, so its parent is the
     # grandparent.
-    return before_release_id(other) == release_id
+    return before_artifact_id(other) == artifact_id
 
 
 def chain_html(
     step: int, row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], link_query: Mapping[str, str] | None
 ) -> str:
-    release_id = row.get("release_id")
+    artifact_id = row.get("artifact_id")
     selection_result = result_of(row)
     if selection_result in ("rejected", "skipped", "failed"):
         # The row carries the id of the release it ran on and published nothing, so that release's parent and
@@ -604,15 +604,15 @@ def chain_html(
             words = "the active release at this step; nothing was evaluated"
         return (
             '<dl class="details">'
-            f'<div><dt>Ran on</dt><dd class="id">{escape(before_release_id(row) or "-")} ({escape(words)})</dd></div>'
+            f'<div><dt>Ran on</dt><dd class="id">{escape(before_artifact_id(row) or "-")} ({escape(words)})</dd></div>'
             "<div><dt>Children</dt><dd>none (the candidate published nothing)</dd></div>"
             "</dl>"
         )
     children = [
         f'<li><a class="step-name" href="{escape(step_href(index, link_query))}">v{index}</a>'
-        f'<span class="id">{escape(other.get("release_id"))}</span>{status_span(result_of(other))}</li>'
+        f'<span class="id">{escape(other.get("artifact_id"))}</span>{status_span(result_of(other))}</li>'
         for index, other in enumerate(rows)
-        if index != step and ran_on(other, release_id)
+        if index != step and ran_on(other, artifact_id)
     ]
     listed = (
         f'<h3>Children</h3><ul class="chain">{"".join(children)}</ul>'
@@ -621,8 +621,8 @@ def chain_html(
     )
     return (
         '<dl class="details">'
-        f'<div><dt>Parent</dt><dd class="id">{escape(row.get("parent_release_id") or "-")}</dd></div>'
-        f'<div><dt>This release</dt><dd class="id">{escape(release_id)}</dd></div>'
+        f'<div><dt>Parent</dt><dd class="id">{escape(row.get("parent_artifact_id") or "-")}</dd></div>'
+        f'<div><dt>This artifact</dt><dd class="id">{escape(artifact_id)}</dd></div>'
         "</dl>" + listed
     )
 
@@ -683,7 +683,7 @@ def build_release_page(
     """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/releases`` lists them.
 
     ``before_files`` is the source tree of the release the step ran on (see
-    ``before_release_id``), which each updated file of the patch is read
+    ``before_artifact_id``), which each updated file of the patch is read
     against; without it, a written file shows its new text instead of a diff.
     ``link_query`` is carried to the Chain's links, so a page opened through
     query parameters links pages that open the same way. Method summary and
@@ -696,7 +696,7 @@ def build_release_page(
     selection_result = result_of(row)
     served = served_step(rows)
     recorded = row.get("recorded_at")
-    headline = [f'<span class="id">{escape(row.get("release_id"))}</span>']
+    headline = [f'<span class="id">{escape(row.get("artifact_id"))}</span>']
     if served == step:
         headline.append('<span class="chip">Active release</span>')
     subtitle = f'<span class="headline">{"".join(headline)}</span>'
@@ -734,7 +734,7 @@ def build_release_page(
 __all__ = [
     "RESULT_FIELDS",
     "RESULT_LABELS",
-    "before_release_id",
+    "before_artifact_id",
     "build_release_page",
     "build_running_step_page",
     "failed_words",

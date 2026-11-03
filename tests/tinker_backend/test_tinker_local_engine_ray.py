@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from reef.dispatcher import Dispatcher
+from reef.runtime.serving import AdapterServingRuntime
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -336,22 +338,41 @@ def served_adapters(tmp_path) -> list[Path]:
     return [path for path in (tmp_path / "remote-work").iterdir() if path.is_dir()]
 
 
+def wait_for_serving(dispatcher: Dispatcher, inference: AdapterServingRuntime) -> None:
+    """Wait for the selected adapter and this runtime's recovery of it."""
+    deadline = time.monotonic() + (1500 if REAL else 120)
+    while time.monotonic() < deadline:
+        item = dispatcher.coordination.served_models.current_request(SCENARIO)
+        selected = dispatcher.get_or_create_scenario(SCENARIO).artifact_selection().to_dict()
+        if item is not None and item.payload.get("selection") == selected:
+            # A restart can read the prior worker's completed request before recovering its adapter.
+            if item.state == "finished" and inference.serving_adapter_runtime_load_id(SCENARIO) is not None:
+                return
+            assert item.state != "failed", item.error
+        time.sleep(0.05)
+    pytest.fail("the selected adapter did not start serving")
+
+
 @pytest.mark.integration
 def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component(tmp_path, monkeypatch):
     from reef.artifact import InMemoryRepositoryBackend
 
     pytest.importorskip("ray")  # the component process starts its own Ray session
-    # The base artifact is the component's untrained adapter release, which the component writes when it starts.
-    repository = InMemoryRepositoryBackend.factory(tmp_path / "tinker" / "base", root=tmp_path / "repository")
+    # The default start is the component's untrained adapter release, which the component writes when it starts.
+    repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     for key in list(os.environ):
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":
             monkeypatch.delenv(key)
     with inference_component(tmp_path) as (url, control):
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
-            initial = inference.base_version
+            dispatcher.get_or_create_scenario(SCENARIO)
+            wait_for_serving(dispatcher, inference)
+            initial = inference.serving_adapter_runtime_load_id(SCENARIO)
+            assert initial is not None
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
             assert inference.base_url == url
             train_one_step(dispatcher, inference)
+            wait_for_serving(dispatcher, inference)
             published = inference.serving_adapter_runtime_load_id(SCENARIO)
             assert published is not None and published != initial
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
@@ -376,6 +397,7 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
         # with no second load.
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
             scenario = dispatcher.get_or_create_scenario(SCENARIO)
+            wait_for_serving(dispatcher, inference)
             assert inference.serving_adapter_runtime_load_id(SCENARIO) == published
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
             (adapter,) = served_adapters(tmp_path)

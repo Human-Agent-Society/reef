@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
+from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.core import AgentRecord, RequestType
 from reef.core.activation import ActivationRule
 from reef.dispatcher import Dispatcher
@@ -25,8 +26,6 @@ from reef.scenario import Scenario
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import ComponentSurface, Surface, TextFileTree
-from reef.surface.weights import WeightLoader
 from reef.train import ComponentTrainer, Trainer
 from reef.train.jobs import JobCommit, JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
@@ -178,18 +177,21 @@ class _TwoTrainerRecipe(Recipe):
 
     backends: Mapping[str, ComponentJobs]
     auto_only_components: frozenset[str] = frozenset()
+    #: The content of a new scenario's root release.
+    start: DefaultStart = field(default_factory=lambda: seeded_start((WEIGHTS, HARNESS)))
 
     def activation_rule(self) -> ActivationRule:
         return AlwaysActivate(frozenset({HELD}))
 
-    def build_surface(self, scenario: str) -> Surface:
-        return Surface(
+    def default_start(self) -> DefaultStart:
+        return self.start
+
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(
             components={
                 # A training component's weights load through the runtime, so train-from imports them as a start.
-                WEIGHTS: (
-                    ComponentSurface() if self.training_component is None else ComponentSurface(loader=WeightLoader())
-                ),
-                HARNESS: ComponentSurface(files=TextFileTree()),
+                WEIGHTS: (ComponentSpec() if self.training_component is None else ComponentSpec(kind="model")),
+                HARNESS: ComponentSpec(files=TextFileTree()),
             }
         )
 
@@ -205,12 +207,13 @@ class _TwoTrainerRecipe(Recipe):
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         def factory_for(component: str):
             return lambda context: self.pipeline_for(component, context)
@@ -232,6 +235,7 @@ class _TwoTrainerRecipe(Recipe):
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     samples=samples_for(component),
+                    root=root,
                 ),
             )
             for component, backend in self.backends.items()
@@ -248,6 +252,7 @@ class _TwoTrainerRecipe(Recipe):
             algorithm_state=algorithm_states.get(WEIGHTS),
             experiment_logger=experiment_logger,
             samples=samples_for(WEIGHTS),
+            root=root,
         )
         return (ComponentTrainer(WEIGHTS, weights), *trainers)
 
@@ -329,17 +334,17 @@ def stop_workers(dispatcher: Dispatcher, scenario: str) -> None:
         worker.thread.join(10)
 
 
-def _seeded_repository(tmp_path: Path, components: tuple[str, ...] = (WEIGHTS, HARNESS)):
-    """A repository whose base seeds one file per component, unless the test wrote its own base first."""
-    initial = tmp_path / "initial"
-    if not initial.exists():
-        for component in components:
-            (initial / component).mkdir(parents=True)
-            (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+def seeded_start(components: tuple[str, ...]) -> DefaultStart:
+    """A default start that seeds ``<component>/<component>.txt``, ``<component> seed``, for each of ``components``."""
+    return DefaultStart(files={f"{component}/{component}.txt": f"{component} seed" for component in components})
 
 
-def component_files(scenario: Scenario, ref: ArtifactRef) -> dict[str, str]:
+def _repository(tmp_path: Path):
+    """An in-memory repository under the test's directory."""
+    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+
+
+def component_files(scenario: Scenario, ref: SnapshotRef) -> dict[str, str]:
     """The text of each component's ``<component>.txt`` in the release ``ref``."""
     head = scenario.repository.materialize(ref)
     return {
@@ -364,15 +369,18 @@ def _dispatcher(
     experiment_tracker: ExperimentTracker | None = None,
     hold_local_cycles: bool = False,
     components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
+    start: DefaultStart | None = None,
 ) -> tuple[Dispatcher, dict[str, ComponentJobs]]:
-    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given. ``components``
-    are the services that it runs; without ``samples``, only the test makes samples (``make_samples``)."""
-    repository = _seeded_repository(tmp_path) if backend_factory is None else backend_factory
+    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given. ``start`` is the
+    two trainer recipe's default start, one seed file per component by default. ``components`` are the services that
+    it runs; without ``samples``, only the test makes samples (``make_samples``)."""
+    repository = _repository(tmp_path) if backend_factory is None else backend_factory
+    seeds = {} if start is None else {"start": start}
     if recipe is not None:
         backends = {} if backends is None else backends
     elif training is None:
         backends = _local_pair(tmp_path) if backends is None else backends
-        recipe = _TwoTrainerRecipe(backends=backends, auto_only_components=auto_only_components)
+        recipe = _TwoTrainerRecipe(backends=backends, auto_only_components=auto_only_components, **seeds)
     else:
         # A training component binds the scenario: a process trains one scenario on it. It trains the weights; the
         # harness keeps its local backend.
@@ -382,6 +390,7 @@ def _dispatcher(
             auto_only_components=auto_only_components,
             runtime=StubInferenceRuntime(),
             training_component=training,
+            **seeds,
         )
     records = tmp_path / "records" if records_dir is None else records_dir
     dispatcher = Dispatcher(
@@ -396,3 +405,12 @@ def _dispatcher(
         components=components,
     )
     return dispatcher, backends
+
+
+def component_id(scenario: Scenario, revision: str, component: str) -> str:
+    """Read a component identity from a test's stored snapshot or composed view."""
+    selection = scenario.repository.selections.get(revision)
+    if selection is not None:
+        return selection.components[component]
+    ref = scenario.repository.backend.resolve_snapshot(revision)
+    return scenario.repository.resolve(ref).component(component).artifact_id

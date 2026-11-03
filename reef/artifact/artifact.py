@@ -4,43 +4,43 @@ import shutil
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
-# Re-export the pure identity types while keeping ``reef.core`` independent of
-# storage implementations.
-from reef.core.artifact_ref import ArtifactRef, decode_artifact_ref, encode_artifact_ref
-from reef.core.components import ReleaseComponents, release_components
+from reef.core.components import COMPONENTS_METADATA_KEY, ReleaseComponents, legacy_artifact_id, release_components
 from reef.core.errors import ReefError
 
+# Re-export the pure identity types while keeping ``reef.core`` independent of
+# storage implementations.
+from reef.core.snapshot import LOCAL_SNAPSHOT_PREFIX, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
+
 __all__ = [
-    "LOCAL_RELEASE_PREFIX",
+    "ARTIFACT_ID_METADATA_KEY",
+    "LOCAL_SNAPSHOT_PREFIX",
+    "SNAPSHOT_METADATA_KEYS",
     "Artifact",
     "ArtifactConflict",
     "ArtifactError",
     "ArtifactMaterializationError",
     "ArtifactNotFound",
     "ArtifactPublicationError",
-    "ArtifactRef",
     "ArtifactRepository",
     "ArtifactSourceError",
     "ArtifactValidator",
-    "decode_artifact_ref",
-    "encode_artifact_ref",
-    "is_local_release",
+    "SnapshotRef",
+    "artifact_components",
+    "content_metadata",
+    "decode_snapshot_ref",
+    "encode_snapshot_ref",
 ]
 
-#: Release prefix for process-local (staged, never published) artifacts.
-#: ``Artifact.local`` and repository staging both mint releases under it;
-#: ``is_local_release`` is the shared predicate for recognizing them.
-LOCAL_RELEASE_PREFIX = "local:"
 #: Files a repository adds to a materialized release; a release with nothing else holds no weights.
 REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
-
-
-def is_local_release(release_id: str) -> bool:
-    """True when ``release_id`` names a process-local artifact without durable bytes."""
-    return release_id.startswith(LOCAL_RELEASE_PREFIX)
+#: The stored metadata key of a flat artifact's ID; ``Artifact`` reads it into ``artifact_id`` and writes it back.
+ARTIFACT_ID_METADATA_KEY = "artifact_id"
+#: Metadata keys that describe a snapshot, not the content of the artifact it holds.
+SNAPSHOT_METADATA_KEYS = frozenset({COMPONENTS_METADATA_KEY, "scenario_commit_record"})
 
 
 class ArtifactError(ReefError):
@@ -71,7 +71,7 @@ class ArtifactRepository(ABC):
     """Minimal repository capability needed by an artifact."""
 
     @abstractmethod
-    def materialize(self, ref: ArtifactRef) -> Artifact: ...
+    def materialize(self, ref: SnapshotRef) -> Artifact: ...
 
 
 class ArtifactValidator(ABC):
@@ -86,7 +86,7 @@ class Artifact:
 
     def __init__(
         self,
-        ref: ArtifactRef,
+        ref: SnapshotRef,
         repository: ArtifactRepository | None,
         *,
         local_path: Path | None = None,
@@ -97,10 +97,17 @@ class Artifact:
         self._repository = repository
         self._local_path = None if local_path is None else Path(local_path)
         self._metadata = dict(metadata or {})
-        self._artifact_id = artifact_id
+        stored_identity = self._metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
+        if stored_identity is not None and (not isinstance(stored_identity, str) or not stored_identity):
+            raise ValueError("stored artifact_id must be a non-empty string")
+        if artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id):
+            raise ValueError("artifact_id must be a non-empty string")
+        if artifact_id is not None and stored_identity is not None and artifact_id != stored_identity:
+            raise ValueError("artifact_id differs from its stored identity")
+        self._artifact_id = artifact_id or stored_identity
 
     @property
-    def ref(self) -> ArtifactRef:
+    def ref(self) -> SnapshotRef:
         return self._ref
 
     @property
@@ -116,25 +123,40 @@ class Artifact:
         return MappingProxyType(self._metadata)
 
     @property
+    def storage_metadata(self) -> dict[str, object]:
+        """Serialize the artifact's metadata and explicit identity for snapshot storage."""
+        metadata = dict(self._metadata)
+        manifest = self.components
+        if manifest is not None:
+            metadata[COMPONENTS_METADATA_KEY] = manifest.carried_from(self.ref.revision).to_dict()
+        if self._artifact_id is not None:
+            metadata[ARTIFACT_ID_METADATA_KEY] = self._artifact_id
+        return metadata
+
+    @property
     def artifact_id(self) -> str:
         """The artifact that this value holds: the artifact of a component view, or the only component of a release.
 
-        A release without a manifest is one artifact. The release made it, so
-        its ``release_id`` names it. A manifest of one component names the
-        artifact (``ReleaseComponents.artifact_ids``). For a release of several
-        components, raise ``ArtifactNotFound``: each component view holds one
-        of its artifacts.
+        New artifacts record an independent ID before publication. A component
+        view keeps that ID when another snapshot carries it. Legacy snapshots
+        without an explicit ID use their original revision-based identity.
+        A snapshot containing several components has no single artifact ID;
+        callers must select a component.
         """
         if self._artifact_id is not None:
             return self._artifact_id
-        manifest = self.materialize().components
+        # Provider calls can carry a ref without local files or a repository.
+        materialized = self if self.repository is None else self.materialize()
+        if materialized._artifact_id is not None:
+            return materialized._artifact_id
+        manifest = materialized.components
         if manifest is None:
-            return self.ref.release_id
+            return legacy_artifact_id(self.ref.revision, None)
         if not manifest.single:
             raise ArtifactNotFound(
-                f"release {self.ref.release_id!r} holds components {list(manifest.names)}; name one of them"
+                f"snapshot {self.ref.revision!r} holds components {list(manifest.names)}; name one of them"
             )
-        return next(iter(manifest.artifact_ids(self.ref.release_id).values()))
+        return next(iter(manifest.artifact_ids(self.ref.revision).values()))
 
     @property
     def components(self) -> ReleaseComponents | None:
@@ -146,19 +168,18 @@ class Artifact:
 
         A release without a manifest, or with one component, is that component
         itself. A multi-component release keeps each component in a directory
-        named after it; the view carries the component's own content id and
-        metadata under the release's identity.
+        named after it; the view carries the component's own artifact ID and metadata.
         """
         materialized = self.materialize()
         manifest = materialized.components
         if manifest is None:
             return materialized
         if name not in manifest.entries:
-            raise ArtifactNotFound(f"release {self.ref.release_id!r} binds no component {name!r}")
+            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} binds no component {name!r}")
         if manifest.single:
             return materialized
         if materialized.local_path is None:
-            raise ArtifactMaterializationError(f"release {self.ref.release_id!r} has no local component directories")
+            raise ArtifactMaterializationError(f"snapshot {self.ref.revision!r} has no local component directories")
         entry = manifest.entries[name]
         directory = materialized.local_path / manifest.relative_path(name)
         # A component the base seeded nothing for has no directory in the
@@ -169,11 +190,11 @@ class Artifact:
             # Two readers of one release race here; the second finds the leaf made.
             directory.mkdir(exist_ok=True)
         return Artifact(
-            ArtifactRef(entry.content_id, self.ref.release_id, self.ref.parent_release_id),
+            SnapshotRef(self.ref.revision, self.ref.parent_revision),
             None,
             local_path=directory,
             metadata=entry.metadata,
-            artifact_id=manifest.artifact_ids(self.ref.release_id)[name],
+            artifact_id=manifest.artifact_ids(self.ref.revision)[name],
         )
 
     @classmethod
@@ -183,19 +204,27 @@ class Artifact:
         *,
         metadata: Mapping[str, object] | None = None,
         repository: ArtifactRepository | None = None,
-        content_id: str | None = None,
     ) -> Artifact:
-        """The unpublished artifact in ``path``; ``content_id`` names its content, a new unique id when ``None``."""
+        """Create an unpublished artifact with a fresh ID that staging and publication preserve."""
         token = uuid.uuid4().hex
+        stored_metadata = dict(metadata or {})
+        stored_metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
+        manifest = release_components(stored_metadata)
+        if manifest is None:
+            stored_metadata[ARTIFACT_ID_METADATA_KEY] = f"artifact:{token}"
+        else:
+            manifest = ReleaseComponents(
+                {
+                    name: replace(entry, artifact_id=entry.artifact_id or f"artifact:{uuid.uuid4().hex}")
+                    for name, entry in manifest.entries.items()
+                }
+            )
+            stored_metadata[COMPONENTS_METADATA_KEY] = manifest.to_dict()
         return cls(
-            ArtifactRef(
-                content_id=f"content:{token}" if content_id is None else content_id,
-                release_id=f"{LOCAL_RELEASE_PREFIX}{token}",
-                parent_release_id=None,
-            ),
+            SnapshotRef(revision=f"{LOCAL_SNAPSHOT_PREFIX}{token}", parent_revision=None),
             repository,
             local_path=path,
-            metadata=metadata,
+            metadata=stored_metadata,
         )
 
     def with_repository(self, repository: ArtifactRepository) -> Artifact:
@@ -217,3 +246,26 @@ class Artifact:
     def discard(self) -> None:
         if self._local_path is not None:
             shutil.rmtree(self._local_path, ignore_errors=True)
+
+
+def artifact_components(snapshot: Artifact) -> dict[str, str | None]:
+    """Map each artifact ID in ``snapshot`` to the name of its component.
+
+    A snapshot without a manifest holds one artifact, which maps to None.
+    """
+    manifest = snapshot.components
+    if manifest is None:
+        return {snapshot.artifact_id: None}
+    return {identity: name for name, identity in manifest.artifact_ids(snapshot.ref.revision).items()}
+
+
+def content_metadata(snapshot: Artifact, component: str | None) -> dict[str, object]:
+    """The metadata of one artifact in ``snapshot``: of ``component``, or of the whole snapshot when None.
+
+    The result excludes ``SNAPSHOT_METADATA_KEYS``, so two snapshots that hold
+    one artifact give equal results for it.
+    """
+    manifest = snapshot.components
+    if component is None or manifest is None:
+        return {key: value for key, value in snapshot.metadata.items() if key not in SNAPSHOT_METADATA_KEYS}
+    return dict(manifest.entries[component].metadata)

@@ -32,7 +32,6 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 from opentelemetry.trace import Link, NonRecordingSpan, SpanContext, SpanKind, TraceFlags, set_span_in_context
 from opentelemetry.util.types import AttributeValue
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import exchange_messages
 from reef.core.version import __version__
@@ -108,8 +107,8 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "reef.agent_record_id": item.agent_record_id,
             "reef.request_type": item.request_type.value,
         }
-        if item.artifact_ref is not None:
-            attributes.update(_artifact_attributes(item.artifact_ref))
+        if item.artifact_id is not None:
+            attributes["reef.artifact_id"] = item.artifact_id
         tags = _tags(item.payload)
         if tags:
             attributes["reef.tags"] = tags
@@ -149,7 +148,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "reef.commit_operation": commit.operation,
             "reef.checkpoint": commit.checkpoint,
             "reef.consumed_record_count": len(commit.consumed_ids),
-            **_artifact_attributes(commit.artifact_ref),
+            **commit_artifact_attributes(commit),
         }
         if commit.training_job_id is not None:
             attributes["reef.training_job_id"] = commit.training_job_id
@@ -173,7 +172,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
             "reef.step": commit.step,
-            **_artifact_attributes(commit.artifact_ref),
+            **commit_artifact_attributes(commit),
         }
         if commit.training_job_id is not None:
             consumed_attributes["reef.training_job_id"] = commit.training_job_id
@@ -231,9 +230,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
         model = payload.get("model")
         if isinstance(model, str) and model:
             attributes["gen_ai.request.model"] = model
-        artifact_id = payload.get("artifact_id")
-        if isinstance(artifact_id, str) and artifact_id:
-            attributes["reef.artifact_id"] = artifact_id
         response = payload.get("response")
         response = response if isinstance(response, Mapping) else {}
         response_model = response.get("model")
@@ -272,8 +268,17 @@ class OpenTelemetryRecordObserver(RecordObserver):
         return attributes
 
 
-def _artifact_attributes(ref: ArtifactRef) -> dict[str, AttributeValue]:
-    return {"reef.release_id": ref.release_id, "reef.content_id": ref.content_id}
+def commit_artifact_attributes(commit: CommitRecord) -> dict[str, AttributeValue]:
+    """Return component artifact IDs for a commit, including legacy flat records."""
+    components = commit.artifact_ids
+    if components is None:
+        return {"reef.artifact_id": commit.snapshot.revision}
+    attributes: dict[str, AttributeValue] = {
+        f"reef.artifacts.{name}": artifact_id for name, artifact_id in components.items()
+    }
+    if commit.component is not None:
+        attributes["reef.artifact_id"] = components[commit.component]
+    return attributes
 
 
 def _tags(payload: Mapping[str, Any]) -> list[str]:

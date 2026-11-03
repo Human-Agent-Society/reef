@@ -32,12 +32,13 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
+from reef.runtime.jobs import ScenarioRoot
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -57,7 +58,7 @@ def scenario_double(
     job_loop=None,
     state: dict | None = None,
 ) -> SimpleNamespace:
-    """A scenario with one trainer; it carries what the status and the local workers read."""
+    """A scenario with one trainer; it carries what the status, the local workers and ``Dispatcher.close`` read."""
     pipeline = SimpleNamespace(background_jobs_running=lambda: background_jobs_running, training_mode="auto")
     trainer = SimpleNamespace(
         pipeline=pipeline,
@@ -76,13 +77,16 @@ def scenario_double(
         runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
-        serving_artifact_id=lambda: "base",
+        served_artifact_id=lambda: "base",
+        close=lambda: None,
     )
 
 
-def registry_double(scenario: SimpleNamespace) -> SimpleNamespace:
+def registry_double(scenario: SimpleNamespace, experiment_reports=None) -> SimpleNamespace:
+    """A registry of ``scenario`` alone; ``experiment_reports`` is what ``Dispatcher.close`` closes."""
     return SimpleNamespace(
         training_status_scenario_names=("s",),
+        experiment_reports=experiment_reports,
         get_optional=lambda name: scenario if name == "s" else None,
         loaded_scenarios=lambda: (scenario,),
         preload_errors={},
@@ -95,11 +99,11 @@ def bound_dispatcher(scenario: SimpleNamespace) -> Dispatcher:
     initial.mkdir()
     dispatcher = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
+        InMemoryRepositoryBackend.factory(directory=root / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
-    dispatcher.registry = registry_double(scenario)
+    dispatcher.registry = registry_double(scenario, dispatcher.registry.experiment_reports)
     dispatcher.local_workers.registry = dispatcher.registry
     dispatcher.training_status.registry = dispatcher.registry
     return dispatcher
@@ -139,7 +143,7 @@ def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
     assert status["served_artifact_id"] == "base"
     assert status["inference_admission"] == {"open": False, "active": 0}
 
-    scenario.serving_artifact_id = lambda: "trained"
+    scenario.served_artifact_id = lambda: "trained"
     runtime.open = True
     status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["served_artifact_id"] == "trained"
@@ -301,8 +305,9 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         algorithm_state: Mapping[str, object] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentReleases | None = None,
+        releases: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -311,6 +316,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
             job_loop=JobLoop(self.training_component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            root=root,
         )
 
 
@@ -322,7 +328,7 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
     recipe = BackgroundStepRecipe(**runtime_bindings(component))
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

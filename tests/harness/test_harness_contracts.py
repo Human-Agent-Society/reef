@@ -8,7 +8,7 @@ from reef.harness.capture import ReleaseObserver
 from reef.harness.runners.native import HookListener, Next, ToolRunner
 from reef.harness.runners.native.enforce import Enforcer, Tool
 from reef.harness.runners.native.graph import Host, TurnLoop
-from reef.harness.runners.native.release_client import EventWriter, ReleaseUpdateListener
+from reef.harness.runners.native.release_client import ArtifactUpdateListener, EventWriter
 from reef.harness.runners.native.selftools import ServeState
 from reef.harness.runners.native.serve import EventSink
 
@@ -27,7 +27,7 @@ from reef.harness.runners.native.serve import EventSink
         Host,
         TurnLoop,
         EventWriter,
-        ReleaseUpdateListener,
+        ArtifactUpdateListener,
         ServeState,
         EventSink,
     ],

@@ -22,13 +22,12 @@ inherits ``ConfigurableRepositoryBackendFactory`` in ``storage.artifact_backend`
 Git LFS is the built-in one. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
-Every repository starts from a base artifact. A configured backend imports
-``RepositoryBackendContext.base`` (a ``BaseArtifactSource``) into a
-repository that has none, with ``base.content_id`` as its content ID, and
-refuses to open a repository whose base was imported from other
-``base.inputs``. Only that import calls ``base.model_files.directory()``
-(a ``BaseModelFiles``, for example a ``ModelDirectory``), so a process that
-opens only repositories that have a base makes no model files.
+Every scenario owns its root release, a release with no parent.
+``RepositoryBackend.register`` stores it and makes it the scenario's head in
+one atomic step; a second caller gets the winner's head. Scenarios share no
+release. A root that holds the recipe's ``DefaultStart`` reads its model
+files (a ``BaseModelFiles``, for example a ``ModelDirectory``) only when the
+scenario is created, so a process that only opens scenarios makes none.
 
 Backends used with a scenario commit history must subclass
 ``StagedReleaseRepositoryBackend``. ``publish`` must accept
@@ -49,21 +48,21 @@ from reef.artifact.artifact import (
     ArtifactMaterializationError,
     ArtifactNotFound,
     ArtifactPublicationError,
-    ArtifactRef,
     ArtifactSourceError,
     ArtifactValidator,
+    SnapshotRef,
 )
 from reef.artifact.composite import compose_release
-from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_content_id
+from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_checksum
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
-    BaseArtifactSource,
     BaseModelFiles,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
+    DefaultStart,
     EnumerableRepositoryBackendFactory,
     ModelDirectory,
     RegistrationAwareRepositoryBackendFactory,
@@ -102,16 +101,15 @@ __all__ = [
     "ArtifactMaterializationError",
     "ArtifactNotFound",
     "ArtifactPublicationError",
-    "ArtifactRef",
     "ArtifactReleaseChain",
     "ArtifactSourceError",
     "ArtifactSourceReader",
     "ArtifactSources",
     "ArtifactValidator",
-    "BaseArtifactSource",
     "BaseModelFiles",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
+    "DefaultStart",
     "DirectoryFiles",
     "DirectorySource",
     "DownloadedSnapshot",
@@ -134,10 +132,11 @@ __all__ = [
     "RepositoryBackendFactory",
     "S3PrefixFiles",
     "S3Reader",
+    "SnapshotRef",
     "SourceFiles",
     "StagedReleaseRepositoryBackend",
     "compose_release",
-    "directory_content_id",
+    "directory_checksum",
     "download_huggingface_snapshot",
     "parse_huggingface_source",
     "read_peft_config",

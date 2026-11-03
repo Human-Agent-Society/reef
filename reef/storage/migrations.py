@@ -17,7 +17,7 @@ from reef.core.atif_payloads import call_shape, canonical_json
 from reef.core.errors import ReefError
 from reef.core.trajectory_index import call_key, sha256_text
 from reef.storage.commits import read_consumed_ids
-from reef.storage.sql_records import ScopedTable, SQLRecordStore, TrajectoryNodes
+from reef.storage.sql_records import SEGMENT_COLUMNS, ScopedTable, SQLRecordStore, TrajectoryNodes
 from reef.storage.work_queue import FINAL_STATES
 
 logger = logging.getLogger(__name__)
@@ -199,6 +199,37 @@ def migrate_record_trajectories(connection: Connection, records: Table, nodes: T
             TrajectoryNodes(ScopedTable(nodes, scope)).add(
                 connection, int(row["sequence"]), row["scenario"], row["agent_record_id"], payload, key
             )
+
+
+def migrate_data_segments(connection: Connection, items: Table, nodes: Table) -> None:
+    """Let the rows of ``items`` and ``nodes`` keep their content in a segment (``reef.storage.segments``).
+
+    Run in the caller's schema transaction, after ``create_all``. Add the ``SEGMENT_COLUMNS`` and their index to a
+    table that has no ``segment_id``, and let a node's ``entries_json`` and ``call_json`` be NULL. A table that has
+    ``segment_id`` is left unchanged.
+    """
+    inspector = inspect(connection)
+    operations = Operations(MigrationContext.configure(connection))
+    for table in (items, nodes):
+        if "segment_id" in {column["name"] for column in inspector.get_columns(table.name, schema=table.schema)}:
+            continue
+        with operations.batch_alter_table(table.name, schema=table.schema) as batch:
+            for name in SEGMENT_COLUMNS:
+                batch.add_column(Column(name, table.c[name].type, nullable=True))
+            if table is nodes:
+                batch.alter_column("entries_json", existing_type=table.c.entries_json.type, nullable=True)
+                batch.alter_column("call_json", existing_type=table.c.call_json.type, nullable=True)
+        index = next(index for index in table.indexes if "segment_id" in index.columns)
+        index.create(connection)
+
+
+def migrate_data_indexes(connection: Connection, items: Table) -> None:
+    """Create each index of ``items`` that the table does not have yet, such as ``data_item_by_kind``.
+
+    Run in the caller's schema transaction, after ``create_all``, which makes no index for a table that exists.
+    """
+    for index in items.indexes:
+        index.create(connection, checkfirst=True)
 
 
 def migrate_data_trajectories(connection: Connection, items: Table, nodes: Table) -> None:

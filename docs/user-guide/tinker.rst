@@ -237,7 +237,7 @@ that the manifest's ``sampler_path`` names, as ``tinker-cookbook``'s
 downloads once. A service that serves no checkpoint archives, such as Spindle,
 fails the load. The control plane loads the PEFT adapter into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
-weight surface. A rejected candidate loads nothing. A restart starts the
+scenario's ``served_models`` route. A rejected candidate loads nothing. A restart starts the
 engines again and loads each scenario's committed adapter before the scenario
 serves. The converter is pinned in the ``tinker`` extra; it brings torch and
 transformers.
@@ -364,9 +364,9 @@ Prerequisites:
        modal-environment: spindle            # where the deployment runs
        learning-rate: 1.0e-6
 
-The base artifact is a reference to the base revision (`Import an artifact
-<operate.rst#import-an-artifact>`__); a job from it starts a new model with
-the base's own weights.
+The default start is a reference to the base revision (`Import an artifact
+<operate.rst#import-an-artifact>`__), which a new scenario's root release
+holds; a job from it starts a new model with the base's own weights.
 
 Every release refers to its weights on Hugging Face. When Spindle saves a
 checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint

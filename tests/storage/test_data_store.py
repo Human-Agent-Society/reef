@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import func, select
@@ -17,10 +18,11 @@ from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewIt
 from reef.storage.item_kinds import json_digest
 from reef.storage.record_items import record_item
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
+from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
-ORIGIN = {"scenario": "coding", "release_id": "r1", "artifact_id": "a1"}
+ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
 
 
 def record_content(record_id: str) -> dict:
@@ -36,7 +38,7 @@ def record_content(record_id: str) -> dict:
 
 
 def artifact_content(source_uri: str | None, component: str | None) -> dict:
-    return {"source_uri": source_uri, "kind": None, "component": component, "content_id": None}
+    return {"source_uri": source_uri, "kind": None, "component": component}
 
 
 def trajectory(item_id: str, text: str = "hi", **metadata) -> NewItem:
@@ -116,7 +118,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
     assert record.kind == "record"
     assert record.metadata["origin"] == ORIGIN
     # An imported record names no release and no artifact.
-    unserved = {**ORIGIN, "release_id": None, "artifact_id": None}
+    unserved = {**ORIGIN, "artifact_id": None}
     (imported,) = store.create(
         "acme", [NewItem("coding/r2", record_content("r2"), {"kind": "record", "origin": unserved})]
     )
@@ -140,7 +142,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         (NewItem("x", {}, {"kind": "record", "origin": {**ORIGIN, "artifact_id": ""}}), "origin.artifact_id"),
         (trajectory("x", origin=ORIGIN), "only a record or an artifact"),
         (NewItem("x", {}, {"kind": "artifact", "scenarios": {"coding": "train"}}), "importing it"),
-        (NewItem("x", {}, {"kind": "artifact", "origin": unserved}), "names its release_id and artifact_id"),
+        (NewItem("x", {}, {"kind": "artifact", "origin": unserved}), "names its artifact_id"),
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),
         (NewItem("x", ATIF, {"kind": "task"}), "task directory"),
@@ -199,6 +201,24 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
     assert [found.item_id for found in store.query("acme", kind="task", scenario="coding")] == ["fix-bug"]
     with pytest.raises(ValueError, match="not a task"):
         store.task_path(store.create("acme", [trajectory("t1")])[0])
+
+
+def test_groups_count_the_items_of_each_metadata_value_newest_first(store):
+    store.create("acme", [trajectory("a1", set_id="a", set_name="A"), trajectory("a2", set_id="a")])
+    store.create("acme", [trajectory("n1"), trajectory("b1", set_id="b", set_name="B"), trajectory("x", set_id=7)])
+    store.create("acme", calls(1))
+    store.create("other", [trajectory("o1", set_id="a")])
+    groups = store.groups("acme", kind="trajectory", key="set_id")
+    assert [(group.value, group.item_count, group.metadata.get("set_name")) for group in groups] == [
+        ("b", 1, "B"),
+        (None, 2, None),
+        ("a", 2, "A"),
+    ]
+    assert groups[2].last_sequence == groups[2].first_sequence + 1
+    assert store.groups("acme", kind="trajectory", key="set_id", limit=2) == groups[:2]
+    assert store.groups("acme", kind="trajectory", key="set_id", before=groups[1].first_sequence) == groups[2:]
+    with pytest.raises(ValueError, match="key"):
+        store.groups("acme", kind="trajectory", key="set.id")
 
 
 def test_query_arguments_are_checked(store):
@@ -265,6 +285,38 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-3": RecordLink("coding/call-1", entries[3]),
         "coding/retry-2": RecordLink("coding/call-1", entries[2]),
     }
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda store: store.read("acme", "coding/call-2").item_id,
+        lambda store: [item.item_id for item in store.query("acme", kind="record")],
+        lambda store: list(store.record_links("acme", ["coding/call-1", "coding/call-2"])),
+    ],
+    ids=["read", "query", "record_links"],
+)
+def test_a_read_sees_one_snapshot_while_a_delete_commits(postgres_config, tmp_path, monkeypatch, read):
+    url, schema = postgres_config
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    with (
+        closing(task_files),
+        closing(PostgresDataStore(url, task_files, schema=schema)) as reader,
+        closing(PostgresDataStore(url, task_files, schema=schema)) as writer,
+    ):
+        writer.create("acme", calls(1, 2))
+        paths = TrajectoryNodes.paths
+
+        def paths_after_delete(self, connection, node_sequences, *columns):
+            # The leaf call-2 and its node go between the read's item rows and its node rows.
+            writer.delete("acme", "coding/call-2")
+            return paths(self, connection, node_sequences, *columns)
+
+        monkeypatch.setattr(TrajectoryNodes, "paths", paths_after_delete)
+        before = read(reader)
+        monkeypatch.undo()
+        assert before in ("coding/call-2", ["coding/call-1", "coding/call-2"])
+        assert reader.read("acme", "coding/call-2") is None
 
 
 def test_a_record_link_is_checked_at_construction():
@@ -409,3 +461,39 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
     finally:
         for store in stores:
             store.close()
+
+
+def test_legacy_origin_is_read_at_admission_without_persisting_a_second_identity(store):
+    legacy = {**ORIGIN, "release_id": "revision-1"}
+    (stored,) = store.create(
+        "acme", [NewItem("coding/r1", record_content("r1"), {"kind": "record", "origin": legacy})]
+    )
+    assert stored.metadata["origin"] == ORIGIN
+
+
+def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable(store):
+    content = artifact_content("s3://bucket/weights", None)
+    legacy_content = {**content, "content_id": "old-checksum"}
+    item = NewItem("weights", legacy_content, {"kind": "artifact"})
+    (created,) = store.create("acme", [item])
+    assert created.content == content
+    assert created.digest == json_digest(content)
+    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (created,)
+
+    # Seed a row written before the migration; a retry must not rewrite its immutable content or digest.
+    legacy = replace(created, content=legacy_content, digest=json_digest(legacy_content))
+    if isinstance(store, MemoryDataStore):
+        store.items["acme"]["weights"] = legacy
+    else:
+        table = store.items_table
+        with store.transaction() as connection:
+            connection.execute(
+                table.update()
+                .where(table.c.owner == "acme", table.c.item_id == "weights")
+                .values(content_json=canonical_json(legacy_content), digest=legacy.digest)
+            )
+    assert store.create("acme", [item]) == (legacy,)
+    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (legacy,)
+    with pytest.raises(ItemConflict, match="other content"):
+        store.create("acme", [NewItem("weights", {**content, "source_uri": "s3://other/weights"}, item.metadata)])
+    assert store.read("acme", "weights") == legacy

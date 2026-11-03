@@ -14,6 +14,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
+from reef.runtime.jobs import ScenarioRoot
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
@@ -22,7 +23,7 @@ from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioSto
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskFileStore, TaskStorage
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
 
@@ -134,8 +135,9 @@ class FailingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentReleases | None = None,
+        releases: ComponentArtifacts | None = None,
         samples: SampleStore | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         raise RuntimeError("injected recipe failure")
 
@@ -169,9 +171,7 @@ def test_sqlite_implementations_inherit_storage_bases(tmp_path: Path) -> None:
 
 
 def backend_factory(tmp_path: Path):
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
 
 def trace(record_id: str, scenario: str = "math") -> AgentRecord:
