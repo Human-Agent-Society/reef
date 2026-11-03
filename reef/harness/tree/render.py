@@ -25,6 +25,7 @@ import tomli_w
 import yaml
 
 from reef.core.errors import ReefError
+from reef.core.values import deep_merge
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.matchers import Each, select
 from reef.harness.adapters.parts import Format
@@ -33,15 +34,6 @@ from reef.harness.tree.tree import HarnessTree
 
 class RenderError(ReefError):
     """The tree cannot be rendered for this adapter."""
-
-
-def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
-    """``base`` with ``overlay`` merged in: nested objects merge key by key, every other value of ``overlay`` wins."""
-    merged = dict(base)
-    for key, value in overlay.items():
-        below = merged.get(key)
-        merged[key] = deep_merge(below, value) if isinstance(below, Mapping) and isinstance(value, Mapping) else value
-    return merged
 
 
 def render_tree(
