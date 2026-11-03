@@ -6,12 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.execution.executor import ExecutorConfig, WorkerSpec
+from reef.execution.executor.delegating import DelegatingExecutor
+from reef.execution.executor.ray import RayExecutor
+from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.control import SGLangControl
-from reef.runtime.executor import ExecutorConfig, WorkerSpec
-from reef.runtime.executor.delegating import DelegatingExecutor
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.executor.uniproc import UniProcExecutor
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 

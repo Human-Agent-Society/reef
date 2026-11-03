@@ -425,7 +425,7 @@ class Repository(ArtifactRepository):
         # lock-free: a ref read is atomic under the GIL and readers must not
         # be serialized behind a publish.
         self._head_lock = Lock()
-        # Non-checkpointed pull-surface releases remain process-local. Keep
+        # Non-checkpointed releases of pulled files remain process-local. Keep
         # every staged artifact addressable for snapshot and activation reads; a
         # single "latest local" slot would make an older snapshot dangle as
         # soon as the next release is staged.

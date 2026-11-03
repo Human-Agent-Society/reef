@@ -55,7 +55,7 @@ Recipe
 ------
 
 The method a deployment runs. It binds a processor, a training objective, an
-inference runtime, and a surface; a weight recipe also binds a training
+inference runtime, and the components of its releases; a weight recipe also binds a training
 component. The core ``recipe`` records without producing updates.
 
 Recipe reference
@@ -153,8 +153,9 @@ Component
 ---------
 
 One named part of a scenario, such as ``weights``, ``harness`` or ``skills``.
-A recipe's surface declares its components and how each artifact is
-admitted, loaded and read. The scenario selects one artifact per component.
+A recipe declares its components (``build_components``): each one's kind,
+admission check, import layout and the files a client pulls. The inference
+runtime loads the component of a weight kind. The scenario selects one artifact per component.
 Updating one component preserves the other components' artifact IDs.
 
 Candidate selection
@@ -173,13 +174,6 @@ The deployment's rule that decides whether a new artifact serves: at once
 (``always``), after an evaluation of it (``evaluated``), or when a person
 activates it (``never``). Training continues from the new artifact either
 way. See `Configuration <configuration.rst#the-activation-section>`__.
-
-Surface
--------
-
-How a published artifact reaches whoever uses it: validation, runtime
-loading, and an optional client-pulled file tree, composed as fields on one
-``Surface`` value. No surface changes an inference request.
 
 Training pipeline
 -----------------

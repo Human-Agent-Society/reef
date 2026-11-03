@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from reef.execution.executor.config import ExecutorSettings, role_executor_settings, select_executor
 from reef.record2sample.generator import HarborChecks, ReefGeneratorRollouts
-from reef.runtime.executor.config import ExecutorSettings, role_executor_settings, select_executor
 from reef.service.deploy import generator_process as generator_main
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.execution import service_executor_selection, validate_services

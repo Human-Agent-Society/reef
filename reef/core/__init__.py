@@ -10,7 +10,8 @@ shared identities and wire types defined here.
 The admission bar is concrete: a type belongs here only when at least two
 packages that do not depend on each other need it, and it carries no I/O.
 ``job_data`` and ``evaluation`` hold the values and candidate contracts shared
-by runtimes and training; ``requirements`` validates training-request requirements
+by runtimes and training; ``weight_layout`` holds the values that
+``reef.train`` and ``reef.inference`` both read; ``requirements`` validates training-request requirements
 and reads their release-chain records.
 ``training_request`` validates TRAIN bodies at admission and holds the queued
 instruction carried by a job's data.

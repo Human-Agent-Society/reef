@@ -9,7 +9,7 @@ import pytest
 import yaml
 from tests.support.config_helpers import deployment_layout
 
-from reef.runtime.executor.ray import RayExecutor
+from reef.execution.executor.ray import RayExecutor
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.orchestrator import _Stack
 

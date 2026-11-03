@@ -7,10 +7,11 @@ import urllib.request
 import pytest
 
 from reef.artifact.artifact import Artifact
+from reef.core.errors import UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, UpstreamStatusError
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 
 
 class RefusingHandler(InferenceHandler):

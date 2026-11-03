@@ -11,9 +11,9 @@ import tests
 from tests.support.harness_steps import PI_SEED, harness_backend
 
 from reef.evaluation.harness import HarnessCandidate, TaskScorer
-from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.executor.config import executor_settings
-from reef.runtime.executor.requirements import ExecutionRequirements
+from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor.config import executor_settings
+from reef.execution.executor.requirements import ExecutionRequirements
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 

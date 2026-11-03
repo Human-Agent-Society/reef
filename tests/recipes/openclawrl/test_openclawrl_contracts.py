@@ -23,8 +23,8 @@ from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSetting
 from recipes.openclawrl.turns import TurnJob
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TrajectorySample

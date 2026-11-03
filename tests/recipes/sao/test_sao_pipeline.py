@@ -40,8 +40,6 @@ from reef.dispatcher import Dispatcher
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2sample.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import TrainerSamples
@@ -49,7 +47,9 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job

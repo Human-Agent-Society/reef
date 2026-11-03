@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from slime.ray import actor_group
 
-from reef.runtime.executor import ExecutorFuture, resolve
+from reef.execution.executor import ExecutorFuture, resolve
 from reef.train.slime_backend.reef_adapters.executors.ray import SlimeRayExecutor
 from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup, merge_rank_metrics
 

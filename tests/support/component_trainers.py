@@ -12,6 +12,7 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
+from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.core import AgentRecord, RequestType
 from reef.core.activation import ActivationRule
 from reef.dispatcher import Dispatcher
@@ -20,14 +21,12 @@ from reef.execution.jobs import SupportsReceipt
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import ComponentSurface, Surface, TextFileTree
-from reef.surface.weights import WeightLoader
 from reef.train import ComponentTrainer, Trainer
+from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobCommit, JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 
@@ -187,14 +186,12 @@ class _TwoTrainerRecipe(Recipe):
     def default_start(self) -> DefaultStart:
         return self.start
 
-    def build_surface(self, scenario: str) -> Surface:
-        return Surface(
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(
             components={
                 # A training component's weights load through the runtime, so train-from imports them as a start.
-                WEIGHTS: (
-                    ComponentSurface() if self.training_component is None else ComponentSurface(loader=WeightLoader())
-                ),
-                HARNESS: ComponentSurface(files=TextFileTree()),
+                WEIGHTS: (ComponentSpec() if self.training_component is None else ComponentSpec(kind="model")),
+                HARNESS: ComponentSpec(files=TextFileTree()),
             }
         )
 
@@ -210,7 +207,7 @@ class _TwoTrainerRecipe(Recipe):
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
