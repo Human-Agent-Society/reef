@@ -3,12 +3,14 @@ from __future__ import annotations
 import multiprocessing
 import os
 from collections import namedtuple
+from functools import partial
 from multiprocessing.synchronize import Event
 from pathlib import Path
 
 import pytest
 
 from reef.runtime import durable_files as durable_io
+from reef.train.slime_backend.reef_adapters import preflight
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
 from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
@@ -485,12 +487,24 @@ def slime_args(tmp_path: Path, **values) -> SlimeArguments:
 
 
 @pytest.mark.unit
-def test_preflight_pins_the_storage_paths_and_gives_a_critic_its_own_root(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("free_bytes", [1 << 30, 0])
+def test_preflight_checks_free_space_and_pins_actor_and_critic_paths(
+    tmp_path: Path, monkeypatch, free_bytes: int
+) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        preflight,
+        "CheckpointStorage",
+        partial(CheckpointStorage, disk_usage=lambda path: Usage(1 << 30, (1 << 30) - free_bytes, free_bytes)),
+    )
     _write_bytes(tmp_path / "source-hf", 10)
     args = slime_args(
         tmp_path, save="checkpoints/megatron", use_critic=True, hf_checkpoint=str(tmp_path / "source-hf")
     )
+    if free_bytes == 0:
+        with pytest.raises(RuntimeError, match="filesystem free-space floor"):
+            prepare_checkpoint_storage(args, RetentionConfig())
+        return
     storage = prepare_checkpoint_storage(args, RetentionConfig())
     assert args.save == str(storage.megatron_root) == str(tmp_path / "checkpoints" / "megatron")
     assert args.save_hf == storage.hf_template
