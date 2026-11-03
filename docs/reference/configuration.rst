@@ -486,9 +486,9 @@ returns token log probabilities only to a client that sends the OpenAI
 `Chat template arguments`_).
 
 Both handlers accept ``tool_call_parser`` (the engine's parser name),
-``sampling_defaults``, ``force_reasoning``, ``chat_template_kwargs`` and
-``rollout_continuation``. Any other option, such as ``capture_topk``, is
-unknown and fails the handler's start. Per-request sampling extras pass through
+``sampling_defaults``, ``force_reasoning`` and ``chat_template_kwargs``. Any
+other option, such as ``capture_topk``, is unknown and fails the handler's
+start. Per-request sampling extras pass through
 ``sglang_sampling_params`` or ``vllm_sampling_params``.
 
 A scenario can set ``temperature``, ``top_p`` and ``top_k`` over
@@ -501,15 +501,6 @@ Anthropic messages requests.
 ``chat_template_kwargs`` renders a request that omits them, for example
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key.
-
-``rollout_continuation: true`` serves a multi-turn rollout from its exact
-sampled tokens. The client names the rollout in the OpenAI ``user`` field and
-sends each later request as the previous messages, the sampled assistant turn
-and the new user or tool messages. The handler renders only the new messages
-and appends them to the previous call's tokens, so a template that rewrites
-earlier turns, as Qwen3's drops their reasoning, cannot change the prompt that
-the engine continues. A request without ``user`` renders as usual. A request
-that names a rollout but does not extend it is refused.
 
 A vLLM engine serving a training stack also needs Reef's connector, which
 stamps every sampled token with the weight version that produced it::
@@ -579,8 +570,8 @@ arguments that the engine renders with: the handler's
 A sample that cannot render, or that is longer than a limit of its stage,
 does not train. The job metric ``unrenderable_samples`` counts these samples.
 A chat template that drops the reasoning of earlier turns, as Qwen3's does,
-cannot render a multi-turn sample whose earlier trained turns carry
-reasoning.
+renders a multi-turn sample as several segments. Each segment trains as one
+sample (see `Processors <../developer-guide/processors.rst>`__).
 
 Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~
