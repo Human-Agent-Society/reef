@@ -247,7 +247,7 @@ const glossaryTerms = [
   "Training objective",
   "Release chain",
   "Artifact",
-  "Surface",
+  "Component",
   "Harness",
   "Runtime",
   "Skill",

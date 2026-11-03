@@ -608,8 +608,8 @@ class TTTDChatRequestBuilder:
     """Describe TTTD sampling through Reef's OpenAI-compatible chat route.
 
     Prompt rendering and exact token/log-prob capture belong to the configured
-    inference backend. The harness supplies chat semantics only: Reef's weight
-    surface addresses the request to whatever adapter the deployment serves,
+    inference backend. The harness supplies chat semantics only: Reef routes
+    the request to whatever adapter the deployment serves,
     so no caller can sample the frozen base by forgetting to name it.
     """
 
@@ -643,7 +643,7 @@ class TTTDChatRequestBuilder:
         request_extra: Mapping[str, Any],
     ) -> dict[str, Any]:
         if "lora_path" in request_extra:
-            raise ValueError("lora_path belongs to Reef's weight surface, not to a harness request")
+            raise ValueError("lora_path belongs to Reef's inference routing, not to a harness request")
         payload: dict[str, Any] = {
             "model": model,
             "messages": [dict(message) for message in messages],
