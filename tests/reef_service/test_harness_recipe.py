@@ -1073,10 +1073,10 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
         row = scenario.artifacts()[0]
         assert row["artifact_id"] == scenario.repository.resolve(record.snapshot).artifact_id
         assert row["active"] is False
-        tree = scenario.surface.files
-        held_files = tree.read_files(scenario.resolve_artifact(row["artifact_id"])[1])
+        components = scenario.components
+        held_files = components.read_files(scenario.resolve_artifact(row["artifact_id"])[1])
         assert any("marker" in text for text in held_files.values())
-        served_files = tree.read_files(scenario.repository.resolve(scenario.current_snapshot()))
+        served_files = components.read_files(scenario.repository.resolve(scenario.current_snapshot()))
         assert not any("marker" in text for text in served_files.values())
 
         async def activate() -> None:
@@ -1100,7 +1100,7 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
 
         asyncio.run(activate())
         assert scenario.current_snapshot() == record.snapshot
-        served_files = tree.read_files(scenario.repository.resolve(scenario.current_snapshot()))
+        served_files = components.read_files(scenario.repository.resolve(scenario.current_snapshot()))
         assert any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
         assert last.operation == "activate" and last.snapshot == record.snapshot
@@ -1139,7 +1139,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
 
     def rules_of(scenario, artifact_id: str) -> str:
         """Every file text of ``artifact_id``, joined: the rules render into one of them."""
-        files = scenario.surface.files.read_files(scenario.resolve_artifact(artifact_id)[1])
+        files = scenario.components.read_files(scenario.resolve_artifact(artifact_id)[1])
         return "".join(files.values())
 
     first_recipe = recipe("r1", "r2")
@@ -1259,9 +1259,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
         assert result.artifact is not None
         newest = last_made(scenario)
         assert newest.made_artifact and newest.snapshot.parent_revision == trained
-        files = scenario.surface.files.read_files(
-            scenario.release_queries.artifact_for_version(newest.snapshot.revision)
-        )
+        files = scenario.components.read_files(scenario.release_queries.artifact_for_version(newest.snapshot.revision))
         evolved = "".join(files.values())
         assert "marker person" in evolved and "marker r2" in evolved and "marker r1" not in evolved
     finally:

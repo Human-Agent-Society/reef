@@ -12,8 +12,8 @@ from reef.runtime.residency import (
     AdapterEvictionFailed,
     AdapterResidencyError,
     AdapterResidencyManager,
+    adapter_name,
 )
-from reef.surface import adapter_name
 
 
 #: The adapter directory every test load names; the fake engine reads no files.

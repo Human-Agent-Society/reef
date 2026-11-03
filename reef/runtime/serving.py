@@ -41,8 +41,7 @@ from reef.runtime.interfaces import (
     WeightFiles,
     new_runtime_load_id_incarnation,
 )
-from reef.runtime.residency import AdapterResidencyError, AdapterResidencyManager
-from reef.surface.adapter import adapter_name, parse_adapter_name
+from reef.runtime.residency import AdapterResidencyError, AdapterResidencyManager, adapter_name, parse_adapter_name
 
 logger = logging.getLogger(__name__)
 

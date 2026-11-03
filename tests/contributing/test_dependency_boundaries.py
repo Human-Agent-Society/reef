@@ -281,7 +281,6 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/artifact",
         "reef/recipe",
         "reef/runtime",
-        "reef/surface",
     )
     files = [path for package in core_packages for path in sorted((REPO_ROOT / package).rglob("*.py"))]
     # A method package's public half too; its ``slime`` subpackage is the

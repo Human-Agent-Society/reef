@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.components import ArtifactLayout
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ADAPTER_DIR, WEIGHT_LAYOUTS, WeightLayout
-from reef.surface.base import ArtifactLayout
 
 JobState = Literal["running", "finished", "failed"]
 
