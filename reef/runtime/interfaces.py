@@ -644,11 +644,13 @@ class InferenceRuntime(AdapterWeightRuntime):
         Other service processes build the same runtime without opening it. The default has no engine to open.
         """
 
-    def adopt(self, served: ServedArtifact) -> None:
+    def adopt(self, served: ServedArtifact) -> bool:
         """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
-        runtime existed (an inference worker restart): when the engine still serves it, the next activation of the same
-        artifact loads nothing. The default can tell nothing about the engine, so the next activation loads."""
-        return
+        runtime existed (an inference worker restart), and return whether the engine still serves it. Then the route
+        stays while the new owner serves the scenario again, and the next activation of the same artifact loads
+        nothing. The default can tell nothing about the engine: it returns False, so the route goes until the
+        scenario serves again, and the next activation loads."""
+        return False
 
     def stop_serving(self, served: ServedArtifact) -> None:
         """Stop serving ``served``, which no ``served_models`` row names any more: the engine frees what it holds
