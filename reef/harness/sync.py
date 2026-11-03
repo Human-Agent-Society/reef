@@ -47,14 +47,13 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.components import FileTree, TextFileTree
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import Format, TreeLayout
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
-from reef.surface.base import ArtifactLayout, ComponentSurface, FileTree, Surface
-from reef.surface.files import TextFileTree
 
-#: The component name a harness surface binds.
+#: The component name of a harness evolution recipe's harness.
 HARNESS_COMPONENT = "harness"
 #: The text a client puts its Reef token in place of, in the files and variables ``layer_install`` makes.
 TOKEN_PLACEHOLDER = "REEF_TOKEN_PLACEHOLDER"
@@ -76,18 +75,6 @@ class HarnessFiles(FileTree):
         if files is None:
             return None
         return render_tree(HarnessTree(files), self.descriptor)
-
-
-def create_harness_surface(descriptor: AdapterDescriptor, *, layout: ArtifactLayout | None = None) -> Surface:
-    """A surface that serves each release of the ``harness`` component as ``descriptor``'s rendered files.
-
-    ``layout`` checks an imported harness artifact (``ComponentSurface.layout``); ``None`` takes no import.
-    """
-    return Surface(
-        components={
-            HARNESS_COMPONENT: ComponentSurface(files=HarnessFiles(descriptor), kind="harness_plugin", layout=layout)
-        }
-    )
 
 
 @dataclass(frozen=True)
@@ -281,7 +268,6 @@ __all__ = [
     "ImportedTree",
     "LayerInstall",
     "TreeMerge",
-    "create_harness_surface",
     "import_files",
     "layer_install",
     "merge_lines",

@@ -263,14 +263,14 @@ def test_tttd_chat_request_builder_leaves_token_capture_to_backend():
     assert payload["top_p"] == 1.0
     assert payload["top_k"] == -1
     assert payload["chat_template_kwargs"] == {"enable_thinking": True}
-    # Reef's weight surface names the served adapter; the harness never does.
+    # Reef's inference routing names the served adapter; the harness never does.
     assert "lora_path" not in payload
 
 
 def test_tttd_chat_request_builder_rejects_adapter_override():
     builder = TTTDChatRequestBuilder()
 
-    with pytest.raises(ValueError, match="weight surface"):
+    with pytest.raises(ValueError, match="inference routing"):
         builder("model", [{"role": "user", "content": "hi"}], {"lora_path": None})
 
 
