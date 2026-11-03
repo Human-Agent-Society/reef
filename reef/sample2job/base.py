@@ -21,6 +21,7 @@ from reef.core.config import config_option
 from reef.core.job_data import JobData, Sample, TaskSample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
+from reef.core.values import deep_merge
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import Record2Sample
@@ -181,7 +182,8 @@ class Sample2Job(ABC, Plugin):
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:
         """The parameters of the training job that trains ``data``: ``context.job_parameters`` of its samples' kind,
-        with the keys of its instruction's ``parameters`` put over them.
+        with its instruction's ``parameters`` merged in (``deep_merge``): nested objects merge key by key, and every
+        other value of the instruction wins.
 
         Together with ``make_job_data``, this is the stage's function from the selected samples to the job: the
         data, and the parameters that the job loop submits with it. The result depends only on ``data``, which
@@ -202,7 +204,7 @@ class Sample2Job(ABC, Plugin):
         overrides = {} if data.request is None else data.request.parameters
         if defaults is None and not overrides:
             raise ValueError(f"the recipe gives no job parameters for a job of {kind} samples")
-        return {**(defaults or {}), **overrides}
+        return deep_merge(defaults or {}, overrides)
 
     def experiment_config(self) -> Mapping[str, Any]:
         """A non-secret description of the jobs that the stage makes, which experiment runs record."""
