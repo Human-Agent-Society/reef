@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Self
 
 from reef.core.plugins import NoSettings
+from reef.core.values import deep_merge
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import Record2Sample
 from reef.sample2job.base import Sample2Job
@@ -44,7 +45,7 @@ class DatasetJobData(Sample2Job):
         return JobData(data_id, ())
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:
-        """The recipe's parameters, which every kind shares, with the instruction's ``parameters`` over them."""
+        """The recipe's parameters, which every kind shares, with the instruction's ``parameters`` merged in."""
         defaults = self.context.job_parameters.get("trajectory") or {}
         overrides = {} if data.request is None else data.request.parameters
-        return {**defaults, **overrides}
+        return deep_merge(defaults, overrides)

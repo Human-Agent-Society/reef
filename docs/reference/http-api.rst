@@ -981,8 +981,10 @@ not join the manual buffer by themselves, in any recipe:
   manual buffer, possibly none. The method reads the request next to them.
 
 A weight recipe's instruction can set the parameters of its training job with
-``parameters``, a JSON object of at most 16 KiB. Its keys go over the recipe's
-parameters for the kind of the buffer's samples. Reef does not read them: the
+``parameters``, a JSON object of at most 16 KiB. Reef merges it into the
+recipe's parameters for the kind of the buffer's samples: nested objects merge
+key by key, and every other value of the instruction wins, lists included. An
+instruction cannot remove a key that the recipe sets. Reef does not read them: the
 training component checks them, as it checks the recipe's. A refused job fails
 the instruction with the component's reason. For example, after an SFT job on
 uploaded trajectories, put uploaded train tasks in the manual buffer and run an
@@ -1197,7 +1199,7 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
   queued job, else ``null``.
 - ``parameters``: the job's parameters, a JSON object: the recipe's
   parameters for the kind of the job's samples, with the instruction's
-  parameters over them. They hold the training ``method`` and the
+  parameters merged in. They hold the training ``method`` and the
   ``scheduling`` when the recipe or the instruction gives them.
 - ``sample_count``: the number of samples that the job trains, an integer
   from 0.
@@ -1425,7 +1427,8 @@ scenario:
      "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
      "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
      "serving_config": {"weights": {"temperature": 0.6}},
-     "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}}
+     "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
+     "job_parameters": {"trajectory": {"method": {"objective": "reef.recipe.sft:SftObjective", "learning_rate_schedule": null}, "save_interval": 50}}
    }
 
 - ``training_mode`` is what the scenario runs.
@@ -1437,6 +1440,10 @@ scenario:
   when the scenario sets no field.
 - ``effective_serving_config`` maps the served component to each of its serving
   fields that has a value: the scenario's value, else the deployment's.
+- ``job_parameters`` maps a sample kind (``trajectory`` or ``task``) to the
+  recipe's parameters of a job of that kind. A training instruction's
+  ``parameters`` merge into them. A kind that the recipe gives no parameters is
+  absent.
 
 An unknown scenario returns ``404``.
 
