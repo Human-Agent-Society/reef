@@ -16,10 +16,13 @@ A ``record_selection`` item:
 
 A selection reads every record that its trainer has not used yet when it runs. So a request adds nothing while a
 selection of the same trainer waits in the queue; it adds one when the trainer's selections are final or running.
+A stage can also make samples without a new record: when background work ends, or when a set that waits for time
+is due. The worker then asks for the next selection at that time.
 """
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -65,7 +68,8 @@ class ProducedSamples:
 
     Values: ``changed`` is whether it gave the trainer something new to build a job from: a new stored sample or a
     new training instruction; ``background`` is whether background work of the stages still runs, so the samples
-    service looks again later.
+    service looks again later. ``due_in_seconds`` is a non-negative finite number: the seconds until a set that waits
+    for time alone is due, such as a trajectory at the end of its idle time. None means that no set waits for time.
 
     Counts describe this completed attempt only, not earlier failed attempts. None means unavailable.
     ``records_read`` counts replayed records, including ignored records; ``samples_created`` counts new inserts.
@@ -78,11 +82,15 @@ class ProducedSamples:
     background: bool
     records_read: int | None = None
     samples_created: int | None = None
+    due_in_seconds: float | None = None
 
     def __post_init__(self) -> None:
         for count in (self.records_read, self.samples_created):
             if count is not None and (type(count) is not int or count < 0):
                 raise ValueError("sample processing counts must be non-negative integers or None")
+        due = self.due_in_seconds
+        if due is not None and (isinstance(due, bool) or not isinstance(due, (int, float)) or not 0 <= due < math.inf):
+            raise ValueError("due_in_seconds must be a non-negative finite number or None")
         if not isinstance(self.changed, bool) or not isinstance(self.background, bool):
             raise TypeError("changed and background are booleans")
         if self.samples_created and not self.changed:
@@ -109,7 +117,8 @@ class SamplesWorker(QueueWorker):
     A selection that names no component fails for good.
 
     Purpose: the samples service starts one or more (``start``) and stops them (``stop``). A selection that left
-    work in the background asks for the next selection after ``BACKGROUND_POLL_SECONDS``.
+    work in the background asks for the next selection after ``BACKGROUND_POLL_SECONDS``. A selection that left
+    only a set that waits for time asks for the next selection after ``due_in_seconds``.
     """
 
     def __init__(
@@ -128,14 +137,20 @@ class SamplesWorker(QueueWorker):
             "background": produced.background,
             "records_read": produced.records_read,
             "samples_created": produced.samples_created,
+            "due_in_seconds": produced.due_in_seconds,
         }
 
     def item_finished(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
         # The next selection is a new item: the finished one keeps its ID until it ends, and an add of the same ID
         # changes nothing.
         if result["background"]:
-            component = cast(str, item.payload["component"])
-            request_selection(self.queue, item.scenario, component, available_at=time.time() + BACKGROUND_POLL_SECONDS)
+            delay = BACKGROUND_POLL_SECONDS
+        elif result["due_in_seconds"] is not None:
+            delay = cast(float, result["due_in_seconds"])
+        else:
+            return
+        component = cast(str, item.payload["component"])
+        request_selection(self.queue, item.scenario, component, available_at=time.time() + delay)
 
 
 __all__ = [
