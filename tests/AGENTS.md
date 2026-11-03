@@ -7,7 +7,7 @@ module before adding another. Keep new test modules out of the `tests/` root.
 
 | Directory | Responsibility |
 | --- | --- |
-| `artifact/`, `storage/`, `surface/` | Artifact repositories, record persistence, and artifact delivery |
+| `artifact/`, `storage/` | Artifact repositories, scenario components, and record persistence |
 | `core/`, `scenario/` | Shared value contracts, scenario lifecycle, dispatcher coordination, and commit recovery |
 | `runtime/`, `inference/`, `train/` | Runtime coordination, inference integrations, and the training pipeline |
 | `sandbox/` | Shared execution, environment contracts, isolation, file transfer, and cleanup |

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact, SnapshotRef
+from reef.artifact.components import ScenarioComponents
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.artifact.sources import SourceFiles
@@ -31,11 +32,9 @@ from reef.scenario.releases import ServedBesideArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
-from reef.surface.base import Surface
 from reef.train.instructions import ScenarioInstructions
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainStepResult
-
 
 #: The keys of a ``Scenario.harness_snapshot_rows`` row that hold private storage locators.
 SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot"})
@@ -50,7 +49,7 @@ class ScenarioCapabilities:
     - ``serve_beside`` is True exactly when ``Scenario.serve`` can serve an artifact beside the active release: the
       store keeps a durable commit history, and the scenario has no runtime-loaded component, no runtime, or a
       runtime that serves artifacts on request (``InferenceRuntime.serves_artifacts_on_request``).
-    - ``evaluate`` holds the components whose artifacts an artifact evaluation can run, in surface order: each
+    - ``evaluate`` holds the components whose artifacts an artifact evaluation can run, in declaration order: each
       component with a kind, when no component is a ``harness_plugin`` and the runtime serves artifacts on request;
       else it is empty.
     - ``train_from`` holds the components whose trainer can start from an artifact (``Trainer.can_train_from``), in
@@ -117,12 +116,12 @@ class Scenario:
         )
         self._name = name
         self._binding = binding
-        self._surface = binding.surface
+        self._components = binding.components
         self._serving_config = ServingConfig()
         self._store = store
         self._closed = False
         #: Every trainer of this scenario with the component it evolves, in recipe order.
-        self.trainers = validate_component_trainers(trainers, binding.surface)
+        self.trainers = validate_component_trainers(trainers, binding.components)
         self._artifact_chain = ArtifactReleaseChain(repository)
         self._committer = ScenarioCommitter(
             name=name,
@@ -172,11 +171,11 @@ class Scenario:
     def effective_serving_config(self, config: ServingConfig) -> dict[str, dict[str, JsonValue]]:
         """The serving fields of each component that has some, with their effective values under ``config``.
 
-        Only the component that the scenario's inference runtime serves (``Surface.loader_component``) has serving
+        Only the component that the scenario's inference runtime serves (``ScenarioComponents.loaded_component``) has serving
         fields; ``InferenceRuntime.serving_config`` gives them. ``ValueError`` when ``config`` sets a field of
         another component, or a field or value that the runtime refuses.
         """
-        component = self._surface.loader_component
+        component = self._components.loaded_component
         runtime = self._binding.runtime
         effective: dict[str, dict[str, JsonValue]] = {}
         if component is not None and runtime is not None and runtime.serves_requests:
@@ -194,7 +193,7 @@ class Scenario:
 
     def served_serving_config(self) -> dict[str, JsonValue]:
         """The override that a serving request carries to inference: the one of the served component."""
-        component = self._surface.loader_component
+        component = self._components.loaded_component
         return {} if component is None else self._serving_config.component(component)
 
     @property
@@ -247,9 +246,9 @@ class Scenario:
         return self._committer.step
 
     @property
-    def surface(self) -> Surface:
-        """The serving surface built for this scenario."""
-        return self._surface
+    def components(self) -> ScenarioComponents:
+        """The components that every release of this scenario binds (``Recipe.build_components``)."""
+        return self._components
 
     @property
     def training_mode(self) -> str:
@@ -257,13 +256,13 @@ class Scenario:
         return self.stepping_trainers()[0].trainer.pipeline.training_mode
 
     def evaluation_refusal(self, component: str) -> str | None:
-        """Why this scenario cannot evaluate an artifact of ``component``, a component that its surface declares
+        """Why this scenario cannot evaluate an artifact of ``component``, a component that the scenario declares
         with a kind; None when it can.
 
         Reef evaluates a model artifact (``RFC #959``): the artifacts hold no harness, and the runtime answers each
         call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``).
         """
-        kinds = {name: declared.kind for name, declared in self._surface.components.items()}
+        kinds = {name: declared.kind for name, declared in self._components.components.items()}
         if kinds[component] == "harness_plugin":
             return "Reef does not evaluate a harness artifact yet (RFC #959, step 2)"
         if "harness_plugin" in kinds.values():
@@ -278,13 +277,14 @@ class Scenario:
 
     def capabilities(self) -> ScenarioCapabilities:
         """The artifact operations that this scenario can run (``ScenarioCapabilities``)."""
-        surface, runtime = self._surface, self.runtime
+        components, runtime = self._components, self.runtime
         on_request = runtime is not None and runtime.serves_artifacts_on_request
         return ScenarioCapabilities(
-            serve_beside=self._store.durable and (surface.loader_component is None or runtime is None or on_request),
+            serve_beside=self._store.durable
+            and (components.loaded_component is None or runtime is None or on_request),
             evaluate=tuple(
                 name
-                for name, component in surface.components.items()
+                for name, component in components.components.items()
                 if component.kind is not None and self.evaluation_refusal(name) is None
             ),
             train_from=tuple(
@@ -348,7 +348,7 @@ class Scenario:
             # The staleness check measures data against the weights that serve; a scenario that loads no weights
             # serves one fixed model, so its data never goes stale.
             runtime = self.runtime
-            weights_load = self._binding.surface.loader_component is not None and runtime is not None
+            weights_load = self._binding.components.loaded_component is not None and runtime is not None
             serving = self.served_artifact_id() if weights_load else None
             if (
                 weights_load
@@ -377,18 +377,18 @@ class Scenario:
             self.instructions.give(component_trainer.trainer for component_trainer in self.trainers)
 
     def served_component(self) -> str | None:
-        """The loaded component, the pulled file component, or the sole component; None for an ambiguous surface."""
-        loader = self._binding.surface.loader_component
-        if loader is not None:
-            return loader
-        files = self._binding.surface.files_component
+        """The loaded component, the pulled file component, or the sole component; None when several could serve."""
+        loaded = self._binding.components.loaded_component
+        if loaded is not None:
+            return loaded
+        files = self._binding.components.files_component
         if files is not None:
             return files
         names = self._committer.component_names()
         return names[0] if len(names) == 1 else None
 
     def serving_artifact_id(self) -> str:
-        """The selected artifact of the served component; an ambiguous surface cannot name one artifact."""
+        """The selected artifact of the served component; several components cannot name one artifact."""
         component = self.served_component()
         if component is None:
             raise ReefError(f"scenario {self.name!r} has no unique component for inference")
@@ -462,8 +462,8 @@ class Scenario:
         The locators (``SNAPSHOT_ROW_KEYS``) serve the legacy HTTP catalog only, as ``artifact_rows`` does.
         """
         with self.release_queries.publication_lock:
-            component = self.surface.files_component
-            harness = [row for row in self.artifact_rows() if self.surface.single or row["component"] == component]
+            component = self.components.files_component
+            harness = [row for row in self.artifact_rows() if self.components.single or row["component"] == component]
             by_snapshot = {row["snapshot"].revision: row for row in harness}
             by_artifact = {row["artifact_id"]: row for row in harness}
             manifests = self.release_queries.manifests(self._committer.step)
@@ -606,24 +606,24 @@ class Scenario:
 
 
 def validate_component_trainers(
-    trainers: tuple[ComponentTrainer, ...], surface: Surface
+    trainers: tuple[ComponentTrainer, ...], components: ScenarioComponents
 ) -> tuple[ComponentTrainer, ...]:
-    """Check that the trainers match the surface: each names a component it serves, and a surface serving
+    """Check that the trainers match ``components``: each names a declared component, and a scenario that declares
     no component has exactly one trainer, bound to ``records``."""
     if not trainers or any(not isinstance(component_trainer, ComponentTrainer) for component_trainer in trainers):
         raise ReefError("a scenario requires at least one ComponentTrainer")
     names = [component_trainer.component for component_trainer in trainers]
     if len(set(names)) != len(names):
         raise ReefError(f"scenario trainers must evolve distinct components, not {names}")
-    if not surface.names:
+    if not components.names:
         if names != [RECORDS_COMPONENT]:
             raise ReefError(
                 f"a scenario serving no component has one trainer bound to {RECORDS_COMPONENT!r}, not {names}"
             )
         return trainers
-    unknown = [name for name in names if name not in surface.names]
+    unknown = [name for name in names if name not in components.names]
     if unknown:
-        raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")
+        raise ReefError(f"scenario trainers name components the scenario does not serve: {unknown}")
     return trainers
 
 

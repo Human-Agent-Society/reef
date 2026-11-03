@@ -29,7 +29,6 @@
 /recipes/tttd/ @Benjamin-eecs @MikeZheng777
 /recipes/openclawrl/ @Benjamin-eecs @MikeZheng777
 /reef/train/harness_backend/ @Benjamin-eecs @hanfeiyu
-/reef/surface/ @Benjamin-eecs @quao627
 /tutorials/evolve-your-harness/ @Benjamin-eecs @quao627
 /recipes/gepa/ @simonucl @Benjamin-eecs
 
@@ -43,6 +42,7 @@
 /reef/train/ @hanfeiyu @MikeZheng777
 /reef/runtime/ @hanfeiyu @MikeZheng777
 /reef/artifact/ @hanfeiyu @MikeZheng777
+/reef/artifact/components.py @Benjamin-eecs @quao627
 /recipes/openclawrl/examples/openclawrl/serve.yaml @hanfeiyu @MikeZheng777
 
 # Documentation defaults to these owners. Domain references override it.

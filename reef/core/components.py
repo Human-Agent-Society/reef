@@ -24,7 +24,7 @@ from typing import Any
 
 COMPONENTS_METADATA_KEY = "components"
 
-#: The component a scenario's only trainer is bound to when its surface serves no component at all.
+#: The component a scenario's only trainer is bound to when the scenario serves no component at all.
 RECORDS_COMPONENT = "records"
 
 

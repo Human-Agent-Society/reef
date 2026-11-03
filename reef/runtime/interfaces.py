@@ -34,7 +34,6 @@ from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
-from reef.surface.base import AdapterWeightRuntime
 
 # -- Identities and errors ----------------------------------------------------
 
@@ -546,7 +545,7 @@ class FixedEngineClients(EngineClients):
 # -- Runtime contracts --------------------------------------------------------
 
 
-class InferenceRuntime(AdapterWeightRuntime):
+class InferenceRuntime(ABC):
     """Own inference requests, serving weights and admission.
 
     An InferenceHandler executes individual requests. This runtime owns that
@@ -599,6 +598,19 @@ class InferenceRuntime(AdapterWeightRuntime):
         """
         return self.inference_handler if url == self.base_url else None
 
+    @abstractmethod
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        """Serve the published release ``artifact``; return the runtime load ID that serves it.
+
+        Reef calls it at a commit that activates a release, at an activation
+        and at a start, before traffic routes to the release. ``scenario`` names
+        the release's scenario exactly when the runtime serves a separate
+        adapter per scenario (``per_scenario_adapters``). A raise leaves the
+        runtime serving what it served before. A runtime that loads weights
+        makes a new runtime load ID for each load; a runtime that loads
+        nothing, such as a proxy, returns the release ID.
+        """
+
     def served_model_name(self, scenario: str) -> str:
         """The name under which the engine serves ``scenario``'s weights now; ``model_path`` unless a runtime serves
         each scenario under its own name."""
@@ -643,6 +655,7 @@ class InferenceRuntime(AdapterWeightRuntime):
 
         Other service processes build the same runtime without opening it. The default has no engine to open.
         """
+        return
 
     def adopt(self, served: ServedArtifact) -> bool:
         """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
