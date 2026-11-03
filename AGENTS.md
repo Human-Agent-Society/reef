@@ -57,8 +57,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/runtime/` | Backend-neutral runtime contracts, scheduling, and publication coordination |
 | `reef/inference/` | Concrete inference integrations, engine control, and weight reception |
 | `reef/tinker/` | Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share |
-| `reef/surface/` | Delivery of published artifacts |
-| `reef/artifact/` | Versioned artifacts and repositories |
+| `reef/artifact/` | Versioned artifacts, repositories, and the components a recipe declares |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
 | `reef/execution/` | Shared job scheduling, local process ownership, sandbox isolation, file transfer, and cleanup |

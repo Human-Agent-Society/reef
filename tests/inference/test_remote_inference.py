@@ -32,8 +32,8 @@ from reef.runtime.deployment import (
 )
 from reef.runtime.interfaces import InferenceBackend, WeightFiles
 from reef.runtime.jobs import ReleaseFormat
+from reef.runtime.residency import adapter_name
 from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
-from reef.surface.adapter import adapter_name
 
 CONTROL_TOKEN = "control-secret"
 ADAPTER = ReleaseFormat("adapter", 16, ("all",))

@@ -21,6 +21,7 @@ from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
+from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
@@ -30,7 +31,7 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.execution.workers import ServiceSet
 from reef.harness.adapters import get_adapter
-from reef.harness.sync import create_harness_surface
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
@@ -43,7 +44,6 @@ from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import Trainer, TrainStepResult
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
@@ -73,8 +73,10 @@ class _TreeRecipe(Recipe):
     artifact_dir: Path = Path(".")
     seed: Mapping[str, str] | None = None
 
-    def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(get_adapter("pi"))
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(
+            {HARNESS_COMPONENT: ComponentSpec(files=HarnessFiles(get_adapter("pi")), kind="harness_plugin")}
+        )
 
     def default_start(self) -> DefaultStart:
         return DefaultStart(files=self.seed or {})
@@ -124,8 +126,8 @@ class _ScoredTreeRecipe(_TreeRecipe):
 class _ConfigRecipe(Recipe):
     """A second component with one settings file and no trainer of its own."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return Surface(components={"config": ComponentSurface(kind="harness_plugin")})
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(components={"config": ComponentSpec(kind="harness_plugin")})
 
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={CONFIG_FILE: json.dumps({"request_defaults": {"temperature": 0.2}})})
@@ -186,11 +188,11 @@ def _serve(recipe: CompositeRecipe, tmp_path: Path, *, hold_local_cycles: bool =
 
 
 @pytest.mark.unit
-def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> None:
+def test_composite_recipe_merges_components_seeds_and_trainers(tmp_path: Path) -> None:
     recipe = _composite(tmp_path)
-    surface = recipe.build_surface("agent")
-    assert surface.names == ("harness", "config")
-    assert surface.files_component == "harness"
+    components = recipe.build_components("agent")
+    assert components.names == ("harness", "config")
+    assert components.files_component == "harness"
     base = recipe.default_start()
     assert base.files == {
         "harness/AGENTS.md": "seed",
@@ -202,7 +204,7 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     trainers = recipe.build_trainers(
         "agent",
         SQLiteScenarioStorage().open("agent").records,
-        surface=surface,
+        components=components,
         algorithm_states={},
         root=_root_of(recipe, tmp_path / "root"),
     )
@@ -223,7 +225,7 @@ def test_composite_recipe_rejects_incoherent_components(tmp_path: Path) -> None:
         CompositeRecipe(components={"step": _TreeRecipe(), "config": _ConfigRecipe()})
     two_trees = CompositeRecipe(components={"a": _TreeRecipe(label="a"), "b": _TreeRecipe(label="b")})
     with pytest.raises(ValueError, match="at most one component exposes a client-pulled file tree"):
-        two_trees.build_surface("agent")
+        two_trees.build_components("agent")
 
 
 @pytest.mark.unit
@@ -539,7 +541,7 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
     trainers = mixed.build_trainers(
         "agent",
         SQLiteScenarioStorage().open("agent").records,
-        surface=mixed.build_surface("agent"),
+        components=mixed.build_components("agent"),
         algorithm_states={},
         root=_root_of(mixed, tmp_path / "root"),
     )
@@ -809,7 +811,7 @@ class _RefuseAll(ArtifactValidator):
 
 @dataclass(frozen=True)
 class _GuardedTreeRecipe(_TreeRecipe):
-    """A recipe written before admission moved onto the component surface: it overrides build_artifact_validator."""
+    """A recipe written before admission moved onto the component components: it overrides build_artifact_validator."""
 
     def build_artifact_validator(self) -> ArtifactValidator:
         return _RefuseAll()
@@ -832,7 +834,7 @@ def test_a_recipe_that_overrides_build_artifact_validator_still_admits_through_i
         assert scenario.current_snapshot() == head
     composite = CompositeRecipe(components={"harness": flat, "config": _ConfigRecipe()})
     with pytest.raises(ValueError, match="validator refused the artifact"):
-        composite.build_surface("agent").components["harness"].validator.validate(Artifact.local(evolved))
+        composite.build_components("agent").components["harness"].validator.validate(Artifact.local(evolved))
 
     @dataclass(frozen=True)
     class GuardedComposite(CompositeRecipe):
@@ -841,12 +843,12 @@ def test_a_recipe_that_overrides_build_artifact_validator_still_admits_through_i
 
     guarded = GuardedComposite(components={"harness": _TreeRecipe(label="harness"), "config": _ConfigRecipe()})
     with pytest.raises(RecipeConfigError, match="overrides build_artifact_validator but serves components"):
-        guarded.serving_surface("agent")
+        guarded.scenario_components("agent")
 
 
 @dataclass(frozen=True)
 class _GuardedRecordOnlyRecipe(Recipe):
-    """A record only recipe (the default surface, no component) that keeps main's admission hook."""
+    """A record only recipe (the default components, no component) that keeps main's admission hook."""
 
     def build_artifact_validator(self) -> ArtifactValidator:
         return _RefuseAll()
@@ -859,13 +861,13 @@ def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_vali
     dispatcher = _serve(_GuardedRecordOnlyRecipe(), tmp_path)  # type: ignore[arg-type]
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
-        assert scenario is not None and scenario.surface.names == ()
+        assert scenario is not None and scenario.components.names == ()
         head = scenario.current_snapshot()
         evolved = tmp_path / "evolved"
         evolved.mkdir()
         (evolved / "notes.txt").write_text("unvetted")
         with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.surface.validate(Artifact.local(evolved))
+            scenario.components.validate(Artifact.local(evolved))
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
         assert scenario.current_snapshot() == head
@@ -885,10 +887,10 @@ class _RefuseUnvetted(ArtifactValidator):
 
 @dataclass(frozen=True)
 class _LegacyTreeRecipe(_TreeRecipe):
-    """A recipe written before components: the default surface, a tree it publishes, and main's admission hook."""
+    """A recipe written before components: the default components, a tree it publishes, and main's admission hook."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return Surface()
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents()
 
     def build_artifact_validator(self) -> ArtifactValidator:
         return _RefuseUnvetted()
@@ -914,7 +916,7 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
         }
     )
     with pytest.raises(ValueError, match="validator refused the artifact"):
-        composite.serving_surface("agent").components["notes"].validator.validate(_tree(tmp_path, "u", "unvetted"))
+        composite.scenario_components("agent").components["notes"].validator.validate(_tree(tmp_path, "u", "unvetted"))
     with closing(_serve(composite, tmp_path / "svc")) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
@@ -930,8 +932,8 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
 class _ReleaseCheckedComposite(CompositeRecipe):
     """A composite that sets the release's own check itself, beside each component's."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return replace(super().build_surface(scenario), validator=_RefuseUnvetted())
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return replace(super().build_components(scenario), validator=_RefuseUnvetted())
 
 
 @pytest.mark.unit

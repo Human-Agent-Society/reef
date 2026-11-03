@@ -19,6 +19,7 @@ from reef.core.values import require_text
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.recipe.base import Recipe
 from reef.runtime.interfaces import InferenceRuntime
+from reef.scenario.binding import activate_release
 from reef.storage.coordination import Coordination
 from reef.storage.served_models import INFERENCE_OWNER_QUEUE, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
 from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
@@ -62,7 +63,7 @@ def serving_config_of(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
 class ServingWorker(QueueWorker):
     """Start queued releases and retire unused endpoints in the inference service.
 
-    ``recipe`` supplies the runtime and each scenario's surface. ``backends`` resolves durable releases.
+    ``recipe`` supplies the runtime and each scenario's components. ``backends`` resolves durable releases.
     ``coordination`` owns requests and routes. ``local_artifact_dir`` holds materialized releases, or uses the repository default.
     A long-lived work lease gives one worker runtime ownership, including health checks and idle periods.
     Other replicas only read routes. The owner recovers completed selections before it takes new work: it opens the
@@ -215,14 +216,14 @@ class ServingWorker(QueueWorker):
             return Artifact(backend.resolve_snapshot(require_text(value.get("release_id"), "release_id")), repository)
 
         artifact = selected_artifact(item.payload)
-        surface = self.recipe.serving_surface(item.scenario)
+        components = self.recipe.scenario_components(item.scenario)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
         runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
         if self.activated.get(item.scenario) == artifact_id:
             logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
         else:
             started = time.monotonic()
-            surface.activate(artifact, runtime)
+            activate_release(components, artifact, runtime, item.scenario)
             self.activated[item.scenario] = artifact_id
             logger.info(
                 "scenario %s: activated artifact %s in %.1f s", item.scenario, artifact_id, time.monotonic() - started
@@ -243,9 +244,9 @@ class ServingWorker(QueueWorker):
             if not isinstance(value, dict):
                 raise ValueError("a beside artifact needs its release and component")
             component = require_text(value.get("component"), "component")
-            if component == surface.loader_component:
+            if component == components.loaded_component:
                 beside_model = runtime.served_artifact_on_request(
-                    surface.component_artifact(selected_artifact(value), component)
+                    components.component_artifact(selected_artifact(value), component)
                 )
                 if beside_model is None:
                     raise ValueError("the inference runtime provides no route for a beside artifact")

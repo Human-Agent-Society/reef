@@ -29,7 +29,6 @@ TEST_DIRECTORIES = {
     "slime_backend",
     "smoke",
     "storage",
-    "surface",
     "sample2job",
     "tinker_backend",
     "train",
