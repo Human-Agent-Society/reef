@@ -7,8 +7,8 @@ component and inference runtime and imports no concrete training framework.
 Everything HTTP lives here, and only the HTTP parts live in the HTTP layer.
 ``RequestService`` is the transport-free core — it parses ``x-reef-*``
 headers, freezes the release before every provider call so
-concurrent publication cannot change what gets recorded, and applies the
-surface's inference hooks; ``routes/`` are thin aiohttp adapters over it and
+concurrent publication cannot change what gets recorded, and stores each
+exchange as a record; ``routes/`` are thin aiohttp adapters over it and
 the only place aiohttp request/response types appear on the request path.
 
 ``task_import`` imports a deployment's Harbor tasks into each scenario's task

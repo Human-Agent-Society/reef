@@ -30,7 +30,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | turn job data into a signal                 | `Training objective <#training-objective>`__     | weight-training methods      |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| deliver a new artifact medium               | `Surface <#surface>`__                           | only a new evolution medium  |
+| declare a new release component             | `Scenario components <#scenario-components>`__   | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | evolve a harness tree and score a task run  | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -133,7 +133,7 @@ can set ``SPLIT_REASONING = False`` (renamed from ``_SPLIT_REASONING``).
 
 Python extension contracts use abstract base classes and explicit inheritance.
 This also applies to repository factories, candidate evaluation plugins, harness
-plugins, and surface capabilities. Implement optional capabilities only when
+plugins, and component file trees. Implement optional capabilities only when
 supported: adapter weight residency, artifact activation, and request leases
 remain separate interfaces. CI rejects ``typing.Protocol``,
 ``typing_extensions.Protocol``, and ``runtime_checkable`` in all first-party
@@ -184,12 +184,12 @@ recipe to remain record-only.
 | use Reef's harness loop         | configure ``HarnessEvolutionRecipe`` with a          |
 |                                 | ``Method`` in ``evolution.method``; subclass it only |
 |                                 | when the method changes more than the tree, such as  |
-|                                 | the delivery surface                                 |
+|                                 | the files a client pulls                             |
 +---------------------------------+------------------------------------------------------+
 | evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |
-|                                 | ``build_surface()``                                  |
+|                                 | ``build_components()``                               |
 +---------------------------------+------------------------------------------------------+
-| serve an externally produced    | subclass ``Recipe``, override ``build_surface()``    |
+| serve an externally produced    | subclass ``Recipe``, override ``build_components()`` |
 | artifact                        | only                                                 |
 +---------------------------------+------------------------------------------------------+
 | evolve weights and a harness    | configure ``CompositeRecipe`` with one recipe per    |
@@ -219,16 +219,16 @@ Common members
 |                                                   |                             | component's committed releases |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
-| ``surface=..., algorithm_states=...,``            | ...]``                      | component; defaults to the     |
+| ``components=..., algorithm_states=...,``         | ...]``                      | component; defaults to the     |
 | ``task_storage=..., releases=...)``               |                             |                                |
 |                                                   |                             | single trainer ``build``       |
 |                                                   |                             | returns, bound to the          |
-|                                                   |                             | surface's one component        |
+|                                                   |                             | scenario's one component       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_surface(scenario)``                       | ``Surface``                 | the delivery contract for one  |
-|                                                   |                             | named scenario: its release    |
-|                                                   |                             | components, each with its      |
-|                                                   |                             | admission check (default       |
+| ``build_components(scenario)``                    | ``ScenarioComponents``      | the components of one named    |
+|                                                   |                             | scenario's releases, each with |
+|                                                   |                             | its kind and admission check   |
+|                                                   |                             | (default                       |
 |                                                   |                             | ``AcceptAnyArtifact()``)       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_artifact_validator()``                    | ``ArtifactValidator``       | kept from before component     |
@@ -950,8 +950,8 @@ files that the URI names, the component's layout checks them where the source
 keeps them, and then Reef stores a copy, or a reference to a Hugging Face
 revision that cannot change. Two contracts decide what an import accepts.
 
-A component's layout is the ``layout`` of its ``ComponentSurface``, an
-``reef.surface.ArtifactLayout``. ``check(files)`` returns when ``files`` are
+A component's layout is the ``layout`` of its ``ComponentSpec``, an
+``reef.artifact.components.ArtifactLayout``. ``check(files)`` returns when ``files`` are
 an artifact in the layout of the component's releases, and the remote weights
 that they name exist. Otherwise it raises ``ValueError``, and Reef answers
 HTTP 400 before it copies anything. ``None``, the default, means that the
@@ -1990,37 +1990,25 @@ section (`Configuration <configuration.rst#the-activation-section>`__). A rule
 of your own inherits ``ActivationRule``. Reef builds it from its config with
 the class method ``from_config(config)``.
 
-Surface
--------
+Scenario components
+-------------------
 
 .. code:: python
 
-   from reef.harness.sync import create_harness_surface
-   from reef.surface import (
-       ComponentSurface, Surface, create_config_surface, create_weight_surface,
-   )
+   from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 
-A surface binds one frozen release to its consumers.
-``WeightTrainingRecipe.build_surface()`` already calls
-``create_weight_surface(kind=...)`` with its runtime's ``served_weight_kind``,
-and ``HarnessEvolutionRecipe`` calls ``create_harness_surface(descriptor)``,
-so most methods never touch this.
+``Recipe.build_components(scenario)`` returns the components that every
+release of the scenario binds. ``WeightTrainingRecipe`` declares a
+``weights`` component of its runtime's ``served_weight_kind``, and
+``HarnessEvolutionRecipe`` declares a ``harness`` component that clients
+pull, so most methods never touch this. See `Scenario components
+<../developer-guide/components.rst>`__ for where Reef reads each field.
 
-``Surface`` is a frozen dataclass mapping each named release component to a
-``ComponentSurface``, whose capabilities are fields, not subclass identity.
-``None`` means the capability is absent, and bare ``Surface()`` is the
-complete record-only configuration. A one-component surface serves a flat
-release; a surface with several components serves a release with one
-directory per component, and ``Surface.loader`` and ``files`` route to their
-components. No surface changes an inference request: the inference routes
-forward each request to the engine that ``served_models`` names.
-
-Migration: code written before components keeps working.
-``Surface(loader=..., files=...)`` builds a one-component
-surface whose component is named ``release``; beside one component in
-``components``, those keywords replace that component's fields, as
-``dataclasses.replace`` does. A surface of several components refuses them:
-set the capabilities on each ``ComponentSurface``.
+``ScenarioComponents`` is a frozen dataclass mapping each component name to a
+``ComponentSpec``. Bare ``ScenarioComponents()`` is the complete record-only
+configuration. A release of one component is flat; a release of several
+components has one directory per component. At most one component has a
+weight kind, and at most one has ``files``.
 
 +---------------+-----------------------------+----------------------------------------------+
 | Field         | Type                        | Contract                                     |
@@ -2028,18 +2016,25 @@ set the capabilities on each ``ComponentSurface``.
 | ``validator`` | ``ArtifactValidator``       | admit the component before publication and   |
 |               |                             | activation; the default accepts any artifact |
 +---------------+-----------------------------+----------------------------------------------+
-| ``loader``    | ``ArtifactLoader | None``   | make published releases servable             |
+| ``kind``      | ``ArtifactKind | None``     | the kind of every artifact of the component; |
+|               |                             | ``model`` and ``model_adapter`` load into    |
+|               |                             | the inference runtime                        |
 +---------------+-----------------------------+----------------------------------------------+
 | ``files``     | ``FileTree | None``         | back client pulls                            |
 +---------------+-----------------------------+----------------------------------------------+
+| ``layout``    | ``ArtifactLayout | None``   | check an imported artifact; ``None`` takes   |
+|               |                             | no import                                    |
++---------------+-----------------------------+----------------------------------------------+
 
-``loader.activate(artifact, runtime, source=...)`` makes a version servable
-once it is published, and returns the runtime load ID that serves it.
+The inference runtime loads the weight component with
+``InferenceRuntime.activate_checkpoint(artifact, scenario=...)``, which returns
+the runtime load ID that serves it. No component changes an inference request:
+the inference routes forward each request to the engine that ``served_models``
+names.
 
-A surface does not decide which records train, compute candidates, execute a
-training job, or mutate the release chain. Native streaming
-behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
-record store.
+Components do not decide which records train, compute candidates, execute a
+training job, or mutate the release chain. Native streaming behavior stays
+unchanged. A method should not add an HTTP proxy or copy Reef's record store.
 
 Runtime responsibilities
 ------------------------
