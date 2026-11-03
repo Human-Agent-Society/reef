@@ -201,7 +201,7 @@ Use the [codebase structure map](https://reefinfra.ai/docs/contributing/codebase
 decide which package owns a change. Each package's `__init__` docstring states
 the invariants inside its area; the map is the repository-wide routing guide.
 
-When adding a recipe, training integration, runtime, surface, artifact type,
+When adding a recipe, training integration, runtime, component, artifact type,
 service route, or harness adapter, follow the
 [component playbooks](https://reefinfra.ai/docs/contributing/adding-components/). They list the
 implementation location, registration point, tests, configuration, and

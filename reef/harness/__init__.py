@@ -30,10 +30,10 @@ The map, one subpackage per job:
     the loopback gateway an agent process reaches its model and its tools
     through, which meters each call.
 ``delivery``
-    the surface that serves a release to a client: its source tree rendered
+    the file tree that serves a release to a client: its source tree rendered
     for the scenario's adapter.
 
-This package depends on core values, runtime and surface contracts, and
+This package depends on core values, runtime and artifact contracts, and
 sandbox execution, never on training, recipes, scenario coordination, or the
 HTTP service. The evolution loop is ``reef.train.harness_backend``; versioning
 (staging, publishing, the commit history, recovery and activation) is Reef's

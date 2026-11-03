@@ -44,8 +44,8 @@ Implementation
   ``objective.py``) and names it in the objective's ``loss_family``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
-- Override ``build_surface`` only when the produced artifact needs delivery
-  behavior beyond the existing surfaces.
+- Override ``build_components`` only when the method's releases bind
+  components beyond those of the recipe it extends.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
@@ -59,7 +59,7 @@ Surrounding changes
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
 - Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe
-  table when the cookbook carries the method. Update the relevant pipeline stage, objective, or surface
+  table when the cookbook carries the method. Update the relevant pipeline stage, objective, or component
   reference if its public contract changes.
 
 Add a harness method
@@ -83,7 +83,7 @@ Implementation
 - Put a prompt longer than a sentence or two in a ``.md`` file beside the
   method.
 - Subclass ``HarnessEvolutionRecipe`` only when the method changes more than
-  the tree, such as the delivery surface.
+  the tree, such as the files a client pulls.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
@@ -217,12 +217,12 @@ owning training integration for a backend-specific launcher. See
 `Worker executors <../developer-guide/executors.rst>`__ for configuration,
 ownership, rank ordering and the Slime extension contract.
 
-Add a surface or artifact type
-------------------------------
+Add a component or artifact type
+--------------------------------
 
-Artifacts own immutable bytes and release heads; surfaces own validation and
-delivery. A change that needs both still keeps those responsibilities in
-separate packages. Read the `Python API <../reference/python-api.rst#surface>`__ and the
+Artifacts own immutable bytes and release heads. A recipe's components own
+admission, import layouts, kinds and client file trees. Runtimes own loading.
+Read `Scenario components <../developer-guide/components.rst>`__ and the
 release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
@@ -230,15 +230,16 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   and is exposed through a repository backend factory. To let a deployment
   select it in ``storage.artifact_backend``, the factory also inherits
   ``ConfigurableRepositoryBackendFactory``.
-- Put activation and recovery behavior in ``ArtifactLoader``, and client-pull
-  delivery in ``FileTree``, under ``reef/surface/``. Reef does not change a
-  model request on its way to the engine: a client pulls the artifacts that
-  shape its requests.
-- Build the surface from the owning recipe; do not make the surface choose a
-  method or evaluate a candidate.
-- Test surface behavior in ``tests/surface/test_surfaces.py`` or the
-  closest artifact-specific surface test. Test storage backends against the
-  contracts in ``tests/artifact/test_reef_artifacts.py``.
+- Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
+  ``reef/runtime/`` or ``reef/inference/``, and client-pull delivery in a
+  ``FileTree`` (``reef/artifact/components.py``). Reef does not change a model
+  request on its way to the engine: a client pulls the artifacts that shape
+  its requests.
+- Declare the components in the owning recipe's ``build_components``; do not
+  make a component choose a method or evaluate a candidate.
+- Test component behavior in ``tests/artifact/test_scenario_components.py`` or
+  ``tests/artifact/test_release_components.py``. Test storage backends against
+  the contracts in ``tests/artifact/test_reef_artifacts.py``.
 - Add scenario commit, activation, train-from, and recovery tests whenever
   persistence or activation ordering changes. Persisted-format changes require an RFC and a
   compatibility contract.

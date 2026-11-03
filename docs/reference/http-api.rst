@@ -1095,7 +1095,7 @@ the deployment's configured recipe. Requests never select a recipe.
      -d '{"model": "m", "messages": [{"role": "user", "content": "fix it"}]}'
 
 The bindings never change; a request naming a different recipe with the same
-scenario returns HTTP 409. This means the surface, runtime, inference backend,
+scenario returns HTTP 409. This means the components, runtime, inference backend,
 and optional report schema chosen when the recipe is constructed are fixed with
 it.
 
@@ -2164,7 +2164,7 @@ The runtime must answer each call from the artifact that the call names.
 The Tinker runtime does, so a Tinker scenario can serve any of its
 artifacts. A runtime that loads weights into engines answers only from the
 release it has loaded, so Reef refuses a serve there. A scenario whose
-surface loads nothing into a runtime, such as a harness scenario, can serve
+components load nothing into a runtime, such as a harness scenario, can serve
 any of its artifacts. A store without a durable commit history also refuses
 a serve.
 

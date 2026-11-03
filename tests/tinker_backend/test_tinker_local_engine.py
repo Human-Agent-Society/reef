@@ -17,6 +17,7 @@ from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
+from reef.runtime.residency import adapter_name
 from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
@@ -24,7 +25,6 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import local_model_required
-from reef.surface.adapter import adapter_name
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.weights import TinkerSamplerWeights
 from reef.train.algos import TrainingSignal

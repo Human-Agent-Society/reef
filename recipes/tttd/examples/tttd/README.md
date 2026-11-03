@@ -266,8 +266,8 @@ tokens or log-probabilities: the training component renders each rollout with
 the model's chat template, and the actor computes the old-policy
 log-probabilities with the weights of the step's start. With
 `max_staleness: 0` these are the weights that sampled the grid. Slime refuses
-`--use-rollout-logprobs`. Reef's weight surface names the scenario's own
-adapter revision on every request; the harness never selects one and the
+`--use-rollout-logprobs`. Reef routes every request to the scenario's own
+adapter revision; the harness never selects one and the
 backend never injects a fallback.
 
 New Slime configs should use the

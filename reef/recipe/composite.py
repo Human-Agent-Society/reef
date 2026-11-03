@@ -1,7 +1,7 @@
 """One scenario served and evolved by several recipes, one per release component.
 
-A composite recipe binds a recipe to each component name. Its surface
-serves every component's capabilities, its default start keeps each
+A composite recipe binds a recipe to each component name. It declares
+each recipe's component under that component's name, its default start keeps each
 component's seed under that component's directory, and its trainers are
 the components' trainers, run as independent workers that meet at the
 scenario's commit boundary (see ``docs/advanced_topics/state-model.rst``).
@@ -36,6 +36,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
 
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.components import validate_component_name
 from reef.core.plugins import PluginConfigError
@@ -53,7 +54,6 @@ from reef.runtime.jobs import ScenarioRoot, TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
-from reef.surface.base import ComponentSurface, Surface
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.trainer import ComponentTrainer
 
@@ -327,26 +327,26 @@ class CompositeRecipe(Recipe):
             return declared[0]
         return any_component_report(tuple(declared))
 
-    def build_surface(self, scenario: str) -> Surface:
-        """Every component's serving capabilities under its own name."""
-        components: dict[str, ComponentSurface] = {}
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        """Each recipe's one component under the name the composite binds it to."""
+        specs: dict[str, ComponentSpec] = {}
         for component, recipe in self.components.items():
-            surface = recipe.serving_surface(scenario)
-            if len(surface.components) > 1:
+            declared = recipe.scenario_components(scenario)
+            if len(declared.components) > 1:
                 raise RecipeConfigError(f"component {component!r} serves several components of its own")
-            served = next(iter(surface.components.values()), ComponentSurface())
+            served = next(iter(declared.components.values()), ComponentSpec())
             # A recipe's own release check (a recipe serving no component admits its whole release with one) admits
             # this component here: inside the composite, the component is that recipe's release.
-            checks = every_check(surface.validator, served.validator)
-            components[component] = served if checks is served.validator else replace(served, validator=checks)
-        return Surface(components=components)
+            checks = every_check(declared.validator, served.validator)
+            specs[component] = served if checks is served.validator else replace(served, validator=checks)
+        return ScenarioComponents(specs)
 
     def build_trainers(
         self,
         scenario: str,
         records: RecordStore,
         *,
-        surface: Surface,
+        components: ScenarioComponents,
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
