@@ -445,9 +445,14 @@ def generation_numbers(worker: InlineWorker | DeferredWorker) -> list[int]:
     return [job.generation for job in worker.submitted if isinstance(job, GenerationJob)]
 
 
-def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -> None:
+@pytest.mark.parametrize("generation_deadline_seconds", [1800.0, float("inf")])
+def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(
+    tmp_path: Path, generation_deadline_seconds: float
+) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1) + generated(0, 2)])
-    p, service = rounds(tmp_path, task_generator, buffer_size=3)
+    p, service = rounds(
+        tmp_path, task_generator, buffer_size=3, generation_deadline_seconds=generation_deadline_seconds
+    )
     status = p.status()["task_generation"]
     assert status["generator"] == "ScriptedGenerator"
     assert (status["next"], status["completed"], status["of"]) == (0, 0, 3)
