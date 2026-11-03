@@ -16,7 +16,7 @@ component (``reef.train.harness_backend.component``):
     3. Read the tree it left in ``harness/``. An unchanged tree, or one that
        fails validation for the adapter, skips the step.
     4. Add the tree to the history with its parent and the method's
-       summary, and make it a ``HarnessCandidate`` against the head. On an
+       summary, and make it a ``HarnessCandidate`` against the head. On a
        request step the method's ``requires`` join the request's, after
        the screens a person's items pass.
 ``evaluate``

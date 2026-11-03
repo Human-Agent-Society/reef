@@ -1008,7 +1008,7 @@ An optional top-level ``agent_record_id`` names the request: an identical
 resend returns the queued request, and the same ID with another body is
 HTTP 409. HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
-do not change a step already in flight. A step that fails with an
+do not change a step already in flight. A step that fails with a
 request (a method error, for one) is not retried: the next step
 consumes the request with a committed row whose ``skipped`` reads
 ``request failed`` and whose ``error`` carries the failure, and the
@@ -1310,7 +1310,7 @@ changed. To change the data processor's mode:
 
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
 The values are ``auto`` and ``manual``: ``"auto"`` starts a job whenever
-``job_samples`` samples wait, and ``"manual"`` starts one only for an
+``job_samples`` samples wait, and ``"manual"`` starts one only for a
 request, on the samples that it names. The change selects subsequent job
 data; job data already reserved or running completes in its original mode.
 After a switch back, automatic jobs train the samples that no job trained,

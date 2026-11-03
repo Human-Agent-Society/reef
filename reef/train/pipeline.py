@@ -553,7 +553,7 @@ class TrainingPipeline:
 
         Handed out job data holds. Else ``auto`` needs ``sample_count`` samples for the next job (``auto_entries``).
         ``manual`` needs a queued request whose samples this trainer trains (``request_entries``), one or
-        more, whatever ``sample_count``. A stage that reads requests (``Sample2Job.reads_requests``) runs an
+        more, whatever ``sample_count``. A stage that reads requests (``Sample2Job.reads_requests``) runs a
         request with no sample too.
         """
         if self.pending is not None:

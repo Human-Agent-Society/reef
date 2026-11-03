@@ -169,12 +169,12 @@ class Sample2Job(ABC, Plugin):
         """Build one job's data from the samples of the next job, in store order.
 
         Use ``data_id`` as the ID of the returned value. The pipeline assigns
-        it. Automatic job data gets ``<scenario>:data:<number>``. An
+        it. Automatic job data gets ``<scenario>:data:<number>``. A
         request's data gets ``<scenario>:request:<request id>``. The
         number counts the job data of this pipeline and starts again when the
         pipeline restarts. It is not a training step.
         The job's commit consumes every sample of ``samples``, including the
-        samples that the recipe leaves out of the job data. In ``manual`` mode an
+        samples that the recipe leaves out of the job data. In ``manual`` mode a
         request's data holds the samples that the request names, at most ``max_job_samples``: one or more,
         or none for a stage that ``reads_requests``.
         """
