@@ -1,7 +1,7 @@
 """The sample-to-job contract: the size of a job, and the samples of the next job become its data.
 
 The record-to-sample stage makes the samples of each record set, and the
-pipeline stores the samples of each ready unit in the scenario's sample store.
+pipeline saves the samples of each ready unit as data items that the scenario uses.
 In ``auto``, the next job takes the untrained samples: the first
 ``buffer_size`` of them in store order, and the rest of each group that those
 touch. When at least ``job_samples`` samples wait, the trainer asks the

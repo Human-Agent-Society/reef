@@ -23,6 +23,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.recipe.sft import SFTJobData, SftObjective, SFTRecipe, SFTSamples, SFTSettings
 from reef.sample2job import DistillJobData
+from reef.storage.data import NewItem
 from reef.train import PipelineContext
 from reef.train.algos import registry
 from reef.train.algos.registry import ObjectiveRegistry, resolve_objective
@@ -555,7 +556,9 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
         record2sample=_samples(),
         sample2job=SFTJobData(context, None, 1),
     )
-    pipeline.store.store.add_trajectories((("t1", _uploaded(ASK, ANSWER)),))
+    samples = pipeline.store.samples
+    metadata = {"kind": "trajectory", "scenarios": {"science": "train"}}
+    samples.data.create(samples.owner, [NewItem("t1", dict(_uploaded(ASK, ANSWER).trajectory), metadata)])
     data = pipeline.build_job_data(1)
     (item,) = _rendered(data, tokenizer).samples
     assert item.training["loss_mask"] == [1] * (len(ANSWER_IDS) + 1)

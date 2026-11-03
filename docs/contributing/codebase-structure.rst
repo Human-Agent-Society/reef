@@ -296,7 +296,8 @@ The extension points those packages expose are in `Python API
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state
   and opens the scenario's task stores (``reef/storage/tasks.py``) and its
-  sample store (``reef/storage/samples.py``);
+  training state; its training samples are data items
+  (``reef/storage/samples.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or run them with an agent? Put it in ``reef/record2sample/generator/``, the

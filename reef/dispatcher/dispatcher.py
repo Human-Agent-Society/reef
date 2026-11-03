@@ -49,7 +49,7 @@ from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, check_owner
-from reef.storage.data_sync import ScenarioUses, sync_scenario_samples, uploads
+from reef.storage.data_sync import ScenarioUses
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
@@ -355,7 +355,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_loaded(self, instance: Scenario) -> None:
         """The registry calls this when it loads a scenario: its weight trainers resume their jobs and records.
 
-        The data sync can add uploads while the scenario opens, and no record wakes a worker for them, so the
+        The scenario's items can wait untrained when it opens, and no record wakes a worker for them, so the
         workers wake when a trainer holds untrained samples.
         """
         if not self.services.runs_control:
@@ -684,22 +684,23 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         return self.storage.read_settings(scenario).owner or scenario
 
     def set_scenario_owner(self, scenario: str, owner: str) -> None:
-        """Give ``scenario`` the owner ``owner``, and sync its uploads with that owner's items.
+        """Give ``scenario`` the owner ``owner``, and load it again, so that it reads the items of that owner.
 
         A scenario gets its owner when it is created, so only a scenario that still has the default owner (its
-        own name) and no uploads can take another. The data service then copies the scenario's artifacts and
-        records to items of ``owner``. Raise ``ValueError`` otherwise, and ``UnknownScenario`` for a scenario that
-        does not exist.
+        own name) and uses none of its trajectory or task items can take another. The data service then copies the
+        scenario's artifacts and records to items of ``owner``. Raise ``ValueError`` otherwise, and
+        ``UnknownScenario`` for a scenario that does not exist.
         """
         check_owner(owner)
         with self.locked_scenario(scenario) as current:
             settings = self.storage.read_settings(scenario)
             if settings.owner == owner:
                 return
-            if settings.owner != scenario or next(uploads(current.store.samples), None) is not None:
+            samples = current.store.samples
+            if settings.owner != scenario or (samples is not None and samples.page(limit=1)):
                 raise ValueError(f"scenario {scenario!r} has the owner {settings.owner!r}; it is set at creation")
             self.storage.write_settings(scenario, replace(settings, owner=owner))
-            self.apply_sync(current, owner)
+        self.registry.reload(scenario)
         # A copy that ran before, such as the one that the creation commit asked for, filled the default owner's
         # store; the new owner's store gets the scenario's artifacts and records too.
         self.request_artifact_copy(scenario)
@@ -713,7 +714,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             ingest.check_use(current, trajectories, train_tasks)
 
     def sync_items(self, owner: str, scenarios: Iterable[str]) -> None:
-        """Sync the uploads of each loaded scenario of ``owner`` among ``scenarios`` with that owner's items.
+        """Sync each loaded scenario of ``owner`` among ``scenarios`` with that owner's items (``apply_sync``).
 
         A scenario that is not loaded syncs when it opens. A scenario of another owner does not use the items.
         """
@@ -726,19 +727,13 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                     self.apply_sync(current, owner)
 
     def apply_sync(self, current: Scenario, owner: str) -> None:
-        """Sync the uploads and record copies of the loaded scenario ``current`` with the items of ``owner``.
-
-        Its trainers forget the uploads that left it, and its workers wake for new uploads and copies. The caller
-        holds the scenario's lock.
-        """
+        """Copy the record items of ``owner`` that the loaded scenario ``current`` now uses into its record store,
+        and wake its workers, which read the items that the write changed. The caller holds the scenario's lock."""
         if self.data_store is None:
             raise ReefError("this dispatcher has no data store")
-        result = sync_scenario_samples(current.store.samples, self.data_store, owner, current.name)
-        for component_trainer in current.trainers:
-            component_trainer.trainer.forget_samples(result.removed)
         if sync_scenario_records(current.store.records, self.data_store, owner, current.name):
             self.process_accepted_records(current)
-        elif result.added:
+        else:
             self.local_workers.wake(current)
 
     def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
@@ -749,7 +744,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""
         with self.locked_scenario(scenario) as current:
-            return current.store.samples.page(after_sequence=after_sequence, limit=limit)
+            samples = current.store.samples
+            return () if samples is None else samples.page(after_sequence=after_sequence, limit=limit)
 
     @staticmethod
     def trainer_of(current: Scenario, component: str | None) -> Trainer:
@@ -831,7 +827,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
         """The scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.locked_scenario(scenario) as current:
-            return current.store.samples.imported_tasks()
+            samples = current.store.samples
+            return () if samples is None else samples.imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable, and copy them to record items."""

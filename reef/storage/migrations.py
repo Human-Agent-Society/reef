@@ -10,11 +10,10 @@ from collections import defaultdict
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Column, LargeBinary, MetaData, Table, cast, func, inspect, select, update
+from sqlalchemy import Column, LargeBinary, MetaData, Table, cast, func, inspect, select, tuple_, update
 from sqlalchemy.engine import Connection
 
 from reef.core.atif_payloads import call_shape, canonical_json
-from reef.core.errors import ReefError
 from reef.core.trajectory_index import call_key, sha256_text
 from reef.storage.commits import read_consumed_ids
 from reef.storage.sql_records import SEGMENT_COLUMNS, ScopedTable, SQLRecordStore, TrajectoryNodes
@@ -223,6 +222,38 @@ def migrate_data_segments(connection: Connection, items: Table, nodes: Table) ->
         index.create(connection)
 
 
+def migrate_data_uses(connection: Connection, items: Table, uses: Table) -> None:
+    """Give each use of an item by a scenario its own sequence and its split (RFC #1140).
+
+    Run in the caller's schema transaction, after ``create_all``. A use table that has ``sequence`` is left
+    unchanged. Otherwise read its uses, drop it, create it again, and insert the uses in the order of their items,
+    each with its item's split for the scenario.
+    """
+    if "sequence" in {column["name"] for column in inspect(connection).get_columns(uses.name, schema=uses.schema)}:
+        return
+    old = Table(uses.name, MetaData(), schema=uses.schema, autoload_with=connection)
+    rows = connection.execute(
+        select(old.c.owner, old.c.item_id, old.c.scenario, items.c.metadata_json)
+        .join(items, (items.c.owner == old.c.owner) & (items.c.item_id == old.c.item_id))
+        .order_by(items.c.sequence)
+    ).all()
+    old.drop(connection)
+    uses.create(connection)
+    if rows:
+        connection.execute(
+            uses.insert(),
+            [
+                {
+                    "owner": row.owner,
+                    "item_id": row.item_id,
+                    "scenario": row.scenario,
+                    "split": json.loads(row.metadata_json)["scenarios"].get(row.scenario, "train"),
+                }
+                for row in rows
+            ],
+        )
+
+
 def migrate_data_indexes(connection: Connection, items: Table) -> None:
     """Create each index of ``items`` that the table does not have yet, such as ``data_item_by_kind``.
 
@@ -286,24 +317,6 @@ def migrate_data_trajectories(connection: Connection, items: Table, nodes: Table
             )
 
 
-def migrate_sample_columns(connection: Connection, samples: Table) -> None:
-    """Add to an existing ``training_sample`` table the columns that it lacks: ``component``, ``group_key`` and
-    ``record_ids_json``. The samples that were stored before have no component, no group and no records.
-
-    Run in the caller's schema transaction, after ``create_all``; a table that ``create_all`` made has them all.
-    """
-    columns = {column["name"] for column in inspect(connection).get_columns(samples.name, schema=samples.schema)}
-    operations = Operations(MigrationContext.configure(connection))
-    for name in ("component", "group_key", "record_ids_json"):
-        if name not in columns:
-            column = samples.c[name]
-            operations.add_column(
-                samples.name,
-                Column(name, column.type, nullable=column.nullable, server_default=column.server_default),
-                schema=samples.schema,
-            )
-
-
 def migrate_work_item_columns(connection: Connection, work_items: Table) -> None:
     """Add to an existing ``work_item`` table the columns that it lacks: ``started_at``, ``ended_at`` and
     ``metadata_json``. A final item that was stored before ended at its last change (``changed_at``), since a
@@ -330,166 +343,6 @@ def migrate_work_item_columns(connection: Connection, work_items: Table) -> None
         )
 
 
-def migrate_uploaded_trajectories(connection: Connection, samples: Table, train_counts: Table, commits: Table) -> None:
-    """Move the rows of the old ``uploaded_trajectory`` table into ``samples``, then drop the old table.
-
-    Run in the caller's schema transaction, after ``create_all`` made ``samples`` and ``train_counts``. Each
-    trajectory keeps its ID, its content and its upload order. For each trainer, its row in ``train_counts`` is
-    the number of that trainer's commits in ``commits`` that list the old consumed ID,
-    ``trajectory:<trajectory_id>``: the commit's ``component``, or ``""`` for a commit that names none. A schema
-    without the old table is left unchanged.
-    """
-    schema = samples.schema
-    if not inspect(connection).has_table("uploaded_trajectory", schema=schema):
-        return
-    legacy = Table("uploaded_trajectory", MetaData(), schema=schema, autoload_with=connection)
-    scoped = "storage_id" in legacy.c
-    counted: dict[tuple[str | None, str, str], int] = defaultdict(int)
-    for row in connection.execute(select(commits)).mappings():
-        commit = json.loads(row["commit_json"])
-        component = commit.get("component") or ""
-        for consumed in read_consumed_ids(commit.get("record_progress", {}), context="commit"):
-            if consumed.startswith("trajectory:"):
-                counted[(row["storage_id"] if scoped else None, consumed.removeprefix("trajectory:"), component)] += 1
-    after_sequence = 0
-    while True:
-        rows = (
-            connection.execute(
-                select(legacy).where(legacy.c.sequence > after_sequence).order_by(legacy.c.sequence).limit(256)
-            )
-            .mappings()
-            .all()
-        )
-        if not rows:
-            break
-        for row in rows:
-            scope = {"storage_id": row["storage_id"]} if scoped else {}
-            connection.execute(
-                samples.insert().values(
-                    **scope,
-                    sample_id=row["trajectory_id"],
-                    kind="trajectory",
-                    split="train",
-                    content_json=row["content_json"],
-                    content_sha256=row["content_sha256"],
-                )
-            )
-        after_sequence = rows[-1]["sequence"]
-    for (storage_id, sample_id, component), count in counted.items():
-        scope = {} if storage_id is None else {"storage_id": storage_id}
-        connection.execute(
-            train_counts.insert().values(**scope, sample_id=sample_id, component=component, train_count=count)
-        )
-    legacy.drop(connection)
-
-
-def legacy_task_trained(connection: Connection, schema: str | None) -> Table | None:
-    """The old ``task_trained`` table, the trained marks of the task stores, or None when the schema has none."""
-    if not inspect(connection).has_table("task_trained", schema=schema):
-        return None
-    return Table("task_trained", MetaData(), schema=schema, autoload_with=connection)
-
-
-def migrate_imported_tasks(
-    connection: Connection, samples: Table, train_counts: Table, commits: Table, published: Table
-) -> None:
-    """Move the tasks of the old ``imported-tasks`` task store into ``samples``, then delete them from the task tables.
-
-    Run in the caller's schema transaction, after ``create_all``. ``published`` is the ``published_task`` table of
-    the task stores; the trained marks come from the old ``task_trained`` table. Each task keeps its name as its sample ID,
-    its split, the digest of its files, and its publication order after the samples already stored. A trained
-    task gets a train count of 1 for each commit of a trainer (the commit's ``component``, or ``""``) whose
-    consumed IDs list a rollout of the task, ``rollout:<task use>`` whose task use ends in ``/<name>``. A trained
-    task that no commit lists gets the count 1 for ``""``. The task files stay in the task file store. Raise
-    ``ReefError`` when a task has the ID of a stored sample, since the store keeps one ID once.
-    """
-    store = published.c.store_name == "imported-tasks"
-    rows = connection.execute(select(published).where(store).order_by(published.c.sequence)).mappings().all()
-    if not rows:
-        return
-    scoped = "storage_id" in published.c
-    trained = legacy_task_trained(connection, published.schema)
-    trained_names = (
-        set()
-        if trained is None
-        else {
-            (row["storage_id"] if scoped else None, row["task_name"])
-            for row in connection.execute(select(trained).where(trained.c.store_name == "imported-tasks")).mappings()
-        }
-    )
-    counted: dict[tuple[str | None, str, str], int] = defaultdict(int)
-    for row in connection.execute(select(commits)).mappings():
-        commit = json.loads(row["commit_json"])
-        storage_id = row["storage_id"] if scoped else None
-        for consumed in read_consumed_ids(commit.get("record_progress", {}), context="commit"):
-            name = consumed.rpartition("/")[2]
-            if consumed.startswith("rollout:") and (storage_id, name) in trained_names:
-                counted[(storage_id, name, commit.get("component") or "")] += 1
-    for storage_id, name in trained_names:
-        if not any(key[:2] == (storage_id, name) for key in counted):
-            counted[(storage_id, name, "")] = 1
-    for row in rows:
-        storage_id = row["storage_id"] if scoped else None
-        scope = {} if storage_id is None else {"storage_id": storage_id}
-        stored = select(samples.c.sample_id).where(samples.c.sample_id == row["task_name"])
-        if storage_id is not None:
-            stored = stored.where(samples.c.storage_id == storage_id)
-        if connection.execute(stored).first() is not None:
-            raise ReefError(f"imported task {row['task_name']!r} has the ID of an uploaded trajectory of its scenario")
-        content = json.dumps({"files_digest": row["files_digest"]}, separators=(",", ":"), sort_keys=True)
-        connection.execute(
-            samples.insert().values(
-                **scope,
-                sample_id=row["task_name"],
-                kind="task",
-                split=row["split"],
-                content_json=content,
-                content_sha256=hashlib.sha256(content.encode()).hexdigest(),
-            )
-        )
-    for (storage_id, name, component), count in counted.items():
-        scope = {} if storage_id is None else {"storage_id": storage_id}
-        connection.execute(
-            train_counts.insert().values(**scope, sample_id=name, component=component, train_count=count)
-        )
-    if trained is not None:
-        connection.execute(trained.delete().where(trained.c.store_name == "imported-tasks"))
-    connection.execute(published.delete().where(store))
-
-
-def migrate_generated_task_marks(connection: Connection, train_counts: Table) -> None:
-    """Turn the trained marks of the generated-task stores into train counts, then drop the old ``task_trained`` table.
-
-    Run in the caller's schema transaction, after ``migrate_imported_tasks``. A mark of task ``n`` in the store
-    ``generated-tasks`` is a count of 1 of sample ``generated-tasks/<n>`` for the scenario's only trainer (``""``);
-    a mark in ``<c>/generated-tasks`` is a count of 1 of sample ``<c>:generated-tasks/<n>`` for the component
-    ``c``. The generated-task stage stores those samples on its next start, and they then read as trained. A
-    count that exists stays. A schema without the old table is left unchanged.
-    """
-    trained = legacy_task_trained(connection, train_counts.schema)
-    if trained is None:
-        return
-    scoped = "storage_id" in trained.c
-    for row in connection.execute(select(trained).where(trained.c.store_name.like("%generated-tasks"))).mappings():
-        component, separator, store_name = str(row["store_name"]).rpartition("/")
-        if store_name != "generated-tasks" or (separator and not component):
-            continue
-        sample_id = (
-            f"{component}:generated-tasks/{row['task_name']}" if component else f"generated-tasks/{row['task_name']}"
-        )
-        scope = {"storage_id": row["storage_id"]} if scoped else {}
-        exists = select(train_counts.c.sample_id).where(
-            train_counts.c.sample_id == sample_id,
-            train_counts.c.component == component,
-            *(train_counts.c[name] == value for name, value in scope.items()),
-        )
-        if connection.execute(exists).first() is None:
-            connection.execute(
-                train_counts.insert().values(**scope, sample_id=sample_id, component=component, train_count=1)
-            )
-    trained.drop(connection)
-
-
 def migrate_scenario_settings(connection: Connection, settings: Table) -> None:
     """Delete the ``model_config`` rows of ``settings``, the ``scenario_setting`` table: the per-scenario model
     override that Reef no longer has (RFC #1062). A scenario that had one calls the deployment's model after this.
@@ -497,6 +350,33 @@ def migrate_scenario_settings(connection: Connection, settings: Table) -> None:
     Run in the caller's schema transaction, after ``create_all``. The other settings stay as they are.
     """
     connection.execute(settings.delete().where(settings.c.name == "model_config"))
+
+
+def migrate_training_samples(connection: Connection, train_counts: Table) -> None:
+    """Drop the sample store of RFC #1009 (``training_sample``) and the records that its samples held
+    (``sample_record``): every training sample is a data item (RFC #1140).
+
+    Run in the caller's schema transaction. Delete the train counts of the samples that a trainer's stage made: the
+    stage makes them again, as items, from the records that no commit consumed. The counts of uploads and imported
+    tasks name their items, and stay. A schema without the old tables is left unchanged.
+    """
+    schema = train_counts.schema
+    inspector = inspect(connection)
+    if inspector.has_table("training_sample", schema=schema):
+        legacy = Table("training_sample", MetaData(), schema=schema, autoload_with=connection)
+        made = legacy.c.component.is_not(None)
+        if "storage_id" in legacy.c:
+            key = tuple_(train_counts.c.storage_id, train_counts.c.sample_id)
+            connection.execute(
+                train_counts.delete().where(key.in_(select(legacy.c.storage_id, legacy.c.sample_id).where(made)))
+            )
+        else:
+            connection.execute(
+                train_counts.delete().where(train_counts.c.sample_id.in_(select(legacy.c.sample_id).where(made)))
+            )
+        legacy.drop(connection)
+    if inspector.has_table("sample_record", schema=schema):
+        Table("sample_record", MetaData(), schema=schema, autoload_with=connection).drop(connection)
 
 
 def migrate_manual_buffers(connection: Connection, schema: str | None) -> None:

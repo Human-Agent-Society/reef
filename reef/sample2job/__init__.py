@@ -5,7 +5,7 @@ Reef reuses records in a pipeline of two stages::
     record ─► record2sample ─► sample ─► sample2job ─► job data
 
 The training pipeline (``reef.train.pipeline.TrainingPipeline``) stores the
-samples of each ready record set unit in the scenario's sample store. In
+samples of each ready record set unit as data items that the scenario uses. In
 ``auto``, the next job takes the first ``buffer_size`` untrained samples in
 store order, and the rest of each group that those touch; when it holds at
 least ``job_samples`` samples, the pipeline gives its samples to this stage. In

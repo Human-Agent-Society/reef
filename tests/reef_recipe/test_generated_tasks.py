@@ -12,6 +12,7 @@ import pytest
 import sqlalchemy.exc
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.samples import data_storage
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
@@ -48,10 +49,9 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_gen
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2JobSettings
-from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import TrainerSamples
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.samples import TrainerSamples, consumed_sample_id, stage_item_id
+from reef.storage.scenario import ScenarioStore
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.component import TrainingComponent
@@ -200,7 +200,7 @@ def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path
         "text": "train it",
         "session": "s-1",
         "release_id": "r-1",
-        "samples": ["generated-tasks/harbor-00000-001"],
+        "samples": [stage_item_id("tasks", "generated-tasks/harbor-00000-001")],
     }
     p.queue_instructions([TrainingRequest.from_dict(payload, request_id="train-1")])
     assert p.ready(BATCH_SIZE) and handed_out_names(p) == ["harbor-00000-001"]
@@ -338,9 +338,9 @@ class DeferredWorker(InlineWorker):
             self.outcomes.append(asyncio.run(self.generation.run(job)))
 
 
-def scenario_session(tmp_path: Path, scenario: str = "tasks") -> CommitHistoryScenarioStore:
-    """A scenario session in a SQLite storage under ``tmp_path``."""
-    return SQLiteScenarioStorage(tmp_path / "records").open(scenario)
+def scenario_session(tmp_path: Path, scenario: str = "tasks") -> ScenarioStore:
+    """A scenario session in a SQLite storage under ``tmp_path``, with its samples in a data store."""
+    return data_storage(tmp_path / "records").open(scenario)
 
 
 def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
@@ -351,9 +351,9 @@ def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
 class CommittingPipeline(TrainingPipeline):
     """A pipeline whose ``acknowledge`` also commits what the job data consumed, as the trainer's commit of a
     job's submission does: the commit counts the stored samples trained. Each look also makes the samples first,
-    as the samples service does before the trainer reads the sample store."""
+    as the samples service does before the trainer reads the scenario's samples."""
 
-    def __init__(self, context: PipelineContext, session: CommitHistoryScenarioStore, **stages: Any) -> None:
+    def __init__(self, context: PipelineContext, session: ScenarioStore, **stages: Any) -> None:
         super().__init__(context, **stages)
         self.session = session
 
@@ -672,7 +672,7 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
             algorithm_state={},
             high_water_sequence=1,
             high_water_offset=1,
-            consumed_ids=frozenset({"sample:generated-tasks/harbor-00000-000"}),
+            consumed_ids=frozenset({consumed_sample_id(stage_item_id("tasks", "generated-tasks/harbor-00000-000"))}),
             recorded_at=1000.0,
         ),
     )
@@ -769,13 +769,15 @@ def test_saved_tasks_are_stored_as_samples_and_train_as_one_task_job(tmp_path: P
     assert not p.ready(BATCH_SIZE), "the generation saves three tasks"
     assert p.ready(BATCH_SIZE), "the stored tasks make the next job"
     stored = p.store.page(kind="task")
-    assert [task.sample_id for task in stored] == [f"generated-tasks/harbor-00000-00{index}" for index in range(3)]
-    assert all(task.component == "" and task.record_ids == () for task in stored)
+    assert [task.sample_id for task in stored] == [
+        f"tasks.generated-tasks.harbor-00000-00{index}" for index in range(3)
+    ]
+    assert all(task.component == "" for task in stored) and p.store.consumed_record_ids() == frozenset()
     names = ["harbor-00000-000", "harbor-00000-001"]
     assert handed_out_names(p) == names, "the job takes buffer_size tasks"
     built = p.build_job_data(BATCH_SIZE)
     assert [item.metadata["task"]["name"] for item in built.samples] == names
-    assert p.acknowledge(built.data_id) == {f"sample:generated-tasks/{name}" for name in names}
+    assert p.acknowledge(built.data_id) == {f"sample:tasks.generated-tasks.{name}" for name in names}
     assert p.status()["task_store"]["trained"] == 2, "the submission's commit counted them trained"
     assert task_generator.result_generations == [] and unfinished(p) == 3, "no result before the job ends"
     assert p.ready(BATCH_SIZE) and handed_out_names(p) == ["harbor-00000-002"], "the next job takes the rest"

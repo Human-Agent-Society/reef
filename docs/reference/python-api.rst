@@ -531,13 +531,17 @@ The session contract is:
      - The ``TaskStorage`` that opens the task stores of the
        scenario (see `Task stores`_). The stores close with the
        session and survive restarts when ``durable``.
+   * - ``training_state``
+     - The ``TrainingState`` of the scenario: the train counts of its samples,
+       the number of committed jobs of each trainer that trained each one, and
+       the records that each trainer's stages consumed. It closes with the
+       session and survives restarts when ``durable``.
    * - ``samples``
-     - The ``SampleStore`` of the scenario's training samples, in arrival
-       order: the uploaded trajectories, the imported Harbor tasks of the
-       ``train`` and ``eval`` splits, and the samples that each trainer made
-       from records. Each sample has ``train_counts``, the
-       number of committed jobs of each trainer that trained it. It closes with the session and survives restarts when
-       ``durable``.
+     - The ``ScenarioSamples`` of the scenario, or None for a storage without
+       a data store: the data items that it uses, in use order (RFC #1140).
+       They are the uploaded trajectories, the imported Harbor tasks of the
+       ``train`` and ``eval`` splits, and the samples that each trainer's
+       stages made, each with its train counts.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
        (including inactive releases), activations, and new training starts.
@@ -622,9 +626,9 @@ give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
 keyword, which the scenario always passes. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store. The scenario's imported tasks are not a task
-store: they are tasks in the scenario's ``SampleStore``, which the factory
-gives to ``Recipe.build_trainers`` as ``samples`` and every component reads
-from ``PipelineContext.samples``.
+store: they are task items that the scenario uses (``ScenarioSamples``), which
+the factory gives to ``Recipe.build_trainers`` as ``samples`` and every
+component reads from ``PipelineContext.samples``.
 
 The service takes a task item in the ``train`` split of a scenario
 (``POST /reef/namespaces/{owner}/data/tasks``) only when a trainer of the
@@ -1250,7 +1254,7 @@ sample2job=...)``):
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
 - ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
   Its ``make_job_data(samples, data_id)`` shapes the samples of the next job,
-  in store order, into one job's data with the ID ``data_id``. The pipeline assigns the
+  in use order, into one job's data with the ID ``data_id``. The pipeline assigns the
   ID. Automatic job data gets ``<scenario>:data:<number>``. An instruction's
   data gets ``<scenario>:instruction:<request id>``. The number counts the
   job data of one pipeline. It is not a training step.
@@ -1376,7 +1380,7 @@ The pipeline stores the samples of a report or a ready group when it is
 ready, and that consumes their records. A group is fixed when it is first
 ready; later reports for its key form a new group. ``make_job_data``
 receives the samples of the `next job
-<../developer-guide/processors.rst#the-next-job>`__ in store order: units in
+<../developer-guide/processors.rst#the-next-job>`__ in use order: units in
 the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
 when the recipe omits constant-reward groups from its output. Samples stored
 after the job data was built wait for later job data.

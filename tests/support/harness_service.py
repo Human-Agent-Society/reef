@@ -20,6 +20,7 @@ from typing import Any
 from weakref import WeakKeyDictionary
 
 from tests.support.harness_steps import head_of
+from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, CachedRepositoryBackendFactory, InMemoryRepositoryBackend
@@ -34,7 +35,6 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.scenario.scenario import Scenario
 from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
@@ -58,16 +58,19 @@ def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
 
 
 def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: bool = False) -> Dispatcher:
-    """A dispatcher over ``recipe`` with a seeded repository and a durable commit history.
+    """A dispatcher over ``recipe`` with a seeded repository, a durable commit history and a data store.
 
     A test that prepares and commits each step itself sets ``hold_local_cycles``, so no local cycle commits the
     same step a second time.
     """
+    storage = data_storage(tmp_path / "agent-record")
     return Dispatcher(
         recipe,
         harness_repository(tmp_path),
         local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        data_store=storage.data,
         hold_local_cycles=hold_local_cycles,
         coordination=memory_coordination(),
     )

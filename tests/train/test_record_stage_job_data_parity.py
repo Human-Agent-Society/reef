@@ -662,10 +662,10 @@ def trace_steps(mode_requests: bool) -> list[Step]:
         # Each instruction trains the one sample that it names, and the other stored samples wait.
         steps += [
             CYCLE,
-            instruction("train-1", "r-c-0:0"),
+            instruction("train-1", "s.r-c-0:0"),
             CYCLE,
             *scored("c", 6),
-            instruction("train-2", "r-c-1:0"),
+            instruction("train-2", "s.r-c-1:0"),
         ]
     return steps
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.samples import data_storage
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from recipes.beta.spade import SpadeTaskGenerator
@@ -28,7 +29,6 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import GeneratorError, TaskNameConflict
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.storage.samples import TrainerSamples
-from reef.storage.sqlite import SQLiteScenarioStorage
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 REQUEST = TaskGenerationRequest((), DESCRIPTION)
@@ -280,7 +280,7 @@ def test_from_config_reads_its_section_and_keeps_one_state_directory_for_each_sc
 def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
-    session = SQLiteScenarioStorage(tmp_path / "records").open("spade")
+    session = data_storage(tmp_path / "records").open("spade")
     context = PipelineContext("spade", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,

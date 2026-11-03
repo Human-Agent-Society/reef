@@ -22,9 +22,10 @@ import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support._threshold_processor import ThresholdJobData
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.samples import made_task
 
 from reef.artifact.memory import InMemoryRepositoryBackend
-from reef.core.job_data import JobOutcome, TaskSample
+from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
@@ -33,7 +34,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.storage.records import RecordStore
-from reef.storage.samples import TrainerSamples
+from reef.storage.samples import TrainerSamples, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
@@ -285,7 +286,7 @@ class BackgroundStep(NoSamples):
         if self.made or self.step != "ended":
             return ()
         self.made = True
-        return (("generated-task", TaskSample(Path("generated-task"))),)
+        return (("generated-task", made_task("generated-task")),)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -347,7 +348,7 @@ def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
     while not component.submitted and time.monotonic() < deadline:
         time.sleep(0.01)
     [job] = component.submitted
-    assert [str(sample.task_path) for sample in job.data.samples] == ["generated-task"]
+    assert [sample.task_path.name for sample in job.data.samples] == [stage_item_id("generated", "generated-task")]
 
 
 def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_without_a_record(
