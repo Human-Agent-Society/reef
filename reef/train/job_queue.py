@@ -155,7 +155,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``.
     - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else None.
     - ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's
-      samples, with the instruction's parameters over them. They hold the training ``method`` and the
+      samples, with the instruction's parameters merged in. They hold the training ``method`` and the
       ``scheduling`` when the recipe or the instruction gives them.
     - ``sample_count``: the number of samples in the job's data, an integer from 0.
     - ``sample_kind``: ``"trajectory"`` or ``"task"``, the kind of the job's samples, which one job never mixes;
