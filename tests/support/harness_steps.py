@@ -25,13 +25,13 @@ from reef.artifact.artifact import ArtifactNotFound
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginReference
 from reef.evaluation.harness import EvaluationSettings, History, TaskCollector, TaskScorer
+from reef.execution.executor.config import ExecutorSettings
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
-from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 from reef.train.harness_backend import Method, StepContext, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings

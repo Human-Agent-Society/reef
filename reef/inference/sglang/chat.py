@@ -26,7 +26,7 @@ from reef.inference.chat import (
     stream_ids,
 )
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.runtime.interfaces import InferenceArtifact, InferenceStream
+from reef.inference.interfaces import InferenceArtifact, InferenceStream
 
 SGLANG_GENERATE_PATH = "/generate"
 #: ``meta_info`` entries that hold per-token tensors; they feed the training block, never a client.

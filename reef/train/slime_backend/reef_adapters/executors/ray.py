@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from contextlib import suppress
 
-from reef.runtime.executor.delegating import DelegatingExecutor
-from reef.runtime.executor.ray import RayExecutor
+from reef.execution.executor.delegating import DelegatingExecutor
+from reef.execution.executor.ray import RayExecutor
 
 
 class SlimeRayExecutor(DelegatingExecutor):

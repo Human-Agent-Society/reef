@@ -17,12 +17,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.recipe.base import Recipe
+from reef.inference.interfaces import InferenceRuntime
+from reef.inference.registry import RuntimeRegistry
+from reef.recipe.base import Recipe, close_runtimes
 from reef.recipe.config import load_recipe_config
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.deployment import RuntimeRegistry, close_runtimes
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
+from reef.train.component import TrainingComponent
 
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RecipeType = type[Recipe]
@@ -120,9 +120,6 @@ def build_named_recipe(
         if runtime_config
         else default_runtime
     )
-    if isinstance(runtime, TrainingComponent):
-        runtime.close()
-        raise TypeError("a recipe's runtime must be an inference runtime; training.backend selects training")
     try:
         return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
     except BaseException:

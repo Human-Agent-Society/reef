@@ -7,9 +7,8 @@ from pathlib import Path
 import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 
-from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.jobs import ReleaseFormat
+from reef.core.errors import DeployConfigError, RuntimeConfigError
+from reef.core.weight_layout import ReleaseFormat
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config

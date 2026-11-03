@@ -109,7 +109,7 @@ Implementation
 
 - Start an accepted integration in ``reef/train/<integration>/``. Keep its
   implementation, framework adapters, and plugins inside that subtree.
-- Implement ``TrainingComponent`` from ``reef/runtime/jobs.py``. A component
+- Implement ``TrainingComponent`` from ``reef/train/component.py``. A component
   runs whole training jobs with the framework's own training loop and saves
   checkpoints; Reef submits jobs and reads their status. Derive from
   ``reef.train.local_jobs.LocalJobComponent`` to get durable job directories,
@@ -164,7 +164,7 @@ Add a runtime kind
 
 Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
-``reef/runtime/interfaces.py`` before adding configuration.
+``reef/inference/interfaces.py`` before adding configuration.
 
 - For an external runtime, expose a factory as
   ``package.module:factory_name`` and use that dotted value as the runtime
@@ -172,26 +172,25 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - For a concrete inference backend, add its native implementation under
   ``reef/inference/<integration>/``. Keep native engine launch, request
   adaptation, weight loading, and framework imports inside that package.
-  ``reef/runtime/`` holds Reef's backend-neutral interfaces; it must not
-  import a concrete inference or training implementation. Implement
-  ``InferenceBackend`` from ``reef/runtime/interfaces.py``, including
+  The modules at the root of ``reef/inference/`` hold the inference contracts;
+  they must not import a concrete integration or ``reef.train``. Implement
+  ``InferenceBackend`` from ``reef/inference/interfaces.py``, including
   ``load_weight_files``, so that the serving runtimes in
-  ``runtime/serving.py`` can load published releases. Expose an inference
+  ``reef/inference/serving.py`` can load published releases. Expose an inference
   service factory through a dotted reference or the
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. Shared monitoring and engine recovery belong in
-  ``runtime/recovery.py``; adapter residency belongs in
-  ``runtime/residency.py``. Shared contracts and version values belong in
-  ``runtime/interfaces.py``.
+  ``reef/inference/recovery.py``; adapter residency belongs in
+  ``reef/inference/residency.py``. Shared contracts and version values belong in
+  ``reef/inference/interfaces.py``.
 - For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
   and load the selected integration from service assembly. ``RuntimeFactory`` and
-  factory resolution live in ``reef.runtime.deployment``. Runtime is a namespace
-  package: importing ``reef.runtime`` does not register integrations or re-export
-  classes. Keep its top level limited to ``interfaces.py``, ``jobs.py``,
-  ``durable_files.py``, ``deployment.py``, ``recovery.py``, ``residency.py``,
-  ``serving.py`` and ``executor/``. A training component is not a runtime: its
-  ``TrainingDeployment.component_type`` names a ``TrainingComponentFactory``.
+  factory resolution live in ``reef.inference.registry``. Importing
+  ``reef.inference`` does not register integrations or re-export classes. A
+  training component is not a runtime: its
+  ``TrainingDeployment.component_type`` names a ``TrainingComponentFactory``
+  from ``reef.train.component``.
 - A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the
@@ -200,7 +199,7 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   Opaque backend payloads must be declared as object fields and validated by
   the adapter; do not enumerate backend-native flags in the service layer.
 - Keep provider authentication and provider-native request handling in the
-  adapter. Do not import a concrete training backend from ``reef/runtime/``.
+  adapter. Do not import ``reef.train`` from ``reef/inference/``.
 - Test registered and dotted resolution in
   ``tests/reef_service/test_runtime_registry.py``. Add request, recovery, and
   malformed-result contracts for every capability the runtime implements.
@@ -212,7 +211,7 @@ Add a worker executor
 
 Use an ``Executor`` subclass when worker launch or control transport changes
 while the training lifecycle stays the same. Implement the common interface
-under ``reef/runtime/executor/`` for a general-purpose backend, or inside the
+under ``reef/execution/executor/`` for a general-purpose backend, or inside the
 owning training integration for a backend-specific launcher. See
 `Worker executors <../developer-guide/executors.rst>`__ for configuration,
 ownership, rank ordering and the Slime extension contract.
@@ -231,7 +230,7 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   select it in ``storage.artifact_backend``, the factory also inherits
   ``ConfigurableRepositoryBackendFactory``.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
-  ``reef/runtime/`` or ``reef/inference/``, and client-pull delivery in a
+  ``reef/inference/``, and client-pull delivery in a
   ``FileTree`` (``reef/artifact/components.py``). Reef does not change a model
   request on its way to the engine: a client pulls the artifacts that shape
   its requests.

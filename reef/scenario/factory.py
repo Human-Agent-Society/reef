@@ -32,7 +32,6 @@ from reef.core.snapshot import RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
-from reef.runtime.jobs import ScenarioRoot
 from reef.scenario.binding import ScenarioBinding, activate_release
 from reef.scenario.release_files import ScenarioArtifactFiles
 from reef.scenario.scenario import Scenario
@@ -46,6 +45,7 @@ from reef.storage.commits import (
 )
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
+from reef.train.component import ScenarioRoot
 from reef.train.instructions import InstructionQueue
 from reef.train.trainer import ComponentTrainer
 

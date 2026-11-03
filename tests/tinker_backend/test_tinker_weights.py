@@ -15,9 +15,9 @@ import pytest
 
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
-from reef.runtime.serving import ReleaseFiles
-from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.inference.serving import ReleaseFiles
 from reef.tinker.weights import TinkerSamplerWeights
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 
 MODEL = "Qwen/Qwen3-8B"
 CHECKPOINT = TinkerCheckpoint(MODEL, 32, "tinker://run/weights/4", "tinker://run/sampler_weights/4")

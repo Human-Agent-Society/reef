@@ -24,8 +24,8 @@ from reef.inference.chat import (
     positive_max_tokens,
 )
 from reef.inference.http import RequestHeadersFactory
+from reef.inference.interfaces import InferenceArtifact
 from reef.inference.vllm.versions import TOKEN_RUNTIME_LOAD_IDS_KEY, UNKNOWN_RUNTIME_LOAD_ID
-from reef.runtime.interfaces import InferenceArtifact
 
 VLLM_GENERATE_PATH = "/inference/v1/generate"
 #: vLLM renders logprob tokens as ``token_id:N`` on this route.

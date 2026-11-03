@@ -10,9 +10,9 @@ import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from reef.inference.process import EngineGroup, EngineStartup
+from reef.inference.recovery import EngineHealthChecks, EngineHealthTarget
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.engine import ReefVLLMEngine
-from reef.runtime.recovery import EngineHealthChecks, EngineHealthTarget
 
 
 def engine_environment(config: VLLMConfig) -> dict[str, str]:

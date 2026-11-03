@@ -65,8 +65,8 @@ there is no aggregate runtime:
 
 .. code:: python
 
-   from reef.runtime.interfaces import InferenceBackend, InferenceRuntime
-   from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
+   from reef.inference.interfaces import InferenceBackend, InferenceRuntime
+   from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
 
 A ``TrainingComponent`` runs bounded training jobs (see `Training jobs and
 components`_). An ``InferenceRuntime`` executes requests, owns admission, and
@@ -78,11 +78,11 @@ serve. ``InferenceEngine`` names the operations one engine actor offers, which
 ``ReefSGLangEngine`` and ``ReefVLLMEngine`` implement. The engine supervision
 hooks an inference integration also implements (``InferenceEngineGroup``,
 ``InferenceMonitor``, ``EngineHealthChecks``, ``EngineHealthTarget``) live in
-``reef/runtime/recovery.py``, next to the objects that drive them.
+``reef/inference/recovery.py``, next to the objects that drive them.
 Implementations inherit the corresponding interface and provide every abstract
 operation. SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``
 through ``EngineInferenceBackend``. ``InferenceService`` in
-``reef/runtime/deployment.py`` owns engine start and shutdown. It also requires
+``reef/inference/deployment.py`` owns engine start and shutdown. It also requires
 explicit inheritance; inference factory discovery rejects objects that only
 happen to expose similarly named methods.
 
@@ -95,7 +95,7 @@ Two other extension points have separate names and purposes:
   (``reef.train.harness_backend.component``) runs each harness step's
   ``HarnessBackend`` as one job, in the training service.
   The trainer's job size is its sample-to-job stage's ``job_samples``.
-- ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
+- ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
   ``artifact_id``, an optional ``local_path``, and ``require_token_runtime_load_ids``.
   Handlers receive no repository or snapshot locator. Runtime and recipe objects
@@ -1736,7 +1736,7 @@ kind of the data's samples, with the keys of the instruction's ``parameters``
 both kinds, and a kind that the recipe does not name when no instruction gives
 parameters. A kind that the recipe does not name never trains in ``auto``. Reef reads none of the parameters; it submits
 them to the deployment's training component, whose name is the job's
-``backend``. ``TrainingMethod`` (``reef.runtime.interfaces``) is an objective
+``backend``. ``TrainingMethod`` (``reef.train.method``) is an objective
 reference and an optional ``LearningRateSchedule``.
 
 By default, the parameters of both kinds are ``method``
@@ -2090,13 +2090,13 @@ their existing training behavior.
 Startup status is available through the inference service's
 ``GET /reef/scenarios/{scenario}/inference/status`` route.
 
-``reef.runtime.serving`` holds the two runtimes for saved weights, both over an
+``reef.inference.serving`` holds the two runtimes for saved weights, both over an
 ``InferenceBackend``:
 
 * ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
   base model. A release holds the adapter in ``adapter/``. At most
   ``adapter_capacity`` adapters stay resident.
-  ``reef.runtime.residency.AdapterResidencyManager`` evicts a leaked
+  ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
@@ -2137,20 +2137,25 @@ Weight recipes hold ``training_component: TrainingComponent`` and
 
    recipe = SAORecipe(training, runtime=inference)
 
-A training deployment's runtime factory returns the ``TrainingComponent``
-alone; a serving factory returns an ``InferenceRuntime``. ``RuntimeFactory``
-and ``RuntimeRegistry`` in ``reef.runtime.deployment`` define and build both.
+A training deployment's component factory returns the ``TrainingComponent``
+alone; a serving factory returns an ``InferenceRuntime``.
+``TrainingComponentFactory`` and ``build_training_component`` in
+``reef.train.component`` define and build the first; ``RuntimeFactory`` and
+``RuntimeRegistry`` in ``reef.inference.registry`` define and build the second.
 The HTTP service builds the training component first, then the serving
 runtime that ``reef.service.deploy.serving.serving_runtime_config`` describes
 from the ``inference`` settings and the component's ``release_format``.
 
-``reef.runtime`` is a namespace package without an import facade. Its modules
-are ``interfaces`` (inference contracts, ``TrainingMethod``, runtime load
-IDs), ``jobs`` (the training component contract), ``serving`` (the
-saved-weight serving runtimes), ``residency`` (adapter residency),
-``deployment`` (runtime factories and inference service contracts) and
-``recovery`` (durable JSON files and engine supervision); ``executor/``
-contains worker transports. Concrete integrations live with their owners:
+Each side owns its contracts. The inference contracts are the modules at the
+root of ``reef.inference``: ``interfaces`` (inference contracts and runtime
+load IDs), ``deployment`` (the inference service contracts), ``registry``
+(runtime factories), ``serving`` (the saved-weight serving runtimes),
+``residency`` (adapter residency) and ``recovery`` (engine supervision).
+``reef.train.component`` holds the training component contract, and
+``reef.train.method`` holds ``TrainingMethod``. Values that both sides read
+are in ``reef.core.weight_layout`` (``ReleaseFormat``, ``WeightFiles``,
+``ReleaseWeights``). ``reef.execution.executor`` contains worker transports.
+Concrete integrations live with their owners:
 ``SlimeTrainingComponent`` in ``reef.train.slime_backend.component``,
 ``TinkerTrainingComponent`` in ``reef.train.tinker_backend.component``, and
 ``SGLangInferenceBackend`` in ``reef.inference.sglang.backend``.
@@ -2158,7 +2163,7 @@ contains worker transports. Concrete integrations live with their owners:
 Training jobs and components
 ----------------------------
 
-``reef.runtime.jobs`` defines bounded training jobs. A ``TrainingJob`` has
+``reef.train.component`` defines bounded training jobs. A ``TrainingJob`` has
 these fields:
 
 - ``job_id`` and ``backend``, the name of the training component.
@@ -2343,7 +2348,7 @@ engine setting, and ``trainer_serving_config(settings)`` the runtime config
 of the backend's own serving, or ``None`` without one.
 ``engine_weights(settings)`` is an ``EngineWeights`` for a backend whose
 releases hold no weight files: the ``ReleaseFormat`` that Reef's engines load
-and the ``ReleaseWeights`` plugin (``reef.runtime.serving``) that gives each
+and the ``ReleaseWeights`` plugin (``reef.core.weight_layout``) that gives each
 release's files. The default is ``None``: engines cannot serve such
 releases. ``ReleaseFiles``, the default plugin, reads a release's own files. ``requires_local_model``
 defaults to true; hosted integrations set it to false to preserve remote

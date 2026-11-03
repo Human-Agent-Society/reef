@@ -11,7 +11,6 @@ from tests.support._trajectories import policy_trajectory
 from recipes.sao.objective import SaoObjective
 from recipes.tttd.objective import TttdObjective
 from reef.recipe import WeightTrainingSpec
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.registry import (
     ObjectiveRegistry,
@@ -21,6 +20,7 @@ from reef.train.algos.registry import (
     unregister_objective,
 )
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.tinker_backend.losses import resolve_tinker_loss
 from reef.train.tinker_backend.preparation import prepare_tinker_job

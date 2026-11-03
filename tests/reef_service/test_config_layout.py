@@ -7,7 +7,7 @@ import argparse
 import pytest
 import yaml
 
-from reef.runtime.executor.arguments import native_arguments
+from reef.execution.executor.arguments import native_arguments
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides
 from reef.service.deploy.config_utils import DeployConfigError, load_config

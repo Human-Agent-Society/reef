@@ -13,14 +13,16 @@ from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any, Generic, TypeVar
 
+from reef.core.weight_layout import WeightFiles
+from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor.config import ExecutorSettings, select_executor
+from reef.execution.executor.delegating import DelegatingExecutor
+from reef.execution.executor.placement import DeploymentResources
+from reef.execution.executor.ray import RayExecutor
+from reef.execution.executor.uniproc import UniProcExecutor
+from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
+from reef.inference.interfaces import InferenceBackend
 from reef.inference.process import RayHealthProbe
-from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceResources, InferenceService
-from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.executor.config import ExecutorSettings, select_executor
-from reef.runtime.executor.delegating import DelegatingExecutor
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
 
 #: Bound on one control RPC or engine launch; a weight update legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400

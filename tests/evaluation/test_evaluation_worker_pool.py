@@ -10,8 +10,8 @@ from tests.support.harness_steps import build_harness_backend, harness_recipe
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection
-from reef.runtime.executor import ExecutorFailedError, WorkerSpec
-from reef.runtime.executor.config import ExecutorSettings
+from reef.execution.executor import ExecutorFailedError, WorkerSpec
+from reef.execution.executor.config import ExecutorSettings
 
 
 def run_requests(evaluator, *pairings):

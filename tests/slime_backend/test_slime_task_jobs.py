@@ -17,11 +17,11 @@ from tests.support.slime_component import finished
 
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample
-from reef.runtime.executor.placement import GpuBundles
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
+from reef.execution.executor.placement import GpuBundles
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.component import TrainingJob
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import rollout_group as rollout_group_module
 from reef.train.slime_backend.component import ROLLOUTS_FILE
