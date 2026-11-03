@@ -71,20 +71,38 @@ def trajectory_stage(idle: float = 10.0) -> TrajectorySamples:
 def test_a_trajectory_forms_its_set_after_its_last_call_was_idle(monkeypatch) -> None:
     clock = [100.0]
     monkeypatch.setattr("reef.record2sample.trajectories.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("reef.record2sample.trajectories.time.time", lambda: clock[0])
     stage = trajectory_stage()
-    stage.push(conversation("call-1", 1))
+    stage.push(conversation("call-1", 1, created_at=100.0))
     stage.push(report("r1", "call-1"))
     clock[0] = 105.0
-    stage.push(conversation("call-2", 2))
+    stage.push(conversation("call-2", 2, created_at=105.0))
     stage.advance(112.0)
-    # call-1 is idle but continued; call-2 is the end, and it is not idle yet.
+    # call-1 is idle but continued; call-2 is the end, and it is not idle yet. The stage is due when it is.
     assert stage.take_ready_units() == ()
+    assert stage.next_due() == 115.0
     stage.advance(115.0)
     (unit,) = stage.take_ready_units()
     assert unit.set_ids() == (("trajectory", "call-2"),)
     assert unit.consumed_ids() == {"call-1", "call-2"}
     assert "r1" in stage.releasable_record_ids()
     assert stage.operational_metrics() == {"waiting_calls": 0}
+    assert stage.next_due() is None
+
+
+def test_a_trajectory_read_after_its_idle_time_forms_its_set_at_once(monkeypatch) -> None:
+    # A restarted samples process reads old records again: the idle time counts from each call, not from the read.
+    monkeypatch.setattr("reef.record2sample.trajectories.time.monotonic", lambda: 50.0)
+    monkeypatch.setattr("reef.record2sample.trajectories.time.time", lambda: 1000.0)
+    stage = trajectory_stage()
+    stage.push(conversation("call-1", 1, created_at=900.0))
+    stage.push(conversation("call-2", 2, created_at=995.0))
+    assert stage.next_due() == 55.0
+    stage.advance(50.0)
+    assert stage.take_ready_units() == ()
+    stage.advance(55.0)
+    (unit,) = stage.take_ready_units()
+    assert unit.set_ids() == (("trajectory", "call-2"),)
 
 
 def test_a_retried_call_ends_with_the_trajectory_that_replaced_it(monkeypatch) -> None:

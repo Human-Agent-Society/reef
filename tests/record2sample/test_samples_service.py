@@ -17,18 +17,28 @@ from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQue
 
 
 class Producers(SampleProducers):
-    """Counts each call; ``background`` says whether the stages still run background work; ``error`` fails it."""
+    """Counts each call; ``background`` says whether the stages still run background work; ``due_in_seconds`` when a
+    set that waits for time is due; ``error`` fails it."""
 
-    def __init__(self, *, background: bool = False, error: Exception | None = None) -> None:
+    def __init__(
+        self, *, background: bool = False, due_in_seconds: float | None = None, error: Exception | None = None
+    ) -> None:
         self.calls: list[tuple[str, str]] = []
         self.background = background
+        self.due_in_seconds = due_in_seconds
         self.error = error
 
     def produce(self, scenario: str, component: str) -> ProducedSamples:
         self.calls.append((scenario, component))
         if self.error is not None:
             raise self.error
-        return ProducedSamples(changed=True, background=self.background, records_read=4, samples_created=2)
+        return ProducedSamples(
+            changed=True,
+            background=self.background,
+            records_read=4,
+            samples_created=2,
+            due_in_seconds=self.due_in_seconds,
+        )
 
 
 @pytest.mark.unit
@@ -60,10 +70,32 @@ def test_the_worker_makes_the_samples_and_comes_back_while_background_work_runs(
     assert producers.calls == [("s", "weights")]
     items = queue.items(SAMPLES_QUEUE, scenario="s")
     assert [item.state for item in items] == ["finished", "queued"]
-    assert items[0].result == {"changed": True, "background": True, "records_read": 4, "samples_created": 2}
+    assert items[0].result == {
+        "changed": True,
+        "background": True,
+        "records_read": 4,
+        "samples_created": 2,
+        "due_in_seconds": None,
+    }
     assert items[1].available_at > items[0].created_at
     producers.background = False
     assert worker.run_once() is False  # the next look waits for its time
+
+
+@pytest.mark.unit
+def test_the_worker_comes_back_when_a_set_that_waits_for_time_is_due_or_a_record_arrives():
+    queue = memory_coordination().work_queue
+    worker = SamplesWorker(queue, Producers(due_in_seconds=600.0), worker_id="samples-1")
+    request_selection(queue, "s", "weights")
+
+    assert worker.run_once() is True
+    finished, due = queue.items(SAMPLES_QUEUE, scenario="s")
+    assert finished.result["due_in_seconds"] == 600.0
+    assert due.state == "queued" and due.available_at >= finished.created_at + 600.0
+    assert worker.run_once() is False
+    # A new record does not wait for the due time: its request makes the queued selection available now.
+    assert request_selection(queue, "s", "weights").id == due.id
+    assert worker.run_once() is True
 
 
 @pytest.mark.unit
