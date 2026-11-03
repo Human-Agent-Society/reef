@@ -108,7 +108,7 @@ import a concrete integration.
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/inference/``     | inference contracts, serving runtimes and their          | training algorithms and publication        |
 |                         | selection, saved-weight serving, concrete inference      | decisions                                  |
-|                         | backends, native engine control, request adaptation     |                                            |
+|                         | backends, native engine control, request adaptation      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/artifact/``      | artifact bytes, repositories, materialization, release   | commit policy, weight loading              |
 |                         | heads, and the components a recipe declares              |                                            |
