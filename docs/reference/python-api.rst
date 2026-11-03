@@ -1366,7 +1366,8 @@ report's trajectories one ATIF trajectory sample with the report's score.
 ``TrajectorySamples(context, *, trajectory_idle_seconds=300.0,
 max_staleness=0)`` is the stage of a method that needs no report. It forms a
 ``TrajectorySet`` of a trajectory's calls once the trajectory's last call has
-had no continuing call and no retry for ``trajectory_idle_seconds``, and makes
+had no continuing call and no retry for ``trajectory_idle_seconds``, counted
+from the call's ``created_at``, and makes
 it one ATIF ``TrajectorySample`` (``trajectory_sample``). Its ``next_due()``
 is the time at which the earliest waiting trajectory goes idle. Every other
 record ends at once. Grouping and

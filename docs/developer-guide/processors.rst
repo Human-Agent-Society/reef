@@ -433,7 +433,7 @@ A recipe's stage extends one of these classes of the ``reef.record2sample`` pack
        ``exclusive_sources=True``, a report that ends owns its inference records
    * - ``TrajectorySamples``
      - one sample per trajectory that ended without a report, after ``trajectory_idle_seconds`` without a
-       continuing call
+       continuing call, counted from the last call's ``created_at``
    * - ``JudgedSamples``
      - correlation, the judging worker, and one sample per judged record (``make_sample``)
    * - ``InferenceRecordSamples``
