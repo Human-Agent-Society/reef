@@ -45,7 +45,7 @@ def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) 
 
 def release_files(scenario: Scenario) -> ScenarioArtifactFiles:
     return ScenarioArtifactFiles(
-        name=scenario.name, store=scenario.store, repository=scenario.repository, surface=scenario.surface
+        name=scenario.name, store=scenario.store, repository=scenario.repository, components=scenario.components
     )
 
 

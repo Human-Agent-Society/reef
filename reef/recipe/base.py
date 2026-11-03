@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
@@ -34,8 +35,6 @@ from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
-from reef.surface.base import AcceptAnyArtifact, Surface
-from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.jobs import JobLoop
@@ -288,7 +287,7 @@ class Recipe:
         scenario: str,
         records: RecordStore,
         *,
-        surface: Surface,
+        components: ScenarioComponents,
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
@@ -299,8 +298,8 @@ class Recipe:
         """Build every trainer of the named scenario, each bound to the component it evolves.
 
         The default builds the one trainer :meth:`build` returns and binds it
-        to the surface's only component (``records`` when the surface serves
-        none). A recipe whose surface declares several components overrides
+        to the scenario's only component (``records`` when the scenario serves
+        none). A recipe that declares several components overrides
         this to return one trainer per component. The scenario runs them as
         separate workers that take turns, one step at a time.
         ``algorithm_states`` carries each one's recovered state under its
@@ -312,14 +311,14 @@ class Recipe:
         reads those of its own component. ``root`` is the scenario's root
         release, where a new trainer starts; a recipe of several components
         gives each trainer its own component of it
-        (``Surface.component_artifact``).
+        (``ScenarioComponents.component_artifact``).
         """
-        if len(surface.names) > 1:
+        if len(components.names) > 1:
             raise RecipeConfigError(
-                f"{type(self).__name__} serves components {list(surface.names)}: override build_trainers "
+                f"{type(self).__name__} serves components {list(components.names)}: override build_trainers "
                 "to bind one trainer per component"
             )
-        component = surface.names[0] if surface.names else RECORDS_COMPONENT
+        component = components.names[0] if components.names else RECORDS_COMPONENT
         return (
             ComponentTrainer(
                 component,
@@ -336,22 +335,21 @@ class Recipe:
             ),
         )
 
-    def build_surface(self, scenario: str) -> Surface:
-        """Build the serving surface for the named scenario.
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        """The components that every release of the named scenario binds.
 
-        The surface names the release's components and binds each one's
-        capabilities, including the admission check run before that component
-        is published or restored. Most recipes ignore ``scenario``; recipes
-        whose serving state is scenario-specific (an adapter on a shared
-        engine) route by it.
+        Each ``ComponentSpec`` gives the component's kind, the admission check
+        run before it is published or restored, its import layout and the
+        files a client pulls. The default declares none: the scenario records
+        traffic only. Most recipes ignore ``scenario``.
         """
-        return Surface()
+        return ScenarioComponents()
 
     def build_artifact_validator(self) -> ArtifactValidator:
         """An admission check run beside the component's own before the recipe's release is published or restored.
 
         Kept for recipes written before admission moved onto the component
-        surface (``ComponentSurface.validator``, where a new recipe binds it):
+        (``ComponentSpec.validator``, where a new recipe binds it):
         it joins the check of the one component the recipe serves, and on a
         recipe that serves none it admits the release as a whole; inside a
         composite that recipe's release is its component, so the check joins
@@ -361,22 +359,22 @@ class Recipe:
         """
         return AcceptAnyArtifact()
 
-    def serving_surface(self, scenario: str) -> Surface:
-        """``build_surface`` with ``build_artifact_validator`` joined to the served component's check."""
-        surface = self.build_surface(scenario)
+    def scenario_components(self, scenario: str) -> ScenarioComponents:
+        """``build_components`` with ``build_artifact_validator`` joined to the served component's check."""
+        components = self.build_components(scenario)
         if type(self).build_artifact_validator is Recipe.build_artifact_validator:
-            return surface
-        if not surface.components:
+            return components
+        if not components.components:
             # A release with no component is admitted as a whole, as it was before components existed.
-            return replace(surface, validator=every_check(surface.validator, self.build_artifact_validator()))
-        if len(surface.components) != 1:
+            return replace(components, validator=every_check(components.validator, self.build_artifact_validator()))
+        if len(components.components) != 1:
             raise RecipeConfigError(
                 f"{type(self).__name__} overrides build_artifact_validator but serves components "
-                f"{list(surface.names)}: bind the check on each component's ComponentSurface.validator instead"
+                f"{list(components.names)}: bind the check on each component's ComponentSpec.validator instead"
             )
-        ((name, component),) = surface.components.items()
+        ((name, component),) = components.components.items()
         checks = every_check(component.validator, self.build_artifact_validator())
-        return replace(surface, components={name: replace(component, validator=checks)})
+        return replace(components, components={name: replace(component, validator=checks)})
 
     def check_root_start(self, root: ScenarioRoot) -> None:
         """Check that training can start from ``root`` before an item start is registered.
@@ -442,6 +440,10 @@ class WeightTrainingSpec:
     def loss_family(self) -> str:
         """The selected objective owns backend loss selection."""
         return resolve_objective(self.objective).loss_family
+
+
+#: The component of a weight-training recipe's weights.
+WEIGHTS_COMPONENT = "weights"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -513,14 +515,9 @@ class WeightTrainingRecipe(Recipe):
         if not isinstance(self.runtime, InferenceRuntime):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
 
-    def build_surface(self, scenario: str) -> Surface:
-        layout = ReleaseLayout(self.training_component)
-        if self.runtime.per_scenario_adapters:
-            # Every scenario owns an adapter on the shared base: route by scenario.
-            return create_weight_surface(
-                scenario=scenario, runtime=self.runtime, kind=self.runtime.served_weight_kind, layout=layout
-            )
-        return create_weight_surface(kind=self.runtime.served_weight_kind, layout=layout)
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        weights = ComponentSpec(kind=self.runtime.served_weight_kind, layout=ReleaseLayout(self.training_component))
+        return ScenarioComponents({WEIGHTS_COMPONENT: weights})
 
     def default_start(self) -> DefaultStart:
         """The training component's untrained checkpoint (``TrainingComponent.default_start``)."""

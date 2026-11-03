@@ -419,7 +419,7 @@ class ArtifactEvaluations:
         """The request of ``settings`` for ``artifact_id`` (None: the component's active artifact), the materialized
         artifact, and the model that the runtime serves for it; ``ValueError`` or ``ReefError`` when ``current``
         cannot run it."""
-        kinds = {name: component.kind for name, component in current.surface.components.items()}
+        kinds = {name: component.kind for name, component in current.components.components.items()}
         component = settings.component
         if component is None:
             named = [name for name, kind in kinds.items() if kind is not None]
@@ -430,7 +430,7 @@ class ArtifactEvaluations:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
         if artifact_id is None:
             active = Artifact(current.current_snapshot(), current.repository)
-            artifact_id = current.surface.component_artifact(active, component).artifact_id
+            artifact_id = current.components.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]
         if kind is None:

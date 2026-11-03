@@ -1,7 +1,7 @@
 """Reef: continual learning infra for self-improving agents.
 
 ``reef`` holds every shared mechanism
-(records, service, runtime, scenario, artifacts, surfaces, the training
+(records, service, runtime, scenario, artifacts and their components, the training
 loop with the candidate evaluation a recipe configures, and the recipe
 contract a method implements). Learning methods are separate packages selected
 through dotted class references; importing ``reef`` never imports method code.

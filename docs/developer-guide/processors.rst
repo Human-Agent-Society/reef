@@ -399,8 +399,8 @@ rules also apply:
 * A sample whose record names no artifact is stale.
 * A sample from an artifact that the stage did not see is stale. A rebuilt
   trainer knows only the artifacts that it sees after the rebuild.
-* A scenario that has no runtime, or whose surface has no component that a
-  runtime loads (no ``loader``), has no staleness check: no data is stale.
+* A scenario that has no runtime, or no component of a weight kind for the
+  runtime to load, has no staleness check: no data is stale.
 * Until the scenario first gives the stage a served artifact, no data is
   stale.
 
