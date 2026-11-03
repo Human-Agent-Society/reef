@@ -497,10 +497,13 @@ one hour. To retry at once, activate the active artifact again
 60 seconds. The service that fails a work item writes one warning to its log,
 with the queue, the item ID, the scenario and the error.
 
-After ownership changes, completed selections return to starting. The new
-owner opens its runtime, adopts retained engines, and activates the selections
-before it publishes routes again. This status is not a continuous engine
-health check. Runtime backends still control cancellation of engine calls
+After ownership changes, the new owner opens its runtime and offers it the
+routes from before. A route stays when the runtime reports that its engine
+still serves it, as a remote endpoint can; requests to it go on without a gap.
+The other routes go, and their scenarios' requests get ``inference_starting``.
+Then completed selections return to starting, and the new owner activates them
+again. An activation replaces a scenario's route when it serves from another
+engine. This status is not a continuous engine health check. Runtime backends still control cancellation of engine calls
 that were already in progress when a worker lost its lease.
 
 Control runs as one active instance and any number of standby instances on the
