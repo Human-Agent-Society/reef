@@ -34,8 +34,8 @@ from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutW
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tasks.rollouts import RolloutRow, TaskLab
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
 from reef.storage.commits import CommitRecord

@@ -33,18 +33,18 @@ from reef.execution.workers import ServiceSet
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
-from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import Trainer, TrainStepResult
+from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 

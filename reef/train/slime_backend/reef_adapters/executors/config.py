@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from reef.runtime.executor import Executor
-from reef.runtime.executor.config import ExecutorSettings, select_executor
+from reef.execution.executor import Executor
+from reef.execution.executor.config import ExecutorSettings, select_executor
 
 DEFAULT_EXECUTOR_BACKEND = "reef.train.slime_backend.reef_adapters.executors.ray:SlimeRayExecutor"
 

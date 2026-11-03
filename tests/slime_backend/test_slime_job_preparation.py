@@ -9,9 +9,9 @@ import pytest
 from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE
 from tests.support._trajectories import policy_trajectory
 
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TaskSample, trajectories
 

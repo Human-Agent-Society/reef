@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.weight_layout import ReleaseFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import plugin as sglang_plugin
 from reef.inference.sglang.config import SGLangConfig
@@ -23,7 +24,6 @@ from reef.inference.sglang.plugin import (
     install_colocated_retract_offload,
     install_scheduler_runtime_load_id_tracking,
 )
-from reef.runtime.jobs import ReleaseFormat
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
 
 
@@ -320,7 +320,7 @@ def test_disk_weight_update_does_not_implicitly_flush_kv_cache(monkeypatch: pyte
 
 
 def test_inference_engine_does_not_inherit_or_patch_slime(monkeypatch):
-    from reef.runtime.interfaces import InferenceEngine
+    from reef.inference.interfaces import InferenceEngine
 
     module = _load_sglang_engine_module(monkeypatch)
     assert module.ReefSGLangEngine.__bases__ == (InferenceEngine,)

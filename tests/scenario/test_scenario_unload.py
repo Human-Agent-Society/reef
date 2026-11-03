@@ -19,13 +19,13 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ScenarioCapacityFull, ScenarioLimitReached
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import Trainer
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop
 
 

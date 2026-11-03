@@ -54,13 +54,12 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/service/` | HTTP, authentication, streaming, and deployment |
 | `reef/recipe/`, `reef/train/` | Recipe contracts, built-in recipes, the training pipeline, training, and backend integrations |
 | `reef/evaluation/` | Candidate evaluation: running and scoring evaluation runs, deciding whether a candidate is published, and plugin configuration |
-| `reef/runtime/` | Backend-neutral runtime contracts, scheduling, and publication coordination |
-| `reef/inference/` | Concrete inference integrations, engine control, and weight reception |
+| `reef/inference/` | Inference contracts, serving runtimes, and concrete inference integrations, engine control, and weight reception |
 | `reef/tinker/` | Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share |
 | `reef/artifact/` | Versioned artifacts, repositories, and the components a recipe declares |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
-| `reef/execution/` | Shared job scheduling, local process ownership, sandbox isolation, file transfer, and cleanup |
+| `reef/execution/` | Shared job scheduling, local process ownership, worker executors, sandbox isolation, file transfer, and cleanup |
 | `reef/record2sample/` | The record-to-sample stage (`Record2Sample`): which records Reef uses, which train together (report grouping, judging, eligibility checks, the staleness check), and their samples; the samples service (`service/`); and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
 | `reef/sample2job/` | The sample-to-job stage: the samples of the buffer into one training job's data (`Sample2Job`), and the job size `job_samples` |
 | `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |

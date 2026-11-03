@@ -48,7 +48,6 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_gen
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, ReportContext, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.requested_generation import RequestedRoundResult
-from reef.runtime.jobs import TrainingComponent
 from reef.sample2job import Sample2JobSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
@@ -56,6 +55,7 @@ from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
+from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 
 MODULE = "tests.reef_recipe.test_generated_tasks"

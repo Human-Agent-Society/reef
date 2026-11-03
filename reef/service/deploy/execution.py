@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.executor.config import (
+from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor.config import (
     ExecutorSelection,
     ExecutorSettings,
     executor_settings,
@@ -18,8 +18,8 @@ from reef.runtime.executor.config import (
     role_executor_settings,
     select_executor,
 )
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.executor.uniproc import UniProcExecutor
+from reef.execution.executor.ray import RayExecutor
+from reef.execution.executor.uniproc import UniProcExecutor
 from reef.service.deploy.process import ProcessWorker, RayProcessWorker
 
 

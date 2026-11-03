@@ -21,12 +21,12 @@ from reef.execution.jobs import SupportsReceipt
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
+from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobCommit, JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 

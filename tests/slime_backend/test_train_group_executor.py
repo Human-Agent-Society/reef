@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 from tests.support.executor_helpers import AttachedTestGroup
 
-from reef.runtime.executor import Executor, ExecutorFuture, resolve
-from reef.runtime.executor.failure import ExecutorFailureListener
+from reef.execution.executor import Executor, ExecutorFuture, resolve
+from reef.execution.executor.failure import ExecutorFailureListener
 from reef.train.slime_backend.reef_adapters import train_groups
 from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 

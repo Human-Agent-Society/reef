@@ -12,11 +12,12 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from reef.execution.executor import ExecutorConfig, WorkerSpec
+from reef.execution.executor.placement import DeploymentResources
+from reef.execution.executor.ray import RayExecutor
+from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
+from reef.inference.interfaces import InferenceBackend
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceResources, InferenceService
-from reef.runtime.executor import ExecutorConfig, WorkerSpec
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.interfaces import InferenceBackend
 
 PROTOCOL = "reef-test-engine-v1"
 CONTROL_NAME = "reef-test-engine"

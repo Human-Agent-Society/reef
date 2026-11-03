@@ -14,9 +14,10 @@ from tests.support._trajectories import policy_trajectory
 
 from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
-from reef.runtime.durable_files import write_json
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
+from reef.core.weight_layout import ReleaseFormat
+from reef.storage.durable_files import write_json
 from reef.train import local_jobs
+from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.local_jobs import CHECKPOINTS_FILE, JOB_FILE, RESULT_FILE, LocalJobComponent
 
 WAIT_SECONDS = 5.0

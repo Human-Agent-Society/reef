@@ -26,8 +26,8 @@ from typing import Any
 from reef.core.values import JsonValue
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
+from reef.inference.interfaces import InferenceArtifact, InferenceStream
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
-from reef.runtime.interfaces import InferenceArtifact, InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"

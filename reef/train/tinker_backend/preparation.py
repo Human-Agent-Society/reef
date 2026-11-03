@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.job_data import JobData, trajectories
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import StepScheduling, schedule_job_data
+from reef.train.method import TrainingMethod
 from reef.train.tinker_backend.config import ScoreCentering
 from reef.train.tinker_backend.losses import ScoreCenteredLoss, TinkerLoss, TokenRow, resolve_tinker_loss
 

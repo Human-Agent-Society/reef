@@ -25,8 +25,8 @@ from typing import Any
 
 import ray
 
-from reef.runtime.executor.placement import GpuBundles
-from reef.runtime.executor.process_guard import DEPLOYMENT_ENV
+from reef.execution.executor.placement import GpuBundles
+from reef.execution.executor.process_guard import DEPLOYMENT_ENV
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 from reef.train.task_rollouts import CHAT_COMPLETIONS_PATH, RolloutChat
@@ -60,7 +60,7 @@ SGLANG_PLUGIN_ENV = "SGLANG_REEF_PLUGIN"
 
 
 #: The component's Slime serving session, in its save root: ``session``, the name of Slime's serving actors, and
-#: ``lease``, the process lease (``reef.runtime.executor.process_guard``) that they and their engines run under.
+#: ``lease``, the process lease (``reef.execution.executor.process_guard``) that they and their engines run under.
 SERVING_FILE = "reef-serving.json"
 
 

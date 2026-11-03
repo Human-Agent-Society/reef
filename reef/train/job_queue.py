@@ -34,6 +34,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData
+from reef.core.weight_layout import ReleaseFormat
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.observability.base import (
     ExperimentLogger,
@@ -43,8 +44,8 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 
 logger = logging.getLogger(__name__)
 

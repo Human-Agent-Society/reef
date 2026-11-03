@@ -23,8 +23,8 @@ from reef.core.errors import (
     ScenarioLimitReached,
     TaskGenerationRefused,
     UnknownScenario,
+    UpstreamStatusError,
 )
-from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.data import NoDataStore
 from reef.storage.data import ItemConflict, ItemNotFound
 from reef.storage.records import RecordConflict

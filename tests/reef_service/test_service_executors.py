@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from reef.runtime.executor import ExecutorConfig
-from reef.runtime.executor.config import executor_settings, role_executor_settings
-from reef.runtime.executor.uniproc import UniProcExecutor
+from reef.execution.executor import ExecutorConfig
+from reef.execution.executor.config import executor_settings, role_executor_settings
+from reef.execution.executor.uniproc import UniProcExecutor
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.execution import service_executor_config, validate_services
 from reef.service.deploy.orchestrator import _Stack
