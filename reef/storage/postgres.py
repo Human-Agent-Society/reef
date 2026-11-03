@@ -234,7 +234,7 @@ class PostgresRecordDatabase:
                 # Version 15 adds sample_record, the records whose trajectory nodes a stored sample renders from.
                 # Version 16 deletes the model_config scenario settings (migrate_scenario_settings): a scenario has no
                 # model override of its own (RFC #1062). Version 17 drops manual_buffer (migrate_manual_buffers): a
-                # training instruction names its samples (RFC #1140).
+                # training request names its samples (RFC #1140).
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 migrate_record_trajectories(connection, self.tables.records, self.tables.nodes)

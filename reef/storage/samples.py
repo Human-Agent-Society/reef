@@ -169,7 +169,7 @@ class SampleStore(ABC):
     stages make (``add_record_samples``), and a rebuilt trainer skips the
     records they consumed (``consumed_record_ids``). The pipeline reads the
     samples in arrival order, after its cursor (``page``), and the samples
-    that an instruction names (``get``). An evaluation and the task
+    that a request names (``get``). An evaluation and the task
     listing read the imported tasks (``imported_tasks``).
     """
 

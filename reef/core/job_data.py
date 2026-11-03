@@ -140,14 +140,14 @@ def check_record_ids(record_ids: tuple[str, ...]) -> None:
 
 @dataclass(frozen=True)
 class JobData:
-    """The data of one training job: an ID, the samples in order, and the training instruction, if any.
+    """The data of one training job: an ID, the samples in order, and the training request, if any.
 
     Values: ``data_id`` is the ID that the training pipeline assigns,
     ``<scenario>:data:<number>`` for automatic data and
-    ``<scenario>:instruction:<request id>`` for an instruction's data.
+    ``<scenario>:request:<request id>`` for a request's data.
     ``samples`` is a tuple of ``TrajectorySample`` and ``TaskSample`` values in
     the order of the sample-to-job stage; it can be empty, for a harness step
-    that runs an instruction with no held samples. ``request`` is the training instruction that
+    that runs a request with no held samples. ``request`` is the training request that
     the data carries, or None. The constructor refuses other sample types.
     Purpose: ``Sample2Job.make_job_data`` makes it, and the training component
     (``TrainingJob.data``) or the harness backend reads it. The consuming

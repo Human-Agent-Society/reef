@@ -43,10 +43,10 @@ class JobDataReservation:
     """Job data held while submission runs outside the trainer lock.
 
     Values: ``data`` is JobData. ``consumed_ids`` is None while the pipeline holds the reservation. Otherwise,
-    ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})``: a failed instruction released
-    its samples and consumed only that instruction.
+    ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})``: a failed request released
+    its samples and consumed only that request.
     Purpose: Trainer.reserve_job_data makes this phase; run_once replaces it with PendingTrainingResult once
-    submission or instruction skipping returns. It contains no training result or prepared commit.
+    submission or request skipping returns. It contains no training result or prepared commit.
     """
 
     data: JobData
@@ -60,7 +60,7 @@ class JobDataReservation:
             or self.data.request is None
             or self.consumed_ids != frozenset({self.data.request.id})
         ):
-            raise ValueError("consumed_ids must name only the reserved instruction, or be None")
+            raise ValueError("consumed_ids must name only the reserved request, or be None")
 
     @property
     def data_id(self) -> str:
@@ -75,7 +75,7 @@ class PendingTrainingResult:
     Values: ``result`` is TrainStepResult. ``data`` is the reserved JobData for a submission or None for a polled
     job update. ``ended`` is a JobOutcome only for a polled job end, otherwise None. When set,
     ``ended.job_id == result.training_job_id``. ``consumed_ids`` is None,
-    or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped instruction.
+    or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped request.
     ``earlier_results`` is an
     ordered, possibly empty tuple of TrainStepResult values replaced by metric annotation; duplicates are allowed.
     Each earlier result equals ``result`` in every field except ``metrics``.
@@ -104,7 +104,7 @@ class PendingTrainingResult:
             or self.data.request is None
             or self.consumed_ids != frozenset({self.data.request.id})
         ):
-            raise ValueError("consumed_ids must name only the reserved instruction, or be None")
+            raise ValueError("consumed_ids must name only the reserved request, or be None")
         if not isinstance(self.earlier_results, tuple) or not all(
             isinstance(result, TrainStepResult) for result in self.earlier_results
         ):
@@ -344,13 +344,13 @@ class Trainer:
         with self._lock:
             return frozenset(ids) & self.consumed_record_ids
 
-    def queue_instructions(self, requests: Iterable[TrainingRequest]) -> None:
-        """Give the pipeline the scenario's queued instructions (``TrainingPipeline.queue_instructions``)."""
+    def queue_requests(self, requests: Iterable[TrainingRequest]) -> None:
+        """Give the pipeline the scenario's queued requests (``TrainingPipeline.queue_requests``)."""
         with self._lock:
-            self._pipeline.queue_instructions(requests)
+            self._pipeline.queue_requests(requests)
 
-    def fail_pending_instruction(self, error: str) -> bool:
-        """Mark the reserved instruction as failed, so its next job data is a skip row; False when none is reserved."""
+    def fail_pending_request(self, error: str) -> bool:
+        """Mark the reserved request as failed, so its next job data is a skip row; False when none is reserved."""
         with self._lock:
             pending = self.pending_step
             if not isinstance(pending, JobDataReservation) or pending.data.request is None:
@@ -358,13 +358,13 @@ class Trainer:
             self._pipeline.mark_request_failed(pending.data.request.id, error)
             return True
 
-    def instruction_failures(self) -> Mapping[str, str]:
-        """The errors of the failed instructions this trainer still holds, by ID, for the trainer that replaces it."""
+    def request_failures(self) -> Mapping[str, str]:
+        """The errors of the failed requests this trainer still holds, by ID, for the trainer that replaces it."""
         with self._lock:
             return self._pipeline.request_failures()
 
-    def set_instruction_failures(self, failures: Mapping[str, str]) -> None:
-        """Carry failed instructions into this trainer's pipeline; a rebuilt scenario starts without them."""
+    def set_request_failures(self, failures: Mapping[str, str]) -> None:
+        """Carry failed requests into this trainer's pipeline; a rebuilt scenario starts without them."""
         with self._lock:
             self._pipeline.set_request_failures(failures)
 
@@ -490,10 +490,10 @@ class Trainer:
             self._pipeline.read_store()
             return {"training_mode": self._pipeline.training_mode, "samples": list(self._pipeline.next_job_listing())}
 
-    def check_instruction(self, request: TrainingRequest) -> None:
-        """Raise ``ValueError`` unless this trainer can run ``request`` (``TrainingPipeline.check_instruction``)."""
+    def check_request(self, request: TrainingRequest) -> None:
+        """Raise ``ValueError`` unless this trainer can run ``request`` (``TrainingPipeline.check_request``)."""
         with self._lock:
-            self._pipeline.check_instruction(request)
+            self._pipeline.check_request(request)
 
     def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
         """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""
@@ -566,7 +566,7 @@ class Trainer:
 
     def produce_samples(self) -> ProducedSamples:
         """Push every record that arrived since the last call into the pipeline and make samples of the formed record
-        sets; return whether the trainer received new input (samples or instructions), whether background work
+        sets; return whether the trainer received new input (samples or requests), whether background work
         of the pipeline still runs, and when a set that waits for time alone is due, so the samples service comes
         back."""
         with self._lock:
@@ -636,8 +636,8 @@ class Trainer:
                 polled = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
                 result, ended = (None, None) if polled is None else (polled.result, polled.ended)
             elif data.request is not None and failure is not None:
-                # Committed without a job: the failed instruction is consumed alone and the catalog row names why.
-                result = self.skip_failed_instruction(data, data.request, failure)
+                # Committed without a job: the failed request is consumed alone and the catalog row names why.
+                result = self.skip_failed_request(data, data.request, failure)
             else:
                 parameters = self._pipeline.sample2job.job_parameters(data)
                 result = (
@@ -660,15 +660,15 @@ class Trainer:
                 )
             return result
 
-    def skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
-        """Consume the instruction alone; the samples of its job data stay untrained."""
+    def skip_failed_request(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
+        """Consume the request alone; the samples of its job data stay untrained."""
         with self._lock:
             pending = self.pending_step
             if not isinstance(pending, JobDataReservation) or pending.data_id != data.data_id:
-                raise RuntimeError("trainer reservation changed while its instruction was being skipped")
+                raise RuntimeError("trainer reservation changed while its request was being skipped")
             self._pipeline.release_job_data(data.data_id)
             self.pending_step = replace(pending, consumed_ids=self._pipeline.discard_request(request.id))
-        return TrainStepResult(dict(self._state), {"skipped": "instruction failed", "error": error})
+        return TrainStepResult(dict(self._state), {"skipped": "request failed", "error": error})
 
     def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.

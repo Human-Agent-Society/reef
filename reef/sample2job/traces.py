@@ -20,11 +20,11 @@ class TraceJobData(DistillJobData):
     Values: as ``DistillJobData``, except that ``job_samples`` defaults to 1,
     so each trace starts a step unless the deployment sets
     ``pipeline.sample2job.config.job_samples``.
-    In ``manual`` a queued instruction takes the samples that it names,
+    In ``manual`` a queued request takes the samples that it names,
     possibly none, so the method reads the request beside them.
     """
 
-    reads_instructions = True
+    reads_requests = True
     required_request_types = frozenset(RequestType)
 
     def __init__(

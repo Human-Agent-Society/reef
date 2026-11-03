@@ -69,15 +69,15 @@ def normalize_request_payload(
     return report.to_dict(), report.references
 
 
-def instruction_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
-    """The training instruction ``request_id`` of ``scenario`` as the request page reads it: ``agent_record_id``,
+def request_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The training request ``request_id`` of ``scenario`` as the request page reads it: ``agent_record_id``,
     ``payload`` and ``created_at``.
 
-    A queued or recent instruction comes from its queue item. One whose item control deleted after the work retention
+    A queued or recent request comes from its queue item. One whose item control deleted after the work retention
     comes from the catalog row that settled it, which records the request (``metrics["training_request"]``), without
     ``created_at``. Raise ``ArtifactNotFound`` when neither holds it.
     """
-    item = None if scenario.instructions is None else scenario.instructions.get(request_id)
+    item = None if scenario.training_requests is None else scenario.training_requests.get(request_id)
     if item is not None:
         return {"agent_record_id": item.id, "payload": dict(item.payload), "created_at": item.created_at}
     step = settled_step(rows, request_id)
@@ -108,11 +108,11 @@ class RequestService:
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
 
-    def accept_instruction(
+    def accept_request(
         self, headers: Mapping[str, str], payload: Mapping[str, Any], *, request_id: str | None = None
     ) -> tuple[str, str]:
-        """Queue a training instruction (``Dispatcher.accept_instruction``); return its scenario and ID."""
-        item = self._dispatcher.accept_instruction(scenario_header(headers), payload, request_id=request_id)
+        """Queue a training request (``Dispatcher.accept_request``); return its scenario and ID."""
+        item = self._dispatcher.accept_request(scenario_header(headers), payload, request_id=request_id)
         return item.scenario, item.id
 
     def accept(
@@ -544,20 +544,20 @@ class RequestService:
     ) -> str:
         """One HTML page for the harness request stored as agent record ``record_id``, live until its step settles.
 
-        The record is the ``POST /reef/train`` instruction as stored; the
+        The record is the ``POST /reef/train`` request as stored; the
         catalog row whose ``training_request.id`` names it settles the page.
         Until then the page reads the running step's progress from the
         progress file of the harness training component, when a step runs, and
         whether the trainer holds the request in its reserved job data.
         ``link_query`` is carried to the version page link, so a page opened
         through query parameters links one that opens the same way. An
-        unknown id, or one that is not a training instruction, raises
+        unknown id, or one that is not a training request, raises
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
         # The step a request settled as counts the catalog rows, the ones the release page opens.
         rows = list(reversed(scenario.harness_rows()))
-        record = instruction_view(scenario, record_id, rows)
+        record = request_view(scenario, record_id, rows)
         progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
@@ -573,12 +573,12 @@ class RequestService:
         settled row's result), what it means in the page's words,
         and, once a row answers the request, the step it landed as. A client
         polls this to show a phase; the page itself stays the readable view.
-        An unknown id, or one that is not a training instruction, raises
+        An unknown id, or one that is not a training request, raises
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
         rows = list(reversed(scenario.harness_rows()))
-        record = instruction_view(scenario, record_id, rows)
+        record = request_view(scenario, record_id, rows)
         step = settled_step(rows, record_id)
         if step is not None:
             return {

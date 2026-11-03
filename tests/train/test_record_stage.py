@@ -84,7 +84,7 @@ class RecordingSamples(InferenceRecordSamples):
 
 
 class RecordingJobData(Sample2Job):
-    """Makes job data of the samples as they come; in ``manual`` it takes instructions."""
+    """Makes job data of the samples as they come; in ``manual`` it takes requests."""
 
     def __init__(self, context: PipelineContext, job_samples: int | None = None) -> None:
         super().__init__(context, None, job_samples)
@@ -212,11 +212,11 @@ def test_the_inference_stage_forms_one_set_per_inference_record_in_arrival_order
 
 
 @pytest.mark.unit
-def test_the_pipeline_keeps_instructions_and_sends_records_through_its_stage() -> None:
+def test_the_pipeline_keeps_requests_and_sends_records_through_its_stage() -> None:
     processor = RecordingPipeline(PipelineContext("s", training_mode="manual"))
     processor.push(inference("i1"))
     processor.push(inference("drop-1"))
-    processor.queue_instructions(
+    processor.queue_requests(
         [TrainingRequest.from_dict({"text": "train-1", "session": "s-1", "release_id": "r-1"}, request_id="train-1")]
     )
     assert processor.stage.assembled == ["i1"]
@@ -665,8 +665,8 @@ def auto_ids(pipeline: TrainingPipeline) -> tuple[str, ...]:
     return tuple(stored.sample_id for stored, _ in pipeline.auto_entries())
 
 
-def instruction(*samples: str) -> TrainingRequest:
-    """A queued instruction that names ``samples``."""
+def training_request(*samples: str) -> TrainingRequest:
+    """A queued request that names ``samples``."""
     payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": {"rollout": {}}}
     return TrainingRequest.from_dict({**payload, **({"samples": list(samples)} if samples else {})}, request_id="t")
 
@@ -767,24 +767,24 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
 
 
 @pytest.mark.unit
-def test_an_instruction_names_stored_samples_of_one_kind_that_the_trainer_can_train() -> None:
+def test_a_request_names_stored_samples_of_one_kind_that_the_trainer_can_train() -> None:
     context = PipelineContext("s", training_mode="manual")
     processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
     store = processor.store.store
     store.add_trajectories((("upload", TRAJECTORY),))
     store.add_record_samples("", None, ("r1",), (("r1:0", TaskSample(Path("task"))),))
     store.add_record_samples("other", None, ("r2",), (("other:r2:0", TRAJECTORY),))
-    processor.check_instruction(instruction("upload"))
+    processor.check_request(training_request("upload"))
     with pytest.raises(ValueError, match="one kind"):
-        processor.check_instruction(instruction("upload", "r1:0"))
+        processor.check_request(training_request("upload", "r1:0"))
     with pytest.raises(ValueError, match="cannot train the samples"):
-        processor.check_instruction(instruction("other:r2:0"))
+        processor.check_request(training_request("other:r2:0"))
     with pytest.raises(ValueError, match="holds no samples"):
-        processor.check_instruction(instruction("missing"))
+        processor.check_request(training_request("missing"))
     with pytest.raises(ValueError, match="names no samples"):
-        processor.check_instruction(instruction())
-    # A sample that left the scenario after the instruction was filed is left out of its job.
-    assert [stored.sample_id for stored, _ in processor.instruction_entries(instruction("upload", "gone"))] == [
+        processor.check_request(training_request())
+    # A sample that left the scenario after the request was filed is left out of its job.
+    assert [stored.sample_id for stored, _ in processor.request_entries(training_request("upload", "gone"))] == [
         "upload"
     ]
 
@@ -808,13 +808,13 @@ def test_imported_train_tasks_are_buffer_samples_of_a_stage_that_trains_them(tmp
     trains = pipeline(TaskJobData)
     assert trains.ready(1) and auto_ids(trains) == ("task-a",), "an eval task never trains"
     assert not pipeline(RecordingJobData).ready(1), "a stage that trains no imported task skips them"
-    # A kind that the recipe gives no parameters trains only for an instruction that gives them.
+    # A kind that the recipe gives no parameters trains only for a request that gives them.
     manual = pipeline(TaskJobData, job_parameters={"trajectory": {}}, training_mode="manual")
     manual.set_training_mode("auto")
     assert auto_ids(manual) == ()
     manual.set_training_mode("manual")
-    manual.queue_instructions([instruction("task-a")])
+    manual.queue_requests([training_request("task-a")])
     data = manual.build_job_data(1)
     assert manual.sample2job.job_parameters(data) == {"rollout": {}}
     with pytest.raises(ValueError, match="cannot train the samples"):
-        manual.check_instruction(instruction("held"))
+        manual.check_request(training_request("held"))

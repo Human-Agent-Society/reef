@@ -6,7 +6,7 @@ In ``auto``, the next job takes the untrained samples: the first
 ``buffer_size`` of them in store order, and the rest of each group that those
 touch. When at least ``job_samples`` samples wait, the trainer asks the
 training pipeline (:class:`~reef.train.pipeline.TrainingPipeline`) for the
-next job's data. In ``manual``, a training instruction names the samples of
+next job's data. In ``manual``, a training request names the samples of
 its job. The pipeline gives the job's samples to a recipe's ``Sample2Job``. A
 sample is a ``Sample``.
 """
@@ -95,11 +95,11 @@ class Sample2Job(ABC, Plugin):
     #: The job data type ``make_job_data`` returns; the trainer validates it.
     output_schema: type[JobData] = JobData
     #: The training modes that the recipe's job data supports. ``auto`` makes job data when ``job_samples``
-    #: samples wait; ``manual`` makes it of the samples that a queued training instruction names.
+    #: samples wait; ``manual`` makes it of the samples that a queued training request names.
     supported_training_modes: frozenset[str] = frozenset({"auto", "manual"})
-    #: Whether the job reads the instruction in its data, as a harness proposer does. In ``manual`` such a stage
-    #: runs an instruction that names no sample too. Another stage needs an instruction that names samples.
-    reads_instructions: bool = False
+    #: Whether the job reads the request in its data, as a harness proposer does. In ``manual`` such a stage
+    #: runs a request that names no sample too. Another stage needs a request that names samples.
+    reads_requests: bool = False
     #: The kinds of record that the trainer gives the pipeline.
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
     #: Whether the recipe trains on uploaded trajectories. Admission refuses an upload
@@ -128,7 +128,7 @@ class Sample2Job(ABC, Plugin):
         #: The most samples that one automatic job takes; None takes every sample.
         self.buffer_size = self.job_samples if buffer_size is None else buffer_size
         #: The most samples one job's data may hold; None sets no limit. A stage whose data is one fixed grid sets it,
-        #: and an instruction names no more (``TrainingPipeline.instruction_entries``).
+        #: and a request names no more (``TrainingPipeline.request_entries``).
         self.max_job_samples = max_job_samples
         if self.job_samples is not None and self.buffer_size is not None and self.buffer_size < self.job_samples:
             raise PluginConfigError(
@@ -170,25 +170,25 @@ class Sample2Job(ABC, Plugin):
 
         Use ``data_id`` as the ID of the returned value. The pipeline assigns
         it. Automatic job data gets ``<scenario>:data:<number>``. An
-        instruction's data gets ``<scenario>:instruction:<request id>``. The
+        request's data gets ``<scenario>:request:<request id>``. The
         number counts the job data of this pipeline and starts again when the
         pipeline restarts. It is not a training step.
         The job's commit consumes every sample of ``samples``, including the
         samples that the recipe leaves out of the job data. In ``manual`` mode an
-        instruction's data holds the samples that the instruction names, at most ``max_job_samples``: one or more,
-        or none for a stage that ``reads_instructions``.
+        request's data holds the samples that the request names, at most ``max_job_samples``: one or more,
+        or none for a stage that ``reads_requests``.
         """
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:
         """The parameters of the training job that trains ``data``: ``context.job_parameters`` of its samples' kind,
-        with its instruction's ``parameters`` merged in (``deep_merge``): nested objects merge key by key, and every
-        other value of the instruction wins.
+        with its request's ``parameters`` merged in (``deep_merge``): nested objects merge key by key, and every
+        other value of the request wins.
 
         Together with ``make_job_data``, this is the stage's function from the selected samples to the job: the
         data, and the parameters that the job loop submits with it. The result depends only on ``data``, which
-        holds the instruction, since a resubmission after a restart must name the same job. The training
+        holds the request, since a resubmission after a restart must name the same job. The training
         component checks the result. Raise ``ValueError`` for data with both trajectories and tasks, and for a
-        kind that the recipe gives no parameters when no instruction gives any. Data with no sample has no
+        kind that the recipe gives no parameters when no request gives any. Data with no sample has no
         parameters: a harness step trains such data, and a harness step takes none.
         """
         kinds: set[SampleKind] = {
@@ -221,7 +221,7 @@ class Sample2Job(ABC, Plugin):
 class NoJobData(Sample2Job):
     """Make no job data: the no-update default. A pipeline with it never becomes ready."""
 
-    #: A pipeline that trains nothing takes no instruction.
+    #: A pipeline that trains nothing takes no request.
     supported_training_modes = frozenset({"auto"})
 
     @classmethod

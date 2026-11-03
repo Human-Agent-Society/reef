@@ -287,13 +287,13 @@ SFT, then RL on uploaded tasks
 
 The recipe gives parameters to trajectory jobs only. An uploaded train task
 (a task item in the ``train`` split, ``POST /reef/namespaces/{owner}/data/tasks``) trains in ``manual``
-mode, for an instruction whose ``parameters`` give its job's method and
+mode, for a request whose ``parameters`` give its job's method and
 rollout. Thus one scenario runs SFT first and then RL:
 
 1. Set the scenario to ``manual``, and create the trajectories and the tasks as items that it uses.
-2. Send an instruction that names the trajectories in ``samples``. The job
+2. Send a request that names the trajectories in ``samples``. The job
    trains them with SFT.
-3. Send an instruction that names the tasks in ``samples``, with
+3. Send a request that names the tasks in ``samples``, with
    ``{"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}``
    in ``parameters``. The job rolls the tasks out and trains on the rollouts.
 
@@ -301,7 +301,7 @@ The training component must run task jobs: Tinker does, and Slime does with
 its own rollout engines (`Task jobs on Slime
 <../../reference/configuration.rst#task-jobs-on-slime>`__). See
 `Manual training <../../reference/http-api.rst#manual-training>`__ for the
-instruction and `Choose the samples that train
+request and `Choose the samples that train
 <../../reference/http-api.rst#choose-the-samples-that-train>`__ for ``samples``.
 
 Train SFT for some jobs of another recipe

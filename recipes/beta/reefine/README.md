@@ -79,8 +79,8 @@ measurement of which requests passed the checks.
 
 ## How it works
 
-1. Ask. `POST /reef/train` files a plain-language instruction for one
-   scenario. Create the scenario, then send the instruction:
+1. Ask. `POST /reef/train` files a plain-language request for one
+   scenario. Create the scenario, then send the request:
 
    ```bash
    curl -sS -H "Content-Type: application/json" \
@@ -101,8 +101,8 @@ measurement of which requests passed the checks.
    JSON. The [manual training API](../../../docs/reference/http-api.rst#manual-training)
    lists the fields a request carries.
 2. Step. In `training-mode: manual` the service runs one evolve step for
-   each accepted instruction. Where the host can isolate it, a coding agent
-   answers the instruction (see [The agent](#the-agent)): it edits the step's
+   each accepted request. Where the host can isolate it, a coding agent
+   answers the request (see [The agent](#the-agent)): it edits the step's
    tree, runs the changed harness for real and stops, and a review call reads
    the files against the request. Otherwise the served model answers it in a
    few calls: it writes a design first (the
@@ -158,12 +158,12 @@ measurement of which requests passed the checks.
 
 ## Behavior and configuration
 
-* `training-mode: manual` runs one step for each accepted instruction on
+* `training-mode: manual` runs one step for each accepted request on
   `POST /reef/train`. Each step also reads the failing reports in the manual
   buffer, which a client fills
   ([Choose the samples that train](../../../docs/reference/http-api.rst#choose-the-samples-that-train));
   new reports do not join it by themselves. Use `auto` to learn from failing
-  reports without instructions.
+  reports without requests.
 * The first tree of a new scenario is the recipe's seed,
   [`seed/`](seed/): one starter skill. The agent, or the served model
   where the host cannot isolate the agent, writes skills, rules, agent
@@ -568,7 +568,7 @@ including another method, seeds, execution settings, and the evaluation; see
 `REEF_REEFINE_CALL_TIMEOUT_S` and `REEF_REEFINE_CALL_MAX_TOKENS` override the
 time and reply token budgets of each model call the method makes itself; the
 agent's run has its own limit, `evolution.agent.timeout_s`. Defaults are 600
-seconds and 65536 reply tokens for the call that answers an instruction (a
+seconds and 65536 reply tokens for the call that answers a request (a
 thinking model reasons for tens of thousands of tokens before it writes an
 extension), 60 seconds and 4096 tokens for the short plan call before it, 120
 seconds and 16384 tokens for the review after it, and 60 seconds and 8192

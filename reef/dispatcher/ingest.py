@@ -1,8 +1,8 @@
-"""Validate records, training instructions, uploaded trajectories and uploaded tasks of one loaded scenario.
+"""Validate records, training requests, uploaded trajectories and uploaded tasks of one loaded scenario.
 
 The dispatcher calls these functions under the scenario's lock. They append records, uploaded trajectories and
-uploaded Harbor tasks durably, queue training instructions (``reef.train.instructions``), and count the ``ingest/*``
-metrics of records and instructions. They do not start training: the caller wakes the trainers after new data lands.
+uploaded Harbor tasks durably, queue training requests (``reef.train.training_requests``), and count the ``ingest/*``
+metrics of records and requests. They do not start training: the caller wakes the trainers after new data lands.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from reef.train.trainer import Trainer
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
-    """Why admission refuses an instruction, or ``None``. The reason names the rule, never the text or the item.
+    """Why admission refuses a request, or ``None``. The reason names the rule, never the text or the item.
 
     The text becomes proposer input and a catalog row. Thus it must pass the
     same screens as a collected task prompt. A ``requires`` name, check or
@@ -42,19 +42,19 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     return None
 
 
-def file_instruction(current: Scenario, request_id: str, payload: Mapping[str, Any]) -> WorkItem:
-    """Check a training instruction and queue it in ``current``'s instructions; return its queue item.
+def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any]) -> WorkItem:
+    """Check a training request and queue it in ``current``'s requests; return its queue item.
 
-    A retry of an instruction that the scenario queued before returns its item, whatever the training mode now.
+    A retry of a request that the scenario queued before returns its item, whatever the training mode now.
     Otherwise the scenario must train in ``manual`` mode, the text and ``requires`` must pass the screens
-    (``training_request_refusal``), and a trainer that trains must take the instruction's samples
-    (``Trainer.check_instruction``). Raise ``ValueError`` for a refused instruction, and
+    (``training_request_refusal``), and a trainer that trains must take the request's samples
+    (``Trainer.check_request``). Raise ``ValueError`` for a refused request, and
     ``RecordConflict`` for an ID that the scenario queued with another payload.
     """
-    if current.instructions is None:
-        raise ValueError(f"scenario {current.name!r} takes no training instructions: it has no instructions queue")
+    if current.training_requests is None:
+        raise ValueError(f"scenario {current.name!r} takes no training requests: it has no training request queue")
     try:
-        retry = current.instructions.get(request_id) is not None
+        retry = current.training_requests.get(request_id) is not None
         if not retry and current.training_mode == "auto":
             raise ValueError("explicit training requests require training_mode='manual'")
         trainers = [
@@ -67,8 +67,8 @@ def file_instruction(current: Scenario, request_id: str, payload: Mapping[str, A
             refusal = training_request_refusal(request["text"], request["requires"])
             if refusal is not None:
                 raise ValueError(refusal)
-            check_instruction(trainers, TrainingRequest.from_dict(request))
-        return current.instructions.file(request_id, request)
+            check_request(trainers, TrainingRequest.from_dict(request))
+        return current.training_requests.file(request_id, request)
     except RecordConflict:
         current.operations.increment("ingest/rejected_conflict_total")
         raise
@@ -128,12 +128,12 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
     return None
 
 
-def check_instruction(trainers: Sequence[Trainer], request: TrainingRequest) -> None:
+def check_request(trainers: Sequence[Trainer], request: TrainingRequest) -> None:
     """Raise ``ValueError`` unless one of ``trainers`` can run ``request``, with the first trainer's reason."""
     reasons: list[str] = []
     for trainer in trainers:
         try:
-            trainer.check_instruction(request)
+            trainer.check_request(request)
             return
         except ValueError as exc:
             reasons.append(str(exc))

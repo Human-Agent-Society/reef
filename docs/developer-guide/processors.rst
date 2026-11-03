@@ -167,7 +167,7 @@ The trainer calls it on its own thread, under its lock; no call may block:
   (``release_job_data``). A released sample can train in a later job.
 - ``acknowledge(data_id)``: the commit that submits the job consumed that job
   data. The pipeline returns ``sample:<sample id>`` for each sample of the
-  data, and the instruction's ID in ``manual``. The commit lists these IDs.
+  data, and the request's ID in ``manual``. The commit lists these IDs.
   In the same transaction, the sample store adds one to the train count of
   each listed sample for the commit's trainer. A job that later fails does
   not give its samples back: they never train again for that trainer.
@@ -264,7 +264,7 @@ scenario's sample store (``TrainingPipeline.auto_entries``):
    imported ``eval`` tasks never are, since an evaluation runs them.
 2. It keeps the samples of one kind, trajectory or task: the kind of the first
    sample. A kind that the recipe gives no job parameters does not count; such
-   samples train only for an instruction that gives them.
+   samples train only for a request that gives them.
 3. It leaves out each stale sample that the trainer made from records (see
    `Staleness <#staleness>`__), and every other sample of its group. An
    uploaded trajectory is never stale.
@@ -278,7 +278,7 @@ pipeline never releases or drops a sample: the other samples wait in the store
 for later jobs, and a stale sample stays in the store untrained.
 
 In ``manual``, the next job takes the samples that the oldest queued
-instruction names (see `Training modes <#training-modes>`__).
+request names (see `Training modes <#training-modes>`__).
 
 ``status()`` reports ``ready_samples`` (the samples of the next automatic job) and
 ``buffer_size``; the trainer adds
@@ -500,31 +500,31 @@ initial value through ``Trainer.build`` and ``PipelineContext``; it defaults
 to ``auto``. A ``Sample2Job`` declares the modes it supports in
 ``supported_training_modes``; the default is ``auto`` and ``manual``. Record push,
 sample storage and acknowledgement use the same methods in both modes.
-``GET /reef/status`` reports ``pending_instructions``, the queued instructions
+``GET /reef/status`` reports ``pending_requests``, the queued requests
 that no commit consumed yet.
 
 - ``auto`` makes job data when the next job holds ``job_samples`` samples.
-- ``manual`` makes job data only for a queued TRAIN instruction. The
-  instruction's data is the samples that it names (``TrainingRequest.samples``,
-  ``TrainingPipeline.instruction_entries``), in store order, whatever
+- ``manual`` makes job data only for a queued TRAIN request. The
+  request's data is the samples that it names (``TrainingRequest.samples``,
+  ``TrainingPipeline.request_entries``), in store order, whatever
   ``job_samples``. A sample that trained before trains again, and staleness
-  does not apply. When Reef accepts the instruction, a trainer must take its
-  samples (``TrainingPipeline.check_instruction``): the store holds each one,
+  does not apply. When Reef accepts the request, a trainer must take its
+  samples (``TrainingPipeline.check_request``): the store holds each one,
   the trainer can train each one, they are of one kind, and they are at most
   the stage's ``max_job_samples``. A sample that leaves the scenario before the
-  job is left out of it. A ``Sample2Job`` that sets ``reads_instructions`` also
-  runs an instruction that names no sample; harness evolution sets it, because
-  its proposer reads the instruction.
+  job is left out of it. A ``Sample2Job`` that sets ``reads_requests`` also
+  runs a request that names no sample; harness evolution sets it, because
+  its proposer reads the request.
 
-The pipeline runs the oldest instruction first, one per step. It gives the
-instruction's data the id ``<scenario>:instruction:<request id>`` and attaches
-the instruction to ``JobData.request``. Automatic job data gets the id
+The pipeline runs the oldest request first, one per step. It gives the
+request's data the id ``<scenario>:request:<request id>`` and attaches
+the request to ``JobData.request``. Automatic job data gets the id
 ``<scenario>:data:<number>``. Acknowledgement also consumes the
-instruction. ``make_job_data`` must not call models or perform training.
+request. ``make_job_data`` must not call models or perform training.
 
 When the pipeline supports ``manual``, the scenario gives it the queued
-training instructions before each step (``TrainingPipeline.queue_instructions``);
-instructions are not records. The pipeline keeps them FIFO regardless of the
+training requests before each step (``TrainingPipeline.queue_requests``);
+requests are not records. The pipeline keeps them FIFO regardless of the
 selected mode; ``auto`` leaves them for ``manual``. The pipeline stores the samples of records in both modes, so
 changing to auto can train on data already collected.
 
@@ -539,7 +539,7 @@ the existing pipeline. The trainer serializes selection with record push and
 reservation. Reserved job data stays unchanged and acknowledgement consumes
 its actual contents, independently of subsequent mode changes.
 
-Buffered data and queued instructions stay on the same instance. Reef stores
+Stored samples and queued requests stay on the same instance. Reef stores
 the selected mode in the scenario's settings, so a reload or a service restart
 applies it again.
 
