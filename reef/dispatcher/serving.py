@@ -14,7 +14,7 @@ from pathlib import Path
 from reef.artifact.artifact import Artifact
 from reef.artifact.repository import Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScenarioModel, ScheduledStop, ServedArtifact
+from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.recipe.base import Recipe
@@ -68,7 +68,9 @@ class ServingWorker(QueueWorker):
     Other replicas only read routes. The owner recovers completed selections before it takes new work: it opens the
     runtime, offers it the routes from before (``InferenceRuntime.adopt``), keeps the routes that it took over, and
     queues every completed selection again. ``owner`` is None before ownership. ``recovered`` becomes true after the
-    recovery. ``opened`` becomes true after the runtime opens.
+    recovery. ``opened`` becomes true after the runtime opens. ``activated`` maps each scenario to the artifact that
+    this worker activated for it last. A route that it kept from before is activated again once, so that the runtime
+    takes over what it adopted.
     """
 
     def __init__(
@@ -92,6 +94,7 @@ class ServingWorker(QueueWorker):
         self.opened = False
         self.owner: ServingLease | None = None
         self.recovered = False
+        self.activated: dict[str, str] = {}
         # Engines can read selected files after startup. Keep local views alive until this worker stops.
         self.repositories: dict[str, Repository] = {}
 
@@ -215,15 +218,15 @@ class ServingWorker(QueueWorker):
         surface = self.recipe.serving_surface(item.scenario)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
         runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
-        current_route = self.routes.read(ScenarioModel(item.scenario))
-        if current_route is None or current_route.artifact_id != artifact_id:
+        if self.activated.get(item.scenario) == artifact_id:
+            logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
+        else:
             started = time.monotonic()
             surface.activate(artifact, runtime)
+            self.activated[item.scenario] = artifact_id
             logger.info(
                 "scenario %s: activated artifact %s in %.1f s", item.scenario, artifact_id, time.monotonic() - started
             )
-        else:
-            logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
         if lease_lost.is_set() or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost its lease")
         active = runtime.served_artifact(artifact_id, item.scenario)
