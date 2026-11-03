@@ -26,17 +26,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.values import JsonValue
+from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data, usage_of
+from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
 from reef.runtime.interfaces import InferenceArtifact, InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
 ANTHROPIC_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
-#: Request keys forwarded from the provider request to the native payload
-#: unchanged; each engine reads the ones it understands.
-NATIVE_REQUEST_KEYS = ("lora_path", "rid", "sglang_sampling_params", "vllm_sampling_params")
 # ``<think>`` and the newline after it can be several tokens; the end of a
 # rendered prompt this long is enough to read an open tag.
 PROMPT_TAIL_TOKEN_COUNT = 8
@@ -697,12 +695,12 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         response = self._response_from_capture(call, captured, call.tool_parser)
         if not call.anthropic:
             return response, response
-        return response, self._anthropic_response(call.payload, response)
+        return response, anthropic_response(call.payload, response)
 
     def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
         """Normalize the provider request and render the prompt once for either endpoint."""
         anthropic = path == ANTHROPIC_MESSAGES_PATH
-        request = self._anthropic_request(payload) if anthropic else dict(payload)
+        request = anthropic_request(payload) if anthropic else dict(payload)
         if request.get("n", 1) != 1:
             raise ValueError("token-native chat requires n=1")
         return ChatCall(
@@ -793,7 +791,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         frames = relay.reconcile(response["choices"][0]["message"])
         output_tokens = response["usage"]["completion_tokens"]
         if call.anthropic:
-            provider_response = self._anthropic_response(call.payload, response)
+            provider_response = anthropic_response(call.payload, response)
             provider_response["id"] = message_id
         else:
             provider_response = response
@@ -837,301 +835,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
 
     def _anthropic_count_tokens(self, artifact: InferenceArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Count the exact templated input."""
-        request = self._anthropic_request({**payload, "max_tokens": 1})
+        request = anthropic_request({**payload, "max_tokens": 1})
         return {"input_tokens": len(self._render_prompt(request))}
-
-    @classmethod
-    def _anthropic_request(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Normalize an Anthropic Messages request to the internal chat shape.
-
-        The normalized request is what the tokenizer sees. Keeping this
-        boundary provider-independent lets one chat template render OpenAI
-        and Anthropic traffic alike.
-        """
-
-        model = payload.get("model")
-        if not isinstance(model, str) or not model:
-            raise ValueError("Anthropic messages requires a non-empty model")
-        max_tokens = payload.get("max_tokens")
-        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
-            raise ValueError("Anthropic messages max_tokens must be a positive integer")
-
-        messages: list[dict[str, Any]] = []
-        system = cls._anthropic_text_content(payload.get("system"), "system", allow_missing=True)
-        if system:
-            messages.append({"role": "system", "content": system})
-
-        raw_messages = payload.get("messages")
-        if not isinstance(raw_messages, list) or not raw_messages:
-            raise ValueError("Anthropic messages requires a non-empty messages list")
-        for index, raw_message in enumerate(raw_messages):
-            if not isinstance(raw_message, Mapping):
-                raise ValueError(f"Anthropic message at index {index} must be an object")
-            role = raw_message.get("role")
-            if role == "user":
-                messages.extend(cls._anthropic_user_messages(raw_message.get("content"), index))
-            elif role == "assistant":
-                messages.append(cls._anthropic_assistant_message(raw_message.get("content"), index))
-            elif role == "system":
-                text = cls._anthropic_text_content(raw_message.get("content"), f"message {index} system")
-                messages.append({"role": "system", "content": text})
-            else:
-                raise ValueError(f"Anthropic message at index {index} has unsupported role {role!r}")
-
-        request: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_completion_tokens": max_tokens,
-        }
-        for key in ("temperature", "top_p", "top_k", "stream", "chat_template_kwargs", *NATIVE_REQUEST_KEYS):
-            if key in payload and payload[key] is not None:
-                request[key] = payload[key]
-        stop_sequences = payload.get("stop_sequences")
-        if stop_sequences is not None:
-            if not isinstance(stop_sequences, list) or any(
-                not isinstance(value, str) or not value for value in stop_sequences
-            ):
-                raise ValueError("Anthropic stop_sequences must be a list of non-empty strings")
-            request["stop"] = list(stop_sequences)
-
-        tools = cls._anthropic_tools(payload.get("tools"))
-        if tools is not None:
-            request["tools"] = tools
-            request["tool_choice"] = cls._anthropic_tool_choice(payload.get("tool_choice"))
-        elif payload.get("tool_choice") is not None:
-            raise ValueError("Anthropic tool_choice requires tools")
-        return request
-
-    @classmethod
-    def _anthropic_user_messages(cls, content: Any, message_index: int) -> list[dict[str, Any]]:
-        if isinstance(content, str):
-            return [{"role": "user", "content": content}]
-        if not isinstance(content, list):
-            raise ValueError(f"Anthropic user message {message_index} content must be text or content blocks")
-
-        normalized: list[dict[str, Any]] = []
-        text_parts: list[str] = []
-
-        def flush_text() -> None:
-            if text_parts:
-                normalized.append({"role": "user", "content": "\n".join(text_parts)})
-                text_parts.clear()
-
-        for block_index, block in enumerate(content):
-            if not isinstance(block, Mapping):
-                raise ValueError(
-                    f"Anthropic user message {message_index} content block {block_index} must be an object"
-                )
-            kind = block.get("type")
-            if kind == "text":
-                text = block.get("text")
-                if not isinstance(text, str):
-                    raise ValueError("Anthropic text blocks require string text")
-                text_parts.append(text)
-                continue
-            if kind != "tool_result":
-                raise ValueError(
-                    f"Anthropic content block type {kind!r} is not supported by exact text-token training"
-                )
-            flush_text()
-            tool_call_id = block.get("tool_use_id", block.get("id"))
-            if not isinstance(tool_call_id, str) or not tool_call_id:
-                raise ValueError("Anthropic tool_result requires tool_use_id")
-            tool_content = cls._anthropic_text_content(
-                block.get("content"),
-                f"tool_result {tool_call_id}",
-                allow_missing=True,
-            )
-            normalized.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": tool_content or "",
-                }
-            )
-        flush_text()
-        if not normalized:
-            normalized.append({"role": "user", "content": ""})
-        return normalized
-
-    @classmethod
-    def _anthropic_assistant_message(cls, content: Any, message_index: int) -> dict[str, Any]:
-        if isinstance(content, str):
-            return {"role": "assistant", "content": content}
-        if not isinstance(content, list):
-            raise ValueError(f"Anthropic assistant message {message_index} content must be text or content blocks")
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        for block_index, block in enumerate(content):
-            if not isinstance(block, Mapping):
-                raise ValueError(
-                    f"Anthropic assistant message {message_index} content block {block_index} must be an object"
-                )
-            kind = block.get("type")
-            if kind == "text":
-                text = block.get("text")
-                if not isinstance(text, str):
-                    raise ValueError("Anthropic text blocks require string text")
-                text_parts.append(text)
-            elif kind == "thinking":
-                thinking = block.get("thinking")
-                if not isinstance(thinking, str):
-                    raise ValueError("Anthropic thinking blocks require string thinking")
-                reasoning_parts.append(thinking)
-            elif kind == "redacted_thinking":
-                raise ValueError("Anthropic redacted_thinking history is not supported")
-            elif kind == "tool_use":
-                tool_id = block.get("id")
-                name = block.get("name")
-                arguments = block.get("input", {})
-                if not isinstance(tool_id, str) or not tool_id or not isinstance(name, str) or not name:
-                    raise ValueError("Anthropic tool_use requires non-empty id and name")
-                if not isinstance(arguments, Mapping):
-                    raise ValueError("Anthropic tool_use input must be an object")
-                tool_calls.append(
-                    {
-                        "id": tool_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": json.dumps(dict(arguments), ensure_ascii=False),
-                        },
-                    }
-                )
-            else:
-                raise ValueError(f"Anthropic assistant content block type {kind!r} is not supported by exact training")
-        message: dict[str, Any] = {
-            "role": "assistant",
-            "content": "\n".join(text_parts) if text_parts else None,
-        }
-        if reasoning_parts:
-            message["reasoning_content"] = "\n".join(reasoning_parts)
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-        return message
-
-    @staticmethod
-    def _anthropic_text_content(content: Any, label: str, *, allow_missing: bool = False) -> str:
-        if content is None and allow_missing:
-            return ""
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            raise ValueError(f"Anthropic {label} content must be text or text blocks")
-        texts: list[str] = []
-        for block in content:
-            if not isinstance(block, Mapping) or block.get("type") != "text" or not isinstance(block.get("text"), str):
-                raise ValueError(f"Anthropic {label} supports only text blocks")
-            texts.append(block["text"])
-        return "\n".join(texts)
-
-    @staticmethod
-    def _anthropic_tools(value: Any) -> list[dict[str, Any]] | None:
-        if value is None:
-            return None
-        if not isinstance(value, list) or not value:
-            raise ValueError("Anthropic tools must be a non-empty list of objects")
-        tools: list[dict[str, Any]] = []
-        for index, tool in enumerate(value):
-            if not isinstance(tool, Mapping):
-                raise ValueError(f"Anthropic tool at index {index} must be an object")
-            name = tool.get("name")
-            schema = tool.get("input_schema")
-            if not isinstance(name, str) or not name or not isinstance(schema, Mapping):
-                raise ValueError("Anthropic custom tools require non-empty name and input_schema")
-            function: dict[str, Any] = {"name": name, "parameters": dict(schema)}
-            description = tool.get("description")
-            if description is not None:
-                if not isinstance(description, str):
-                    raise ValueError("Anthropic tool description must be a string")
-                function["description"] = description
-            tools.append({"type": "function", "function": function})
-        return tools
-
-    @staticmethod
-    def _anthropic_tool_choice(value: Any) -> Any:
-        if value is None:
-            return "auto"
-        if not isinstance(value, Mapping):
-            raise ValueError("Anthropic tool_choice must be an object")
-        kind = value.get("type")
-        if kind == "auto":
-            return "auto"
-        if kind == "any":
-            return "required"
-        if kind == "none":
-            return "none"
-        if kind == "tool":
-            name = value.get("name")
-            if not isinstance(name, str) or not name:
-                raise ValueError("Anthropic tool_choice type 'tool' requires name")
-            return {"type": "function", "function": {"name": name}}
-        raise ValueError(f"unsupported Anthropic tool_choice type {kind!r}")
-
-    @classmethod
-    def _anthropic_response(cls, original_request: Mapping[str, Any], response: Mapping[str, Any]) -> dict[str, Any]:
-        choice = response["choices"][0]
-        message = choice["message"]
-        content: list[dict[str, Any]] = []
-        reasoning = message.get("reasoning_content")
-        if isinstance(reasoning, str) and reasoning:
-            content.append(
-                {
-                    "type": "thinking",
-                    "thinking": reasoning,
-                    # Local reasoning parsers do not produce Anthropic's
-                    # cryptographic signature. Engines' own compatibility
-                    # layers likewise emit an empty signature for local models.
-                    "signature": "",
-                }
-            )
-        text = message.get("content")
-        if isinstance(text, str) and text:
-            content.append({"type": "text", "text": text})
-        for call in message.get("tool_calls") or []:
-            if not isinstance(call, Mapping) or not isinstance(call.get("function"), Mapping):
-                raise ValueError("internal assistant tool call is malformed")
-            function = call["function"]
-            arguments = function.get("arguments", "{}")
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError as exc:
-                    raise ValueError("sampled tool-call arguments are not valid JSON") from exc
-            if not isinstance(arguments, Mapping):
-                raise ValueError("sampled tool-call arguments must decode to an object")
-            content.append(
-                {
-                    "type": "tool_use",
-                    "id": str(call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"),
-                    "name": str(function.get("name", "")),
-                    "input": dict(arguments),
-                }
-            )
-
-        # Anthropic has no stop reason for an engine abort: the response names it in its meta_info, which the
-        # service reads (inference_aborted); an aborted response never reaches the client.
-        aborted = {"meta_info": {"finish_reason": "abort"}} if choice.get("finish_reason") == "abort" else {}
-        return {
-            "id": f"msg_{uuid.uuid4().hex}",
-            "type": "message",
-            "role": "assistant",
-            "model": str(original_request.get("model", response.get("model", ""))),
-            "content": content,
-            "stop_reason": cls._anthropic_stop_reason(choice.get("finish_reason")),
-            "stop_sequence": None,
-            "usage": usage_of(response) or {"input_tokens": 0, "output_tokens": 0},
-            **aborted,
-        }
-
-    @staticmethod
-    def _anthropic_stop_reason(value: Any) -> str:
-        if value == "tool_calls":
-            return "tool_use"
-        if value == "length":
-            return "max_tokens"
-        return "end_turn"
 
     # -- Rollout continuation ---------------------------------------------------
 
