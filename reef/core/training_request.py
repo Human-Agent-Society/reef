@@ -64,7 +64,7 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     absent requirements become an empty list, and an empty client or empty parameters are omitted.
     Older clients may send ``release_id`` instead of ``artifact_id``; normalized records use ``artifact_id``.
     ``parameters`` is a JSON object with string keys, at most ``MAX_PARAMETERS_BYTES`` bytes of JSON: the
-    parameters of the instruction's training job over the recipe's (``Sample2Job.job_parameters``).
+    parameters of the instruction's training job, merged into the recipe's (``Sample2Job.job_parameters``).
     """
     fields: dict[str, str] = {}
     for key in ("text", "session", "artifact_id"):
@@ -113,7 +113,7 @@ class TrainingRequest:
     ``reef.core.requirements.parse_requires`` admits; default none.
     ``client`` is the requesting client's report of its machine (see
     :func:`reef.core.training_request.parse_client`); empty when it sent none.
-    ``parameters`` are the parameters of the instruction's training job over the recipe's; empty when it sent none.
+    ``parameters`` are the parameters of the instruction's training job, merged into the recipe's; empty when it sent none.
 
     :meth:`from_dict` validates a payload with
     :func:`normalize_training_request_payload`; the constructor takes values
