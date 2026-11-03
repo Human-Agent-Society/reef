@@ -239,6 +239,7 @@ def test_report_returns_and_inference_resolves_while_training_job_is_blocked(sta
 
 @pytest.mark.unit
 def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher, monkeypatch) -> None:
+    failure_timeout_seconds = 30
     component, dispatcher = start_dispatcher()
     # Control submits a job by adding it to the jobs queue; the first addition loses its acknowledgement.
     queued_submit = JobQueueComponent.submit
@@ -253,7 +254,7 @@ def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher
     monkeypatch.setattr(JobQueueComponent, "submit", lose_first_acknowledgement)
     _submit_pair(dispatcher)
     # Each record wakes the worker, so a retry may clear the error before a poll sees it: wait for the count.
-    deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
+    deadline = time.monotonic() + failure_timeout_seconds
     while dispatcher.errors.failure_count("math") == 0 and time.monotonic() < deadline:
         time.sleep(_ASYNC_WAIT_POLL_S)
     assert dispatcher.errors.failure_count("math") == 1

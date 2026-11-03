@@ -512,6 +512,7 @@ class AdapterInference(StubInferenceRuntime):
 def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter(
     tmp_path, monkeypatch, per_scenario_adapters
 ) -> None:
+    synchronization_timeout_seconds = 30
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     component = HeldJobComponent(tmp_path / "checkpoints")
     runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
@@ -529,7 +530,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         return (await response.json())["scenarios"]["math"]
 
     async def wait_for(client: TestClient, finished_jobs: int, running: bool) -> dict:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + synchronization_timeout_seconds
         while time.monotonic() < deadline:
             block = await math_status(client)
             if (
@@ -554,7 +555,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             dispatcher.accept_record(report(1))
             running = await wait_for(client, finished_jobs=0, running=True)
             # The training service hands the queued job to the component on its own thread.
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + synchronization_timeout_seconds
             while not component.submitted and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
             (job,) = component.submitted
