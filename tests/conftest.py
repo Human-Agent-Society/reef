@@ -19,6 +19,7 @@ from argparse import Namespace
 
 import pytest
 
+from reef.dispatcher import Dispatcher
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
 
@@ -65,3 +66,36 @@ def quick_server_shutdown():
         quick = functools.partialmethod(socketserver.BaseServer.serve_forever, poll_interval=0.01)
         patch.setattr(socketserver.BaseServer, "serve_forever", quick)
         yield
+
+
+#: The dispatchers that the running test built, in the order it built them.
+BUILT_DISPATCHERS: list[Dispatcher] = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def record_built_dispatchers():
+    """Record each ``Dispatcher`` that a test builds, so ``close_open_dispatchers`` can close it."""
+    original = Dispatcher.__init__
+
+    @functools.wraps(original)
+    def record(self: Dispatcher, *args, **kwargs) -> None:
+        original(self, *args, **kwargs)
+        BUILT_DISPATCHERS.append(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Dispatcher, "__init__", record)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def close_open_dispatchers():
+    """Close each dispatcher that the test built and left open.
+
+    An open dispatcher keeps its service threads, which poll until the process ends. One xdist worker runs
+    hundreds of tests, so the threads of unclosed dispatchers pile up and starve the timed waits of later tests.
+    ``Dispatcher.close`` does nothing for a dispatcher that is closed already.
+    """
+    BUILT_DISPATCHERS.clear()
+    yield
+    while BUILT_DISPATCHERS:
+        BUILT_DISPATCHERS.pop().close()
