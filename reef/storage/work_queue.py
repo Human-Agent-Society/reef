@@ -223,10 +223,10 @@ class WorkQueue(ABC):
         """Ask for one run of the work that ``serial_key`` names; return the item that will do it.
 
         The items of ``serial_key`` share it, so they run one at a time, in order. An item reads the state that it
-        works on when it runs, so a queued item of ``queue`` with ``serial_key`` covers this request: return it
-        unchanged. Otherwise add a queued item with the ID ``<serial_key>:<n>``, where ``n`` is the store's next
-        change sequence, which no earlier item used, and return it. The look and the add are one change, so two
-        requests at once add one item.
+        works on when it runs, so a queued item of ``queue`` with ``serial_key`` covers this request: return it,
+        with its ``available_at`` moved to this request's (``now`` when None) if that is earlier. Otherwise add a
+        queued item with the ID ``<serial_key>:<n>``, where ``n`` is the store's next change sequence, which no
+        earlier item used, and return it. The look and the add are one change, so two requests at once add one item.
         """
 
     @abstractmethod
