@@ -17,8 +17,8 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
 from reef.execution.workers import QueueWorker, WorkerStopped
+from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.base import Recipe
-from reef.runtime.interfaces import InferenceRuntime
 from reef.scenario.binding import activate_release
 from reef.storage.coordination import Coordination
 from reef.storage.served_models import INFERENCE_OWNER_QUEUE, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND

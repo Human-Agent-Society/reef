@@ -7,7 +7,7 @@ from pathlib import Path
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.core.config import config_option
-from reef.runtime.deployment import TrainingComponentFactory
+from reef.train.component import TrainingComponentFactory
 from reef.train.deployment import InProcessTrainingDeployment
 
 

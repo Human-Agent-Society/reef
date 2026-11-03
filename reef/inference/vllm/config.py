@@ -6,8 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.execution.executor import Executor
 from reef.inference.engine_control import EngineConfig
-from reef.runtime.executor import Executor
 
 #: Engine arguments Reef derives from its own settings; ``options`` may not repeat them.
 RESERVED_OPTIONS = frozenset({"model", "host", "port", "tensor_parallel_size", "enable_sleep_mode"})

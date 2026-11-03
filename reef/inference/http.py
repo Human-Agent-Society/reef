@@ -14,15 +14,10 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
+from reef.core.errors import UpstreamStatusError
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime, InferenceStream
 from reef.inference.provider_protocol import provider_headers
-from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
-from reef.runtime.interfaces import (
-    InferenceArtifact,
-    InferenceHandler,
-    InferenceRuntime,
-    InferenceStream,
-    UpstreamStatusError,
-)
+from reef.inference.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string
 
 #: Hop-by-hop headers that describe one connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(

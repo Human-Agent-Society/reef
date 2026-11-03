@@ -8,7 +8,7 @@ from typing import Any
 
 import ray
 
-from reef.runtime.recovery import EngineHealthChecks, EngineHealthTarget
+from reef.inference.recovery import EngineHealthChecks, EngineHealthTarget
 
 
 class SGLangEngineHealthChecks(EngineHealthChecks):

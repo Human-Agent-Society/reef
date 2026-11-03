@@ -18,10 +18,10 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
-from reef.runtime.executor.config import role_executor_settings
-from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import ReleaseFormat
+from reef.core.weight_layout import ReleaseFormat
+from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
+from reef.execution.executor.config import role_executor_settings
+from reef.inference.interfaces import InferenceHandler
 from reef.service.deploy.service_config import ServiceConfig
 from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
 

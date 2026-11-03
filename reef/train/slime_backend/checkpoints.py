@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.weight_layout import ADAPTER_DIR
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import LearningRateScheduleState
+from reef.storage.durable_files import read_json, write_json
+from reef.train.method import LearningRateScheduleState
 
 #: A start directory's description of the weights a later job continues from.
 START_STATE = "start.json"

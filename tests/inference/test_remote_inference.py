@@ -15,25 +15,19 @@ import pytest
 from aiohttp import web
 
 from reef.artifact import Artifact
-from reef.core.errors import ReefError
-from reef.core.weight_layout import ADAPTER_DIR
+from reef.core.errors import ReefError, RuntimeConfigError
+from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat, WeightFiles
+from reef.inference.deployment import InferenceConnection, InferenceService
+from reef.inference.interfaces import InferenceBackend
+from reef.inference.registry import RuntimeRegistry, runtime_factory_for
 from reef.inference.remote import server as server_module
 from reef.inference.remote.config import CONTROL_PROTOCOL, RemoteInferenceSettings
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.remote.server import RemoteInferenceServer
 from reef.inference.remote.service import RemoteControl, RemoteInferenceBackend, RemoteInferenceService
+from reef.inference.residency import adapter_name
+from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.runtime.deployment import (
-    InferenceConnection,
-    InferenceService,
-    RuntimeConfigError,
-    RuntimeRegistry,
-    runtime_factory_for,
-)
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
-from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.residency import adapter_name
-from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
 
 CONTROL_TOKEN = "control-secret"
 ADAPTER = ReleaseFormat("adapter", 16, ("all",))

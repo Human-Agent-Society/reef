@@ -16,7 +16,7 @@ from reef.artifact.artifact import ArtifactNotFound
 from reef.core.errors import ReefError
 from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
-from reef.runtime.interfaces import InferenceHandler
+from reef.inference.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

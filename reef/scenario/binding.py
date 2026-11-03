@@ -8,9 +8,9 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.components import ScenarioComponents
 from reef.core.activation import ActivationRule
 from reef.core.reports import ReportBase
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
+from reef.inference.interfaces import InferenceRuntime
 from reef.storage.served_models import ServedModels
+from reef.train.component import TrainingComponent
 
 
 @dataclass(frozen=True)

@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from reef.execution.executor.delegating import DelegatingExecutor
+from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.launch import SGLangModel
-from reef.runtime.executor.delegating import DelegatingExecutor
-from reef.runtime.executor.uniproc import UniProcExecutor
 
 torch = pytest.importorskip("torch")
 
@@ -161,7 +161,7 @@ def test_rollout_shutdown_of_external_engines_is_idempotent(monkeypatch):
 
 def _attach_control(module, worker) -> None:
     """Give a bare serving worker the inference control its constructor builds."""
-    from reef.runtime.recovery import InferenceControl
+    from reef.inference.recovery import InferenceControl
 
     worker._control = InferenceControl(module._SGLangEngineGroup(worker), module._SGLangInferenceMonitor(worker))
 
@@ -542,7 +542,7 @@ def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
 
 
 def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
-    from reef.runtime.recovery import EngineHealthMonitor, HealthMonitorConfig
+    from reef.inference.recovery import EngineHealthMonitor, HealthMonitorConfig
 
     module = _load_manager_module(monkeypatch, serving=True)
     group = types.SimpleNamespace(all_engines=[], nodes_per_engine=1)

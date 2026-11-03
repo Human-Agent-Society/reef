@@ -11,9 +11,9 @@ import importlib
 from collections.abc import Mapping
 from typing import Any, overload
 
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 
 
 class ObjectiveRegistry:

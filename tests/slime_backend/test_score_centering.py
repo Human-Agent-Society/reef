@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
 from reef.train.slime_backend.distill import DistillSettings
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job

@@ -13,8 +13,8 @@ from dataclasses import replace
 from typing import Any
 
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate
-from reef.tinker.checkpoint import FreshStart, TinkerCheckpoint
 from reef.tinker.service import close_service, tinker_sdk
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.config import TinkerServiceConfig
 from reef.train.tinker_backend.losses import MatrixInput, TinkerCustomLoss, TinkerLoss, TokenRow
 
