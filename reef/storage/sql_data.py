@@ -195,8 +195,11 @@ class SQLDataStore(DataStore):
 
     @abstractmethod
     @contextmanager
-    def transaction(self) -> Iterator[Connection]:
-        """One transaction: commit when the block ends, roll back when it raises."""
+    def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
+        """One transaction: commit when the block ends, roll back when it raises.
+
+        A ``read_only`` transaction reads one snapshot in all its statements, so a concurrent ``delete`` cannot
+        remove a row between two of them."""
 
     @abstractmethod
     def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
@@ -232,7 +235,7 @@ class SQLDataStore(DataStore):
         statement = select(values.c.value, func.count(), first, func.max(values.c.sequence)).group_by(values.c.value)
         if before is not None:
             statement = statement.having(first < before)
-        with self.transaction() as connection:
+        with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(first.desc()).limit(limit)).all()
             metadata = {
                 int(sequence): json.loads(text)
@@ -404,7 +407,7 @@ class SQLDataStore(DataStore):
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
-        with self.transaction() as connection:
+        with self.transaction(read_only=True) as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
             return None if row is None else self.stored_items(connection, owner, [row])[0]
 
@@ -434,7 +437,7 @@ class SQLDataStore(DataStore):
             statement = statement.where(
                 exists().where(uses.c.owner == owner, uses.c.item_id == items.c.item_id, uses.c.scenario == scenario)
             )
-        with self.transaction() as connection:
+        with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
 
@@ -611,7 +614,7 @@ class SQLDataStore(DataStore):
     def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]:
         check_owner(owner)
         items = self.items_table
-        with self.transaction() as connection:
+        with self.transaction(read_only=True) as connection:
             linked: dict[int, str] = {}
             for batch in batches(dict.fromkeys(item_ids)):
                 for item_id, row in self.rows(connection, owner, batch).items():
@@ -693,7 +696,8 @@ class SQLiteDataStore(SQLDataStore):
         return cls(directory, task_files, segments)
 
     @contextmanager
-    def transaction(self) -> Iterator[Connection]:
+    def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
+        # The lock and the write lock already run each transaction alone, so a read sees one state.
         with self.lock:
             if self.connection is None:
                 raise ReefError("the data store is closed")
@@ -784,10 +788,11 @@ class PostgresDataStore(SQLDataStore):
         return cls(settings.database_url, task_files, schema=settings.schema, segments=segments)
 
     @contextmanager
-    def transaction(self) -> Iterator[Connection]:
+    def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
         if self.engine is None:
             raise ReefError("the data store is closed")
-        with self.engine.begin() as connection:
+        isolation = "REPEATABLE READ" if read_only else "READ COMMITTED"
+        with self.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
             yield connection
 
     def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
