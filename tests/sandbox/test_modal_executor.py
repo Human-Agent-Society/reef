@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import shlex
 import subprocess
 import sys
@@ -270,7 +271,8 @@ def test_a_root_is_copied_in_and_back_through_the_sandboxs_files(tmp_path) -> No
                 (self.base / path.lstrip("/")).parent.mkdir(parents=True, exist_ok=True)
                 (self.base / path.lstrip("/")).write_bytes(data)
             command = args[-1].replace("/tmp/", f"{self.base}/tmp/").replace(REMOTE_BASE, f"{self.base}{REMOTE_BASE}")
-            subprocess.run(["/bin/sh", "-c", command], check=True)
+            # The stand-in runs Linux sandbox commands; macOS tar must not add host metadata.
+            subprocess.run(["/bin/sh", "-c", command], check=True, env={**os.environ, "COPYFILE_DISABLE": "1"})
             for path in list(self.filesystem.files):
                 if not (self.base / path.lstrip("/")).exists():
                     del self.filesystem.files[path]
