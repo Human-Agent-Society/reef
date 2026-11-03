@@ -8,8 +8,10 @@ serving side reads only the sampler that it names (``TinkerRelease``).
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 MANIFEST = "tinker-checkpoint.json"
 
@@ -23,7 +25,7 @@ class TinkerRelease:
     ``service`` is the base URL of the Tinker-compatible service that holds the path (``TinkerConfig.base_url``), or
     ``None`` for Thinking Machines' hosted Tinker.
 
-    Purpose: ``read`` makes the value from a release's manifest. The Tinker inference runtime and
+    Purpose: ``from_dict`` makes the value from a release's manifest, and ``read`` from the manifest in a directory. The Tinker inference runtime and
     ``TinkerSamplerWeights`` read it, and ``check_compatible`` refuses a release of another model or service.
     """
 
@@ -48,9 +50,16 @@ class TinkerRelease:
             )
 
     @classmethod
-    def read(cls, directory: Path) -> TinkerRelease:
-        """The sampler of the manifest in ``directory``; ``ValueError`` for a manifest of another version."""
-        value = json.loads((directory / MANIFEST).read_text())
-        if not isinstance(value, dict) or value.get("schema_version", 1) != 1:
+    def from_dict(cls, value: Mapping[str, Any]) -> TinkerRelease:
+        """The sampler of the manifest ``value``; ``ValueError`` for a manifest of another version.
+
+        The training fields of the manifest are ignored.
+        """
+        if not isinstance(value, Mapping) or value.get("schema_version", 1) != 1:
             raise ValueError("invalid Tinker checkpoint manifest version")
         return cls(value.get("base_model", ""), value.get("sampler_path", ""), value.get("service"))
+
+    @classmethod
+    def read(cls, directory: Path) -> TinkerRelease:
+        """The sampler of the manifest ``MANIFEST`` in ``directory``, as ``from_dict`` reads it."""
+        return cls.from_dict(json.loads((directory / MANIFEST).read_text()))
