@@ -14,8 +14,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.executor import Executor, ExecutorConfig
-from reef.runtime.executor.failure import ExecutorFailureListener
+from reef.execution.executor import Executor, ExecutorConfig
+from reef.execution.executor.failure import ExecutorFailureListener
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,

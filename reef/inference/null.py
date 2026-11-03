@@ -15,8 +15,8 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable
-from reef.runtime.deployment import RuntimeFactory
-from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import InferenceAdmissionHandle, InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.registry import RuntimeFactory
 
 #: The response body of every inference request.
 UNAVAILABLE_MESSAGE = (

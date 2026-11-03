@@ -8,19 +8,18 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-
 from tests.support.chat_templates import CharTemplate
 
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
 from reef.harness.tasks.rollouts import RolloutRow, TaskLab
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
-from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
+from reef.train.component import TrainingJob
+from reef.train.method import TrainingMethod
 from reef.train.task_rollouts import ChatEndpoint, RolloutSettings, TaskJobRollouts, run_train_tasks
 from reef.train.tinker_backend import component as component_module
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig

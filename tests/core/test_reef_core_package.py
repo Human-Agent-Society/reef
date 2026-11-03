@@ -24,6 +24,6 @@ def test_core_package_exports_protocol_and_record_types() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("module", ["reef.headers", "reef.runtime.testing", "reef.wire"])
+@pytest.mark.parametrize("module", ["reef.headers", "reef.runtime", "reef.wire"])
 def test_non_public_modules_are_not_shipped(module: str) -> None:
     assert importlib.util.find_spec(module) is None

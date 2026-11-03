@@ -17,10 +17,10 @@ from tests.slime_backend.test_slime_component import batch_for, parameters, work
 from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData, TaskSample
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
+from reef.storage.durable_files import read_json, write_json
+from reef.train.component import TrainingJob
 from reef.train.local_jobs import JOB_FILE
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import driver
 from reef.train.slime_backend.component import (

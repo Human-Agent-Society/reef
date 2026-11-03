@@ -22,16 +22,16 @@ from reef.core.served_models import ScenarioModel
 from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import RootSource
 from reef.core.values import JsonValue
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.scenario.releases import ServedBesideArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
+from reef.train.component import TrainingComponent
 from reef.train.instructions import ScenarioInstructions
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainStepResult

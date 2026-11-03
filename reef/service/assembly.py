@@ -27,15 +27,14 @@ from reef.dispatcher.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.inference.registry import RuntimeRegistry
 from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
-from reef.recipe.base import ServedEndpoint
+from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.deployment import RuntimeRegistry, build_training_component, close_runtimes
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
@@ -60,6 +59,7 @@ from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+from reef.train.component import TrainingComponent, build_training_component
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:

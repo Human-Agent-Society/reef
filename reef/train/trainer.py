@@ -29,10 +29,10 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.record2sample.service import ProducedSamples
-from reef.runtime.jobs import ScenarioRoot
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
+from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, PreparedCommit, TrainStepResult

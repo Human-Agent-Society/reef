@@ -9,9 +9,9 @@ from tests.support.samples_service import make_samples
 
 from reef.core import AgentRecord, RequestType
 from reef.evaluation import UpdateCandidate
-from reef.runtime.jobs import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import JobData, PipelineContext, PreparedStep, Trainer, TrainingPipeline, TrainStepResult
+from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
 
 

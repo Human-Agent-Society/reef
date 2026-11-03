@@ -8,16 +8,16 @@ from typing import Any
 import ray
 
 from reef.inference.process import retire_engines
-from reef.inference.sglang.config import SGLangConfig
-from reef.inference.sglang.health import SGLangEngineHealthChecks
-from reef.inference.sglang.launch import SGLangCluster
-from reef.runtime.recovery import (
+from reef.inference.recovery import (
     EngineHealthMonitor,
     HealthMonitorConfig,
     InferenceControl,
     InferenceEngineGroup,
     InferenceMonitor,
 )
+from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.health import SGLangEngineHealthChecks
+from reef.inference.sglang.launch import SGLangCluster
 
 
 def recover_server(server) -> None:

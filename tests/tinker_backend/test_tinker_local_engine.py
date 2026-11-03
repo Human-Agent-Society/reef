@@ -13,23 +13,25 @@ import yaml
 from tests.support.runtime_stubs import RunningEngines
 
 from reef.artifact.artifact import Artifact
+from reef.core.errors import RuntimeConfigError
+from reef.core.weight_layout import ReleaseFormat, ReleaseWeights
+from reef.inference.interfaces import InferenceBackend, InferenceHandler
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
-from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
-from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
-from reef.runtime.residency import adapter_name
-from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights
+from reef.inference.residency import adapter_name
+from reef.inference.serving import AdapterServingRuntime
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import local_model_required
-from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.weights import TinkerSamplerWeights
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.component import TrainingJob, job_id_for
+from reef.train.method import TrainingMethod
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
 from reef.train.types import JobData, TrajectorySample
