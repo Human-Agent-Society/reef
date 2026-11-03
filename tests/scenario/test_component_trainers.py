@@ -739,20 +739,26 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
 
 
 @pytest.mark.unit
-def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(dispatchers: _Dispatchers) -> None:
-    """The harness trained on i1 through r1a while the weights trainer still holds i1; after a restart r1b is not resolved against it."""
+@pytest.mark.parametrize("select_before_commit", [False, True])
+def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(
+    dispatchers: _Dispatchers, select_before_commit: bool
+) -> None:
+    """The restarted harness settles a second report on a trained source; weights keep independent consumption."""
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     scenario.records.append(_report("r1b", "i1"))
-    # The job trains the sample of r1a alone: r1b has no sample yet.
+    if select_before_commit:
+        make_samples(scenario)
+    # The job trains r1a alone; r1b references the same source and makes no new sample.
     assert _commit_step(scenario, HARNESS, make=False) is not None
     assert scenario.records.count("agent") == 3
     assert scenario.prepare_training_step(HARNESS) is None
     rebuilt = _reload(dispatcher)
     make_samples(rebuilt)
     assert rebuilt.prepare_training_step(HARNESS) is None
-    # Its source trained, so the rebuilt harness skips it; the weights trainer still reads it.
-    assert "r1b" in rebuilt.trainer_for(HARNESS).skipped_record_ids
+    # Selection before the commit can persist the skipped report as consumed.
+    harness = rebuilt.trainer_for(HARNESS)
+    assert "r1b" in harness.skipped_record_ids | harness.consumed_record_ids
     assert "r1b" not in rebuilt.trainer_for(WEIGHTS).consumed_record_ids
 
 
