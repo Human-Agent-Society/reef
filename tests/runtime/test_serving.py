@@ -476,7 +476,7 @@ def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a
 
     # Control restarts; the engines keep serving. The new runtime takes the adapter over and loads nothing.
     restarted = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2))
-    restarted.adopt(served)
+    assert restarted.adopt(served)
     loads = len(engines.loads())
     assert restarted.activate_checkpoint(artifact, scenario="math") == version
     assert len(engines.loads()) == loads
@@ -500,7 +500,7 @@ def test_a_value_the_engines_did_not_keep_loads_again(tmp_path):
     served = first.served_artifact("artifact-m", "math")
     fresh = Engines()  # new engines: they kept nothing
     restarted = opened(AdapterServingRuntime(RunningEngines(fresh), Handler(), adapter_capacity=2))
-    restarted.adopt(served)
+    assert not restarted.adopt(served)
     restarted.activate_checkpoint(artifact, scenario="math")
     assert len(fresh.loads()) == 1
 

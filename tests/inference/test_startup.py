@@ -340,6 +340,7 @@ def test_the_worker_logs_its_ownership_its_opening_and_each_activation(startup, 
         worker.stop()
     messages = [record.getMessage() for record in caplog.records if record.name == "reef.dispatcher.serving"]
     assert any("holds runtime ownership" in message for message in messages)
-    assert any("opened the inference runtime and offered it 0 routes" in message for message in messages)
+    assert any("opened the inference runtime" in message for message in messages)
+    assert any("kept 0 of 0 routes from before" in message for message in messages)
     assert any("scenario math: activated artifact" in message for message in messages)
     assert any("released runtime ownership" in message for message in messages)
