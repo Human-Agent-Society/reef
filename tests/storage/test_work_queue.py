@@ -164,6 +164,18 @@ def test_a_request_reuses_the_queued_item_of_its_key_and_ended_items_go_after_th
     assert third.id not in (first.id, second.id)
 
 
+@pytest.mark.unit
+def test_a_request_makes_the_queued_item_of_its_key_available_no_later_than_it_asks(open_coordination):
+    queue = open_coordination().queue
+    later = queue.request("samples", "s", "record_selection", "record_selection:s", {}, available_at=60, now=0)
+    assert later.available_at == 60
+    # A request for a later time leaves it; a request for now moves it to now.
+    assert queue.request("samples", "s", "record_selection", "record_selection:s", {}, available_at=90, now=1) == later
+    moved = queue.request("samples", "s", "record_selection", "record_selection:s", {}, now=2)
+    assert (moved.id, moved.available_at) == (later.id, 2)
+    assert queue.take("samples", "w", ["record_selection"], now=2).id == later.id
+
+
 class FailingWorker(QueueWorker):
     """A worker whose every item ends with ``error``."""
 

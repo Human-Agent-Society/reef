@@ -999,7 +999,11 @@ class SQLWorkQueue(WorkQueue):
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             found = connection.execute(waiting).mappings().first()
             if found is not None:
-                return item_from_row(found)
+                queued = item_from_row(found)
+                wanted = moment if available_at is None else available_at
+                if queued.available_at <= wanted:
+                    return queued
+                return self.save(connection, counter, queued, moment, available_at=wanted)
             sequence = counter.next()
             work = NewWork(
                 queue,

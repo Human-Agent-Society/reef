@@ -261,6 +261,11 @@ class Record2Sample(ABC, Plugin):
         """Return True while background jobs run. A finished job can form sets without a new record."""
         return False
 
+    def next_due(self) -> float | None:
+        """Return the monotonic time at which ``advance`` can form a set without a new record, such as the end of a
+        trajectory's idle time; None when no set waits for time alone. The default is None."""
+        return None
+
     # ------------------------------------------------------- other samples
 
     def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:

@@ -155,6 +155,11 @@ class TrajectorySamples(Record2Sample):
                 TrajectorySet(set_id=("trajectory", record_id), calls=tuple(self.inferences[call] for call in calls))
             )
 
+    def next_due(self) -> float | None:
+        """The time at which the earliest waiting trajectory ends, unless a call continues it first."""
+        ends = [read_at for record_id, read_at in self.read_at.items() if self.trajectories.is_end(record_id)]
+        return min(ends) + self.trajectory_idle_seconds if ends else None
+
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
         super().release_records(agent_record_ids)
         for record_id in agent_record_ids:

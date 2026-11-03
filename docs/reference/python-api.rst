@@ -1367,8 +1367,9 @@ report's trajectories one ATIF trajectory sample with the report's score.
 max_staleness=0)`` is the stage of a method that needs no report. It forms a
 ``TrajectorySet`` of a trajectory's calls once the trajectory's last call has
 had no continuing call and no retry for ``trajectory_idle_seconds``, and makes
-it one ATIF ``TrajectorySample`` (``trajectory_sample``). Every other record
-ends at once. Grouping and
+it one ATIF ``TrajectorySample`` (``trajectory_sample``). Its ``next_due()``
+is the time at which the earliest waiting trajectory goes idle. Every other
+record ends at once. Grouping and
 consumption state stay in the stage; recipes never receive buffered report objects.
 ``placement`` returns ``(None, None)`` by default. A group key collects reports,
 and a slot deduplicates retries within that group (None uses the report id).

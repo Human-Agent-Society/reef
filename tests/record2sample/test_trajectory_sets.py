@@ -77,14 +77,16 @@ def test_a_trajectory_forms_its_set_after_its_last_call_was_idle(monkeypatch) ->
     clock[0] = 105.0
     stage.push(conversation("call-2", 2))
     stage.advance(112.0)
-    # call-1 is idle but continued; call-2 is the end, and it is not idle yet.
+    # call-1 is idle but continued; call-2 is the end, and it is not idle yet. The stage is due when it is.
     assert stage.take_ready_units() == ()
+    assert stage.next_due() == 115.0
     stage.advance(115.0)
     (unit,) = stage.take_ready_units()
     assert unit.set_ids() == (("trajectory", "call-2"),)
     assert unit.consumed_ids() == {"call-1", "call-2"}
     assert "r1" in stage.releasable_record_ids()
     assert stage.operational_metrics() == {"waiting_calls": 0}
+    assert stage.next_due() is None
 
 
 def test_a_retried_call_ends_with_the_trajectory_that_replaced_it(monkeypatch) -> None:
