@@ -259,7 +259,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
-        rollout_continuation: bool = False,
         client: NativeGenerateClient | None = None,
         request_headers: RequestHeadersFactory | None = None,
     ) -> None:
@@ -273,7 +272,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
             chat_template_kwargs=chat_template_kwargs,
-            rollout_continuation=rollout_continuation,
             request_headers=request_headers,
         )
 
