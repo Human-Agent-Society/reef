@@ -34,6 +34,7 @@ from typing import Any
 from reef.core.errors import ReefError
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.inference.interfaces import InferenceRuntime
 from reef.inference.provider_protocol import (
     fold_anthropic_stream,
     fold_chat_stream,
@@ -42,7 +43,6 @@ from reef.inference.provider_protocol import (
     stream_events,
     usage_of,
 )
-from reef.runtime.interfaces import InferenceRuntime
 
 #: The API dialects a binding can speak. ``openai`` is Chat Completions,
 #: ``responses`` is OpenAI Responses, and ``anthropic`` is Messages.

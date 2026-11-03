@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from reef.core.served_models import ServedArtifact
 from reef.inference.http import InferenceProxyRuntime
-from reef.runtime.interfaces import EngineClients, InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import EngineClients, InferenceHandler, InferenceRuntime
 
 
 class DeploymentEngineClients(EngineClients):

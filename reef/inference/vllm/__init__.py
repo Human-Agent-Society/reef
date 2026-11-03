@@ -1,4 +1,4 @@
-"""vLLM inference capture behind Reef's runtime contracts.
+"""vLLM inference capture behind Reef's inference contracts.
 
 This package holds the vLLM implementations of the contracts SGLang already
 implements under :mod:`reef.inference.sglang`: request capture, the KV

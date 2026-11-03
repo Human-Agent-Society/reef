@@ -14,7 +14,7 @@ from reef.core.records_types import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
-from reef.runtime.interfaces import EngineClients, InferenceHandler
+from reef.inference.interfaces import EngineClients, InferenceHandler
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, RELEASE_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE

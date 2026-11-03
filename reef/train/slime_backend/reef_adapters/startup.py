@@ -103,7 +103,7 @@ def parse_slime_args(arguments: Sequence[str]) -> SlimeArguments:
 
 def configure_executors(args: SlimeArguments, execution: Mapping[str, Any], arguments: Sequence[str]) -> None:
     """Select the training executor: an explicit Slime flag, else the deployment's role setting."""
-    from reef.runtime.executor.config import (
+    from reef.execution.executor.config import (
         ExecutorSettings,
         executor_settings,
         role_executor_settings,

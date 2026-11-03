@@ -14,7 +14,6 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
-from reef.runtime.jobs import ScenarioRoot
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
@@ -24,6 +23,7 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskFileStore, TaskStorage
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import ScenarioRoot
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
 
