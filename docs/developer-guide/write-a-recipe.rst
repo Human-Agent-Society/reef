@@ -65,7 +65,7 @@ to publish it.
 Before you write one
 --------------------
 
-If an existing recipe's processor, objective, and surface already match your method, change its config instead. Re-read
+If an existing recipe's processor, objective, and components already match your method, change its config instead. Re-read
 `Choosing a recipe <../user-guide/recipes.rst>`__.
 
 Build one

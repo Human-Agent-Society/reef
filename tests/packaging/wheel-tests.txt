@@ -3,6 +3,7 @@ tests/artifact/test_reef_artifacts.py
 tests/artifact/test_reef_git_lfs.py
 tests/artifact/test_release_components.py
 tests/artifact/test_repository_backend_capabilities.py
+tests/artifact/test_scenario_components.py
 tests/contributing/test_contributor_docs.py
 tests/contributing/test_dependency_boundaries.py
 tests/contributing/test_example_executor_configs.py
@@ -136,6 +137,8 @@ tests/reef_service/test_training_server.py
 tests/reef_service/test_training_startup.py
 tests/reef_service/test_vendor_install.py
 tests/reef_service/test_worker_resource_config.py
+tests/runtime/test_adapter_names.py
+tests/runtime/test_adapter_residency.py
 tests/runtime/test_checkpoint_storage.py
 tests/runtime/test_executor.py
 tests/runtime/test_executor_failure.py
@@ -150,6 +153,7 @@ tests/runtime/test_runtime_load_id.py
 tests/runtime/test_runtime_kinds.py
 tests/runtime/test_runtime_ownership.py
 tests/runtime/test_shared_ray_runtime.py
+tests/scenario/test_activate_release.py
 tests/scenario/test_commit_history.py
 tests/scenario/test_component_trainers.py
 tests/scenario/test_composite_activation_admission.py
@@ -173,10 +177,6 @@ tests/storage/test_postgres_records.py
 tests/storage/test_record_store_contract.py
 tests/storage/test_records.py
 tests/storage/test_scenario_store.py
-tests/surface/test_adapter_residency.py
-tests/surface/test_adapter_surface.py
-tests/surface/test_surfaces.py
-tests/surface/test_weight_surface_scenarios.py
 tests/tinker_backend/test_tinker_backend.py
 tests/tinker_backend/test_tinker_client.py
 tests/tinker_backend/test_tinker_local_engine.py

@@ -156,7 +156,7 @@ class _Recipe(_TwoTrainerRecipe):
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,

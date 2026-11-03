@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from reef.surface import adapter_name, parse_adapter_name
+from reef.runtime.residency import adapter_name, parse_adapter_name
 
 
 def test_adapter_name_is_lossless_and_scenario_qualified() -> None:

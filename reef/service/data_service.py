@@ -46,19 +46,19 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
         return 0
     store = DataAccess.of(dispatcher).require_store()
     with dispatcher.locked_scenario(scenario) as current:
-        surface = current.surface
+        components = current.components
         missing: list[NewItem] = []
         for row in current.artifacts():
             if store.read(owner, f"{scenario}/{row['artifact_id']}") is not None:
                 continue
             _, artifact = current.resolve_artifact(row["artifact_id"], row["component"])
             uri = current.repository.release_uri(artifact.ref)
-            if uri is not None and not surface.single:
+            if uri is not None and not components.single:
                 # A release of several components keeps each one in a directory named after it.
                 uri = f"{uri}{row['component']}/"
-            # A component that the surface does not declare, such as the records of a trainer that serves nothing,
+            # A component that the scenario does not declare, such as the records of a trainer that serves nothing,
             # has no kind.
-            declared = surface.components.get(row["component"])
+            declared = components.components.get(row["component"])
             missing.append(artifact_item(scenario, row, None if declared is None else declared.kind, uri))
     for start in range(0, len(missing), MAX_ITEMS_PER_CREATE):
         store.create(owner, missing[start : start + MAX_ITEMS_PER_CREATE])

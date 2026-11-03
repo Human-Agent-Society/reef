@@ -6,7 +6,7 @@ where they are. There are two kinds of artifact item of an owner ``o``.
 * The item of an artifact that a scenario ``s`` of ``o`` lists (``Scenario.artifacts``). Let ``a`` be that row. Its
   item has the ID ``<s>/<a.artifact_id>``, unique within ``o`` because a scenario name has no ``/`` and an artifact
   ID is unique within its scenario. Its metadata is ``kind: artifact`` and ``origin: {scenario: s, artifact_id}``
-  of ``a``. Its content is ``{source_uri, kind, component}``: ``component`` of ``a``, ``kind`` the ``ArtifactKind`` of the component (null when the surface declares none), and
+  of ``a``. Its content is ``{source_uri, kind, component}``: ``component`` of ``a``, ``kind`` the ``ArtifactKind`` of the component (null when the scenario declares none), and
   ``source_uri`` the URI of the component's files in the scenario's repository (``Repository.release_uri``), or null
   when the repository gives none.
 * An item that a client creates for files that it stored, such as an upload. It has no ``origin``. Its content

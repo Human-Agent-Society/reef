@@ -21,7 +21,7 @@ class MadeArtifact:
     """An artifact that a training step makes, as the activation rule sees it.
 
     Values: ``component`` is the non-empty name of the component whose trainer makes it, or None for the one
-    trainer of a scenario whose surface names no component. ``changed_kinds`` holds the harness node kinds that
+    trainer of a scenario that serves no component. ``changed_kinds`` holds the harness node kinds that
     the artifact changes from the tree it was trained from, and is empty for weights. Purpose: the committer
     makes it when a training step publishes an artifact, and the scenario's ``ActivationRule`` reads it.
     """
