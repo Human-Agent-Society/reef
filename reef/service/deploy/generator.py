@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import Settings, config_metadata, config_option
+from reef.execution.processes import http_readiness_command
 from reef.execution.sandbox.task_environment import checked_task_environment
-from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
 
 GENERATOR_SERVICE = "generator"

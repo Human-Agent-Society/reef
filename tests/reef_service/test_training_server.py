@@ -24,12 +24,12 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.service import deploy
 from reef.service.app import create_app
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import JobStatus, TrainingJob
 from reef.train.job_queue import JobQueueComponent
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
@@ -250,7 +250,7 @@ def test_training_configs_leave_max_staleness_unset_and_make_checkpoint_budget_m
     monkeypatch.setenv("REEF_TOKEN", "test-token")
     from tests.support.config_helpers import load_deployment
 
-    from reef.runtime.executor.arguments import native_arguments
+    from reef.execution.executor.arguments import native_arguments
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
     assert "max_staleness" not in config["reef"]
@@ -419,8 +419,8 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(stub_reposito
 
 @pytest.mark.unit
 def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured_inference_handler() -> None:
+    from reef.core.weight_layout import ReleaseFormat
     from reef.inference.sglang.chat import SGLangInferenceHandler
-    from reef.runtime.jobs import ReleaseFormat
     from reef.service.deploy.serving import serving_runtime_config
     from reef.service.deploy.training import training_deployment_for
 
@@ -791,7 +791,7 @@ def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkey
 def test_the_watchdog_fails_on_an_unexpected_child_exit_only(
     tmp_path: Path, returncode: int, signal_during_poll: bool, exit_code: int
 ) -> None:
-    from reef.runtime.executor.uniproc import UniProcExecutor
+    from reef.execution.executor.uniproc import UniProcExecutor
     from reef.service.deploy.orchestrator import _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
@@ -879,7 +879,7 @@ def test_stack_signal_during_event_wait_does_not_deadlock(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -> None:
-    from reef.runtime.executor.uniproc import UniProcExecutor
+    from reef.execution.executor.uniproc import UniProcExecutor
     from reef.service.deploy import orchestrator
 
     stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
@@ -927,7 +927,7 @@ def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -
 def test_opd_example_trains_an_adapter_against_the_teacher_engine(monkeypatch, config_path) -> None:
     from tests.support.config_helpers import load_deployment
 
-    from reef.runtime.executor.arguments import native_arguments
+    from reef.execution.executor.arguments import native_arguments
 
     monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen3-8b-sft")
     monkeypatch.setenv("OPD_TEACHER_PATH", "/models/qwen3-32b")

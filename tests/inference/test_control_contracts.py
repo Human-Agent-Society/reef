@@ -2,11 +2,11 @@
 
 import pytest
 
+from reef.execution.executor.failure import ExecutorFailureListener
+from reef.inference.interfaces import AdapterEngine, InferenceBackend, InferenceEngine
+from reef.inference.recovery import EngineHealthChecks, EngineHealthTarget, InferenceEngineGroup, InferenceMonitor
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.vllm.engine import ReefVLLMEngine
-from reef.runtime.executor.failure import ExecutorFailureListener
-from reef.runtime.interfaces import AdapterEngine, InferenceBackend, InferenceEngine
-from reef.runtime.recovery import EngineHealthChecks, EngineHealthTarget, InferenceEngineGroup, InferenceMonitor
 
 
 @pytest.mark.parametrize(

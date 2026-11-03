@@ -17,9 +17,9 @@ from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData
 from reef.core.training_request import TrainingRequest
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
+from reef.storage.durable_files import read_json, write_json
+from reef.train.component import TrainingJob
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SlimeNativeAlgorithm
 from reef.train.slime_backend.rollout_group import SlimeRolloutGroup

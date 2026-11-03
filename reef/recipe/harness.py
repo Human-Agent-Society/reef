@@ -55,6 +55,7 @@ from reef.evaluation.harness import (
     TaskScorer,
     evaluation_selection,
 )
+from reef.execution.executor.config import ExecutorSettings, role_executor_settings
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
@@ -69,13 +70,12 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
-from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.runtime.jobs import SavedCheckpoint, ScenarioRoot, TrainingComponent
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingComponent
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
