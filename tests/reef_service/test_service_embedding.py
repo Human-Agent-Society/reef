@@ -12,7 +12,7 @@ from tests.support.artifact_backend_plugin import MemoryArtifactBackend
 from tests.support.inference import wait_for_inference
 
 from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendContext, git_lfs
-from reef.runtime.interfaces import InferenceHandler
+from reef.inference.interfaces import InferenceHandler
 from reef.service import assembly
 from reef.service.app import get_dispatcher
 from reef.service.deploy.deployment_config import translate_layout

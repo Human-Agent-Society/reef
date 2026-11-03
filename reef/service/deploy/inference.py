@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from reef.execution.executor.arguments import native_arguments
+from reef.execution.processes import http_readiness_command
 from reef.inference.http import PROVIDER_APIS
 from reef.inference.remote.config import RemoteInferenceSettings
-from reef.runtime.deployment import http_readiness_command
-from reef.runtime.executor.arguments import native_arguments
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 

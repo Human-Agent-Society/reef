@@ -8,11 +8,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
-from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, training_component_factory_for
-from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import ReleaseWeights
+from reef.core.errors import DeployConfigError, RuntimeConfigError
+from reef.core.weight_layout import ReleaseFormat, ReleaseWeights
+from reef.execution.executor.arguments import normalize_native_options
+from reef.train.component import training_component_factory_for
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
 NO_INFERENCE_BACKEND = "none"

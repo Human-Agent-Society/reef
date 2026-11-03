@@ -312,3 +312,14 @@ class ProcessScope(Execution):
 
 
 CURRENT_PROCESS_SCOPE: ContextVar[ProcessScope | None] = ContextVar("job_process_scope", default=None)
+
+
+def http_readiness_command(python: str, endpoint: str) -> list[str]:
+    """Check HTTP readiness without a shell or an optional HTTP client."""
+    return [
+        python,
+        "-c",
+        "import sys, urllib.request; "
+        "urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1], timeout=5).close()",
+        endpoint,
+    ]

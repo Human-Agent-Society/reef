@@ -1,0 +1,523 @@
+from __future__ import annotations
+
+import multiprocessing
+import os
+from collections import namedtuple
+from functools import partial
+from multiprocessing.synchronize import Event
+from pathlib import Path
+
+import pytest
+
+from reef.storage import durable_files as durable_io
+from reef.train.slime_backend.reef_adapters import preflight
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
+from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
+from reef.train.slime_backend.reef_adapters.training_job.storage import (
+    CheckpointStorage,
+    CheckpointStorageError,
+    RetentionConfig,
+    critic_checkpoint_due,
+)
+
+Usage = namedtuple("Usage", "total used free")
+
+
+def _logical_bytes(path: Path) -> int:
+    if not path.exists() or path.is_symlink() or path.is_file():
+        return path.lstat().st_size if path.exists() or path.is_symlink() else 0
+    return sum(_logical_bytes(child) for child in path.iterdir())
+
+
+def _write_bytes(path: Path, size: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "data").write_bytes(b"x" * size)
+
+
+def _storage(
+    tmp_path: Path,
+    *,
+    policy: str = "latest",
+    cap: int = 1000,
+    free: int = 1000,
+    min_free: int = 0,
+    lora: bool = False,
+    critic: bool = False,
+    critic_save_interval: int = 1,
+) -> CheckpointStorage:
+    root = tmp_path / "checkpoints"
+    source_hf, source_megatron = tmp_path / "source-hf", tmp_path / "source-megatron"
+    _write_bytes(source_hf, 10)
+    _write_bytes(source_megatron / "iter_0000000", 90)
+    (source_megatron / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
+    return CheckpointStorage(
+        RetentionConfig(policy=policy, max_storage_bytes=cap, min_free_space_bytes=min_free),
+        hf_template=str(root / "hf" / "{rollout_id}"),
+        megatron_root=root / "megatron",
+        source_hf=source_hf,
+        source_megatron=source_megatron,
+        measure=_logical_bytes,
+        disk_usage=lambda path: Usage(1000, 1000 - free, free),
+        lora=lora,
+        critic_root=root / "megatron-critic" if critic else None,
+        critic_save_interval=critic_save_interval,
+    )
+
+
+def enter_storage_lock(root: Path, attempting: Event, entered: Event) -> None:
+    """Open the parent's checkpoint paths in a fresh process and signal lock acquisition."""
+    storage = CheckpointStorage(
+        RetentionConfig(), hf_template=str(root / "hf" / "{rollout_id}"), megatron_root=root / "megatron"
+    )
+    attempting.set()
+    with storage._locked():
+        entered.set()
+
+
+def _complete(storage: CheckpointStorage, rollout_id: int, *, reward=None) -> None:
+    with storage.admit(rollout_id=rollout_id) as plan:
+        assert not plan["blocked"], plan
+        for path, size in zip(storage.pair_paths(rollout_id), (40, 60), strict=True):
+            _write_bytes(path, size)
+        (storage.megatron_root / "latest_checkpointed_iteration.txt").write_text(str(rollout_id), encoding="utf-8")
+        storage.complete(f"job-{rollout_id}", rollout_id, reward=reward)
+
+
+def _completed_storage(tmp_path: Path, rewards, **options) -> CheckpointStorage:
+    storage = _storage(tmp_path, **options)
+    for rollout_id, reward in enumerate(rewards):
+        _complete(storage, rollout_id, reward=reward)
+    return storage
+
+
+@pytest.mark.unit
+def test_complete_requires_the_critic_asset_only_on_its_save_commits(tmp_path: Path) -> None:
+    # A critic checkpointed every second commit leaves nothing under its root
+    # on the commits in between; completing those must not demand a critic
+    # asset, while a commit on the cadence still refuses to record a durable
+    # checkpoint without one.
+    storage = _storage(tmp_path, critic=True, critic_save_interval=2)
+    assert storage.critic_root is not None
+    critic_root = storage.critic_root
+
+    assert storage.required_assets(0) == storage.pair_paths(0)
+    assert storage.asset_paths(0) == (*storage.pair_paths(0), critic_root / "iter_0000000")
+    _complete(storage, 0, reward=1.0)
+
+    with storage.admit(rollout_id=1) as plan:
+        assert not plan["blocked"], plan
+        for path, size in zip(storage.pair_paths(1), (40, 60), strict=True):
+            _write_bytes(path, size)
+        (storage.megatron_root / "latest_checkpointed_iteration.txt").write_text("1", encoding="utf-8")
+        with pytest.raises(CheckpointStorageError, match="missing or unsafe"):
+            storage.complete("job-1", 1, reward=1.0)
+        _write_bytes(critic_root / "iter_0000001", 30)
+        (critic_root / "latest_checkpointed_iteration.txt").write_text("1", encoding="utf-8")
+        storage.complete("job-1", 1, reward=1.0)
+
+    assert storage.required_assets(1) == (*storage.pair_paths(1), critic_root / "iter_0000001")
+
+
+@pytest.mark.unit
+def test_critic_checkpoint_cadence_counts_from_the_first_commit(tmp_path: Path) -> None:
+    assert all(critic_checkpoint_due(rollout_id, 1) for rollout_id in range(4))
+    assert [rollout_id for rollout_id in range(17) if critic_checkpoint_due(rollout_id, 8)] == [7, 15]
+    with pytest.raises(ValueError, match="critic_save_interval"):
+        _storage(tmp_path, critic=True, critic_save_interval=0)
+
+
+@pytest.mark.unit
+class TestCheckpointStorage:
+    def test_retention_config_validates_fraction_budget(self) -> None:
+        assert RetentionConfig().capacity_bytes(1000) == 800
+        assert RetentionConfig().free_floor_bytes(1000) == 100
+        assert RetentionConfig(max_storage_bytes=950).capacity_bytes(1000) == 900
+        with pytest.raises(ValueError, match="must not exceed"):
+            RetentionConfig(max_storage_fraction=0.9, min_free_space_fraction=0.2)
+
+    def test_admission_blocks_when_one_estimated_pair_cannot_fit(self, tmp_path: Path) -> None:
+        assert _storage(tmp_path, cap=99).validate_capacity()["blocked"]
+        assert _storage(tmp_path, free=199, min_free=100).validate_capacity()["blocked"]
+        assert not _storage(tmp_path, cap=150).validate_capacity()["blocked"]
+
+    def test_initial_estimate_includes_adam_checkpoint_state(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        _write_bytes(storage._source_megatron_checkpoint, 10)
+        assert storage.validate_capacity()["reservation_bytes"] == 80
+
+    def test_lora_estimate_reserves_base_weights_plus_adapter_margin(self, tmp_path: Path) -> None:
+        full = _storage(tmp_path).validate_capacity()["reservation_bytes"]
+        lora = _storage(tmp_path, lora=True).validate_capacity()["reservation_bytes"]
+        assert lora == int(1.2 * 90)  # 1.2 x max(hf, megatron source)
+        assert lora > 90  # still covers the base weights themselves
+        assert full == 100  # unchanged full-training estimate
+
+    def test_lora_estimate_does_not_double_count_the_base_model(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path, lora=True)
+        _write_bytes(storage._source_megatron_checkpoint, 10)
+        assert storage.validate_capacity()["reservation_bytes"] == int(1.2 * 10)
+
+    def test_cold_start_estimates_from_the_hf_source_alone(self, tmp_path: Path) -> None:
+        # The first boot of a fresh deployment has saved nothing yet, and
+        # Slime clears --load when the load root holds no checkpoint, so the
+        # store is built with source_megatron unset. The HF source is enough:
+        # refusing here blocked every cold start of a training stack.
+        root, source_hf = tmp_path / "checkpoints", tmp_path / "source-hf"
+        _write_bytes(source_hf, 10)
+        storage = CheckpointStorage(
+            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            hf_template=str(root / "hf" / "{rollout_id}"),
+            megatron_root=root / "megatron",
+            source_hf=source_hf,
+            source_megatron=None,
+            measure=_logical_bytes,
+            disk_usage=lambda path: Usage(1000, 0, 1000),
+        )
+
+        assert storage.validate_capacity()["reservation_bytes"] == 80
+
+    @pytest.mark.parametrize(("saves_optimizer", "reservation"), [(True, 80), (False, 20)])
+    def test_cold_start_reserves_the_optimizer_only_when_it_is_saved(
+        self, tmp_path: Path, saves_optimizer: bool, reservation: int
+    ) -> None:
+        # With --no-save-optim a pair is the HF export and the Megatron model. An
+        # estimate that included the optimizer blocked a 27B model on a 500 GB disk.
+        root, source_hf = tmp_path / "checkpoints", tmp_path / "source-hf"
+        _write_bytes(source_hf, 10)
+        storage = CheckpointStorage(
+            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            hf_template=str(root / "hf" / "{rollout_id}"),
+            megatron_root=root / "megatron",
+            source_hf=source_hf,
+            measure=_logical_bytes,
+            disk_usage=lambda path: Usage(1000, 0, 1000),
+            saves_optimizer=saves_optimizer,
+        )
+
+        assert storage.validate_capacity()["reservation_bytes"] == reservation
+
+    def test_megatron_source_alone_stands_in_for_the_pair(self, tmp_path: Path) -> None:
+        root, source_megatron = tmp_path / "checkpoints", tmp_path / "source-megatron"
+        _write_bytes(source_megatron / "iter_0000000", 90)
+        (source_megatron / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
+        storage = CheckpointStorage(
+            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            hf_template=str(root / "hf" / "{rollout_id}"),
+            megatron_root=root / "megatron",
+            source_hf=None,
+            source_megatron=source_megatron,
+            measure=_logical_bytes,
+            disk_usage=lambda path: Usage(1000, 0, 1000),
+        )
+
+        assert storage.validate_capacity()["reservation_bytes"] == 90
+
+    def test_capacity_refuses_only_when_no_source_can_size_a_pair(self, tmp_path: Path) -> None:
+        root = tmp_path / "checkpoints"
+        storage = CheckpointStorage(
+            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            hf_template=str(root / "hf" / "{rollout_id}"),
+            megatron_root=root / "megatron",
+            source_hf=None,
+            source_megatron=None,
+            measure=_logical_bytes,
+            disk_usage=lambda path: Usage(1000, 0, 1000),
+        )
+
+        with pytest.raises(ValueError, match="cannot estimate one paired checkpoint"):
+            storage.validate_capacity()
+
+    def test_source_measurement_follows_nested_symlinks(self, tmp_path: Path) -> None:
+        target = tmp_path / "weights"
+        target.write_bytes(b"x" * 4096)
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        assert checkpoint_storage._allocated_bytes(link, follow_symlinks=True) == checkpoint_storage._allocated_bytes(
+            target
+        )
+
+    @pytest.mark.parametrize(
+        ("policy", "metrics", "deleted"),
+        [
+            ("latest", [9.0, 1.0, 5.0], 0),
+            ("best_reward", [9.0, 1.0, 5.0], 1),
+            ("best_reward", [None, 0.2, 0.1], 0),
+        ],
+    )
+    def test_policy_ranks_pairs_but_always_protects_latest(self, tmp_path: Path, policy, metrics, deleted) -> None:
+        _completed_storage(tmp_path, metrics)
+
+        constrained = _storage(tmp_path, policy=policy, cap=300)
+        plan = constrained.validate_capacity(active_rollouts={2})
+
+        assert not plan["blocked"]
+        assert plan["delete"] == [deleted]
+
+    @pytest.mark.parametrize("protection", ["tracker", "source"])
+    def test_recovery_pair_is_never_eligible_for_deletion(self, tmp_path: Path, protection: str) -> None:
+        storage = _completed_storage(tmp_path, (None,) * 3)
+        constrained = _storage(tmp_path, cap=300)
+        if protection == "tracker":
+            (storage.megatron_root / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
+        else:
+            constrained.source_hf, constrained.source_megatron = storage.pair_paths(0)
+
+        plan = constrained.validate_capacity(active_rollouts={2})
+
+        assert plan["delete"] == [1]
+
+    def test_tracker_symlink_target_is_protected(self, tmp_path: Path) -> None:
+        storage = _completed_storage(tmp_path, (None,) * 3)
+        source = tmp_path / "tracker-source"
+        source.mkdir()
+        (source / "iter_0000000").symlink_to(storage.pair_paths(0)[1], target_is_directory=True)
+        (source / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
+        constrained = _storage(tmp_path, cap=300)
+        constrained.source_megatron = source.resolve()
+
+        assert constrained.validate_capacity(active_rollouts={2})["delete"] == [1]
+
+    def test_free_space_floor_reclaims_an_eligible_pair(self, tmp_path: Path) -> None:
+        _completed_storage(tmp_path, (None,) * 2)
+
+        constrained = _storage(tmp_path, free=150, min_free=100)
+        plan = constrained.validate_capacity(active_rollouts={1})
+
+        assert not plan["blocked"]
+        assert plan["delete"] == [0]
+
+    def test_admission_finishes_followup_reclamation(self, tmp_path: Path) -> None:
+        storage = _completed_storage(tmp_path, (None,) * 3, min_free=100)
+        frees = iter((150, 150, 250))
+
+        def disk_usage(_path: Path) -> Usage:
+            free = next(frees)
+            return Usage(1000, 1000 - free, free)
+
+        storage._disk_usage = disk_usage
+        with storage.admit(rollout_id=3, active_rollouts={2}) as plan:
+            assert not plan["blocked"] and plan["delete"] == []
+        assert [int(record["rollout_id"]) for record in storage._records()[0]] == [2]
+
+    def test_cataloged_pairs_are_not_recursively_remeasured(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        _complete(storage, 0)
+        storage._measure = lambda path: pytest.fail(f"unexpected measurement: {path}")
+        assert not storage.validate_capacity(active_rollouts={0})["blocked"]
+
+    def test_atomic_json_temp_cannot_clobber_symlink(self, tmp_path: Path) -> None:
+        path, victim = tmp_path / "state.json", tmp_path / "victim"
+        victim.write_text("safe", encoding="utf-8")
+        predictable = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        predictable.symlink_to(victim)
+        durable_io.write_json(path, {"ok": True})
+        assert victim.read_text(encoding="utf-8") == "safe"
+        assert durable_io.read_json(path) == {"ok": True}
+
+    def test_tracker_temp_from_crash_is_ignored(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        _complete(storage, 0)
+        (storage.megatron_root / ".latest_checkpointed_iteration.txt.crash.tmp").write_text("0", encoding="utf-8")
+        assert not _storage(tmp_path).validate_capacity(active_rollouts={0})["blocked"]
+
+    def test_symlinked_checkpoint_root_is_rejected(self, tmp_path: Path) -> None:
+        root, outside = tmp_path / "checkpoints", tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+        (root / "hf").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="under one checkpoint root"):
+            CheckpointStorage(
+                RetentionConfig(),
+                hf_template=str(root / "hf" / "{rollout_id}"),
+                megatron_root=root / "megatron",
+            )
+
+    def test_symlinked_storage_lock_is_rejected(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        durable_io.mkdir_durable(storage.meta_root)
+        storage.lock_path.symlink_to(tmp_path / "victim")
+        with pytest.raises(OSError):
+            storage.validate_capacity()
+
+    def test_storage_lock_serializes_processes(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        # Pytest workers have background threads; fork can inherit their locked synchronization state.
+        context = multiprocessing.get_context("spawn")
+        attempting, entered = (context.Event() for _ in range(2))
+        process = context.Process(target=enter_storage_lock, args=(storage.root, attempting, entered))
+        try:
+            with storage._locked():
+                process.start()
+                assert attempting.wait(30)
+                assert not entered.wait(0.1)
+            assert entered.wait(30)
+            process.join(30)
+            assert process.exitcode == 0
+        finally:
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
+
+    def test_unknown_and_symlinked_entries_are_protected_and_never_deleted(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        _complete(storage, 0)
+        unknown = storage.hf_root / "operator-copy"
+        _write_bytes(unknown, 20)
+        target = tmp_path / "outside"
+        _write_bytes(target, 30)
+        symlink = storage.megatron_root / "iter_0000009"
+        symlink.symlink_to(target, target_is_directory=True)
+        orphan = storage.hf_root / ".reef-delete-4-unowned"
+        _write_bytes(orphan, 10)
+
+        plan = _storage(tmp_path, cap=500).validate_capacity(active_rollouts={0})
+
+        assert plan["blocked"]
+        assert all(name in " ".join(plan["reasons"]) for name in (unknown.name, symlink.name, orphan.name))
+        assert unknown.is_dir() and symlink.is_symlink() and target.is_dir()
+        hf_target, _ = storage.pair_paths(1)
+        hf_target.symlink_to(target, target_is_directory=True)
+        with (
+            pytest.raises(RuntimeError, match="target already exists"),
+            storage.admit(rollout_id=1),
+        ):
+            pass
+
+    def test_protected_pair_blocks_before_any_new_checkpoint_can_fit(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        _complete(storage, 0)
+
+        with _storage(tmp_path, cap=150).admit(rollout_id=1, active_rollouts={0}) as plan:
+            assert plan["blocked"]
+            assert "protected checkpoints" in " ".join(plan["reasons"])
+
+    def test_oversized_completed_pair_stays_protected_and_blocks_later_jobs(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path, cap=250)
+        with storage.admit(rollout_id=0) as plan:
+            assert not plan["blocked"]
+            hf, megatron = storage.pair_paths(0)
+            _write_bytes(hf, 150)
+            _write_bytes(megatron, 150)
+            storage.complete("large", 0, reward=1.0)
+
+        plan = storage.validate_capacity(active_rollouts={0})
+
+        assert plan["blocked"]
+        assert plan["delete"] == []
+
+    @pytest.mark.parametrize("fault", ["rename", "remove"])
+    def test_deletion_fault_is_reconciled_on_restart(self, tmp_path: Path, monkeypatch, fault: str) -> None:
+        _completed_storage(tmp_path, (0.0, 1.0))
+        crashing = _storage(tmp_path, cap=250)
+        hf, megatron = crashing.pair_paths(0)
+
+        if fault == "rename":
+            replace = checkpoint_storage.os.replace
+
+            def fail(source, target) -> None:
+                if Path(source) == megatron:
+                    raise OSError("crash during deletion")
+                replace(source, target)
+
+            monkeypatch.setattr(checkpoint_storage.os, "replace", fail)
+        else:
+            monkeypatch.setattr(
+                checkpoint_storage.shutil,
+                "rmtree",
+                lambda path: (_ for _ in ()).throw(OSError("crash during deletion")),
+            )
+        with (
+            pytest.raises(OSError, match="crash during deletion"),
+            crashing.admit(rollout_id=2, active_rollouts={1}),
+        ):
+            pass
+
+        record = checkpoint_storage.read_json(crashing._record_path(0))
+        tombstone = crashing._tombstone_path(hf, 0, record["job_id"])
+        assert record["status"] == "DELETING"
+        assert tombstone.exists()
+        assert fault != "rename" or megatron.exists()
+
+        monkeypatch.undo()
+        recovered = _storage(tmp_path, cap=250)
+        plan = recovered.validate_capacity(active_rollouts={1})
+        assert not recovered._record_path(0).exists()
+        assert not tombstone.exists()
+        assert not megatron.exists()
+        assert not plan["blocked"]
+
+    def test_reclamation_never_touches_unowned_sibling_storage(self, tmp_path: Path) -> None:
+        storage = _completed_storage(tmp_path, (None,) * 2)
+        artifacts = storage.root / "artifacts.git"
+        _write_bytes(artifacts, 50)
+
+        constrained = _storage(tmp_path, cap=250)
+        with constrained.admit(rollout_id=2, active_rollouts={1}) as plan:
+            assert not plan["blocked"]
+            assert not constrained._record_path(0).exists()
+            assert artifacts.is_dir()
+
+    def test_corrupt_catalog_fails_closed(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        storage.records_root.mkdir(parents=True)
+        (storage.records_root / "broken.json").write_text("{", encoding="utf-8")
+
+        plan = storage.validate_capacity()
+
+        assert plan["blocked"]
+        assert "invalid checkpoint catalog" in " ".join(plan["reasons"])
+
+
+def slime_args(tmp_path: Path, **values) -> SlimeArguments:
+    root = tmp_path / "checkpoints"
+    return SlimeArguments(
+        **{
+            "save_hf": str(root / "hf" / "{rollout_id}"),
+            "save": str(root / "megatron"),
+            "use_critic": False,
+            "critic_save": None,
+            "hf_checkpoint": None,
+            "load": None,
+            "megatron_lora_rank": 0,
+            "critic_save_interval": 1,
+            **values,
+        }
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("free_bytes", [1 << 30, 0])
+def test_preflight_checks_free_space_and_pins_actor_and_critic_paths(
+    tmp_path: Path, monkeypatch, free_bytes: int
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        preflight,
+        "CheckpointStorage",
+        partial(CheckpointStorage, disk_usage=lambda path: Usage(1 << 30, (1 << 30) - free_bytes, free_bytes)),
+    )
+    _write_bytes(tmp_path / "source-hf", 10)
+    args = slime_args(
+        tmp_path, save="checkpoints/megatron", use_critic=True, hf_checkpoint=str(tmp_path / "source-hf")
+    )
+    if free_bytes == 0:
+        with pytest.raises(RuntimeError, match="filesystem free-space floor"):
+            prepare_checkpoint_storage(args, RetentionConfig())
+        return
+    storage = prepare_checkpoint_storage(args, RetentionConfig())
+    assert args.save == str(storage.megatron_root) == str(tmp_path / "checkpoints" / "megatron")
+    assert args.save_hf == storage.hf_template
+    # A critic without --critic-save keeps its weights beside the policy's, so a restart resumes them.
+    assert args.critic_save == str(storage.critic_root) == f"{args.save}-critic"
+
+
+@pytest.mark.unit
+def test_preflight_refuses_a_storage_that_cannot_hold_the_next_checkpoint(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    _complete(storage, 0)
+    unknown = storage.hf_root / "operator-copy"
+    _write_bytes(unknown, 20)
+    args = slime_args(tmp_path, save_hf=storage.hf_template, save=str(storage.megatron_root))
+    with pytest.raises(RuntimeError, match=r"checkpoint storage preflight blocked Slime's start: .*operator-copy"):
+        prepare_checkpoint_storage(args, RetentionConfig())

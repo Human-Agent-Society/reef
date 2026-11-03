@@ -14,11 +14,12 @@ import yaml
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.core.config import config_arguments, config_option, parse_config_values
+from reef.core.errors import RuntimeConfigError
+from reef.execution.executor.config import executor_settings
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, config_field
 from reef.recipe.config_fields import resolve_config_field_values
-from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, RuntimeRegistry
-from reef.runtime.executor.config import executor_settings
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
@@ -312,7 +313,9 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
     ids=["tinker", "remote_serving"],
 )
 def test_training_and_serving_runtimes_share_typed_fields_without_allocating_resources(runtime_type, required):
-    from reef.runtime.deployment import ConfiguredFactory, runtime_factory_for, training_component_factory_for
+    from reef.core.config import ConfiguredFactory
+    from reef.inference.registry import runtime_factory_for
+    from reef.train.component import training_component_factory_for
 
     factory: ConfiguredFactory | None = (
         training_component_factory_for(runtime_type) if ":" in runtime_type else runtime_factory_for(runtime_type)

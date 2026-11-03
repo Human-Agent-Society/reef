@@ -12,10 +12,10 @@ import bisect
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, StepScheduling, schedule_job_data
 from reef.train.algos.signals import PreparedJob
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.score_centering import sampler_topk_columns
 from reef.train.types import JobData, trajectories

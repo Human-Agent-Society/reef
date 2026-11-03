@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from reef.dispatcher import Dispatcher
-from reef.runtime.serving import AdapterServingRuntime
+from reef.inference.serving import AdapterServingRuntime
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping

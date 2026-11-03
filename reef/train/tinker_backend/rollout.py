@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.interfaces import UpstreamStatusError
+from reef.core.errors import UpstreamStatusError
 from reef.tinker.sampling import TinkerSampler, sample_chat
 from reef.train.task_rollouts import CHAT_COMPLETIONS_PATH, RolloutChat
 

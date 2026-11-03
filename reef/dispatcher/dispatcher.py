@@ -35,11 +35,10 @@ from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorkers
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, close_runtimes
 from reef.record2sample.service import SamplesWorker, request_selection
-from reef.runtime.deployment import close_runtimes
-from reef.runtime.interfaces import InferenceRuntime
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.factory import ItemStart

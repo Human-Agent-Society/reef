@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reef.runtime.interfaces import UpstreamStatusError
+from reef.core.errors import UpstreamStatusError
 from reef.tinker.service import close_service, tinker_sdk
 
 
