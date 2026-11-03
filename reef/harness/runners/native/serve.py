@@ -43,6 +43,7 @@ from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, LoadEr
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
 from reef.harness.runners.native.graph import GraphError, Run, run_graph, run_loop_module
 from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.mounts import HostMounts
 from reef.harness.runners.native.release_client import (
     ArtifactClient,
     ArtifactClientError,
@@ -52,7 +53,7 @@ from reef.harness.runners.native.release_client import (
 )
 from reef.harness.runners.native.selftools import HostTool, ServeState, self_tools
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_patch
+from reef.harness.tree import HarnessTree, RenderError, TreePatch, validate_patch
 
 SERVE_LOG = "serve.jsonl"
 SOCKET_NAME = "serve.sock"
@@ -343,6 +344,7 @@ class Server(ServeState, ArtifactUpdateListener):
         self.sessions_dir = self.native / "sessions"
         self.mounts_dir = self.native / MOUNTS_DIR
         self.descriptor = get_adapter("native")
+        self.mounts = HostMounts(self.mounts_dir, self.descriptor)
         try:
             self._installed_binding = binding_from(self.native / "models.json")
         except (OSError, ValueError, KeyError) as exc:
@@ -356,14 +358,11 @@ class Server(ServeState, ArtifactUpdateListener):
         self._client = ArtifactClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
         #: The served release's source tree, and the tree the current host runs: the served one, or a trial's.
         self._tree = HarnessTree({})
-        self._live_tree = self._tree
         self._artifact_id: str | None = None
         self._parent_artifact_id: str | None = None
         self._pending: _Pending | None = None
         self._trial: str | None = None
         self._builtin_tools: list[HostTool] = []
-        self._mount_count = 0
-        self._mount_dir: Path | None = None
         self._conversations: dict[str, _Conversation] = {}
         self._current: _Conversation | None = None
         self._deadline = 0.0
@@ -372,7 +371,6 @@ class Server(ServeState, ArtifactUpdateListener):
         self._stopped = threading.Event()
         self._started = False
         self._log: EventLog
-        self._host: NativeHost
         self._proxy: CaptureProxy
         self._watch: HeadWatch
         self._enforcer: BuiltinToolEnforcer
@@ -386,11 +384,11 @@ class Server(ServeState, ArtifactUpdateListener):
 
     @property
     def host(self) -> NativeHost:
-        return self._host
+        return self.mounts.host
 
     def live_tree(self) -> HarnessTree:
         """The tree the current host runs: the served one, or the trial's for the rest of a turn."""
-        return self._live_tree
+        return self.mounts.live_tree
 
     def served_tree(self) -> HarnessTree:
         with self._state_lock:
@@ -460,7 +458,7 @@ class Server(ServeState, ArtifactUpdateListener):
             raise ServeError(str(exc)) from exc
         self.binding = replace(self._installed_binding, base_url=f"http://127.0.0.1:{self._proxy.port}")
         # A crashed process leaves its mounts behind; none of them is current.
-        shutil.rmtree(self.mounts_dir, ignore_errors=True)
+        self.mounts.clear()
         if self.self_tools:
             self._builtin_tools = self_tools(self)
         failure = self._mount(stored, release, parent, source="boot", manifest=manifest)
@@ -507,7 +505,7 @@ class Server(ServeState, ArtifactUpdateListener):
         if hasattr(self, "_watch"):
             self._watch.stop()
         with self._turn_lock:
-            shutil.rmtree(self.mounts_dir, ignore_errors=True)
+            self.mounts.clear()
         if hasattr(self, "_proxy"):
             self._proxy.stop()
         if self._started:
@@ -659,9 +657,7 @@ class Server(ServeState, ArtifactUpdateListener):
         except (RenderError, LoadError, GraphError) as exc:
             self._log.write("harness/mount-failed", {"artifact_id": artifact_id, "source": source, "error": str(exc)})
             return {"error": str(exc)}
-        previous, self._host, self._mount_dir, self._live_tree = self._mount_dir, host, directory, tree
-        if previous is not None:
-            shutil.rmtree(previous, ignore_errors=True)
+        self.mounts.replace(host, directory, tree)
         if source in ("boot", "release"):
             with self._state_lock:
                 self._tree = tree
@@ -687,27 +683,8 @@ class Server(ServeState, ArtifactUpdateListener):
         return None
 
     def build_host(self, tree: HarnessTree) -> tuple[NativeHost, Path]:
-        """``tree`` rendered for the native adapter into a fresh mount directory, and the host its files make.
-
-        The built-in tools join every host; a tree file that takes one of their
-        names fails the load. A failure removes the directory it wrote.
-        """
-        files = render_tree(tree, self.descriptor)
-        self._mount_count += 1
-        directory = self.mounts_dir / str(self._mount_count)
-        shutil.rmtree(directory, ignore_errors=True)
-        try:
-            for relative, text in files.items():
-                path = directory / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text, encoding="utf-8")
-            host = NativeHost.from_root(directory / "native")
-            for tool in self._builtin_tools:
-                host.add_tool(tool)
-        except BaseException:
-            shutil.rmtree(directory, ignore_errors=True)
-            raise
-        return host, directory
+        """Build a candidate host without replacing the current mount."""
+        return self.mounts.build(tree, self._builtin_tools)
 
     def _install(self, tree: HarnessTree, manifest: Mapping[str, Any]) -> None:
         """What a restart boots from: the release's source tree under ``source/`` and the release file naming it."""
@@ -762,7 +739,7 @@ class Server(ServeState, ArtifactUpdateListener):
         if time.monotonic() > self._deadline:
             run.end_turn({"kind": "turn-timeout", "seconds": self.turn_timeout_s}, "budget")
         self._drain_pending()
-        run.host = self._host
+        run.host = self.host
 
     def _conversation(self, session_id: str | None) -> _Conversation:
         with self._state_lock:
@@ -805,10 +782,8 @@ class Server(ServeState, ArtifactUpdateListener):
                 run = self._begin_turn(conversation, prompt, workdir, session)
                 # Read at each turn start: a mount between turns lands on the next one, and a mount inside the turn
                 # (landed by before_step) changes the host under a loop that keeps this module object until the end.
-                module = self._host.loop
-                exit_code = (
-                    run_graph(run, self._host.graph("main")) if module is None else run_loop_module(run, module)
-                )
+                module = self.host.loop
+                exit_code = run_graph(run, self.host.graph("main")) if module is None else run_loop_module(run, module)
                 result = {
                     "exit": exit_code,
                     "session": conversation.id,
@@ -854,8 +829,8 @@ class Server(ServeState, ArtifactUpdateListener):
                 "artifact_id": self._artifact_id,
             }
             loop = _ServeLoop(self, session, self.native, conversation.dir, header, self._enforcer)
-            run = Run(loop, prompt, self.binding, self._host, workdir, session=session)
-            tools, hooks, module = run.tools, run.hooks, self._host.loop
+            run = Run(loop, prompt, self.binding, self.host, workdir, session=session)
+            tools, hooks, module = run.tools, run.hooks, self.host.loop
             session.write(
                 "session",
                 {
@@ -866,9 +841,9 @@ class Server(ServeState, ArtifactUpdateListener):
                     "tools": sorted(tools),
                     "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                     "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
-                    "graph": self._host.graph("main").source,
+                    "graph": self.host.graph("main").source,
                     "loop": None if module is None else module.name,
-                    "agents": sorted(self._host.agents),
+                    "agents": sorted(self.host.agents),
                 },
             )
             conversation.loop, conversation.run = loop, run
@@ -876,7 +851,7 @@ class Server(ServeState, ArtifactUpdateListener):
             loop.session = session
             run.session = session
             # A mount between turns built a new host; the held run reads it from this turn on.
-            run.host = self._host
+            run.host = self.host
             run.turn += 1
             run.prompt = prompt
             run.workdir = workdir
