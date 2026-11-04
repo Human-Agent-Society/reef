@@ -26,6 +26,7 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
@@ -86,6 +87,9 @@ class ReleaseRuntime(InferenceRuntime):
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}")
+
+    def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact:
+        return ServedArtifact(artifact.artifact_id, "http://runtime.invalid", f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"

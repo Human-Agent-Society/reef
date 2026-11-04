@@ -41,6 +41,10 @@ class ArtifactEndpoint:
             raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.revision!r}")
         self.runtime = runtime
         self.artifact = artifact
+        # The agent names the model it was given, often the base model; the runtime picks a sampler by that name, so
+        # each call is sent under the name that reaches this artifact.
+        served = runtime.served_artifact_on_request(artifact)
+        self.model_name = served.model_name if served is not None else None
         self.server: ThreadingHTTPServer | None = None
         self.url = ""
 
@@ -51,8 +55,9 @@ class ArtifactEndpoint:
         except InferenceUnavailable as exc:
             return 503, {"error": {"message": str(exc)}}
         try:
+            call = payload if self.model_name is None else {**payload, "model": self.model_name}
             return 200, await self.runtime.inference_handler.inference(
-                InferenceArtifact.from_artifact(self.artifact), path, payload
+                InferenceArtifact.from_artifact(self.artifact), path, call
             )
         except UpstreamStatusError as exc:
             return exc.status, {"error": {"message": str(exc)}}

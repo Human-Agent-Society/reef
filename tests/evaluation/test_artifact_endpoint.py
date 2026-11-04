@@ -9,6 +9,7 @@ import pytest
 from reef.artifact.artifact import Artifact
 from reef.core.errors import UpstreamStatusError
 from reef.core.evaluation import PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
@@ -20,7 +21,7 @@ class RefusingHandler(InferenceHandler):
     async def inference(self, artifact, path, payload):
         content = payload["messages"][-1]["content"]
         if content == "ok":
-            return {"artifact_id": artifact.artifact_id, "path": path}
+            return {"artifact_id": artifact.artifact_id, "path": path, "model": payload.get("model")}
         if content == "bad":
             raise UpstreamStatusError("the model refused the request", status=422)
         raise ValueError("the sampler returned nothing")
@@ -43,6 +44,9 @@ class Runtime(InferenceRuntime):
     def artifact_model(self, artifact):
         return PolicyModel("base", artifact.ref.revision)
 
+    def served_artifact_on_request(self, artifact):
+        return ServedArtifact(artifact.artifact_id, "http://runtime.invalid", f"sampler-of-{artifact.artifact_id}")
+
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
 
@@ -63,10 +67,11 @@ def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_
     )
     runtime = Runtime(serves_any_release=True)
     with ArtifactEndpoint(runtime, release) as endpoint:
-        chat = {"messages": [{"role": "user", "content": "ok"}]}
+        # The agent names the base model; the call still samples the endpoint's artifact, under its served name.
+        chat = {"model": "base", "messages": [{"role": "user", "content": "ok"}]}
         assert call(endpoint.url, "/v1/chat/completions", chat) == (
             200,
-            {"artifact_id": "artifact:r7", "path": "/v1/chat/completions"},
+            {"artifact_id": "artifact:r7", "path": "/v1/chat/completions", "model": "sampler-of-artifact:r7"},
         )
         assert call(endpoint.url, "/v1/embeddings", chat)[0] == 404
         assert call(endpoint.url, "/v1/chat/completions", [1, 2])[0] == 400
