@@ -836,7 +836,7 @@ class SQLRecordStore(RecordStore):
         """Validate a retry before applying admission rules for new records.
 
         Compacted records retain content hashes, so an already accepted
-        instruction can still be retried after the training mode changes.
+        request can still be retried after the training mode changes.
         This lookup never appends data or changes its receipt.
         """
         encoded, _ = self._encode(item)

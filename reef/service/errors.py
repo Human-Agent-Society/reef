@@ -17,7 +17,6 @@ from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core.errors import (
     CommitPending,
     InferenceUnavailable,
-    ManualBufferRefused,
     ReefError,
     ScenarioCapacityFull,
     ScenarioLimitReached,
@@ -42,7 +41,6 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ScenarioCapacityFull, web.HTTPServiceUnavailable),
     (ArtifactConflict, web.HTTPConflict),
     (CommitPending, web.HTTPConflict),
-    (ManualBufferRefused, web.HTTPConflict),
     (ReleaseNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
     (SampleConflict, web.HTTPConflict),

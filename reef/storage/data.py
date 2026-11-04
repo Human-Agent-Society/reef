@@ -3,7 +3,7 @@
 The data store keeps the data that scenarios train on, once per deployment. An item is content and metadata.
 Its content never changes; its metadata says what the item is, which owner it belongs to, and which scenarios
 use it. The store has create, read, query, update and delete, and each operation reads or writes the items of
-one owner only. Training state, such as train counts and buffers, is not data and stays in the scenario
+one owner only. Training state, such as train counts, is not data and stays in the scenario
 storage.
 
 This module defines the item values, the metadata rules, the ``DataStore`` plugin base and an in-memory store.

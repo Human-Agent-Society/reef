@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Column, LargeBinary, MetaData, Table, cast, func, inspect, select, update
+from sqlalchemy import Column, LargeBinary, MetaData, Table, Text, cast, func, inspect, literal, select, update
 from sqlalchemy.engine import Connection
 
 from reef.core.atif_payloads import call_shape, canonical_json
@@ -144,8 +144,8 @@ def migrate_record_trajectories(connection: Connection, records: Table, nodes: T
     the row keeps the payload's hash. Its ``body_bytes`` counts the new row. Each node goes into the namespace of its
     record's store generation (``storage_id``), or of the database when the table has no such column.
 
-    Training instructions are no longer records (``reef.train.instructions``): the migration deletes the rows of
-    request type ``train``. A commit that consumed one records it in ``metrics["training_request"]``; an instruction
+    Training requests are no longer records (``reef.train.training_requests``): the migration deletes the rows of
+    request type ``train``. A commit that consumed one records it in ``metrics["training_request"]``; a request
     that no commit consumed is gone, and its client files it again.
     """
     columns = {column["name"] for column in inspect(connection).get_columns(records.name, schema=records.schema)}
@@ -154,7 +154,7 @@ def migrate_record_trajectories(connection: Connection, records: Table, nodes: T
     deleted = connection.execute(records.delete().where(records.c.request_type == "train")).rowcount
     if deleted:
         logger.warning(
-            "deleted %d training instruction record(s) of %s: instructions now live in the instructions queue",
+            "deleted %d training request record(s) of %s: requests now live in the training request queue",
             deleted,
             records.fullname,
         )
@@ -330,6 +330,24 @@ def migrate_work_item_columns(connection: Connection, work_items: Table) -> None
         )
 
 
+def migrate_training_request_items(connection: Connection, work_items: Table) -> None:
+    """Move the queued training requests of an older version to their new queue and kind: the queue
+    ``instructions`` becomes ``training_requests``, and the kind ``train_instruction:<scenario>`` becomes
+    ``training_request:<scenario>`` (``reef.train.training_requests``). Items of other queues stay as they are.
+
+    Run in the caller's schema transaction, after ``create_all``.
+    """
+    old = "train_instruction:"
+    connection.execute(
+        update(work_items)
+        .where(work_items.c.queue == "instructions")
+        .values(
+            queue="training_requests",
+            kind=literal("training_request:", Text).concat(func.substr(work_items.c.kind, len(old) + 1)),
+        )
+    )
+
+
 def migrate_uploaded_trajectories(connection: Connection, samples: Table, train_counts: Table, commits: Table) -> None:
     """Move the rows of the old ``uploaded_trajectory`` table into ``samples``, then drop the old table.
 
@@ -497,3 +515,10 @@ def migrate_scenario_settings(connection: Connection, settings: Table) -> None:
     Run in the caller's schema transaction, after ``create_all``. The other settings stay as they are.
     """
     connection.execute(settings.delete().where(settings.c.name == "model_config"))
+
+
+def migrate_manual_buffers(connection: Connection, schema: str | None) -> None:
+    """Drop the old ``manual_buffer`` table: a training request names its samples (RFC #1140), and its queued
+    buffers are lost. Run in the caller's schema transaction. A schema without the table is left unchanged."""
+    if inspect(connection).has_table("manual_buffer", schema=schema):
+        Table("manual_buffer", MetaData(), schema=schema, autoload_with=connection).drop(connection)

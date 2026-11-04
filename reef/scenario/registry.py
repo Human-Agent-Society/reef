@@ -40,7 +40,7 @@ from reef.scenario.factory import ItemStart, ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.served_models import ServedModels
-from reef.train.instructions import InstructionQueue
+from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class ScenarioRegistry:
         lifecycle: ScenarioLifecycle | None = None,
         activates_runtime: bool = True,
         served_models: ServedModels | None = None,
-        instructions: InstructionQueue | None = None,
+        training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._storage = scenario_storage
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -149,7 +149,7 @@ class ScenarioRegistry:
             experiment_tracker=tracker,
             activates_runtime=activates_runtime,
             served_models=served_models,
-            instructions=instructions,
+            training_requests=training_requests,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
@@ -328,7 +328,7 @@ class ScenarioRegistry:
         """Select an existing scenario's mode and store it, so reloads and restarts apply it again."""
         with self.lock_for(scenario):
             current = self.require(scenario)
-            current.set_training_mode(training_mode, fill_manual_buffer=True)
+            current.set_training_mode(training_mode)
             settings = self._storage.read_settings(scenario)
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current

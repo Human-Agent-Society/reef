@@ -542,15 +542,15 @@ def test_an_instance_parked_while_its_cycle_lock_is_held_closes_when_the_holder_
 
 
 @pytest.mark.unit
-def test_a_failed_instruction_of_a_scenario_that_is_gone_starts_no_worker(
+def test_a_failed_request_of_a_scenario_that_is_gone_starts_no_worker(
     monkeypatch: Any, dispatchers: _Dispatchers
 ) -> None:
     """Workers started for a deleted name would record errors that nothing clears."""
     dispatcher, _ = dispatchers.open()
     old = _scenario(dispatcher)
     dispatcher.delete_scenario("agent")
-    monkeypatch.setattr(old.trainer_for(HARNESS), "fail_pending_instruction", lambda error: True)
-    dispatcher.local_workers.fail_instruction(old, RuntimeError("rollout failed"), HARNESS)
+    monkeypatch.setattr(old.trainer_for(HARNESS), "fail_pending_request", lambda error: True)
+    dispatcher.local_workers.fail_request(old, RuntimeError("rollout failed"), HARNESS)
     with dispatcher.local_workers.lock:
         assert dispatcher.local_workers.workers == {}
 
@@ -1639,34 +1639,31 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
 
 
 @pytest.mark.unit
-def test_a_manual_weights_trainer_waits_for_inserted_samples_and_submits_them_with_the_instruction(
+def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """In manual mode a weights stage takes an instruction as a request to train: the job waits until a client
-    inserts samples into the trainer's manual buffer, then carries them and the instruction, and the submission
-    consumes both and empties the buffer."""
+    """In manual mode a weights stage trains only for a training request: the job carries the samples that
+    the request names and the request, and the submission consumes both."""
     training = WeightsJobComponent(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     scenario.set_training_mode("manual")
-    dispatcher.accept_instruction(
-        "agent", {"text": "learn the tool", "session": "session-1", "release_id": "release-1"}, request_id="t1"
-    )
-    assert scenario.prepare_training_step(WEIGHTS) is None
     _append_records(scenario, 1)
     make_samples(scenario)
-    # The samples service stores the step's sample, but no sample joins the manual buffer by itself: the instruction
-    # waits.
+    # The samples service stores the step's sample, but without a training request nothing trains.
     assert scenario.prepare_training_step(WEIGHTS) is None
     trainer = scenario.trainer_for(WEIGHTS)
     held = tuple(trainer.pipeline.held)
     # In a scenario of several components, a sample's ID names its component first.
     assert held == (f"{WEIGHTS}:r1:0",)
-    trainer.change_buffer(held, insert=True)
+    dispatcher.accept_request(
+        "agent",
+        {"text": "learn the tool", "session": "session-1", "release_id": "release-1", "samples": list(held)},
+        request_id="t1",
+    )
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
-    assert trainer.buffer_listing()["samples"] == []
     [job] = _submitted(training, 1)
-    assert job.data.data_id == "agent:instruction:t1"
+    assert job.data.data_id == "agent:request:t1"
     assert job.data.request is not None and job.data.request.id == "t1"
     assert {"t1", "i1", "r1"} <= scenario.store.history()[-1].consumed_ids
     _settle_weights_job(scenario)

@@ -103,7 +103,7 @@ import a concrete integration.
 |                         | harness publication policies, and the ``evaluation``     |                                            |
 |                         | plugin configuration                                     |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sample2job/``    | shaping the samples of the buffer into one job's         | which records train, the training loop,    |
+| ``reef/sample2job/``    | shaping the samples of the next job into one job's       | which records train, the training loop,    |
 |                         | data (``Sample2Job``), and the job size                  | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/inference/``     | inference contracts, serving runtimes and their          | training algorithms and publication        |
@@ -187,7 +187,7 @@ ownership and depends only on that interface and the standard library.
 
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
-payloads and holds the queued instruction carried by a job's data. Request
+payloads and holds the queued request carried by a job's data. Request
 requirements and their release-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with the components a recipe declares (``artifact/components.py``).

@@ -194,7 +194,7 @@ class LocalTrainingWorkers:
             try:
                 result = current.prepare_training_step(component)
             except Exception as exc:
-                self.fail_instruction(current, exc, component)
+                self.fail_request(current, exc, component)
                 self.reload_after_local_failure(current)
                 raise
             if result is None:
@@ -225,12 +225,12 @@ class LocalTrainingWorkers:
                 self.registry.lifecycle.scenario_committed(current)
         return True
 
-    def fail_instruction(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
-        """A failed instruction step consumes the instruction with a skip row on the next step; wake for it."""
-        if not current.trainer_for(component).fail_pending_instruction(error_text(cause)):
+    def fail_request(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
+        """A failed request step consumes the request with a skip row on the next step; wake for it."""
+        if not current.trainer_for(component).fail_pending_request(error_text(cause)):
             return
         with self.registry.lock_instance(current) as state:
-            # Wake the worker, so that the failed instruction settles without a new record.
+            # Wake the worker, so that the failed request settles without a new record.
             # Do not start a worker for an instance that a delete or a reload removed.
             if state is InstanceState.CURRENT:
                 self.wake(current)
@@ -298,10 +298,10 @@ class LocalTrainingWorkers:
                 self.reload(current.name, current)
 
     def reload(self, scenario: str, current: Scenario | None) -> Scenario:
-        """Rebuild durable state, retaining failed instructions that still need skip rows."""
+        """Rebuild durable state, retaining failed requests that still need skip rows."""
         failures = (
             {
-                component_trainer.component: component_trainer.trainer.instruction_failures()
+                component_trainer.component: component_trainer.trainer.request_failures()
                 for component_trainer in current.trainers
             }
             if current is not None
@@ -310,5 +310,5 @@ class LocalTrainingWorkers:
         recovered = self.registry.reload(scenario)
         for component, failed in failures.items():
             if failed:
-                recovered.trainer_for(component).set_instruction_failures(failed)
+                recovered.trainer_for(component).set_request_failures(failed)
         return recovered
