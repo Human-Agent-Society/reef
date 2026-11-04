@@ -406,6 +406,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
             score_centering=self.score_centering,
+            max_sequence_tokens=self._sampler.context_window() if self._sampler is not None else None,
         )
         if prepared.loss is None:
             # The objective skipped the job's data: the job trains nothing and saves no checkpoint.

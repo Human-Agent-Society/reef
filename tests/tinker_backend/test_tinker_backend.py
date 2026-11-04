@@ -598,6 +598,26 @@ def test_a_packed_tinker_step_trains_batch_size_packs(objective):
     assert [len(rows) for rows in step.steps] == [2, 1]
 
 
+def test_a_row_longer_than_the_model_context_leaves_its_step(objective):
+    # Tinker refuses a whole step for one row whose targets exceed the model's context; a long multi-turn rollout can.
+    longer = item(group="long")
+    training = longer.trajectory["extra"]["reef"]["training"]
+    training.update(
+        tokens=[10, 11, 20, 21, 22, 23], loss_mask=[1, 0, 1, 0], rollout_log_probs=[-0.2, -0.4, -0.1, -0.3]
+    )
+    data = JobData("batch", (item(group="short"), longer))
+    method = TrainingMethod(objective.name)
+    step = prepare_tinker_job(
+        data, method, {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None, max_sequence_tokens=4
+    )
+    assert [[row.tokens for row in rows] for rows in step.steps] == [[(10, 11, 20, 21)]]
+    assert step.metrics["too_long_rollouts"] == 1
+    every_row = prepare_tinker_job(
+        data, method, {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None, max_sequence_tokens=2
+    )
+    assert every_row.loss is None and every_row.steps == () and every_row.metrics["too_long_rollouts"] == 2
+
+
 def test_step_size_respects_error_remainder(objective):
     with pytest.raises(ValueError, match="do not form complete optimizer steps of 2"):
         prepare_tinker_job(
