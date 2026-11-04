@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
 from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, MemoryDataStore, NewItem, StoredItem
@@ -75,6 +75,25 @@ class StoredSample:
     def train_count(self, trainer: str) -> int:
         """The number of committed jobs of ``trainer`` (a ``train_counts`` key) that held the sample."""
         return self.train_counts.get(trainer, 0)
+
+
+@dataclass(frozen=True)
+class ListedSample:
+    """What a listing shows of one sample: the values of ``StoredSample`` without its content.
+
+    Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component`` and ``group`` are those of
+    ``StoredSample``, and ``kind`` is the kind of its item.
+
+    Purpose: ``SampleStore.listing`` makes it, and the listing routes read it.
+    """
+
+    sequence: int
+    sample_id: str
+    kind: SampleKind
+    split: SplitName
+    train_counts: Mapping[str, int]
+    component: str | None
+    group: str | None
 
 
 class TrainingState(ABC):
@@ -162,6 +181,32 @@ class SampleStore:
             after_sequence = uses[-1][0]
         return ()
 
+    def listing(self, *, after_sequence: int = 0, limit: int = 256) -> tuple[ListedSample, ...]:
+        """The samples whose use sequence is above ``after_sequence``, in use order, at most ``limit``, without their
+        content: a scenario can hold more trajectories than a listing can read in time."""
+        uses = self.data.scenario_items(
+            self.owner, self.scenario, kinds=SAMPLE_KINDS, after=after_sequence, limit=limit, content=False
+        )
+        counts = self.state.train_counts([item.item_id for _, item in uses])
+        return tuple(self.listed_sample(sequence, item, counts.get(item.item_id, {})) for sequence, item in uses)
+
+    def listed_sample(self, sequence: int, item: StoredItem, train_counts: Mapping[str, int]) -> ListedSample:
+        own = self.own_origin(item)
+        return ListedSample(
+            sequence,
+            item.item_id,
+            cast(SampleKind, item.kind),
+            cast(SplitName, item.scenarios[self.scenario]),
+            train_counts,
+            None if own is None else own["component"],
+            None if own is None else item.metadata.get("group"),
+        )
+
+    def own_origin(self, item: StoredItem) -> Mapping[str, Any] | None:
+        """The origin of ``item`` when a stage of this scenario made it, else None."""
+        origin = item.metadata.get("origin")
+        return origin if isinstance(origin, Mapping) and origin.get("scenario") == self.scenario else None
+
     def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
         """The samples of ``sample_ids`` that the scenario uses, in the order of their items."""
         items = sorted(
@@ -184,8 +229,7 @@ class SampleStore:
         """The sample of ``item``. An item that a stage of this scenario made trains for that stage's trainer, with
         its group, its sample's group and records, and, for a task, its sample's metadata."""
         split = cast(SplitName, item.scenarios[self.scenario])
-        origin = item.metadata.get("origin")
-        own = origin if isinstance(origin, Mapping) and origin.get("scenario") == self.scenario else None
+        own = self.own_origin(item)
         records = () if own is None else tuple(own["records"])
         sample: TrajectorySample | TaskSample
         if item.kind == "trajectory":
@@ -296,6 +340,7 @@ class TrainerSamples:
 __all__ = [
     "CONSUMED_SAMPLE_PREFIX",
     "SAMPLE_KINDS",
+    "ListedSample",
     "MemoryTrainingState",
     "SampleKind",
     "SampleStore",
