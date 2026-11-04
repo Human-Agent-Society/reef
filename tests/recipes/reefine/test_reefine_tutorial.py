@@ -227,7 +227,7 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
         },
         # A refused patch or a skip after three failed steps carries no patch: filed, not answered.
         {"request": "h", "filed": True, "parts": "-", "result": "skipped: the patch changes nothing"},
-        {"request": "i", "filed": True, "parts": "-", "result": "skipped: instruction failed"},
+        {"request": "i", "filed": True, "parts": "-", "result": "skipped: request failed"},
         # Under the floor a row carries passed and failed: met the floor is won, missed is evaluated and lost.
         {"request": "j", "filed": True, "parts": "rules", "result": "selected", "passed": 1, "failed": 0},
         {"request": "k", "filed": True, "parts": "skill", "result": "rejected", "passed": 0, "failed": 1},

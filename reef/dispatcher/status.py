@@ -76,9 +76,8 @@ class TrainingStatus:
         # The stepping trainer's status is read once and reported again in its component block.
         stepping_pipeline_status = stepping_trainer.pipeline_status()
         processor = dict(stepping_pipeline_status)
-        if "buffered_requests" in processor:
-            # The queue's count: the trainer holds the instructions that the last step gave it.
-            processor["pending_instructions"] = current.pending_instructions()
+        if "manual" in stepping_trainer.pipeline.supported_training_modes:
+            processor["pending_requests"] = current.pending_requests()
         block: dict[str, Any] = {
             **current.commit_status,
             # The artifact that answers the scenario's requests now: the one that served_models names.

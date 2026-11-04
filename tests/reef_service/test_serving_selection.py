@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from reef.core.errors import DeployConfigError
+from reef.core.weight_layout import ReleaseFormat
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.runtime.jobs import ReleaseFormat
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.deploy.serving import ENGINES, NONE, TRAINER, serving_mode, serving_runtime_config
 from reef.train.slime_backend.launch import SlimeDeployment

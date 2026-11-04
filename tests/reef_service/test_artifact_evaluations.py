@@ -34,8 +34,8 @@ from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutW
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tasks.rollouts import RolloutRow, TaskLab
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
 from reef.storage.commits import CommitRecord
@@ -433,6 +433,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "effective_activation": {"module": "never", "config": {}},
                 "serving_config": {},
                 "effective_serving_config": {"weights": {}},
+                "job_parameters": {"trajectory": {}, "task": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": rule})

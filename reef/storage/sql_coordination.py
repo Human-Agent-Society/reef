@@ -62,7 +62,7 @@ from reef.core.values import require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.marks import Marks, check_mark_name
-from reef.storage.migrations import migrate_work_item_columns
+from reef.storage.migrations import migrate_training_request_items, migrate_work_item_columns
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
@@ -248,6 +248,7 @@ class CoordinationDatabase(CoordinationResource):
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
         migrate_work_item_columns(connection, self.tables.work_item)
+        migrate_training_request_items(connection, self.tables.work_item)
         present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
         for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
             if sequence not in present:
@@ -999,7 +1000,11 @@ class SQLWorkQueue(WorkQueue):
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             found = connection.execute(waiting).mappings().first()
             if found is not None:
-                return item_from_row(found)
+                queued = item_from_row(found)
+                wanted = moment if available_at is None else available_at
+                if queued.available_at <= wanted:
+                    return queued
+                return self.save(connection, counter, queued, moment, available_at=wanted)
             sequence = counter.next()
             work = NewWork(
                 queue,

@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.interfaces import UpstreamStatusError
-from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.core.errors import UpstreamStatusError
 from reef.tinker.sampling import SampleResult, TinkerSampler, TinkerSDKSampler, sample_chat, split_reasoning
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TinkerCustomLoss, TokenRow

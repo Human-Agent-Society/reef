@@ -72,28 +72,28 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
 
         return accept
 
-    async def accept_instruction(request: web.Request) -> web.Response:
-        """Queue a training instruction (``RequestService.accept_instruction``); it is not a record."""
+    async def accept_request(request: web.Request) -> web.Response:
+        """Queue a training request (``RequestService.accept_request``); it is not a record."""
         payload = await read_object(request)
         request_id = None
         if isinstance(payload, dict) and "agent_record_id" in payload:
-            # A client-supplied ID makes the request retry-safe: an identical resend returns the queued instruction.
+            # A client-supplied ID makes the request retry-safe: an identical resend returns the queued request.
             request_id = payload.pop("agent_record_id")
             if not isinstance(request_id, str) or not request_id.strip():
                 raise ValueError("agent_record_id must be a non-empty string")
-        scenario, instruction_id = await asyncio.to_thread(
-            request_service.accept_instruction, request.headers, payload, request_id=request_id
+        scenario, accepted_id = await asyncio.to_thread(
+            request_service.accept_request, request.headers, payload, request_id=request_id
         )
         # A training request has a page; its link carries a page key in place of the token.
-        page = f"/reef/harness/requests/{quote(instruction_id, safe='')}/page?{page_query(request, scenario)}"
+        page = f"/reef/harness/requests/{quote(accepted_id, safe='')}/page?{page_query(request, scenario)}"
         return web.json_response(
-            {"agent_record_id": instruction_id, "scenario": scenario, "request_type": "train", "page_path": page}
+            {"agent_record_id": accepted_id, "scenario": scenario, "request_type": "train", "page_path": page}
         )
 
     app.router.add_post("/reef/records", import_record)
     app.router.add_post("/reef/records/batch", import_records)
     app.router.add_post("/reef/report", accept_typed(RequestType.REPORT))
-    app.router.add_post("/reef/train", accept_instruction)
+    app.router.add_post("/reef/train", accept_request)
 
 
 __all__ = ["register_record_routes"]

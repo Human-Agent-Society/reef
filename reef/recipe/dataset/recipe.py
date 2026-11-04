@@ -11,9 +11,9 @@ from reef.train.pipeline import PipelineSpec
 
 @dataclass(frozen=True, kw_only=True)
 class DatasetRecipe(WeightTrainingRecipe):
-    """Slime-native training on a prompt dataset: one dataset job per training instruction.
+    """Slime-native training on a prompt dataset: one dataset job per training request.
 
-    The instruction's ``parameters`` (or ``recipe.config.job_parameters``)
+    The request's ``parameters`` (or ``recipe.config.job_parameters``)
     hold ``dataset``: ``{"path": <JSONL>, "epochs": 1}``, and optionally
     ``save_interval`` in rollouts. Configure the rollout, the reward model,
     the advantage estimator and the optimizer in ``training.options``, as for

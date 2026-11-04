@@ -18,7 +18,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.postgres import PostgresRecordStore
 from reef.storage.records import AppendResult, RecordConflict, RecordStore
 from reef.storage.scenario import ScenarioSettings
-from reef.storage.sql_records import RecordTables, SQLRecordStore, sample_record_table, trajectory_node_table
+from reef.storage.sql_records import RecordTables, SQLRecordStore, trajectory_node_table
 from reef.storage.sqlite import SQLiteRecordStore
 
 
@@ -174,7 +174,6 @@ def custom_record_tables(metadata: MetaData) -> RecordTables:
             Column("value_json", Text, nullable=False),
         ),
         trajectory_node_table(metadata, "custom_nodes"),
-        sample_record_table(metadata),
     )
 
 

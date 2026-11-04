@@ -15,9 +15,10 @@ from pathlib import Path
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, HuggingFaceRevisionFiles, read_reference
-from reef.runtime.jobs import ReleaseFormat
-from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
+from reef.core.weight_layout import ReleaseFormat
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerBaseFiles, TinkerJobComponent
 from reef.train.tinker_backend.config import SpindleFullConfig

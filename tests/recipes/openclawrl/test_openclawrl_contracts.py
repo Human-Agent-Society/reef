@@ -23,8 +23,8 @@ from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSetting
 from recipes.openclawrl.turns import TurnJob
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id
-from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TrajectorySample
@@ -321,6 +321,7 @@ class TestOpenclawrlWireRow:
             build_openclawrl_rollout_data(short, short["samples"], spec)
 
 
+@pytest.mark.parametrize("step_spans", [None, [[0, 2]], [[0, 1], [1, 2]]])
 @pytest.mark.parametrize("hint_selection", ["shortest", "token_optimal", "sequence_optimal"])
 @pytest.mark.parametrize("subset_mode", ["student", "overlap", "teacher"])
 def test_topk_objective_executes_every_selection_and_subset_mode(
@@ -328,6 +329,7 @@ def test_topk_objective_executes_every_selection_and_subset_mode(
     topk_objective,
     hint_selection,
     subset_mode,
+    step_spans,
 ) -> None:
     """Exercise all nine public modes through the real differentiable kernel."""
     torch = pytest.importorskip("torch")
@@ -348,15 +350,15 @@ def test_topk_objective_executes_every_selection_and_subset_mode(
     )
     teacher_native_indices = torch.tensor(
         [
-            [[0, 2], [0, 2]],
-            [[0, 1], [1, 2]],
+            [[0, 1], [0, 2]],
+            [[0, 2], [1, 2]],
         ],
         dtype=torch.long,
     )
     teacher_overlap_indices = torch.tensor(
         [
-            [[0, 2], [0, 2]],
-            [[0, 1], [1, 2]],
+            [[0, 1], [0, 2]],
+            [[0, 2], [1, 2]],
         ],
         dtype=torch.long,
     )
@@ -370,7 +372,7 @@ def test_topk_objective_executes_every_selection_and_subset_mode(
         "advantages": [torch.tensor([0.5, -0.25])],
         "topk_indices": [student_indices],
         "topk_log_probs": [student_log_probs],
-        "step_wise_step_token_spans": [[[0, 1], [1, 2]]],
+        "step_wise_step_token_spans": [step_spans],
     }
     if subset_mode == "teacher":
         batch.update(
@@ -428,6 +430,15 @@ def test_topk_objective_executes_every_selection_and_subset_mode(
             "teacher": 2,
         }[subset_mode]
     )
+    if subset_mode == "teacher" or hint_selection == "shortest":
+        expected_candidate_mean, expected_overlap = 0.0, 0.0
+    elif hint_selection == "sequence_optimal" and step_spans != [[0, 1], [1, 2]]:
+        # The whole response ties; argmax selects candidate zero.
+        expected_candidate_mean, expected_overlap = 0.0, 1.5
+    else:
+        expected_candidate_mean, expected_overlap = 0.5, 2.0
+    assert metrics["sel_k_star_mean"].item() == expected_candidate_mean
+    assert metrics["sel_overlap_at_k_star"].item() == expected_overlap
     loss.backward()
     assert logits.grad is not None
     assert torch.isfinite(logits.grad).all()

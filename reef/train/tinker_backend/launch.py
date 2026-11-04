@@ -23,9 +23,9 @@ from typing import Any
 
 from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import TrainingComponentFactory
-from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.jobs import ReleaseFormat, TrainingComponent
+from reef.core.weight_layout import ReleaseFormat
+from reef.execution.executor.arguments import normalize_native_options
+from reef.train.component import TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import EngineWeights, InProcessTrainingDeployment
 from reef.train.tinker_backend.config import SpindleFullConfig, TinkerConfig, TinkerServiceConfig
 

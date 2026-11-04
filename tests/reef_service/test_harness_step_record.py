@@ -32,13 +32,13 @@ from tests.support.harness_steps import (
 
 from reef.evaluation.harness import TaskEvaluationWorker
 from reef.evaluation.harness.runner import TaskRun
+from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.run import TaskRunError, TrajectoryKeepError, run_task
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import RECORD_TEXT_CAP
-from reef.runtime.executor.config import ExecutorSettings
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.records import StepRecord
 from reef.train.harness_backend.state import HarnessState

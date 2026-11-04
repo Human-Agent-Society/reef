@@ -24,10 +24,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import FrameType
 
-from reef.core.job_data import JobData, TaskSample
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.jobs import TrainingJob
-from reef.train.local_jobs import JOB_FILE
+from reef.storage.durable_files import read_json, write_json
+from reef.train.local_jobs import JOB_FILE, submitted_job
 from reef.train.slime_backend.component import (
     DRIVER_FILE,
     DRIVER_RESULT_FILE,
@@ -61,22 +59,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     settings_value = read_json(directory / DRIVER_FILE)
     if submitted is None or settings_value is None:
         raise SystemExit(f"{directory} holds no {JOB_FILE} and {DRIVER_FILE}")
-    job = TrainingJob(
-        directory.name,
-        "slime",
-        submitted["start"],
-        JobData.from_dict(submitted["data"]),
-        submitted["parameters"],
-        scenario=submitted["scenario"],
-    )
+    job = submitted_job(directory.name, "slime", submitted)
     settings = settings_from_json(settings_value)
     # A task job and a dataset job roll out on the serving session's engines; another job trains on the
     # session's GPUs while a session holds them, else on GPUs of its own, without engines.
-    serving = (
-        any(isinstance(item, TaskSample) for item in job.data.samples)
-        or "dataset" in job.parameters
-        or (directory.parent.parent / SERVING_FILE).exists()
-    )
+    serving = job.kind == "task" or "dataset" in job.parameters or (directory.parent.parent / SERVING_FILE).exists()
     if not serving:
         settings = settings_from_json({**settings_value, "arguments": [*settings.arguments, NO_ROLLOUT_ENGINES]})
 

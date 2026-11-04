@@ -22,18 +22,18 @@ from reef.core.served_models import ScenarioModel
 from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import RootSource
 from reef.core.values import JsonValue
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.scenario.releases import ServedBesideArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
-from reef.train.instructions import ScenarioInstructions
+from reef.train.component import TrainingComponent
 from reef.train.trainer import ComponentTrainer, Trainer
+from reef.train.training_requests import ScenarioTrainingRequests
 from reef.train.types import TrainStepResult
 
 #: The keys of a ``Scenario.harness_snapshot_rows`` row that hold private storage locators.
@@ -99,11 +99,11 @@ class Scenario:
         scenario_step: int = 0,
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
-        instructions: ScenarioInstructions | None = None,
+        training_requests: ScenarioTrainingRequests | None = None,
     ) -> None:
-        #: The scenario's training instructions; None for a scenario built without an instructions queue, which takes
-        #: no instruction.
-        self.instructions = instructions
+        #: The scenario's training requests; None for a scenario built without a training request queue, which takes
+        #: no request.
+        self.training_requests = training_requests
         self.operations = OperationMetrics(
             ("ingest/write",),
             counters=(
@@ -299,14 +299,11 @@ class Scenario:
         stepping = tuple(component_trainer for component_trainer in self.trainers if component_trainer.trainer.trains)
         return stepping or self.trainers[:1]
 
-    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
+    def set_training_mode(self, training_mode: str) -> None:
         """Select future job data without waiting for a running backend step.
 
-        ``fill_manual_buffer`` is for a person's switch: a switch from ``auto`` to ``manual`` then starts each
-        trainer's manual buffer from what auto would train next (``TrainingPipeline.set_training_mode``).
-
         Every trainer that runs a step switches or none does: a scenario whose
-        components run in different modes would accept instructions for some
+        components run in different modes would accept requests for some
         and drop them for others. A trainer without a step builds no job data,
         so it has no mode to switch.
         """
@@ -321,7 +318,7 @@ class Scenario:
         if unsupported:
             raise NotImplementedError(f"{', '.join(unsupported)} does not implement training_mode={training_mode!r}")
         for component_trainer in stepping:
-            component_trainer.trainer.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
+            component_trainer.trainer.set_training_mode(training_mode)
 
     def produce_samples(self) -> bool:
         """Do the samples service's step for every trainer: make the samples of the new records
@@ -358,23 +355,23 @@ class Scenario:
                 and serving != self.serving_artifact_id()
             ):
                 return None
-            self.refresh_instructions()
+            self.refresh_requests()
             return trainer.run_once(serving_artifact_id=serving)
 
-    def pending_instructions(self) -> int:
-        """The queued instructions that no trainer's commit consumed yet; 0 for a scenario without instructions."""
-        if self.instructions is None:
+    def pending_requests(self) -> int:
+        """The queued requests that no trainer's commit consumed yet; 0 for a scenario without requests."""
+        if self.training_requests is None:
             return 0
-        ids = [request.id for request in self.instructions.queued()]
+        ids = [request.id for request in self.training_requests.queued()]
         consumed: set[str] = set()
         for component_trainer in self.trainers:
             consumed |= component_trainer.trainer.consumed_among(ids)
         return len(set(ids) - consumed)
 
-    def refresh_instructions(self) -> None:
-        """Give every trainer the queued instructions that no commit consumed (``ScenarioInstructions.give``)."""
-        if self.instructions is not None:
-            self.instructions.give(component_trainer.trainer for component_trainer in self.trainers)
+    def refresh_requests(self) -> None:
+        """Give every trainer the queued requests that no commit consumed (``ScenarioTrainingRequests.give``)."""
+        if self.training_requests is not None:
+            self.training_requests.give(component_trainer.trainer for component_trainer in self.trainers)
 
     def served_component(self) -> str | None:
         """The loaded component, the pulled file component, or the sole component; None when several could serve."""

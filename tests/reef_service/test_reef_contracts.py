@@ -28,13 +28,12 @@ from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import TrainStepResult
-from reef.train.types import JobData
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -304,7 +303,6 @@ def test_recipe_pipeline_has_no_update_algorithm() -> None:
     ).get_or_create_scenario("math")
 
     assert not runtime.trainer.trains
-    assert runtime.trainer.pipeline.output_schema is JobData
 
 
 @pytest.mark.unit
@@ -1214,7 +1212,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
                 )
             )
         with pytest.raises(ValueError, match="training_mode"):
-            dispatcher.accept_instruction("math", {"text": "train"})
+            dispatcher.accept_request("math", {"text": "train"})
         scenario = dispatcher.get_or_create_scenario("math")
 
         def fail_write(item: AgentRecord) -> None:

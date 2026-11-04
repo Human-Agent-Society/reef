@@ -19,6 +19,7 @@ import pytest
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
 
+from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import (
@@ -32,7 +33,6 @@ from reef.harness.tasks.vendor_install import (
     version_probe_env,
 )
 from reef.harness.tree import TreePatch
-from reef.runtime.executor.config import ExecutorSettings
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainStepResult

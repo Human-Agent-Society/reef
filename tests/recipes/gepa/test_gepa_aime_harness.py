@@ -344,7 +344,7 @@ def test_run_files_render_the_served_tree_with_the_transient_binding(load):
 
 
 def stub_backend():
-    from reef.runtime.interfaces import InferenceHandler
+    from reef.inference.interfaces import InferenceHandler
 
     class StubModel(InferenceHandler):
         async def inference(self, artifact, path, payload):

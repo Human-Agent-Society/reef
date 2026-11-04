@@ -13,15 +13,16 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.slime_backend.test_slime_component import Stack, batch_for, parameters
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import finished
 
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample
-from reef.runtime.executor.placement import GpuBundles
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
+from reef.execution.executor.placement import GpuBundles
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.component import TrainingJob
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import rollout_group as rollout_group_module
 from reef.train.slime_backend.component import ROLLOUTS_FILE
@@ -86,7 +87,7 @@ def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the
         "job-0",
         "slime",
         stack.component.base_start,
-        JobData("tasks", (task(tmp_path / "tasks", "add"),)),
+        job_data_ref(JobData("tasks", (task(tmp_path / "tasks", "add"),))),
         {**parameters(TrainingMethod("sft")), "rollout": ROLLOUT},
         scenario="s",
     )
@@ -117,7 +118,7 @@ def test_failed_rollouts_still_release_the_engines(tmp_path, task_stack):
         "job-0",
         "slime",
         stack.component.base_start,
-        JobData("tasks", (task(tmp_path / "tasks", "add"),)),
+        job_data_ref(JobData("tasks", (task(tmp_path / "tasks", "add"),))),
         {**parameters(TrainingMethod("sft")), "rollout": ROLLOUT},
         scenario="s",
     )
@@ -136,14 +137,19 @@ def test_a_task_job_is_checked_at_submit(tmp_path, task_stack):
     method = parameters(TrainingMethod("sft"))
     for items, job_parameters, message in (
         ((add,), method, "needs the rollout parameter"),
-        ((add, *batch_for(0).samples), {**method, "rollout": ROLLOUT}, "either trajectories or tasks"),
+        ((add, *batch_for(0).samples), {**method, "rollout": ROLLOUT}, "both trajectories and tasks"),
         ((add, task(tmp_path / "b", "add")), {**method, "rollout": ROLLOUT}, "distinct names"),
         ((add,), {**method, "rollout": {"rollouts_per_task": 1}}, "rollouts_per_task must be an int of at least 2"),
     ):
         with pytest.raises(ValueError, match=message):
             stack.component.submit(
                 TrainingJob(
-                    "j", "slime", stack.component.base_start, JobData("d", items), job_parameters, scenario="s"
+                    "j",
+                    "slime",
+                    stack.component.base_start,
+                    job_data_ref(JobData("d", items)),
+                    job_parameters,
+                    scenario="s",
                 )
             )
     assert events == []
@@ -159,7 +165,7 @@ def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path, task_
             "j",
             "slime",
             stack.component.base_start,
-            JobData("d", (add,)),
+            job_data_ref(JobData("d", (add,))),
             {**parameters(TrainingMethod("task_group")), "rollout": ROLLOUT},
             scenario="s",
         )
@@ -180,7 +186,7 @@ def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path, task_
                     "j",
                     "slime",
                     stack.component.base_start,
-                    JobData("d", (add,)),
+                    job_data_ref(JobData("d", (add,))),
                     {**parameters(TrainingMethod("elsewhere")), "rollout": ROLLOUT},
                     scenario="s",
                 )

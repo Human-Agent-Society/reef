@@ -11,11 +11,11 @@ generator's method:
   ``TaskGenerationRequest``, is the generator service's
   (``reef.record2sample.generator.inputs``).
 - ``processor``: the two stages. ``GeneratedTaskSamples`` holds the source
-  sessions, starts each task-generation round when it is due, runs the rounds
-  (generate, validate, send the results back), and hands the saved train tasks
+  sessions, starts each task-generation round when it is due, and hands the saved train tasks
   to the sample store; and
-  ``GeneratedTaskJobData`` makes task jobs of the buffer's tasks, which the
-  training component rolls out on its own sampler.
+  ``GeneratedTaskJobData`` makes task jobs of the generated tasks, which the
+  training component rolls out on its own sampler. ``GenerationRunner`` owns
+  generation, validation, task publication and result delivery on the stage's worker.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
 - ``objective``: group relative advantages per task group on the

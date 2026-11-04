@@ -3,8 +3,8 @@
 Requests go to the component, which forwards them to its engines. The
 control plane controls the component itself and serves published releases
 (kind ``remote_serving``): each scenario's adapter
-(``reef.runtime.serving.AdapterServingRuntime``) or one scenario's full
-weights (``reef.runtime.serving.FullWeightServingRuntime``), as the training
+(``reef.inference.serving.AdapterServingRuntime``) or one scenario's full
+weights (``reef.inference.serving.FullWeightServingRuntime``), as the training
 component's ``ReleaseFormat`` says. The runtime builds the engines' input from
 the deployment's ``inference`` settings and that format; no training backend
 takes part.
@@ -17,21 +17,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.config import config_metadata, config_option
+from reef.core.errors import RuntimeConfigError
+from reef.core.weight_layout import ReleaseFormat, ReleaseWeights
 from reef.inference.http import ProviderRequestHeaders
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.inference.registry import RuntimeFactory
 from reef.inference.remote.config import RemoteInferenceSettings
 from reef.inference.remote.service import RemoteInferenceService
+from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime, OpenedEngines, ServingEngines
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.inference.vllm.chat import VLLMInferenceHandler
-from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
-from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import (
-    AdapterServingRuntime,
-    FullWeightServingRuntime,
-    OpenedEngines,
-    ReleaseWeights,
-    ServingEngines,
-)
 
 #: The request dialect of each built-in engine the component can run.
 ENGINE_HANDLERS: dict[str, type[InferenceHandler]] = {

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from reef.runtime.jobs import JobStatus, TrainingComponent
+from reef.train.component import JobStatus, TrainingComponent
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig

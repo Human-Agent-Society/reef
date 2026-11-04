@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from tests.support._trajectories import policy_trajectory, recorded_trajectory
+from tests.support.samples import made_task
 
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
@@ -18,9 +19,10 @@ from reef.core.trajectories import (
     source_record_id,
     trajectory_reward,
 )
-from reef.runtime.interfaces import InferenceStream, TrainingMethod
+from reef.inference.interfaces import InferenceStream
 from reef.service.streaming import stream_record
 from reef.train.algos.schedule import StepScheduling
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
 
@@ -231,7 +233,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
         def make_sample(self, context):
             source = context.inferences[0]
             return (
-                TaskSample(Path(source.payload["task_path"]))
+                made_task(source.payload["task_path"])
                 if "task_path" in source.payload
                 else make_trajectory(context.inferences)
             )
@@ -272,10 +274,10 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
     batch = processor.build_job_data(1)
     assert processor.build_job_data(1) is batch
     assert [type(sample) for sample in batch.samples] == [TrajectorySample]
-    assert processor.acknowledge(batch.data_id) == {"sample:report-0:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:mixed.report-0:0"}
     batch = processor.build_job_data(1)
     assert [type(sample) for sample in batch.samples] == [TaskSample]
-    assert processor.acknowledge(batch.data_id) == {"sample:report-1:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:mixed.report-1:0"}
     assert not processor.ready(1)
 
 
