@@ -26,10 +26,11 @@ built, and only its missing pure-Python dependencies follow, under the base's
 constraints. The one package the layer moves is `openai`, to 2.25 or newer:
 vLLM's OpenAI server imports response types that SGLang's declared 2.6.1
 lacks, and SGLang serves with the installed version. Every other package that
-vLLM declares at an exact version stays at the base's version, and `pip check`
-lists each mismatch next to the base's own: flashinfer (vLLM names 0.6.18, the
-image has the 0.7 line for SGLang's attention fix), fastapi, outlines_core,
-llguidance, opencv-python-headless and a few more. Chat completions on dense
+vLLM declares at an exact version stays at the version the image already has,
+or at the one its unpinned install picked, and `pip check` lists each mismatch
+next to the base's own: flashinfer (vLLM names 0.6.18, the image has the 0.7
+line for SGLang's attention fix), fastapi, outlines_core, llguidance,
+opencv-python-headless, nvtx and a few more. Chat completions on dense
 models are verified with these versions; vLLM's structured output and image
 inputs are not. Expect a few `Failed to import Triton kernels` lines at a vLLM
 engine start: Triton 3.7 renamed the MXFP4 MoE module vLLM 0.29 imports, and
