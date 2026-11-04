@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 
 import pytest
+from tests.support.job_data import job_data_ref
 from tests.tinker_backend.test_spindle_full import BASE, MODEL, RELEASES, SPINDLE, Exporter, SpindleClient
 
 from reef.core.errors import DeployConfigError
@@ -282,7 +283,7 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
                 "job-0",
                 component.name,
                 component.base_start,
-                JobData("d", (TaskSample(task, metadata={"task": {"name": "add"}}),)),
+                job_data_ref(JobData("d", (TaskSample(task, metadata={"task": {"name": "add"}}),))),
                 parameters,
                 scenario="s",
             )

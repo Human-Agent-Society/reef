@@ -26,7 +26,6 @@ from reef.core.errors import (
 from reef.service.data import NoDataStore
 from reef.storage.data import ItemConflict, ItemNotFound
 from reef.storage.records import RecordConflict
-from reef.storage.samples import SampleConflict
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +42,6 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (CommitPending, web.HTTPConflict),
     (ReleaseNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
-    (SampleConflict, web.HTTPConflict),
     (InferenceUnavailable, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),
     (ReefError, web.HTTPBadRequest),

@@ -25,14 +25,12 @@ from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
-    migrate_generated_task_marks,
-    migrate_imported_tasks,
     migrate_manual_buffers,
+    migrate_published_tasks,
     migrate_record_storage,
     migrate_record_trajectories,
-    migrate_sample_columns,
     migrate_scenario_settings,
-    migrate_uploaded_trajectories,
+    migrate_training_samples,
 )
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -43,10 +41,9 @@ from reef.storage.sql_records import (
     ScopedTable,
     SQLRecordRetention,
     SQLRecordStore,
-    sample_record_table,
     trajectory_node_table,
 )
-from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
+from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
@@ -74,7 +71,6 @@ _AGENT_RECORD = Table(
     sqlite_autoincrement=True,
 )
 _RECORD_NODE = trajectory_node_table(_METADATA, "record_node")
-_SAMPLE_RECORD = sample_record_table(_METADATA)
 _CONSUMED_RECORD = Table(
     "consumed_agent_record",
     _METADATA,
@@ -116,8 +112,8 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
-SAMPLE_TABLE = ScopedTable(sample_table(_METADATA))
 SAMPLE_TRAIN_COUNT_TABLE = ScopedTable(sample_train_count_table(_METADATA))
+STAGE_RECORD_TABLE = ScopedTable(stage_record_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
@@ -129,7 +125,6 @@ _TABLES = RecordTables(
     RECORD_EVICTION,
     _SCENARIO_SETTING,
     _RECORD_NODE,
-    _SAMPLE_RECORD,
 )
 
 
@@ -253,20 +248,10 @@ class SQLiteRecordStore(SQLRecordStore):
                 _METADATA.create_all(self._connection)
                 migrate_record_storage(self._connection, _AGENT_RECORD, CONSUMPTION_RECEIPTS)
                 migrate_record_trajectories(self._connection, _AGENT_RECORD, _RECORD_NODE)
-                migrate_sample_columns(self._connection, SAMPLE_TABLE.table)
-                migrate_uploaded_trajectories(
-                    self._connection, SAMPLE_TABLE.table, SAMPLE_TRAIN_COUNT_TABLE.table, COMMIT_TABLE.table
-                )
-                migrate_imported_tasks(
-                    self._connection,
-                    SAMPLE_TABLE.table,
-                    SAMPLE_TRAIN_COUNT_TABLE.table,
-                    COMMIT_TABLE.table,
-                    TASK_TABLES.published,
-                )
-                migrate_generated_task_marks(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
+                migrate_training_samples(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
                 migrate_scenario_settings(self._connection, _SCENARIO_SETTING)
                 migrate_manual_buffers(self._connection, None)
+                migrate_published_tasks(self._connection, None)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -291,9 +276,9 @@ class SQLiteRecordStore(SQLRecordStore):
         """Open the task stores of ``scenario`` in this database, with their task files in ``files``."""
         return SQLTaskStorage(self, TASK_TABLES, files, scenario)
 
-    def sample_store(self, files: TaskFileStore, scenario: str) -> SQLSampleStore:
-        """Open the training samples of ``scenario`` in this database, with its task files in ``files``."""
-        return SQLSampleStore(self, SAMPLE_TABLE, SAMPLE_TRAIN_COUNT_TABLE, files, scenario)
+    def training_state(self) -> SQLTrainingState:
+        """Open the training state of the scenario in this database."""
+        return SQLTrainingState(self, SAMPLE_TRAIN_COUNT_TABLE, STAGE_RECORD_TABLE)
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
@@ -362,7 +347,6 @@ class SQLiteRecordRetention:
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
                     RECORD_EVICTION.create(connection, checkfirst=True)
                     _RECORD_NODE.create(connection, checkfirst=True)
-                    _SAMPLE_RECORD.create(connection, checkfirst=True)
                     migrate_record_trajectories(connection, _AGENT_RECORD, _RECORD_NODE)
                 with connection.begin():
                     total += self._queries.retained_bytes(connection)
@@ -500,7 +484,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
                     records,
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
-                    samples=records.sample_store(self.task_files, scenario),
+                    training_state=records.training_state(),
                     evaluations=records.evaluation_store(),
                 )
             except BaseException:

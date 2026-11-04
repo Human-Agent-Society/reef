@@ -1,6 +1,6 @@
 """Transport-independent reads of a scenario's training samples.
 
-``list_samples`` reads the scenario's sample store, and ``read_next_job`` reads the samples that one trainer's
+``list_samples`` reads the data items that the scenario uses, and ``read_next_job`` reads the samples that one trainer's
 next automatic job takes. No aiohttp types appear here. ``reef.service.routes.samples`` adapts it to HTTP.
 """
 

@@ -50,6 +50,8 @@ MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
 import signal
 
+from tests.support.job_data import job_data_ref
+
 from reef.core.errors import ReefError
 from reef.dispatcher.dispatcher import build_default_dispatcher
 
@@ -102,7 +104,14 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
     coordination = assembly.open_service_coordination(config)
     view = JobQueueComponent(component, coordination.work_queue, owns_component=False)
     view.submit(
-        TrainingJob("one", component.name, component.base_start, JobData("data", (trajectory,)), {}, scenario="math")
+        TrainingJob(
+            "one",
+            component.name,
+            component.base_start,
+            job_data_ref(JobData("data", (trajectory,))),
+            {},
+            scenario="math",
+        )
     )
 
     async def run() -> None:

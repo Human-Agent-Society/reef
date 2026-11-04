@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.job_data import job_data_ref
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import (
     TOKEN,
@@ -42,7 +43,9 @@ DATA = "/reef/namespaces/acme/data"
 
 def queued_job(job_id: str, scenario: str) -> NewWork:
     """A Tinker training job of ``scenario`` with no samples, as control adds it to the jobs queue."""
-    job = TrainingJob(job_id, "tinker", "tinker:base", JobData(f"{scenario}:data:1"), {"lr": 1e-5}, scenario=scenario)
+    job = TrainingJob(
+        job_id, "tinker", "tinker:base", job_data_ref(JobData(f"{scenario}:data:1")), {"lr": 1e-5}, scenario=scenario
+    )
     return NewWork(JOBS_QUEUE, job_id, scenario, job_kind("tinker"), job_payload(job), serial_key=scenario)
 
 

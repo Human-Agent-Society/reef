@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
+from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import RunningEngines
 
 from reef.artifact.artifact import Artifact
@@ -239,7 +240,7 @@ def train(component, inference, objective, scenario, sample, start=None):
     parameters = {"method": TrainingMethod(objective.name).to_dict()}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":
         assert time.monotonic() < deadline

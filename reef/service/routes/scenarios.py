@@ -135,8 +135,9 @@ def register_scenario_writes(
         else:
             scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name)
         if owner is not None:
-            # The default owner is the scenario's own name.
+            # The default owner is the scenario's own name. A new owner loads the scenario again.
             await asyncio.to_thread(dispatcher.set_scenario_owner, name, owner)
+            scenario = await asyncio.to_thread(dispatcher.registry.require, name)
         components = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
         answer: dict[str, object] = {
             "scenario": scenario.name,

@@ -318,18 +318,27 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     if choice is None:
         choice = "postgres" if settings.record_backend == "postgres" else "sqlite"
     segments = build_segment_store(settings)
+    # Without a segment store, the job data directories stay in a directory that the services share.
+    job_directories = segments if segments is not None else LocalSegmentStore(directory / "job-directories")
+    ttl_seconds = settings.job_directory_ttl_s
     try:
         if choice == "postgres":
             return PostgresDataStore(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 task_files,
                 segments=segments,
+                job_directories=job_directories,
+                job_directory_ttl_seconds=ttl_seconds,
             )
         if choice == "sqlite":
-            return SQLiteDataStore(directory / "data", task_files, segments)
+            return SQLiteDataStore(directory / "data", task_files, segments, job_directories, ttl_seconds)
         reference = DataStore.reference(choice, setting="storage.data_store")
         return DataStore.referenced_class(reference).from_config(
-            reference.config, directory=directory, task_files=task_files, segments=segments
+            reference.config,
+            directory=directory,
+            task_files=task_files,
+            segments=segments,
+            job_directory_ttl_seconds=ttl_seconds,
         )
     except BaseException:
         # The data store owns the segment store after it exists. Until then, this code closes it.
@@ -355,17 +364,19 @@ def open_service_coordination(settings: ServiceConfig) -> Coordination:
     )
 
 
+def build_task_files(settings: ServiceConfig) -> TaskFileStore:
+    """The task file store that ``storage.task_file_backend`` names, in ``storage.task_file_dir``."""
+    task_file_directory = Path(settings.task_file_dir)
+    if settings.task_file_backend == "local":
+        return LocalTaskFileStore(task_file_directory)
+    reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
+    return TaskFileStore.referenced_class(reference).from_config(reference.config, directory=task_file_directory)
+
+
 def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, TaskFileStore]:
     """The deployment's scenario storage (``storage.record_backend``) and its task file store, which it owns."""
     record_directory = Path(settings.agent_record_dir)
-    task_file_directory = Path(settings.task_file_dir)
-    task_files: TaskFileStore
-    if settings.task_file_backend == "local":
-        task_files = LocalTaskFileStore(task_file_directory)
-    else:
-        reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
-        store_class = TaskFileStore.referenced_class(reference)
-        task_files = store_class.from_config(reference.config, directory=task_file_directory)
+    task_files = build_task_files(settings)
     try:
         if settings.record_backend == "postgres":
             storage: ScenarioStorage = PostgresScenarioStorage(
@@ -465,7 +476,7 @@ def build_dispatcher(
             scenario_storage = ObservedScenarioStorage(scenario_storage, new_artifacts)
         # The inference path and the data service append and read records without opening a scenario.
         record_storage = scenario_storage
-        # Each scenario's session opens with copies of the data items that the scenario uses.
+        # Each scenario's session reads its training samples from the data store.
         scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
         backend_factory = build_artifact_backend(settings)
         if not isinstance(settings.training_settings, Mapping):
