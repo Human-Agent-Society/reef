@@ -179,14 +179,22 @@ class JobLoop:
         }
         return job_id_for(self.component.name, start, identity, parameters)
 
-    def submit(self, state: JobLoopState, data: JobData, parameters: Mapping[str, Any]) -> JobCommit:
+    def submit(
+        self,
+        state: JobLoopState,
+        data: JobData,
+        parameters: Mapping[str, Any],
+        *,
+        train_from_artifact_id: str | None = None,
+    ) -> JobCommit:
         """Submit the job that trains ``data`` with ``parameters``; the result records the running job.
 
         The job starts from ``state.start``, under ``job_id``. ``parameters``
         is the mapping that the pipeline's sample-to-job stage gives for
         ``data``, which encodes as JSON. The loop writes ``data`` as the job's data directory first. The directory
-        holds no request: the job keeps only its ID (``TrainingJob.request_id``). Raise ``ValueError`` when
-        ``state`` has a running job.
+        holds no request: the job keeps only its ID (``TrainingJob.request_id``). ``train_from_artifact_id`` is the
+        artifact of ``state.start``, for the job listing, or None. Raise ``ValueError`` when ``state`` has a running
+        job.
         """
         if state.job is not None:
             raise ValueError("a weight trainer runs one job at a time")
@@ -202,6 +210,7 @@ class JobLoop:
             request_id=None if data.request is None else data.request.id,
             component=self.scenario_component,
             previous_job_id=None if state.last_job is None else state.last_job.job_id,
+            train_from_artifact_id=train_from_artifact_id,
         )
         self.component.submit(job)
         submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)

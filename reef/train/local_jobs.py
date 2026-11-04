@@ -44,6 +44,7 @@ def submitted_job(job_id: str, backend: str, submitted: Mapping[str, Any]) -> Tr
         request_id=submitted.get("request_id"),
         component=submitted.get("component"),
         previous_job_id=submitted.get("previous_job_id"),
+        train_from_artifact_id=submitted.get("train_from_artifact_id"),
     )
 
 
@@ -169,6 +170,7 @@ class LocalJobComponent(TrainingComponent):
                     "request_id": job.request_id,
                     "component": job.component,
                     "previous_job_id": job.previous_job_id,
+                    "train_from_artifact_id": job.train_from_artifact_id,
                 },
             )
             self.queue.append(job.job_id)

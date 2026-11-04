@@ -81,6 +81,7 @@ def job_payload(job: TrainingJob, request: Mapping[str, JsonValue] | None = None
             "request": None if request is None else dict(request),
             "component": job.component,
             "previous_job_id": job.previous_job_id,
+            "train_from_artifact_id": job.train_from_artifact_id,
         },
     )
 
@@ -125,6 +126,7 @@ def job_from_item(item: WorkItem, data_store: DataStore) -> TrainingJob:
         request_id=None if request is None else cast(str, request["id"]),
         component=optional_text(payload.get("component"), "a job's component"),
         previous_job_id=optional_text(payload.get("previous_job_id"), "a job's previous job"),
+        train_from_artifact_id=optional_text(payload.get("train_from_artifact_id"), "a job's start artifact"),
     )
 
 
@@ -215,6 +217,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     - ``request``: ``{id, text, parameters}`` of the training request (``POST /reef/train``) that the job
       trains, where ``parameters`` is the JSON object that the request gave, ``{}`` when it gave none; None for
       a job that the training mode ``auto`` made without a request.
+    - ``train_from_artifact_id``: the artifact that the job started from; None for an item that an earlier Reef added.
     - ``created_at``, ``started_at`` and ``ended_at``: ISO 8601 UTC times of the item, when control added the job,
       when a worker first took it, and when it finished or failed. ``started_at`` is None until a worker takes the
       job, and ``ended_at`` until the job ends.
@@ -247,6 +250,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
         "sample_count": sample_count,
         "sample_kind": sample_kind,
         "request": cast(JsonValue, request_summary(item)),
+        "train_from_artifact_id": optional_text(payload.get("train_from_artifact_id"), "a job's start artifact"),
         "created_at": utc_time(item.created_at),
         "started_at": None if item.started_at is None else utc_time(item.started_at),
         "ended_at": None if item.ended_at is None else utc_time(item.ended_at),

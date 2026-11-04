@@ -269,6 +269,12 @@ class TrainingPipeline:
         self.training_requests = queued
         self.failed_requests = {key: value for key, value in self.failed_requests.items() if key in queued}
 
+    def next_request(self) -> TrainingRequest | None:
+        """The request that the next job data trains: the oldest queued one in manual, else None."""
+        if self.training_mode != "manual":
+            return None
+        return next(iter(self.training_requests.values()), None)
+
     def request_failure(self, request_id: str) -> str | None:
         """What the request's failed step said, when it failed at all."""
         return self.failed_requests.get(request_id)
@@ -584,7 +590,7 @@ class TrainingPipeline:
                 raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
             self.data_number += 1
             # Manual runs the oldest queued request with the samples that it names; auto leaves the queue to manual.
-            request = next(iter(self.training_requests.values())) if self.training_mode == "manual" else None
+            request = self.next_request()
             entries = self.auto_entries() if request is None else self.request_entries(request)
             self.reserved_sample_ids = tuple(stored.sample_id for stored, _ in entries)
             samples = tuple(grouped(stored, sample) for stored, sample in entries)

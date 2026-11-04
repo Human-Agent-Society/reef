@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, SnapshotRef
+from reef.artifact.artifact import Artifact, ArtifactNotFound, SnapshotRef
 from reef.artifact.components import ScenarioComponents
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
@@ -16,7 +16,7 @@ from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import RECORDS_COMPONENT
-from reef.core.errors import ReefError
+from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
 from reef.core.reports import ReportBase
 from reef.core.served_models import ScenarioModel
 from reef.core.serving_config import ServingConfig
@@ -54,6 +54,8 @@ class ScenarioCapabilities:
       else it is empty.
     - ``train_from`` holds the components whose trainer can start from an artifact (``Trainer.can_train_from``), in
       trainer order.
+    - ``request_train_from`` is True exactly when a training request can name the artifact that its job starts from:
+      the scenario has one component, and its trainer can start from an artifact.
 
     Each name occurs at most once in its tuple.
 
@@ -65,10 +67,13 @@ class ScenarioCapabilities:
     serve_beside: bool
     evaluate: tuple[str, ...]
     train_from: tuple[str, ...]
+    request_train_from: bool
 
     def __post_init__(self) -> None:
         if not isinstance(self.serve_beside, bool):
             raise TypeError("serve_beside must be a bool")
+        if not isinstance(self.request_train_from, bool):
+            raise TypeError("request_train_from must be a bool")
         for field_name, names in (("evaluate", self.evaluate), ("train_from", self.train_from)):
             if not isinstance(names, tuple) or not all(isinstance(name, str) and name for name in names):
                 raise TypeError(f"{field_name} must be a tuple of component names")
@@ -76,11 +81,12 @@ class ScenarioCapabilities:
                 raise ValueError(f"{field_name} names a component twice")
 
     def to_json(self) -> dict[str, object]:
-        """``{serve_beside, evaluate, train_from}``, with the tuples as lists."""
+        """``{serve_beside, evaluate, train_from, request_train_from}``, with the tuples as lists."""
         return {
             "serve_beside": self.serve_beside,
             "evaluate": list(self.evaluate),
             "train_from": list(self.train_from),
+            "request_train_from": self.request_train_from,
         }
 
 
@@ -279,6 +285,11 @@ class Scenario:
         """The artifact operations that this scenario can run (``ScenarioCapabilities``)."""
         components, runtime = self._components, self.runtime
         on_request = runtime is not None and runtime.serves_artifacts_on_request
+        train_from = tuple(
+            component_trainer.component
+            for component_trainer in self.trainers
+            if component_trainer.trainer.can_train_from
+        )
         return ScenarioCapabilities(
             serve_beside=self._store.durable
             and (components.loaded_component is None or runtime is None or on_request),
@@ -287,11 +298,8 @@ class Scenario:
                 for name, component in components.components.items()
                 if component.kind is not None and self.evaluation_refusal(name) is None
             ),
-            train_from=tuple(
-                component_trainer.component
-                for component_trainer in self.trainers
-                if component_trainer.trainer.can_train_from
-            ),
+            train_from=train_from,
+            request_train_from=bool(train_from) and len(self._committer.component_names()) == 1,
         )
 
     def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
@@ -356,7 +364,45 @@ class Scenario:
             ):
                 return None
             self.refresh_requests()
-            return trainer.run_once(serving_artifact_id=serving)
+            try:
+                train_from_artifact_id = self.start_next_job(component)
+            except CommitPending:
+                return None
+            return trainer.run_once(serving_artifact_id=serving, train_from_artifact_id=train_from_artifact_id)
+
+    def start_next_job(self, component: str | None) -> str | None:
+        """Apply the start that the next job's request names; return the artifact that the job starts from.
+
+        Return None when no job is due. No job runs then, so ``train_from`` cancels nothing. A start that the request
+        names and the trainer holds stays, so a retry after a restart writes no second record. A start that the
+        trainer refuses fails only its request. Raise ``CommitPending`` as ``train_from`` does.
+        """
+        component_trainer = self._committer.component_trainer(component)
+        trainer = component_trainer.trainer
+        if not trainer.job_due():
+            return None
+        start = self.artifact_status()[component_trainer.component]["training_start"]
+        request = trainer.next_request()
+        if (
+            request is None
+            or request.train_from_artifact_id in (None, start)
+            or request.id in trainer.request_failures()
+        ):
+            return start
+        try:
+            return self.train_from(request.train_from_artifact_id, component_trainer.component).artifact_id
+        except (ArtifactNotFound, ReleaseNotRestorable, TrainingStartRefused) as exc:
+            trainer.fail_request(request.id, str(exc))
+            return start
+
+    def check_request_start(self, artifact_id: str) -> None:
+        """Raise ``ValueError`` unless a training request can name ``artifact_id`` as the start of its job."""
+        if not self.capabilities().request_train_from:
+            raise ValueError(f"scenario {self.name!r} cannot start a request's job from an artifact")
+        try:
+            self.artifact_snapshot(artifact_id)
+        except ArtifactNotFound as exc:
+            raise ValueError(str(exc)) from exc
 
     def pending_requests(self) -> int:
         """The queued requests that no trainer's commit consumed yet; 0 for a scenario without requests."""

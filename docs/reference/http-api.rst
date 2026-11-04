@@ -1000,6 +1000,15 @@ only on a job of tasks. Slime takes ``method``, ``scheduling`` and
      -H "Content-Type: application/json" \
      -d '{"agent_record_id":"change-001","text":"Add a skill that runs tests before answering", "session":"session-1", "artifact_id":"artifact-1"}'
 
+A request can also name the artifact that its job starts from with
+``train_from_artifact_id``. The running job continues. When the request's job
+is next, Reef sets the trainer's start to the artifact and writes a
+``train_from`` record, and the job starts from it. The next job continues from
+this job's newest checkpoint, as usual. An artifact that the scenario does not
+list, or a scenario without the ``request_train_from`` capability, is HTTP 400.
+When the trainer refuses the artifact later, only this request fails. The
+``artifact_id`` field does not choose a start: it names the request's source.
+
 The response is ``{agent_record_id, scenario, request_type: "train"}``,
 plus ``page_path``, the request's page with the query a browser opens it by
 (see Request page).
@@ -1192,6 +1201,8 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
   from 0.
 - ``sample_kind``: ``trajectory`` or ``task``, the kind of the job's samples.
   It is ``null`` for a job with no sample.
+- ``train_from_artifact_id``: the artifact that the job started from. It is
+  ``null`` for a job that an earlier Reef added.
 - ``request``: ``{id, text, parameters}`` of the training request
   (``POST /reef/train``) that the job trains. ``parameters`` is what the
   request gave, ``{}`` when it gave none. It is ``null`` for a job that
@@ -1263,6 +1274,10 @@ scenario can run, so that it offers only those:
 - ``train_from``: the components whose trainer ``POST
   /reef/scenarios/{scenario}/train-from`` can start from an artifact. A Slime
   component, which continues only from its own checkpoints, is not in it.
+- ``request_train_from``: true when ``POST /reef/train`` takes
+  ``train_from_artifact_id``: the scenario has one component, and its trainer
+  can start from an artifact. Check it before you send the field. A Reef
+  version without this capability ignores the field.
 
 An operation that the capabilities allow can still refuse one artifact, for
 example a release whose weights the training component cannot import.
