@@ -49,21 +49,24 @@ class RemoteConfig:
     """``training.options`` of a remote training backend.
 
     Values: ``url`` is the base URL of the backend service. ``token_env`` names the variable that holds its bearer
-    token. ``base`` is the URI of the artifact that a new scenario starts from (``hf://`` or ``file://``).
+    token. ``base`` is the URI of the artifact that a new scenario starts from: ``base:``, the backend's own default start, or an ``hf://`` or ``file://`` URI.
     ``state_dir`` is a directory that control and the training service share. ``timeout_s`` bounds each call.
     """
 
     url: str = config_option(help="Base URL of the training backend service.")
-    base: str = config_option(help="URI of the artifact that a new scenario starts from: hf:// or file://.")
     state_dir: str = config_option(help="Directory that control and the training service share.")
+    base: str = config_option(
+        "base:",
+        help="URI of the artifact that a new scenario starts from: base: (the backend's own), hf:// or file://.",
+    )
     token_env: str = config_option("REEF_TRAINING_BACKEND_TOKEN", help="Variable that holds the bearer token.")
     timeout_s: float = config_option(30.0, help="Seconds that one call to the backend service can take.")
 
     def __post_init__(self) -> None:
         if not self.url.startswith(("http://", "https://")):
             raise ValueError(f"url must be an http(s) URL, got {self.url!r}")
-        if not self.base.startswith(("hf://", "file://")):
-            raise ValueError(f"base must be an hf:// or file:// URI, got {self.base!r}")
+        if not self.base.startswith(("hf://", "file://", "base:")):
+            raise ValueError(f"base must be base:, or an hf:// or file:// URI, got {self.base!r}")
         if not self.state_dir.strip():
             raise ValueError("state_dir must be a directory")
         if self.timeout_s <= 0:

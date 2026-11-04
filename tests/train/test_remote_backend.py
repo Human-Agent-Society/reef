@@ -1,27 +1,24 @@
 from __future__ import annotations
 
-import asyncio
-import threading
 import time
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Self
 
 import pytest
-from aiohttp import web
 from tests.support._trajectories import policy_trajectory
+from tests.support.remote_backend import ended, remote_component, serving
+from tests.support.runtime_stubs import VERSION_FILE, StubTrainingComponent
 
 from reef.core.job_data import JobData
 from reef.storage.data import MemoryDataStore
 from reef.storage.job_data import read_job_data
-from reef.storage.segments import LocalSegmentStore
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train.component import TrainingJob
-from reef.train.remote.client import BackendRefused, RemoteConfig, RemoteTrainingComponent
+from reef.train.remote.client import BackendRefused
+from reef.train.remote.components import BASE_URI, ComponentBackend
 from reef.train.remote.contract import RELEASE_DIR, STATE_DIR, BackendInfo, RemoteJob
-from reef.train.remote.server import BackendServer, JobRun, TrainingBackend
-
-TOKEN = "backend-token"
+from reef.train.remote.server import JobRun, TrainingBackend
 
 
 class CountingBackend(TrainingBackend):
@@ -61,29 +58,8 @@ class CountingBackend(TrainingBackend):
 
 @pytest.fixture
 def backend_url(tmp_path: Path) -> Iterator[str]:
-    """The URL of a backend server with ``CountingBackend``, which keeps its checkpoints under ``tmp_path``."""
-    server = BackendServer(CountingBackend(), LocalSegmentStore(tmp_path / "backend-files"), token=TOKEN)
-    loop = asyncio.new_event_loop()
-    runner = web.AppRunner(server.app())
-    loop.run_until_complete(runner.setup())
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    loop.run_until_complete(site.start())
-    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
-    thread = threading.Thread(target=loop.run_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{port}"
-    loop.call_soon_threadsafe(loop.stop)
-    thread.join()
-    loop.run_until_complete(runner.cleanup())
-    loop.close()
-
-
-def component(url: str, tmp_path: Path, token: str = TOKEN) -> RemoteTrainingComponent:
-    base = tmp_path / "base"
-    (base / RELEASE_DIR).mkdir(parents=True, exist_ok=True)
-    (base / RELEASE_DIR / "model.txt").write_text("0")
-    config = RemoteConfig(url=url, base=base.as_uri(), state_dir=str(tmp_path / "reef"), timeout_s=5.0)
-    return RemoteTrainingComponent(config, token)
+    with serving(CountingBackend(), tmp_path) as url:
+        yield url
 
 
 def job(job_id: str, start: str, samples: int, **parameters: Any) -> TrainingJob:
@@ -92,16 +68,8 @@ def job(job_id: str, start: str, samples: int, **parameters: Any) -> TrainingJob
     return TrainingJob(job_id, "counting", start, data, parameters, scenario="s")
 
 
-def ended(remote: RemoteTrainingComponent, job_id: str):
-    deadline = time.monotonic() + 10
-    while (status := remote.status(job_id)).state == "running":
-        assert time.monotonic() < deadline, "the job did not end"
-        time.sleep(0.01)
-    return status
-
-
 def test_a_job_runs_on_the_service_and_the_next_job_continues_from_its_checkpoint(backend_url, tmp_path):
-    remote = component(backend_url, tmp_path)
+    remote = remote_component(backend_url, tmp_path)
     assert (remote.name, remote.release_format, remote.shares_scenarios) == ("counting", None, False)
     # The root release that Reef writes from the default start names the base artifact.
     root = tmp_path / "root"
@@ -131,7 +99,7 @@ def test_a_job_runs_on_the_service_and_the_next_job_continues_from_its_checkpoin
 
 
 def test_a_refused_job_a_cancelled_job_and_an_unknown_job(backend_url, tmp_path):
-    remote = component(backend_url, tmp_path)
+    remote = remote_component(backend_url, tmp_path)
     with pytest.raises(BackendRefused, match="asks to be refused"):
         remote.check_job(job("j1", remote.config.base, 1, refuse=True))
     with pytest.raises(BackendRefused, match="asks to be refused"):
@@ -151,5 +119,24 @@ def test_a_refused_job_a_cancelled_job_and_an_unknown_job(backend_url, tmp_path)
 
 def test_a_call_without_the_token_is_refused(backend_url, tmp_path):
     with pytest.raises(BackendRefused) as refused:
-        component(backend_url, tmp_path, token="wrong").call("GET", "/v1/backend")
+        remote_component(backend_url, tmp_path, token="wrong").call("GET", "/v1/backend")
     assert refused.value.status == 401
+
+
+def test_a_training_component_runs_behind_the_server_from_artifacts(tmp_path):
+    stub = StubTrainingComponent(tmp_path / "checkpoints")
+    with serving(ComponentBackend(stub, poll_seconds=0.01), tmp_path) as url:
+        remote = remote_component(url, tmp_path)
+        remote.submit(job("j1", BASE_URI, 1))
+        (checkpoint,) = ended(remote, "j1").checkpoints
+        assert stub.submitted[0].start == stub.base_start
+        artifact = Path(checkpoint.path.removeprefix("file://"))
+        assert (artifact / RELEASE_DIR / VERSION_FILE).read_text() == "w1"
+        assert (artifact / STATE_DIR / VERSION_FILE).read_text() == "w1"
+        # A job from that checkpoint starts from its state/; one from a release alone imports the release.
+        remote.submit(job("j2", checkpoint.path, 1))
+        ended(remote, "j2")
+        assert stub.submitted[1].start == str(artifact / STATE_DIR)
+        remote.submit(job("j3", (artifact / RELEASE_DIR).as_uri(), 1))
+        ended(remote, "j3")
+        assert stub.imported == [artifact / RELEASE_DIR]

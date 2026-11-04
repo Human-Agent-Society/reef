@@ -83,6 +83,26 @@ A backend is a ``reef.train.remote.server.TrainingBackend``:
   while it runs. It returns the job's metrics. ``run.save`` raises
   ``JobCancelled`` after a cancel.
 
+Run a training component
+------------------------
+
+``reef.train.remote.components:ComponentBackend`` runs a ``TrainingComponent``,
+such as Tinker, as a backend:
+
+.. code:: yaml
+
+   backend:
+     module: reef.train.remote.components:ComponentBackend
+     config:
+       component: {type: reef.train.tinker_backend.launch:component_factory, ...}
+
+A job's artifact becomes the component's start: ``state/`` is the start that a
+checkpoint of the backend wrote; a release alone goes through
+``import_start``; and the URI ``base:`` is the component's ``base_start``.
+Each checkpoint becomes an artifact: its ``path`` as ``state/`` and its
+``release_path`` as ``release/``. Set Reef's ``base`` to ``base:`` to start new
+scenarios from the component's own default start.
+
 Run the server
 --------------
 

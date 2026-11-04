@@ -15,6 +15,7 @@ import pytest
 import yaml
 from tests.support.chat_templates import CharTemplate
 from tests.support.job_data import job_data_ref
+from tests.support.remote_backend import ended, remote_component, serving
 from tests.support.serving import wait_for_serving
 
 from recipes.tttd.tinker import TttdTinkerLoss
@@ -29,7 +30,9 @@ from reef.recipe.sft import SftObjective
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
+from reef.storage.data import MemoryDataStore
 from reef.storage.sql_coordination import memory_coordination
+from reef.storage.tasks import LocalTaskFileStore
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
@@ -40,6 +43,7 @@ from reef.train.component import TrainingJob, job_id_for
 from reef.train.jobs import JobLoopState
 from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
 from reef.train.method import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
+from reef.train.remote.components import BASE_URI, ComponentBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
@@ -1065,3 +1069,22 @@ def test_a_recorded_trajectory_renders_with_the_models_chat_template(component, 
     ((row,),) = client.calls[0][1]
     # user q | assistant ab in CharTemplate; the client computes the log probabilities from the start's weights.
     assert (row.tokens, row.mask, row.logprobs) == ((2, 213, 9, 197, 198), (1, 1), ())
+
+
+def test_tinker_runs_behind_the_backend_server_and_continues_from_an_artifact(component, client, objective, tmp_path):
+    with serving(ComponentBackend(component, poll_seconds=0.01), tmp_path) as url:
+        remote = remote_component(url, tmp_path)
+        assert (remote.name, remote.release_format) == (component.name, component.release_format)
+        parameters = {"method": TrainingMethod(objective.name).to_dict()}
+
+        def run(job_id: str, start: str, data: JobData):
+            data_ref = MemoryDataStore(LocalTaskFileStore()).write_job_directory(data)
+            remote.submit(TrainingJob(job_id, remote.name, start, data_ref, parameters, scenario="s"))
+            return ended(remote, job_id)
+
+        first = run("j1", BASE_URI, JobData("first", (item("old:0"),)))
+        assert first.state == "finished", first.error
+        (checkpoint,) = first.checkpoints
+        # The artifact's state/ holds the checkpoint's manifest, so the next job continues its Tinker state.
+        assert run("j2", checkpoint.path, batch(name="next")).state == "finished"
+        assert [call[0].state_path for call in client.calls] == ["tinker://base/state", "tinker://update-1/state"]
