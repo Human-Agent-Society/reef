@@ -18,6 +18,19 @@ dependencies. Having the runtime in the image does not start it: `reef serve`
 starts only the `services` that your config lists and the ones that its
 training backend needs.
 
+The image carries both serving engines. SGLang comes from the base image.
+vLLM 0.29.0 (`--build-arg VLLM_VERSION`) is added on top for
+`inference.backend: vllm`: the release wheel pins the base's torch 2.13.0, it
+installs without dependency resolution so the base's CUDA stack stays as
+built, and its missing pure-Python dependencies follow under the base's
+constraints. Two declared pins stay unmet on purpose and `pip check` reports
+them: vLLM names flashinfer 0.6.18 but runs on the 0.7 line the image
+installs for SGLang's attention fix, and SGLang names openai 2.6.1 while
+vLLM's OpenAI server needs the response types of openai 2.25 or newer; both
+engines serve with the installed versions. Expect a few
+`Failed to import Triton kernels` lines at a vLLM engine start: Triton 3.7
+renamed the MXFP4 MoE module vLLM 0.29 imports, and dense models never use it.
+
 Reef's serving engines run the base image's SGLang, so LoRA training
 (`--megatron-lora-rank`) works on any weight-training recipe without a
 separate image. The build fails if that SGLang lacks the fix for how Qwen3.5
