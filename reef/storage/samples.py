@@ -149,13 +149,13 @@ class SampleStore:
         """The samples whose use sequence is above ``after_sequence``, in use order, at most ``limit``; only
         ``kind``'s if given. With ``trainer``, only the samples that it reads: its own, and the uploads and imported
         tasks. A page is empty only after the last such sample."""
+        # The store filters by kind: a scenario can use many record items before its first sample.
+        kinds = SAMPLE_KINDS if kind is None else (kind,)
         while uses := self.data.scenario_items(
-            self.owner, self.scenario, after=after_sequence, limit=min(limit, MAX_QUERY_LIMIT)
+            self.owner, self.scenario, kinds=kinds, after=after_sequence, limit=min(limit, MAX_QUERY_LIMIT)
         ):
             found = tuple(
-                stored
-                for stored in self.stored(uses)
-                if (kind is None or stored.kind == kind) and (trainer is None or stored.component in (None, trainer))
+                stored for stored in self.stored(uses) if trainer is None or stored.component in (None, trainer)
             )
             if found:
                 return found
