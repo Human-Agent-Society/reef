@@ -2,8 +2,8 @@ Sandbox environments
 ====================
 
 Use ``reef.execution.sandbox.environment.ExecutorEnvironment`` to run commands and move
-files through Harbor's ``BaseEnvironment`` interface. It supports Reef's local
-and bubblewrap executors, and the cloud sandboxes of E2B and Modal. Harness rendering and candidate
+files through Harbor's ``BaseEnvironment`` interface. It supports Reef's local,
+bubblewrap and Seatbelt executors, and the cloud sandboxes of E2B and Modal. Harness rendering and candidate
 evaluation remain outside this package.
 
 Callers do not need to know which sandbox runs their commands. These
@@ -34,7 +34,7 @@ Executors and Harbor task environments
 --------------------------------------
 
 The two run different things. A ``ProgramExecutor`` launches one program,
-such as a harness's pinned binary, locally, in bubblewrap, or in an E2B or
+such as a harness's pinned binary, locally, in bubblewrap or Seatbelt, or in an E2B or
 Modal sandbox, and ``ExecutorEnvironment`` adapts one to Harbor's
 ``BaseEnvironment`` without building a task image. A Harbor task environment
 is where Harbor builds a task's ``environment/Dockerfile``, starts it, runs
@@ -176,7 +176,7 @@ with a ``reef.execution.sandbox.process.SandboxProgram`` subclass, then bind it:
 ``for_program`` returns the bound executor and the binary its processes
 launch. Pass ``binary=`` to override the resolved binary. An executor on the
 Reef host resolves ``program.host_binary()``, which can install the binary.
-Bubblewrap also binds ``program.host_install_dir()`` read-only. A cloud sandbox
+Bubblewrap binds ``program.host_install_dir()`` read-only, and Seatbelt allows reads of it. A cloud sandbox
 resolves ``program.binary`` in its image (an E2B template, a Modal image) and
 never installs on the Reef host; it refuses a ``self_isolating`` program. The harness layer provides
 ``reef.harness.tasks.vendor_install.AdapterProgram`` for an adapter.
@@ -190,9 +190,9 @@ session::
     finally:
         session.close()
 
-Local and default-network bubblewrap executors already reach the host, so the
-session is the executor itself. An isolated bubblewrap network forwards the
-ports. A cloud sandbox opens one sandbox with a tunnel for each port. ``push``, ``pull`` and
+Local executors and the local sandboxes on their default network already
+reach the host, so the session is the executor itself. An isolated bubblewrap
+network forwards the ports; an isolated Seatbelt profile allows them. A cloud sandbox opens one sandbox with a tunnel for each port. ``push``, ``pull`` and
 ``close`` do nothing for an executor whose processes use the host's files.
 ``runs_on_host`` tells a caller whether processes see the host's paths,
 environment and container runtime.
@@ -221,8 +221,20 @@ timeouts preserve the executor's file-copy behavior. Transfer and cleanup
 failures propagate. Retaining a stopped owned session and forcing template
 rebuilds are unsupported.
 
-Local execution provides no sandbox isolation. Bubblewrap and the cloud sandboxes retain their
-existing read-only inputs, writable state and network behavior. Configuration
+Local execution provides no sandbox isolation. Bubblewrap, Seatbelt and the cloud sandboxes retain their
+existing read-only inputs, writable state and network behavior.
+
+On macOS, ``executor: sandbox`` selects ``SeatbeltExecutor``. It launches the
+program with ``sandbox-exec`` under a profile with the same read, write and
+credential rules as bubblewrap. It differs in three ways:
+
+- Seatbelt profiles do not nest. A native loop in this sandbox runs its tool
+  calls under the run's profile, and its trajectory reports enforcement
+  ``none`` instead of a narrower profile per call.
+- An isolated network denies every loopback port except the forwarded ones,
+  but the host's LAN addresses stay reachable.
+- macOS cannot limit address space, so preflight refuses
+  ``limits.memory_bytes``. The other limits apply. Configuration
 remains independent for the evaluation runs and for an agent that a method
 runs; see
 `Running runs <../user-guide/evolve-your-harness.rst#running-runs>`__.

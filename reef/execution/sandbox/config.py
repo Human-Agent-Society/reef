@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -19,9 +20,23 @@ from reef.execution.sandbox.process import (
     SandboxUnavailableError,
 )
 from reef.execution.sandbox.remote import RemoteExecutor, deployment_owner
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 
 #: The cloud sandbox providers, by the name a deployment selects.
 REMOTE_EXECUTORS: Mapping[str, type[RemoteExecutor]] = {"e2b": E2BExecutor, "modal": ModalExecutor}
+#: The local sandboxes, by the name a deployment selects: bubblewrap on Linux, Seatbelt on macOS.
+LOCAL_SANDBOXES: Mapping[str, type[SandboxExecutor] | type[SeatbeltExecutor]] = {
+    "bwrap": SandboxExecutor,
+    "seatbelt": SeatbeltExecutor,
+}
+
+
+def host_sandbox_kind(platform: str | None = None) -> str:
+    """The local sandbox this host runs: ``seatbelt`` on macOS (``platform`` ``darwin``), else ``bwrap``.
+
+    ``platform`` defaults to ``sys.platform``.
+    """
+    return "seatbelt" if (sys.platform if platform is None else platform) == "darwin" else "bwrap"
 
 
 def remote_executor(
@@ -66,7 +81,8 @@ def build_executor(
 ) -> ProgramExecutor:
     """Build the executor a deployment selected.
 
-    ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``); a sandbox reads its
+    ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``). ``sandbox`` is the
+    host's local sandbox (``host_sandbox_kind``): bubblewrap on Linux, Seatbelt on macOS. A sandbox reads its
     ``egress_hosts``, ``limits``, and an explicit ``env_from`` list of host
     variable names from the same section. The executor is
     preflighted at build so a hosted deployment that requires the sandbox
@@ -111,6 +127,6 @@ def build_executor(
         if name not in values or not values[name]:
             raise ReefError(f"evolution.sandbox.env_from requires environment variable {name!r}")
         env[name] = values[name]
-    executor = SandboxExecutor(egress_hosts=egress, limits=limits, env=env)
+    executor = LOCAL_SANDBOXES[host_sandbox_kind()](egress_hosts=egress, limits=limits, env=env)
     executor.preflight()
     return executor
