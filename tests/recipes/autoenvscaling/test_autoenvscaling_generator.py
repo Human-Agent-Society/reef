@@ -800,8 +800,8 @@ def test_an_outage_that_makes_no_task_leaves_the_round_incomplete_so_a_restart_g
     service = StandInGenerator(tmp_path / "tasks")
     stand_in = StandInAuthor(unreachable=("session-1", "session-2"))
     generator = autoenvscaling(tmp_path, stand_in, service, count=2)
-    session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
-    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+    session, samples = open_sample_store(tmp_path / "records", "autoenvscaling")
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=samples.for_trainer(""))
     generation = GeneratedTaskSamples(
         context,
         GeneratedTaskSettings(rounds=1, description=DESCRIPTION, generation_attempts=2),
