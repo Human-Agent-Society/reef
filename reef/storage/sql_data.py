@@ -496,7 +496,14 @@ class SQLDataStore(DataStore):
             return self.stored_items(connection, owner, found, content=content)
 
     def scenario_items(
-        self, owner: str, scenario: str, *, kinds: Sequence[str], after: int = 0, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        scenario: str,
+        *,
+        kinds: Sequence[str],
+        after: int = 0,
+        limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
     ) -> tuple[tuple[int, StoredItem], ...]:
         check_query(owner, None, scenario, after, limit)
         items, uses = self.items_table, self.scenarios_table
@@ -511,7 +518,7 @@ class SQLDataStore(DataStore):
         )
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement).mappings().all()
-            stored = self.stored_items(connection, owner, found)
+            stored = self.stored_items(connection, owner, found, content=content)
         return tuple((int(row["use_sequence"]), item) for row, item in zip(found, stored, strict=True))
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
