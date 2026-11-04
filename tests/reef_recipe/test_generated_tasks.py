@@ -12,6 +12,7 @@ import pytest
 import sqlalchemy.exc
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
@@ -48,10 +49,9 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_gen
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2JobSettings
-from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import TrainerSamples
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.scenario import ScenarioStore
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.component import TrainingComponent
@@ -135,8 +135,13 @@ def processor(**config: object) -> TrainingPipeline:
 
 
 def handed_out_names(p: TrainingPipeline) -> list[str]:
-    """The names of the tasks that the next job's data takes: the buffer's."""
-    return [sample.metadata["task"]["name"] for _, sample in p.buffer_entries()]
+    """The names of the tasks that the next job's data takes: in ``manual``, the oldest training request's."""
+    if p.training_mode == "auto":
+        entries = p.auto_entries()
+    else:
+        request = next(iter(p.training_requests.values()), None)
+        entries = () if request is None else p.request_entries(request)
+    return [sample.metadata["task"]["name"] for _, sample in entries]
 
 
 def sample(task: str, index: int, reward: float) -> TrajectorySample:
@@ -190,11 +195,14 @@ def test_the_contract_values_refuse_what_the_recipe_cannot_run(build: Any, messa
 def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1, training_mode="manual")
     looked(p)
-    assert handed_out_names(p) == [], "manual adds no generated task to the buffer by itself"
-    p.insert_into_buffer(("generated-tasks/harbor-00000-001",))
-    p.queue_instructions(
-        [TrainingRequest.from_dict({"text": "train it", "session": "s-1", "release_id": "r-1"}, request_id="train-1")]
-    )
+    assert handed_out_names(p) == [], "manual trains no generated task by itself"
+    payload = {
+        "text": "train it",
+        "session": "s-1",
+        "release_id": "r-1",
+        "samples": [stage_item_id("tasks", "generated-tasks/harbor-00000-001")],
+    }
+    p.queue_requests([TrainingRequest.from_dict(payload, request_id="train-1")])
     assert p.ready(BATCH_SIZE) and handed_out_names(p) == ["harbor-00000-001"]
     assert train_job(p) == ["harbor-00000-001"]
     assert set(rollout_results(p.record2sample.task_store)) == {"harbor-00000-001"}
@@ -330,14 +338,14 @@ class DeferredWorker(InlineWorker):
             self.outcomes.append(asyncio.run(self.generation.run(job)))
 
 
-def scenario_session(tmp_path: Path, scenario: str = "tasks") -> CommitHistoryScenarioStore:
-    """A scenario session in a SQLite storage under ``tmp_path``."""
-    return SQLiteScenarioStorage(tmp_path / "records").open(scenario)
+def scenario_session(tmp_path: Path, scenario: str = "tasks") -> tuple[ScenarioStore, SampleStore]:
+    """A scenario session in a SQLite storage under ``tmp_path``, and its sample store in a data store."""
+    return open_sample_store(tmp_path / "records", scenario)
 
 
 def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
     """The task stores of a scenario session in a SQLite storage under ``tmp_path``."""
-    return scenario_session(tmp_path, scenario).tasks
+    return scenario_session(tmp_path, scenario)[0].tasks
 
 
 class CommittingPipeline(TrainingPipeline):
@@ -345,7 +353,7 @@ class CommittingPipeline(TrainingPipeline):
     job's submission does: the commit counts the stored samples trained. Each look also makes the samples first,
     as the samples service does before the trainer reads the sample store."""
 
-    def __init__(self, context: PipelineContext, session: CommitHistoryScenarioStore, **stages: Any) -> None:
+    def __init__(self, context: PipelineContext, session: ScenarioStore, **stages: Any) -> None:
         super().__init__(context, **stages)
         self.session = session
 
@@ -382,11 +390,11 @@ def rounds(
     """A generated-task pipeline; ``worker`` runs the generation and delivery jobs, inline by default."""
     service = service if service is not None else StandInGenerator(tmp_path / "tasks")
     worker = worker if worker is not None else InlineWorker()
-    session = scenario_session(tmp_path)
+    session, samples = scenario_session(tmp_path)
     context = PipelineContext(
         "tasks",
         task_storage=session.tasks,
-        samples=TrainerSamples(session.samples),
+        samples=samples.for_trainer(""),
         training_mode=str(config.pop("training_mode", "auto")),
     )
     sample_settings, batch_settings = stage_settings(
@@ -650,7 +658,7 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
     looked(first)
     first.close()
     # The first task trained, with its result, before the stop.
-    session = scenario_session(tmp_path)
+    session, _ = scenario_session(tmp_path)
     session.tasks.open("generated-tasks").write_document(
         key="rollout/harbor-00000-000", document=TaskRolloutResult("harbor-00000-000", (1.0, 0.0)).document()
     )
@@ -664,7 +672,7 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
             algorithm_state={},
             high_water_sequence=1,
             high_water_offset=1,
-            consumed_ids=frozenset({"sample:generated-tasks/harbor-00000-000"}),
+            consumed_ids=frozenset({consumed_sample_id(stage_item_id("tasks", "generated-tasks/harbor-00000-000"))}),
             recorded_at=1000.0,
         ),
     )
@@ -755,19 +763,21 @@ class FirstResultsFail(ScriptedGenerator):
 # ------------------------------------------------------------------------------------------------- the task jobs
 
 
-def test_saved_tasks_are_stored_as_samples_and_the_buffer_trains_them_as_one_task_job(tmp_path: Path) -> None:
+def test_saved_tasks_are_stored_as_samples_and_train_as_one_task_job(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1, 2)])
     p, _ = rounds(tmp_path, task_generator, rounds=1)
     assert not p.ready(BATCH_SIZE), "the generation saves three tasks"
-    assert p.ready(BATCH_SIZE), "the stored tasks make the buffer"
+    assert p.ready(BATCH_SIZE), "the stored tasks make the next job"
     stored = p.store.page(kind="task")
-    assert [task.sample_id for task in stored] == [f"generated-tasks/harbor-00000-00{index}" for index in range(3)]
-    assert all(task.component == "" and task.record_ids == () for task in stored)
+    assert [task.sample_id for task in stored] == [
+        f"tasks.generated-tasks.harbor-00000-00{index}" for index in range(3)
+    ]
+    assert all(task.component == "" for task in stored) and p.store.consumed_record_ids() == frozenset()
     names = ["harbor-00000-000", "harbor-00000-001"]
-    assert handed_out_names(p) == names, "the buffer takes buffer_size tasks"
+    assert handed_out_names(p) == names, "the job takes buffer_size tasks"
     built = p.build_job_data(BATCH_SIZE)
     assert [item.metadata["task"]["name"] for item in built.samples] == names
-    assert p.acknowledge(built.data_id) == {f"sample:generated-tasks/{name}" for name in names}
+    assert p.acknowledge(built.data_id) == {f"sample:tasks.generated-tasks.{name}" for name in names}
     assert p.status()["task_store"]["trained"] == 2, "the submission's commit counted them trained"
     assert task_generator.result_generations == [] and unfinished(p) == 3, "no result before the job ends"
     assert p.ready(BATCH_SIZE) and handed_out_names(p) == ["harbor-00000-002"], "the next job takes the rest"
@@ -1018,10 +1028,8 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
         },
     )
     ScriptedGenerator.built.clear()
-    session = scenario_session(tmp_path, "one")
-    built = recipe.build_pipeline(
-        PipelineContext("one", task_storage=session.tasks, samples=TrainerSamples(session.samples))
-    )
+    session, samples = scenario_session(tmp_path, "one")
+    built = recipe.build_pipeline(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
     assert isinstance(built.record2sample, GeneratedTaskSamples)
     assert isinstance(built.record2sample.task_generator, ScriptedGenerator)
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]

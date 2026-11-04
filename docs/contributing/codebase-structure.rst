@@ -103,7 +103,7 @@ import a concrete integration.
 |                         | harness publication policies, and the ``evaluation``     |                                            |
 |                         | plugin configuration                                     |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sample2job/``    | shaping the samples of the buffer into one job's         | which records train, the training loop,    |
+| ``reef/sample2job/``    | shaping the samples of the next job into one job's       | which records train, the training loop,    |
 |                         | data (``Sample2Job``), and the job size                  | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/inference/``     | inference contracts, serving runtimes and their          | training algorithms and publication        |
@@ -187,7 +187,7 @@ ownership and depends only on that interface and the standard library.
 
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
-payloads and holds the queued instruction carried by a job's data. Request
+payloads and holds the queued request carried by a job's data. Request
 requirements and their release-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with the components a recipe declares (``artifact/components.py``).
@@ -296,7 +296,8 @@ The extension points those packages expose are in `Python API
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state
   and opens the scenario's task stores (``reef/storage/tasks.py``) and its
-  sample store (``reef/storage/samples.py``);
+  training state; its training samples are data items
+  (``reef/storage/samples.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or run them with an agent? Put it in ``reef/record2sample/generator/``, the
@@ -362,8 +363,9 @@ The extension points those packages expose are in `Python API
     running tasks, with the history as the score cache, and ``policy.py``
     decides.
   - Release: the harness backend turns a selected tree into the step's
-    release, and the recipe's ``HarnessJobLoop`` names the parts that it
-    changes from the job's start (``changed_kinds``). The scenario
+    release, and the harness component names the parts that it changes from
+    the job's start (``TrainingComponent.changed_parts``, which the job loop
+    puts in ``changed_kinds``). The scenario
     committer publishes it, and the scenario's activation rule
     (``reef/evaluation/activation.py``) decides whether it serves.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's

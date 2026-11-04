@@ -294,7 +294,7 @@ Offline runs on uploaded tasks
 ``reef.sample2job.traces:TrainTaskJobData`` makes each step from the train
 split of the scenario's imported tasks:
 
-- Each uploaded train task joins the buffer and trains once, in upload
+- Each uploaded train task trains once, in upload
   order. A step of train tasks runs up to ``buffer_size`` of them (default
   ``job_samples``) on the head, and the method reads those runs.
 - A step holds either traces or train tasks, so recorded sessions still

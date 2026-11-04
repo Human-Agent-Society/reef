@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.job_data import job_data_ref
 
 from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
@@ -81,7 +82,7 @@ class GatedComponent(LocalJobComponent):
 
 def training_job(job_id: str, **parameters: bool) -> TrainingJob:
     data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
-    return TrainingJob(job_id, "gated", "gated:base", data, parameters, scenario="s")
+    return TrainingJob(job_id, "gated", "gated:base", job_data_ref(data), parameters, scenario="s")
 
 
 def wait_until(condition: Callable[[], bool]) -> None:

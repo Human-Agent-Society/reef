@@ -14,6 +14,7 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.slime_backend.test_slime_component import batch_for, parameters, worker_args
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData, TaskSample
@@ -88,7 +89,12 @@ def parsed(tmp_path, monkeypatch):
 
 def sft_job(component: SlimeTrainingComponent, job_id: str = "job-0", start: str | None = None) -> TrainingJob:
     return TrainingJob(
-        job_id, "slime", start or component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+        job_id,
+        "slime",
+        start or component.base_start,
+        job_data_ref(batch_for(0)),
+        parameters(TrainingMethod("sft")),
+        scenario="s",
     )
 
 
@@ -231,9 +237,16 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
         **parameters(TrainingMethod("sft")),
         **({"rollout": {"rollouts_per_task": 2}} if rollout else {}),
     }
+    # The job file that LocalJobComponent.submit writes: the job data reference with its local path.
+    ref = job_data_ref(data)
     write_json(
         directory / JOB_FILE,
-        {"scenario": "s", "start": str(start), "data": data.to_dict(), "parameters": job_parameters},
+        {
+            "scenario": "s",
+            "start": str(start),
+            "data": {**ref.to_dict(), "path": str(ref.path)},
+            "parameters": job_parameters,
+        },
     )
     write_json(directory / DRIVER_FILE, settings_to_json(SETTINGS))
     return directory

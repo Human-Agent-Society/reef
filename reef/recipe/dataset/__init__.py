@@ -2,14 +2,14 @@
 
 A deployment selects the recipe as ``reef.recipe.dataset:DatasetRecipe`` on
 the Slime backend, with ``data.training_mode: manual``. Each training
-instruction (``POST /reef/train``) whose ``parameters`` hold ``dataset``
+request (``POST /reef/train``) whose ``parameters`` hold ``dataset``
 becomes one dataset job (``reef.train.slime_backend.dataset``): Slime rolls the
 dataset's prompts out, rewards them and trains them with its own options in
 ``training.options``.
 
 - ``objective``: ``SlimeDatasetObjective``, of the ``slime`` loss family,
   which leaves the training signal to Slime.
-- ``processor``: ``DatasetJobData``, the job of one instruction, with no samples.
+- ``processor``: ``DatasetJobData``, the job of one request, with no samples.
 - ``recipe``: the objective and the stage.
 
 The ``slime`` loss family is in ``reef.train.slime_backend.native``. This

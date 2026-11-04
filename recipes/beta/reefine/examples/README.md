@@ -161,7 +161,7 @@ installed tree.
 
 In the bug-fix show session, check the tool calls: the agent should run a
 failing test before editing `adder.py`, then fix the code and run the test
-again. A published release alone does not establish that the instruction was
+again. A published release alone does not establish that the request was
 followed. If the behavior is incomplete, submit a more specific request.
 
 The [scripted deployment](configs/deployment.yaml) answers requests in text,

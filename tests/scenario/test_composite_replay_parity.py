@@ -30,6 +30,7 @@ from tests.support.component_trainers import (
     _TwoTrainerRecipe,
     finish_job,
 )
+from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
@@ -40,9 +41,7 @@ from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.sample2job import Sample2Job
-from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
@@ -177,7 +176,7 @@ class _Recipe(_TwoTrainerRecipe):
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
-                    samples=None if samples is None else TrainerSamples(samples, component),
+                    samples=None if samples is None else samples.for_trainer(component),
                     root=root,
                 ),
             )
@@ -191,11 +190,14 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
         (initial / component).mkdir(parents=True, exist_ok=True)
         (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
     backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    storage = data_storage(tmp_path / "records")
     return Dispatcher(
         _Recipe(backends=backends, pipelines=tuple(pipelines.items())),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        data_store=storage.data,
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
         coordination=memory_coordination(),

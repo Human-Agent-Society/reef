@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact.files import DirectoryFiles
@@ -22,13 +23,19 @@ from reef.train.types import JobData
         ({"backend": ""}, ValueError, "backend must be a non-empty string"),
         ({"start": ""}, ValueError, "start must be a non-empty string"),
         ({"start": None}, ValueError, "start must be a non-empty string"),
-        ({"data": ()}, TypeError, "data must be a JobData"),
+        ({"data": ()}, TypeError, "data must be a JobDataRef"),
         ({"parameters": [("lr", 1.0)]}, TypeError, "parameters must be a mapping"),
         ({"parameters": {"lr": float("nan")}}, ValueError, "Out of range float"),
     ],
 )
 def test_a_training_job_checks_its_values_at_construction(changes, error, message):
-    values = {"job_id": "job", "backend": "tinker", "start": "/base", "data": JobData("b"), "parameters": {}}
+    values = {
+        "job_id": "job",
+        "backend": "tinker",
+        "start": "/base",
+        "data": job_data_ref(JobData("b")),
+        "parameters": {},
+    }
     TrainingJob(**values, scenario="s")
     with pytest.raises(error, match=message):
         TrainingJob(**{**values, **changes}, scenario="s")

@@ -3,7 +3,7 @@
 Control does not make samples on the training path. When a scenario accepts records, control adds a
 ``record_selection`` item for each trainer that trains to the ``samples`` queue. A ``SamplesWorker`` takes the
 item and has a ``SampleProducers`` make the samples: the trainer's record-to-sample stage selects and groups the
-records and makes samples of the record sets that it forms, and the samples land in the sample store. Control's trainer reads the sample store and builds jobs from it. Slow stages (judges, generated tasks and
+records and makes samples of the record sets that it forms, and the samples become data items that the scenario uses. Control's trainer reads them and builds jobs from them. Slow stages (judges, generated tasks and
 their rollouts) never hold the training path.
 
 A ``record_selection`` item:
@@ -67,7 +67,7 @@ class ProducedSamples:
     """What one record selection did.
 
     Values: ``changed`` is whether it gave the trainer something new to build a job from: a new stored sample or a
-    new training instruction; ``background`` is whether background work of the stages still runs, so the samples
+    new training request; ``background`` is whether background work of the stages still runs, so the samples
     service looks again later. ``due_in_seconds`` is a non-negative finite number: the seconds until a set that waits
     for time alone is due, such as a trajectory at the end of its idle time. None means that no set waits for time.
 

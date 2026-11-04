@@ -46,8 +46,8 @@ from reef.storage.commits import (
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
 from reef.train.component import ScenarioRoot
-from reef.train.instructions import InstructionQueue
 from reef.train.trainer import ComponentTrainer
+from reef.train.training_requests import TrainingRequestQueue
 
 
 def committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
@@ -103,7 +103,7 @@ def recovered_trainer_states(
     training commit and consumption receipt, which name no component.
     Activations and new training starts carry no trainer state, so no
     trainer recovers from them. The records that a trainer's stored samples
-    consumed (``SampleStore.consumed_record_ids``) count as consumed too, so a
+    consumed (``TrainingState.consumed_record_ids``) count as consumed too, so a
     replay never makes their samples again. A drop is a step without
     a commit that an earlier Reef version recorded as a consumption receipt:
     its rows count as consumed, and the state and the cursor stay the last
@@ -134,8 +134,8 @@ def recovered_trainer_states(
             and (record.component == component or (alone and record.component is None))
         )
         last = own[-1] if own else None
-        # The records that the trainer's stored samples consumed: its sample store key is "" when it is alone.
-        stored = store.samples.consumed_record_ids("" if alone else component)
+        # The records that the trainer's stages consumed: its key is "" when it is alone.
+        stored = store.training_state.consumed_record_ids("" if alone else component)
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
@@ -167,11 +167,11 @@ class ScenarioFactory:
         experiment_reports: ExperimentReportQueue | None = None,
         activates_runtime: bool = True,
         served_models: ServedModels | None = None,
-        instructions: InstructionQueue | None = None,
+        training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._recipe = recipe
-        #: The training instructions of every scenario; None builds scenarios that take no instruction.
-        self._instructions = instructions
+        #: The training requests of every scenario; None builds scenarios that take no request.
+        self._training_requests = training_requests
         self._activates_runtime = activates_runtime
         self.served_models = served_models
         self._backend_factory = backend_factory
@@ -423,7 +423,7 @@ class ScenarioFactory:
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
                 releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
-                samples=store.samples,
+                samples=self._storage.sample_store(name, store),
                 root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )
             if any(
@@ -470,7 +470,7 @@ class ScenarioFactory:
                 store=store,
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,
-                instructions=None if self._instructions is None else self._instructions.of(name),
+                training_requests=None if self._training_requests is None else self._training_requests.of(name),
             )
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.samples import data_storage
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
@@ -24,10 +25,9 @@ from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
-from reef.train.jobs import JobCommit, JobLoop, JobLoopState
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 
 WEIGHTS = "weights"
@@ -42,8 +42,8 @@ class ComponentJobs(StubTrainingComponent):
     ``n``-th job, with the metrics ``{prepared}``. ``prepared`` counts the steps that started, a step that raised
     included; a step that raises records no job, so ``submit`` raises as a refused job does and the trainer's cycle
     fails. ``reject_next`` ends the next job without a checkpoint, with ``selected: False``. ``hold_next`` adds the
-    next checkpoint's release path to ``held_paths``, whose commit ``HeldJobLoop`` names as changing the ``HELD``
-    kind, which the test recipe's activation rule does not activate. ``started``
+    next checkpoint's release path to ``held_paths``: such a checkpoint changes the ``HELD`` part
+    (``changed_parts``), which the test recipe's activation rule does not activate. ``started``
     is the text of the last start that ``import_start`` took. A subclass blocks or fails a step in ``step``.
     """
 
@@ -56,6 +56,9 @@ class ComponentJobs(StubTrainingComponent):
         self.hold_next = False
         self.held_paths: set[str] = set()
         self.started: str | None = None
+
+    def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
+        return frozenset({HELD}) if checkpoint.release_path in self.held_paths else frozenset()
 
     def unblock(self) -> None:
         """Let go of any step the test holds, so the dispatcher can close."""
@@ -143,7 +146,7 @@ class JudgedAtOnce:
 
 
 class AutoOnlyThresholdJobData(ThresholdJobData):
-    """The same batches, without ``manual``: the stage takes no instruction."""
+    """The same batches, without ``manual``: the stage takes no training request."""
 
     supported_training_modes = frozenset({"auto"})
 
@@ -154,21 +157,6 @@ HELD = "held"
 #: How many artifacts behind the served one a row may be and still train. A test appends rows before the jobs that
 #: it waits for move the served artifact, so its rows stay trainable until it ends.
 MAX_STALENESS = 100
-
-
-class HeldJobLoop(JobLoop):
-    """The ``JobLoop`` of a ``ComponentJobs``: the commit of a checkpoint that ``jobs`` held names the ``HELD``
-    kind, as a harness checkpoint names the parts that it changed (``HarnessJobLoop``)."""
-
-    def __init__(self, jobs: ComponentJobs, *, scenario: str) -> None:
-        super().__init__(jobs, scenario=scenario)
-        self.jobs = jobs
-
-    def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
-        commit = super().publish(state, checkpoint)
-        if checkpoint.release_path not in self.jobs.held_paths:
-            return commit
-        return replace(commit, result=replace(commit.result, changed_kinds=frozenset({HELD})))
 
 
 @dataclass(frozen=True)
@@ -222,7 +210,7 @@ class _TwoTrainerRecipe(Recipe):
         alone = len(self.backends) + (self.training_component is not None) == 1
 
         def samples_for(component: str) -> TrainerSamples | None:
-            return None if samples is None else TrainerSamples(samples, "" if alone else component)
+            return None if samples is None else samples.for_trainer("" if alone else component)
 
         trainers = tuple(
             ComponentTrainer(
@@ -231,7 +219,7 @@ class _TwoTrainerRecipe(Recipe):
                     scenario,
                     records,
                     pipeline_factory=factory_for(component),
-                    job_loop=HeldJobLoop(backend, scenario=scenario),
+                    job_loop=JobLoop(backend, scenario=scenario),
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     samples=samples_for(component),
@@ -393,11 +381,14 @@ def _dispatcher(
             **seeds,
         )
     records = tmp_path / "records" if records_dir is None else records_dir
+    storage = data_storage(records)
     dispatcher = Dispatcher(
         recipe,
         repository,
         local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(records),
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        data_store=storage.data,
         experiment_tracker=experiment_tracker,
         hold_local_cycles=hold_local_cycles,
         # The work queues live beside the records, so a restarted dispatcher finds the running job, as in a deployment.

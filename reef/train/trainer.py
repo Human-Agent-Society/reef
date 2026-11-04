@@ -43,10 +43,10 @@ class JobDataReservation:
     """Job data held while submission runs outside the trainer lock.
 
     Values: ``data`` is JobData. ``consumed_ids`` is None while the pipeline holds the reservation. Otherwise,
-    ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})``: a failed instruction released
-    its samples and consumed only that instruction.
+    ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})``: a failed request released
+    its samples and consumed only that request.
     Purpose: Trainer.reserve_job_data makes this phase; run_once replaces it with PendingTrainingResult once
-    submission or instruction skipping returns. It contains no training result or prepared commit.
+    submission or request skipping returns. It contains no training result or prepared commit.
     """
 
     data: JobData
@@ -60,7 +60,7 @@ class JobDataReservation:
             or self.data.request is None
             or self.consumed_ids != frozenset({self.data.request.id})
         ):
-            raise ValueError("consumed_ids must name only the reserved instruction, or be None")
+            raise ValueError("consumed_ids must name only the reserved request, or be None")
 
     @property
     def data_id(self) -> str:
@@ -75,7 +75,7 @@ class PendingTrainingResult:
     Values: ``result`` is TrainStepResult. ``data`` is the reserved JobData for a submission or None for a polled
     job update. ``ended`` is a JobOutcome only for a polled job end, otherwise None. When set,
     ``ended.job_id == result.training_job_id``. ``consumed_ids`` is None,
-    or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped instruction.
+    or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped request.
     ``earlier_results`` is an
     ordered, possibly empty tuple of TrainStepResult values replaced by metric annotation; duplicates are allowed.
     Each earlier result equals ``result`` in every field except ``metrics``.
@@ -104,7 +104,7 @@ class PendingTrainingResult:
             or self.data.request is None
             or self.consumed_ids != frozenset({self.data.request.id})
         ):
-            raise ValueError("consumed_ids must name only the reserved instruction, or be None")
+            raise ValueError("consumed_ids must name only the reserved request, or be None")
         if not isinstance(self.earlier_results, tuple) or not all(
             isinstance(result, TrainStepResult) for result in self.earlier_results
         ):
@@ -242,8 +242,7 @@ class Trainer:
                     start = job_loop.component.root_start(root)
                 except ValueError as exc:
                     raise TrainingStartRefused(
-                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.revision}: "
-                        f"{exc}"
+                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.revision}: {exc}"
                     ) from exc
                 initial_state = JobLoopState(start).to_dict()
             trainer = cls(
@@ -335,29 +334,23 @@ class Trainer:
     def scenario(self) -> str:
         return self._scenario
 
-    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
+    def set_training_mode(self, training_mode: str) -> None:
         """Serialize mode selection with record push and job data reservation (``TrainingPipeline.set_training_mode``)."""
         with self._lock:
-            self._pipeline.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
-
-    def pending_instructions(self) -> int:
-        """The instructions that the pipeline holds: those that the scenario last gave it (``queue_instructions``) and
-        that it did not consume yet. ``Scenario.pending_instructions`` counts the queue itself."""
-        with self._lock:
-            return self._pipeline.buffered_requests()
+            self._pipeline.set_training_mode(training_mode)
 
     def consumed_among(self, ids: Iterable[str]) -> frozenset[str]:
         """The IDs among ``ids`` that a commit of this trainer consumed, or that its recovery read as consumed."""
         with self._lock:
             return frozenset(ids) & self.consumed_record_ids
 
-    def queue_instructions(self, requests: Iterable[TrainingRequest]) -> None:
-        """Give the pipeline the scenario's queued instructions (``TrainingPipeline.queue_instructions``)."""
+    def queue_requests(self, requests: Iterable[TrainingRequest]) -> None:
+        """Give the pipeline the scenario's queued requests (``TrainingPipeline.queue_requests``)."""
         with self._lock:
-            self._pipeline.queue_instructions(requests)
+            self._pipeline.queue_requests(requests)
 
-    def fail_pending_instruction(self, error: str) -> bool:
-        """Mark the reserved instruction as failed, so its next job data is a skip row; False when none is reserved."""
+    def fail_pending_request(self, error: str) -> bool:
+        """Mark the reserved request as failed, so its next job data is a skip row; False when none is reserved."""
         with self._lock:
             pending = self.pending_step
             if not isinstance(pending, JobDataReservation) or pending.data.request is None:
@@ -365,13 +358,13 @@ class Trainer:
             self._pipeline.mark_request_failed(pending.data.request.id, error)
             return True
 
-    def instruction_failures(self) -> Mapping[str, str]:
-        """The errors of the failed instructions this trainer still holds, by ID, for the trainer that replaces it."""
+    def request_failures(self) -> Mapping[str, str]:
+        """The errors of the failed requests this trainer still holds, by ID, for the trainer that replaces it."""
         with self._lock:
             return self._pipeline.request_failures()
 
-    def set_instruction_failures(self, failures: Mapping[str, str]) -> None:
-        """Carry failed instructions into this trainer's pipeline; a rebuilt scenario starts without them."""
+    def set_request_failures(self, failures: Mapping[str, str]) -> None:
+        """Carry failed requests into this trainer's pipeline; a rebuilt scenario starts without them."""
         with self._lock:
             self._pipeline.set_request_failures(failures)
 
@@ -491,28 +484,16 @@ class Trainer:
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
 
-    def buffer_listing(self) -> Mapping[str, Any]:
-        """The trainer's training mode and the samples of its buffer (``TrainingPipeline.buffer_listing``)."""
+    def next_job_listing(self) -> Mapping[str, Any]:
+        """The trainer's training mode and the samples of its next automatic job (``TrainingPipeline.next_job_listing``)."""
         with self._lock:
             self._pipeline.read_store()
-            return {"training_mode": self._pipeline.training_mode, "samples": list(self._pipeline.buffer_listing())}
+            return {"training_mode": self._pipeline.training_mode, "samples": list(self._pipeline.next_job_listing())}
 
-    def change_buffer(self, sample_ids: tuple[str, ...], *, insert: bool) -> Mapping[str, Any]:
-        """Insert ``sample_ids`` into the manual buffer, or remove them; return ``buffer_listing`` after it.
-
-        Raise as ``TrainingPipeline.insert_into_buffer`` and ``remove_from_buffer`` do.
-        """
+    def check_request(self, request: TrainingRequest) -> None:
+        """Raise ``ValueError`` unless this trainer can run ``request`` (``TrainingPipeline.check_request``)."""
         with self._lock:
-            if insert:
-                self._pipeline.insert_into_buffer(sample_ids)
-            else:
-                self._pipeline.remove_from_buffer(sample_ids)
-        return self.buffer_listing()
-
-    def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
-        """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""
-        with self._lock:
-            self._pipeline.forget_samples(sample_ids)
+            self._pipeline.check_request(request)
 
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
@@ -536,25 +517,6 @@ class Trainer:
         that trains nothing is never ready.
         """
         return self.trains and self._pipeline.ready(self.job_samples)
-
-    def _build_validated_job_data(self) -> JobData:
-        """Build the next job's data and hold the pipeline to its declared schema.
-
-        ``Sample2Job.output_schema`` is the recipe's published contract for
-        what the training component receives; enforcing it at the only place
-        job data enters the trainer turns a drifting recipe into a loud error
-        instead of a backend-side shape failure.
-        """
-        if not self.trains:
-            raise RuntimeError("a trainer that trains nothing builds no job data")
-        data = self._pipeline.build_job_data(self.job_samples)
-        schema = self._pipeline.output_schema
-        if not isinstance(data, schema):
-            raise TypeError(
-                f"{type(self._pipeline.sample2job).__name__} declared output_schema "
-                f"{schema.__name__} but built {type(data).__name__}"
-            )
-        return data
 
     def push_retained(self, item: AgentRecord) -> None:
         """Consumption state is independent of record visibility in storage."""
@@ -580,7 +542,7 @@ class Trainer:
 
     def produce_samples(self) -> ProducedSamples:
         """Push every record that arrived since the last call into the pipeline and make samples of the formed record
-        sets; return whether the trainer received new input (samples or instructions), whether background work
+        sets; return whether the trainer received new input (samples or requests), whether background work
         of the pipeline still runs, and when a set that waits for time alone is due, so the samples service comes
         back."""
         with self._lock:
@@ -650,8 +612,8 @@ class Trainer:
                 polled = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
                 result, ended = (None, None) if polled is None else (polled.result, polled.ended)
             elif data.request is not None and failure is not None:
-                # Committed without a job: the failed instruction is consumed alone and the catalog row names why.
-                result = self.skip_failed_instruction(data, data.request, failure)
+                # Committed without a job: the failed request is consumed alone and the catalog row names why.
+                result = self.skip_failed_request(data, data.request, failure)
             else:
                 parameters = self._pipeline.sample2job.job_parameters(data)
                 result = (
@@ -674,15 +636,15 @@ class Trainer:
                 )
             return result
 
-    def skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
-        """Consume the instruction alone; the samples of its job data stay in the buffer."""
+    def skip_failed_request(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
+        """Consume the request alone; the samples of its job data stay untrained."""
         with self._lock:
             pending = self.pending_step
             if not isinstance(pending, JobDataReservation) or pending.data_id != data.data_id:
-                raise RuntimeError("trainer reservation changed while its instruction was being skipped")
+                raise RuntimeError("trainer reservation changed while its request was being skipped")
             self._pipeline.release_job_data(data.data_id)
             self.pending_step = replace(pending, consumed_ids=self._pipeline.discard_request(request.id))
-        return TrainStepResult(dict(self._state), {"skipped": "instruction failed", "error": error})
+        return TrainStepResult(dict(self._state), {"skipped": "request failed", "error": error})
 
     def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
@@ -697,7 +659,7 @@ class Trainer:
         # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
         if not self.pipeline_ready():
             return None
-        data = self._build_validated_job_data()
+        data = self._pipeline.build_job_data(self.job_samples)
         self.pending_step = JobDataReservation(data)
         return data
 
