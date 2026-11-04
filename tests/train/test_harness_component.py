@@ -89,7 +89,7 @@ def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
         # The step's metrics are the checkpoint's: the job's end carries none of its own.
         assert checkpoint.metrics["selected"] is True
         # The tree's checksum names the head that the step ran on.
-        assert checkpoint.metrics["head_artifact_id"] == PI_SEED.checksum()
+        assert checkpoint.metrics["head_checksum"] == PI_SEED.checksum()
         assert "head_release_id" not in checkpoint.metrics
         assert checkpoint.path == checkpoint.release_path
         assert HarnessTree.read(Path(checkpoint.path)) == PI_SEED.apply(MARKER)
@@ -98,7 +98,7 @@ def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
         second = ended(component, "two")
         assert second.state == "finished" and second.checkpoints == ()
         assert second.metrics["skipped"] == UNCHANGED
-        assert second.metrics["head_artifact_id"] == PI_SEED.apply(MARKER).checksum()
+        assert second.metrics["head_checksum"] == PI_SEED.apply(MARKER).checksum()
         assert component.state_after("two")[0] == 2 and component.state_after(None)[0] == 0
     finally:
         component.close()
