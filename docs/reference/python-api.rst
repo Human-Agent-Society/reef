@@ -537,7 +537,7 @@ The session contract is:
        the records that each trainer's stages consumed. It closes with the
        session and survives restarts when ``durable``.
    * - ``samples``
-     - The ``ScenarioSamples`` of the scenario, or None for a storage without
+     - The ``SampleStore`` of the scenario, or None for a storage without
        a data store: the data items that it uses, in use order (RFC #1140).
        They are the uploaded trajectories, the imported Harbor tasks of the
        ``train`` and ``eval`` splits, and the samples that each trainer's
@@ -626,7 +626,7 @@ give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
 keyword, which the scenario always passes. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store. The scenario's imported tasks are not a task
-store: they are task items that the scenario uses (``ScenarioSamples``), which
+store: they are task items that the scenario uses (``SampleStore``), which
 the factory gives to ``Recipe.build_trainers`` as ``samples`` and every
 component reads from ``PipelineContext.samples``.
 

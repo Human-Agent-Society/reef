@@ -20,7 +20,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
-from reef.storage.samples import ScenarioSamples, TrainingState
+from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
@@ -136,7 +136,7 @@ class ObservedScenarioStore(ScenarioStore):
         return self._inner.training_state
 
     @property
-    def samples(self) -> ScenarioSamples | None:
+    def samples(self) -> SampleStore | None:
         return self._inner.samples
 
     @property

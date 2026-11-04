@@ -5,7 +5,7 @@
 owner with its name. Then the deployment's ``task-import`` section, when it is set, adds each task of its split
 manifest as an item of the owner that the scenario uses in the manifest's split. Last, the record items of another
 scenario that it uses are appended to its record store (``sync_scenario_records``). The session's training samples
-are the items of the owner that the scenario uses (``ScenarioSamples``).
+are the items of the owner that the scenario uses (``SampleStore``).
 
 An identical import changes nothing, so the import runs again at each open and picks up the tasks that the operator
 added to the manifest. A task that conflicts with a stored item stops the open.
@@ -29,7 +29,7 @@ from reef.storage.data_sync import release_items
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.record_items import sync_scenario_records
 from reef.storage.records import RecordStore
-from reef.storage.samples import ScenarioSamples, TrainingState
+from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import SplitName, TaskFileStore, TaskStorage
 
@@ -80,14 +80,14 @@ class TaskImport:
 class DataScenarioStore(ScenarioStore):
     """A scenario session whose training samples are the items of the data store that its scenario uses.
 
-    Values: ``inner`` is the session of the scenario storage, and ``samples`` the scenario's ``ScenarioSamples``,
+    Values: ``inner`` is the session of the scenario storage, and ``samples`` the scenario's ``SampleStore``,
     whose training state is ``inner.training_state``. Each operation is the operation of ``inner``, except
     ``samples``.
 
     Purpose: ``DataScenarioStorage.open`` makes it.
     """
 
-    def __init__(self, inner: ScenarioStore, samples: ScenarioSamples) -> None:
+    def __init__(self, inner: ScenarioStore, samples: SampleStore) -> None:
         self.inner = inner
         self._samples = samples
 
@@ -108,7 +108,7 @@ class DataScenarioStore(ScenarioStore):
         return self.inner.training_state
 
     @property
-    def samples(self) -> ScenarioSamples:
+    def samples(self) -> SampleStore:
         return self._samples
 
     @property
@@ -188,7 +188,7 @@ class DataScenarioStorage(ScenarioStorage):
         except BaseException:
             session.close()
             raise
-        return DataScenarioStore(session, ScenarioSamples(self.data, owner, scenario, session.training_state))
+        return DataScenarioStore(session, SampleStore(self.data, owner, scenario, session.training_state))
 
     def archive(self, scenario: str) -> tuple[str, ...]:
         owner = self.inner.read_settings(scenario).owner

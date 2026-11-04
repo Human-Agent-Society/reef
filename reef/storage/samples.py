@@ -49,7 +49,7 @@ class StoredSample:
     """One item that a scenario uses, as its trainers read it, with the train counts of each trainer.
 
     Values: ``sequence`` is the positive sequence of the scenario's use of the item (``DataStore.scenario_items``),
-    or the item's sequence when ``ScenarioSamples.get`` read it. ``sample_id`` is the item's ID. ``split`` is the
+    or the item's sequence when ``SampleStore.get`` read it. ``sample_id`` is the item's ID. ``split`` is the
     item's split for the scenario: ``train``, or ``eval`` for an imported task that an evaluation runs. ``sample`` is
     the ``TrajectorySample`` or ``TaskSample`` of the item. ``train_counts`` maps each trainer (its component, or
     ``""`` for the only trainer of a scenario) to the positive number of its committed jobs that listed
@@ -57,7 +57,7 @@ class StoredSample:
     or an imported task. ``group`` is None or the name that the samples of one stage unit share, so that they train
     together.
 
-    Purpose: ``ScenarioSamples`` makes it. A trainer's pipeline reads it, and the listings and evaluations too.
+    Purpose: ``SampleStore`` makes it. A trainer's pipeline reads it, and the listings and evaluations too.
     """
 
     sequence: int
@@ -85,7 +85,7 @@ class TrainingState(ABC):
     trainer, for each sample that the commit lists (``consumed_sample_id``), in the commit's transaction. A train
     count stays when its item leaves the scenario, so an item that comes back keeps it.
 
-    Purpose: the scenario storage keeps it with the scenario's commits. ``ScenarioSamples`` reads it.
+    Purpose: the scenario storage keeps it with the scenario's commits. ``SampleStore`` reads it.
     """
 
     @abstractmethod
@@ -119,8 +119,8 @@ class MemoryTrainingState(TrainingState):
 
 
 @dataclass(frozen=True)
-class ScenarioSamples:
-    """The training samples of one scenario: the items of its owner that it uses, and its training state.
+class SampleStore:
+    """The sample store of one scenario: the items of its owner that it uses, and its training state.
 
     Values: ``data`` is the deployment's data store, ``owner`` the scenario's owner there, ``scenario`` its name and
     ``state`` its training state.
@@ -246,17 +246,17 @@ class ScenarioSamples:
         return tuple(found)
 
 
-def memory_samples(scenario: str) -> ScenarioSamples:
+def memory_samples(scenario: str) -> SampleStore:
     """The samples of ``scenario`` in process memory, for a trainer without a scenario session: a data store whose
     owner is the scenario, with its task files in a temporary directory, and a training state in memory."""
-    return ScenarioSamples(MemoryDataStore(LocalTaskFileStore()), scenario, scenario, MemoryTrainingState())
+    return SampleStore(MemoryDataStore(LocalTaskFileStore()), scenario, scenario, MemoryTrainingState())
 
 
 @dataclass(frozen=True)
 class TrainerSamples:
     """The samples of a scenario as one trainer reads and writes them.
 
-    Values: ``samples`` is the scenario's ``ScenarioSamples``; ``trainer`` is the trainer's ``train_counts`` key, the
+    Values: ``samples`` is the scenario's ``SampleStore``; ``trainer`` is the trainer's ``train_counts`` key, the
     component that its commits name or ``""`` for the only trainer of a scenario. ``page`` reads the samples that the
     trainer reads (its own, and the uploads and imported tasks), ``add_record_samples`` saves its own,
     ``consumed_record_ids`` reads the records that its stages consumed, and ``imported_tasks`` reads the imported
@@ -266,7 +266,7 @@ class TrainerSamples:
     and its stages read it.
     """
 
-    samples: ScenarioSamples
+    samples: SampleStore
     trainer: str = ""
 
     def page(
@@ -294,7 +294,7 @@ __all__ = [
     "SAMPLE_KINDS",
     "MemoryTrainingState",
     "SampleKind",
-    "ScenarioSamples",
+    "SampleStore",
     "StoredSample",
     "TrainerSamples",
     "TrainingState",

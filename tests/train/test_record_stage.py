@@ -37,7 +37,7 @@ from reef.record2sample import (
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
-from reef.storage.samples import ScenarioSamples, TrainerSamples, consumed_sample_id, stage_item_id
+from reef.storage.samples import SampleStore, TrainerSamples, consumed_sample_id, stage_item_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -418,7 +418,7 @@ class UploadJobData(PairJobData):
 TRAJECTORY = TrajectorySample({"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1}]})
 
 
-def upload(samples: ScenarioSamples, *trajectory_ids: str) -> None:
+def upload(samples: SampleStore, *trajectory_ids: str) -> None:
     """Upload ``TRAJECTORY`` under each of ``trajectory_ids`` for the training of the scenario."""
     metadata = {"kind": "trajectory", "scenarios": {samples.scenario: "train"}}
     samples.data.create(

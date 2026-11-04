@@ -52,7 +52,7 @@ def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path
         dispatcher.close()
 
 
-def test_each_composite_component_opens_its_own_task_stores_and_shares_the_scenario_samples() -> None:
+def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sample_store() -> None:
     first, second = ContextRecipe(), ContextRecipe()
     with closing(data_storage()) as storage, closing(storage.open("math")) as session:
         trainers = CompositeRecipe(components={"first": first, "second": second}).build_trainers(
@@ -71,7 +71,7 @@ def test_each_composite_component_opens_its_own_task_stores_and_shares_the_scena
 
         assert second_storage.open("tasks").generations() == ()
         assert session.tasks.open("first/tasks").generation(0) is not None
-        # The scenario's samples, such as its imported tasks, are one set that every component reads as itself.
+        # The sample store, with its imported tasks, is one store that every component reads as itself.
         first_samples, second_samples = first.contexts[-1].samples, second.contexts[-1].samples
         assert first_samples is not None and second_samples is not None
         assert first_samples.samples is session.samples and second_samples.samples is session.samples

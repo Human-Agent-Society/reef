@@ -185,7 +185,7 @@ class HarnessJobLoop(JobLoop):
     checkpoint names the parts of the tree that it changed.
 
     Values: ``component`` and ``scenario`` as ``JobLoop``. ``releases`` reads the scenario component's head, whose
-    release is the job's start. ``eval_samples`` holds the scenario's samples, whose imported eval split the job evaluates on,
+    release is the job's start. ``eval_samples`` reads the sample store, whose imported eval split the job evaluates on,
     or ``None`` for the configured tasks. ``layout`` is the adapter's tree layout.
 
     Operations: ``submit(state, data, parameters)`` is ``JobLoop.submit`` with ``harness_parameters(data,

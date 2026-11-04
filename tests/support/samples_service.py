@@ -1,7 +1,7 @@
 """The samples service's step, for tests that drive trainers and scenarios without a samples worker.
 
 In Reef, the samples service makes a trainer's samples from its new records (``Trainer.produce_samples``); a
-trainer's own cycle only reads the scenario's samples. A test that steps a trainer or a scenario by hand calls these
+trainer's own cycle only reads the sample store. A test that steps a trainer or a scenario by hand calls these
 before the cycle, as the samples worker would.
 """
 

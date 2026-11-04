@@ -188,7 +188,7 @@ class TrainingPipeline:
         #: reshuffle what it references.
         self.pending: JobData | None = None
         self.data_number = 0
-        #: The scenario's samples as this trainer reads them; in memory for a trainer without a scenario session.
+        #: The sample store as this trainer reads it; in memory for a trainer without a scenario session.
         self.store = TrainerSamples(memory_samples(context.scenario)) if context.samples is None else context.samples
         #: The sequence of the last stored sample that the pipeline read.
         self.store_sequence = 0
@@ -520,7 +520,7 @@ class TrainingPipeline:
         return whether the trainer received new input since the last call: a sample stored here or by ``push`` when
         a record completed a set, or a training request that ``push`` read.
 
-        The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the scenario's samples.
+        The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the sample store.
         """
         # Background work, such as judgments or finished rounds, forms sets or makes samples without a new record.
         self.record2sample.advance(time.monotonic())

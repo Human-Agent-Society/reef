@@ -33,7 +33,7 @@ from reef.record2sample import Record2Sample
 from reef.sample2job import NoJobData
 from reef.storage.job_data_store import JobDataStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, ScenarioSamples, TrainerSamples
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
@@ -298,7 +298,7 @@ class Recipe:
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: CommittedArtifacts | None = None,
-        samples: ScenarioSamples | None = None,
+        samples: SampleStore | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.

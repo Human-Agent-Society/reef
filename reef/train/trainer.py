@@ -656,7 +656,7 @@ class Trainer:
             return self.pending_step.data
         if serving_artifact_id is not None:
             self._pipeline.observe_serving_artifact_id(serving_artifact_id)
-        # The samples service makes the samples (``produce_samples``); the cycle only reads the scenario's samples.
+        # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
         if not self.pipeline_ready():
             return None
         data = self._pipeline.build_job_data(self.job_samples)

@@ -2,7 +2,7 @@
 
 ``LocalSampleProducers`` makes the samples of a trainer of a scenario with this process's copy of the scenario. When
 the process runs control, it uses the loaded scenario and then wakes the trainer's worker, which builds the next job
-from the scenario's samples. When control runs in another process, it loads the scenario on demand, and control learns of
+from the sample store. When control runs in another process, it loads the scenario on demand, and control learns of
 the samples from the samples queue.
 """
 
