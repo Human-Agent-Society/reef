@@ -28,6 +28,7 @@ from tests.support.harness_steps import PI_SEED
 from tests.support.serving import wait_for_serving
 
 from reef.harness.sync import TOKEN_PLACEHOLDER
+from reef.harness.tree import HarnessTree
 from reef.service.app import create_app
 
 SKILL = "---\nname: fix\ndescription: Fix the failing test first.\n---\n\nRun the tests, then fix.\n"
@@ -81,8 +82,9 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
                 )
                 assert refused.status == status and named in await refused.text()
             # The next step builds on the merge: its method's patch applies to the person's files.
+            head = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             evolved = await evaluated_step(client)
-            assert evolved["evaluation"]["head_artifact_id"] == merged["artifact_id"]
+            assert evolved["evaluation"]["head_checksum"] == HarnessTree(head["files"]).checksum()
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert (
                 source["files"]["skills/other/SKILL.md"] == other and source["files"]["rules.md"] == "marker rules\n"

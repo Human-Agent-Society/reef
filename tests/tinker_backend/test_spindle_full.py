@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
+from tests.support.job_data import job_data_ref
 
 from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
 from reef.core.evaluation import PolicyModel
@@ -167,7 +168,7 @@ def train(component, start=None):
     parameters = {"method": TrainingMethod(Objective.name).to_dict()}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":
         assert time.monotonic() < deadline, status

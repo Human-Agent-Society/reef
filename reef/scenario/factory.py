@@ -423,7 +423,7 @@ class ScenarioFactory:
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
                 releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
-                samples=store.samples,
+                samples=self._storage.sample_store(name, store),
                 root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )
             if any(

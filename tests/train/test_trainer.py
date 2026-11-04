@@ -18,7 +18,7 @@ from tests.support.runtime_stubs import (
     StubTrainingComponent,
     runtime_bindings,
 )
-from tests.support.samples import data_storage
+from tests.support.samples import data_storage, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
@@ -38,7 +38,7 @@ from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import TrainerSamples
+from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
@@ -557,9 +557,9 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
 
 @pytest.mark.unit
 def test_trainer_restores_algorithm_state_from_metadata() -> None:
-    session = data_storage().open("math")
+    session, items = open_sample_store(None, "math")
+    samples = items.for_trainer("")
     records = session.records
-    samples = TrainerSamples(session.samples)
     for item in (
         inference("i1"),
         report("r1", "i1", 1.0),
@@ -618,7 +618,7 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         first_store = first_session.records
         for item in (first_inference, first_report, second_inference, second_report):
             first_store.append(item)
-        first = preparing_trainer(first_store, samples=TrainerSamples(first_session.samples))
+        first = preparing_trainer(first_store, samples=sample_store(storage, "math", first_session).for_trainer(""))
         make_samples(first)
         first_result = first.run_once()
         assert first_result is not None
@@ -642,7 +642,9 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
     with closing(storage.open("math")) as second_session:
         second_store = second_session.records
         second = preparing_trainer(
-            second_store, algorithm_state=first_state, samples=TrainerSamples(second_session.samples)
+            second_store,
+            algorithm_state=first_state,
+            samples=sample_store(storage, "math", second_session).for_trainer(""),
         )
         second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
@@ -720,8 +722,10 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     [job] = component.submitted
     assert TrainingMethod.from_dict(job.parameters["method"]) == TrainingMethod(_GROUPED_PG_OBJECTIVE)
     # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
-    assert [trajectory_reward(item) for item in job.data.samples] == [0.2, 0.8]
-    prepared = prepare_slime_job(job.data, TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1)
+    assert [trajectory_reward(item) for item in read_job_data(job.data_dir).samples] == [0.2, 0.8]
+    prepared = prepare_slime_job(
+        read_job_data(job.data_dir), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
+    )
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
     # After the root release, the job's checkpoint is what the scenario serves.

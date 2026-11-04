@@ -44,7 +44,7 @@ class StepJobs(StubTrainingComponent):
             self.started.set()
             assert self.resume.wait(10), "the test did not release the cycle"
         step = len(self.submitted)
-        path = self.checkpoint_root / f"{job.data.data_id.replace(':', '-')}-{step}"
+        path = self.checkpoint_root / f"{job.data_id.replace(':', '-')}-{step}"
         path.mkdir(parents=True)
         (path / "model.txt").write_text(f"step {step}", encoding="utf-8")
         return (SavedCheckpoint(0, str(path), str(path)),)

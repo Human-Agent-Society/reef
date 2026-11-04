@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support.chat_templates import CharTemplate
+from tests.support.job_data import job_data_ref
 from tests.support.serving import wait_for_serving
 
 from recipes.tttd.tinker import TttdTinkerLoss
@@ -215,7 +216,7 @@ def submit(component, data, objective_name, *, start=None, schedule=None, **para
     }
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     return job_id
 
 
@@ -345,7 +346,9 @@ def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothi
     parameters = {"method": TrainingMethod(objective.name).to_dict(), **overrides}
     with pytest.raises(ValueError, match=message):
         component.submit(
-            TrainingJob("refused", component.name, component.base_start, batch(), parameters, scenario="s")
+            TrainingJob(
+                "refused", component.name, component.base_start, job_data_ref(batch()), parameters, scenario="s"
+            )
         )
     with pytest.raises(KeyError):
         component.status("refused")

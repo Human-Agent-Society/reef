@@ -68,6 +68,7 @@ from reef.storage.commits import (
     parse_scenario_metadata,
     scenario_metadata_for,
 )
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ComponentTrainer, Trainer
@@ -330,7 +331,7 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
     assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     [job] = _wait_for_jobs(dispatcher, training, 1)
-    assert [item.source_agent_record_ids for item in job.data.samples] == [("i1", "r1")]
+    assert [item.source_agent_record_ids for item in read_job_data(job.data_dir).samples] == [("i1", "r1")]
     assert _commit_step(scenario, HARNESS) == [("i1", "r1")]
     for _ in range(2):
         wait_for_serving(dispatcher, "agent")
@@ -1665,8 +1666,8 @@ def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     )
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     [job] = _submitted(training, 1)
-    assert job.data.data_id == "agent:request:t1"
-    assert job.data.request is not None and job.data.request.id == "t1"
+    assert job.data_id == "agent:request:t1"
+    assert job.request_id == "t1"
     assert {"t1", "i1", "r1"} <= scenario.store.history()[-1].consumed_ids
     _settle_weights_job(scenario)
     assert _job_events(scenario) == ["submitted", "checkpoint", "finished"]
@@ -1702,7 +1703,9 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     for record in _records(3, scenario.serving_artifact_id()):
         restarted.accept_record(record)
     assert _wait_for(lambda: len(training.submitted) == 2)
-    assert [item.source_agent_record_ids for item in training.submitted[1].data.samples] == [("i3", "r3")]
+    assert [item.source_agent_record_ids for item in read_job_data(training.submitted[1].data_dir).samples] == [
+        ("i3", "r3")
+    ]
     assert training.submitted[1].start == str(tmp_path / "checkpoints" / "1")
 
 

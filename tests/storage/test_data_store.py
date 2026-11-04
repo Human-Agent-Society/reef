@@ -8,15 +8,18 @@ from dataclasses import replace
 import pytest
 import sqlalchemy
 from sqlalchemy import func, select
+from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
 
 from reef.core.atif_payloads import canonical_json
+from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink
 from reef.storage.item_kinds import json_digest
+from reef.storage.job_data import job_data_key, read_job_data
 from reef.storage.record_items import record_item
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
@@ -547,3 +550,23 @@ def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable
     with pytest.raises(ItemConflict, match="other content"):
         store.create("acme", [NewItem("weights", {**content, "source_uri": "s3://other/weights"}, item.metadata)])
     assert store.read("acme", "weights") == legacy
+
+
+def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):
+    sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
+    first = store.write_job_directory(JobData("s:data:1", (sample,)))
+    # A job of the same samples, under another data ID, uses the same directory.
+    again = store.write_job_directory(JobData("s:request:r1", (sample,)))
+    assert (again.uri, again.data_id, again.sample_count, again.kind) == (first.uri, "s:request:r1", 1, "trajectory")
+    assert read_job_data(store.open_job_directory(again.to_dict()).path).samples == (sample,)
+    other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
+    assert other.uri != first.uri
+    # A directory that no job used since the time goes; a used one stays.
+    store.record_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
+    assert store.delete_unused_job_directories(100.0) == 1
+    with pytest.raises(FileNotFoundError):
+        store.open_job_directory(first.to_dict())
+    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+    # The periodic work keeps a directory that a job used within the time to live.
+    store.maintain()
+    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
