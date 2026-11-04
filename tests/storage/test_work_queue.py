@@ -200,6 +200,8 @@ def warnings_of(caplog) -> list[str]:
         (RuntimeError("engine down"), 2, "queued"),
         (RuntimeError("engine down"), 1, "failed"),
         (WorkerStopped(), 1, "failed"),
+        # A driver log's tail ends with a newline; the item still fails, with the trimmed text.
+        (ItemFailed("the driver exited with 1; the end of driver.log:\nTraceback\n"), 2, "failed"),
     ],
 )
 def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, error, attempts, state):
