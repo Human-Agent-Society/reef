@@ -17,7 +17,7 @@ from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, MemoryDataStore, NewItem
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.samples import ScenarioSamples, consumed_sample_id, stage_item_id
+from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -42,7 +42,7 @@ class Scenario:
 
     session: ScenarioStore
     data: DataStore
-    samples: ScenarioSamples
+    samples: SampleStore
     root: Path
 
     def task(self, name: str, split: str, port: int = 9000) -> None:
@@ -67,7 +67,7 @@ def scenario(request, tmp_path):
         storage = SQLiteScenarioStorage(task_files=task_files)
         data = MemoryDataStore(task_files)
     with closing(storage), closing(data), closing(storage.open("math")) as session:
-        yield Scenario(session, data, ScenarioSamples(data, "acme", "math", session.training_state), tmp_path)
+        yield Scenario(session, data, SampleStore(data, "acme", "math", session.training_state), tmp_path)
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -157,7 +157,7 @@ def training_commit(step: int, *consumed: str, component: str | None = None) -> 
     )
 
 
-def train_counts(samples: ScenarioSamples) -> dict[str, dict[str, int]]:
+def train_counts(samples: SampleStore) -> dict[str, dict[str, int]]:
     return {stored.sample_id: dict(stored.train_counts) for stored in samples.page()}
 
 

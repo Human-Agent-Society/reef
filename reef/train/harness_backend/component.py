@@ -6,10 +6,12 @@ its ``JobLoop``; a training worker runs it here, and control commits the selecte
 
 - ``start``: the tree that the step builds on. ``base:<checksum>`` is the recipe's seed tree; any other start is a
   directory that holds a tree, which ``import_start`` or an earlier job's checkpoint wrote.
-- ``data``: the step's material: the traces of traffic, the train tasks of an offline step, and the request.
+- ``data``: the job data directory of the step's material: the traces of traffic and the train tasks of an
+  offline step.
 - ``parameters``: ``component``, the scenario component that the step evolves; ``head_artifact_id``, the component artifact
   used as the start; ``evaluation_tasks``, the eval split of the scenario's imported tasks, or ``None`` for the
-  configured tasks; ``previous_job``, the last job whose end the trainer committed, or ``None`` before the first.
+  configured tasks; ``previous_job``, the last job whose end the trainer committed, or ``None`` before the first;
+  ``request``, the training request that the step runs (``request_parameter``), or ``None``.
 
 A job's directory keeps ``outcome.json``: the settled step, with the steps that ended and the ``HarnessState``
 after it; and ``tree/``, its selected tree. A job continues the state after ``previous_job``, so the harness state
@@ -24,6 +26,7 @@ import shutil
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +35,11 @@ from reef.artifact.components import TextFileTree
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
+from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ReleaseFormat
 from reef.harness.tree import HarnessTree
 from reef.storage.durable_files import read_json, write_json
+from reef.storage.job_data import read_job_data
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.backend import HarnessBackend, StepProgress
@@ -60,6 +65,24 @@ def head_artifact_id(parameters: Mapping[str, Any]) -> str:
     if not isinstance(head, str) or not head:
         raise ValueError("a harness job names the artifact of its start in parameters.head_artifact_id")
     return head
+
+
+def request_parameter(request: TrainingRequest) -> dict[str, Any]:
+    """``request`` as the ``request`` parameter of a harness job: its ID and its fields without ``samples``, which
+    the job data directory holds."""
+    fields = {key: value for key, value in request.to_dict().items() if key != "samples"}
+    return {"id": request.id, **fields}
+
+
+def request_from_parameters(parameters: Mapping[str, Any]) -> TrainingRequest | None:
+    """The training request of the ``request`` parameter that ``request_parameter`` wrote, or None; ``ValueError``
+    for another value."""
+    value = parameters.get("request")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not isinstance(value.get("id"), str) or not value["id"]:
+        raise ValueError("parameters.request of a harness job must be a request with its id, or null")
+    return TrainingRequest.from_dict({key: item for key, item in value.items() if key != "id"}, request_id=value["id"])
 
 
 class HarnessSteps(ABC):
@@ -194,6 +217,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         previous = parameters.get("previous_job")
         if previous is not None and (not isinstance(previous, str) or not previous):
             raise ValueError("parameters.previous_job of a harness job must be a job ID or null")
+        request_from_parameters(parameters)
 
     def import_start(self, release: Path) -> str:
         """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
@@ -276,7 +300,8 @@ class HarnessTrainingComponent(LocalJobComponent):
         the tree it kept in ``directory/tree``; ``error`` is ``None`` or the error of a step that
         raised, which counts as a step and keeps the state."""
         parameters = job.parameters
-        request = job.data.request
+        request = request_from_parameters(parameters)
+        data = replace(read_job_data(job.data_dir, job.data_id), request=request)
         # The row of a request's step names the request, so its request page settles on that row.
         named = {} if request is None else {"training_request": {"id": request.id, **request.to_dict()}}
         component = str(parameters["component"])
@@ -288,7 +313,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         try:
             with ProgressFile(backend, progress):
                 prepared = backend.prepare_step(
-                    job.data, state.to_json(), steps, head=head, seed_tasks=None if tasks is None else tuple(tasks)
+                    data, state.to_json(), steps, head=head, seed_tasks=None if tasks is None else tuple(tasks)
                 )
                 if prepared.outcome == "skip":
                     return {
@@ -349,4 +374,6 @@ __all__ = [
     "HarnessTrainingComponent",
     "ProgressFile",
     "read_step_progress",
+    "request_from_parameters",
+    "request_parameter",
 ]

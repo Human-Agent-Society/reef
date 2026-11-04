@@ -277,7 +277,7 @@ directory Reef publishes as a release.
 Training job
 ------------
 
-One ``TrainingJob``: its job data, the weights it starts from, and the backend's
+One ``TrainingJob``: its job data directory, the weights it starts from, and the backend's
 parameters. The recipe gives the parameters of each job, by the kind of its
 samples. The
 job ID is a hash of the scenario, the backend, the start, the records of the

@@ -13,6 +13,7 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.slime_backend.test_slime_component import Stack, batch_for
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData
@@ -78,7 +79,9 @@ def dataset_job(stack: Stack, job_id: str, *, epochs: int = 1, save_interval: in
     }
     if save_interval is not None:
         parameters["save_interval"] = save_interval
-    return TrainingJob(job_id, "slime", stack.start, JobData(f"data-{job_id}", ()), parameters, scenario="s")
+    return TrainingJob(
+        job_id, "slime", stack.start, job_data_ref(JobData(f"data-{job_id}", ())), parameters, scenario="s"
+    )
 
 
 @pytest.fixture
@@ -184,12 +187,19 @@ def test_dataset_jobs_and_the_slime_family_go_together(tmp_path, dataset_args) -
     try:
         with pytest.raises(ValueError, match="trains only dataset jobs"):
             stack.component.submit(
-                TrainingJob("job-0", "slime", stack.start, batch_for(0), {"method": METHOD.to_dict()}, scenario="s")
+                TrainingJob(
+                    "job-0",
+                    "slime",
+                    stack.start,
+                    job_data_ref(batch_for(0)),
+                    {"method": METHOD.to_dict()},
+                    scenario="s",
+                )
             )
         job = dataset_job(stack, "job-1")
         with pytest.raises(ValueError, match="has no samples"):
             stack.component.submit(
-                TrainingJob("job-1", "slime", stack.start, batch_for(0), job.parameters, scenario="s")
+                TrainingJob("job-1", "slime", stack.start, job_data_ref(batch_for(0)), job.parameters, scenario="s")
             )
     finally:
         stack.component.close()

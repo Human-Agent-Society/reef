@@ -12,7 +12,7 @@ generator's method:
   (``reef.record2sample.generator.inputs``).
 - ``processor``: the two stages. ``GeneratedTaskSamples`` holds the source
   sessions, starts each task-generation round when it is due, and hands the saved train tasks
-  to the scenario's samples; and
+  to the sample store; and
   ``GeneratedTaskJobData`` makes task jobs of the generated tasks, which the
   training component rolls out on its own sampler. ``GenerationRunner`` owns
   generation, validation, task publication and result delivery on the stage's worker.

@@ -28,7 +28,7 @@ from reef.record2sample.traces import InferenceSamples, TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
-from reef.storage.samples import ScenarioSamples, TrainerSamples, consumed_sample_id
+from reef.storage.samples import SampleStore, TrainerSamples, consumed_sample_id
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import JobData
 
@@ -275,7 +275,7 @@ def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> 
     assert [source_record_id(s) for s in processor.build_job_data(2).samples] == ["inf-2", "inf-3"]
 
 
-def add_tasks(samples: ScenarioSamples, root: Path, split: str, *names: str) -> None:
+def add_tasks(samples: SampleStore, root: Path, split: str, *names: str) -> None:
     """Import one Harbor task per name into ``split`` of the scenario, each with its own files."""
     metadata = {"kind": "task", "scenarios": {samples.scenario: split}}
     tasks = [
@@ -285,9 +285,7 @@ def add_tasks(samples: ScenarioSamples, root: Path, split: str, *names: str) -> 
     samples.data.create(samples.owner, tasks)
 
 
-def offline_pipeline(
-    samples: ScenarioSamples, *, job_samples: int, buffer_size: int | None = None
-) -> TrainingPipeline:
+def offline_pipeline(samples: SampleStore, *, job_samples: int, buffer_size: int | None = None) -> TrainingPipeline:
     """An offline pipeline of the scenario whose samples are ``samples``, in ``auto``."""
     context = PipelineContext("offline", samples=TrainerSamples(samples))
     return TrainingPipeline(context, sample2job=TrainTaskJobData(context, buffer_size, job_samples))

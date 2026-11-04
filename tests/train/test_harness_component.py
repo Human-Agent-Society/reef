@@ -21,6 +21,7 @@ from tests.support.harness_steps import (
     harness_backend,
     harness_recipe,
 )
+from tests.support.job_data import job_data_ref
 
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
@@ -61,7 +62,7 @@ def job(component: HarnessTrainingComponent, name: str, *, start: str, previous:
         name,
         component.name,
         start,
-        JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),)),
+        job_data_ref(JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),))),
         {
             "component": COMPONENT,
             "head_artifact_id": "base",

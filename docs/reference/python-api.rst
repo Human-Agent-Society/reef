@@ -537,7 +537,7 @@ The session contract is:
        the records that each trainer's stages consumed. It closes with the
        session and survives restarts when ``durable``.
    * - ``samples``
-     - The ``ScenarioSamples`` of the scenario, or None for a storage without
+     - The ``SampleStore`` of the scenario, or None for a storage without
        a data store: the data items that it uses, in use order (RFC #1140).
        They are the uploaded trajectories, the imported Harbor tasks of the
        ``train`` and ``eval`` splits, and the samples that each trainer's
@@ -626,7 +626,7 @@ give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
 keyword, which the scenario always passes. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store. The scenario's imported tasks are not a task
-store: they are task items that the scenario uses (``ScenarioSamples``), which
+store: they are task items that the scenario uses (``SampleStore``), which
 the factory gives to ``Recipe.build_trainers`` as ``samples`` and every
 component reads from ``PipelineContext.samples``.
 
@@ -838,6 +838,19 @@ partition per owner. A deployment selects the store in
        segment or a line past its end.
    * - ``delete(partition, segment_id)``
      - Remove the segment. A missing segment is not an error.
+   * - ``find_directory(key)``
+     - The URI of the directory ``key``, or ``None`` when the store does not
+       hold all of it. A key is ``/``-separated names. The data store keeps
+       each job data directory as ``job-data/<key>``.
+   * - ``put_directory(key, source)``
+     - Keep a copy of the files under ``source`` as the directory ``key``,
+       and return its URI. A put of a key that the store holds keeps the
+       first copy.
+   * - ``open_directory(uri)``
+     - A local directory with the files of the directory at ``uri``. A remote
+       store copies them into its local cache.
+   * - ``delete_directory(key)``
+     - Remove the directory. A missing directory is not an error.
    * - ``close()``
      - Release the resources of the store.
 
@@ -1384,7 +1397,7 @@ receives the samples of the `next job
 the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
 when the recipe omits constant-reward groups from its output. Samples stored
 after the job data was built wait for later job data.
-``output_schema`` declares the job data type. On the stage, ``exclusive_sources``
+On the stage, ``exclusive_sources``
 controls source release for terminal group/duplicate reports.
 
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
@@ -1610,8 +1623,9 @@ Migration: the former policy/trace sample types and their batch subclasses are
 removed. Construct ATIF trajectory samples directly and return ``JobData(id, samples)``.
 Use ``group_id`` on each member for grouped job data. Read training fields from
 ``item.training`` and rewards through ``trajectory_reward(item)``.
-``output_schema`` defaults to ``JobData``. Keep job data serializable, with
-no handles to services, files, threads or models.
+The component reads job data as a job data directory, so only the fields of
+``JobData`` reach it. Keep job data serializable, with no handles to
+services, files, threads or models.
 
 Chat rendering
 ~~~~~~~~~~~~~~
@@ -2170,7 +2184,12 @@ Training jobs and components
 these fields:
 
 - ``job_id`` and ``backend``, the name of the training component.
-- ``data``, a ``JobData``: the data snapshot that the job trains.
+- ``data``, a ``JobDataRef``: the job data directory that the job trains.
+  ``data_dir`` is its local path, which ``read_job_data`` reads, and
+  ``data_uri`` its URI. ``data_id``, ``sample_count`` and ``kind`` describe
+  the data.
+- ``request_id``: the ID of the training request that the job trains, or
+  ``None``.
 - ``start``: the directory of the weights the job starts from, or ``None``
   for the backend's base model.
 - ``parameters``: the backend's parameters. Reef reads none of them; they

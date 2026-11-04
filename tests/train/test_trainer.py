@@ -38,6 +38,7 @@ from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -720,8 +721,10 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     [job] = component.submitted
     assert TrainingMethod.from_dict(job.parameters["method"]) == TrainingMethod(_GROUPED_PG_OBJECTIVE)
     # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
-    assert [trajectory_reward(item) for item in job.data.samples] == [0.2, 0.8]
-    prepared = prepare_slime_job(job.data, TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1)
+    assert [trajectory_reward(item) for item in read_job_data(job.data_dir).samples] == [0.2, 0.8]
+    prepared = prepare_slime_job(
+        read_job_data(job.data_dir), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
+    )
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
     # After the root release, the job's checkpoint is what the scenario serves.

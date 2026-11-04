@@ -50,8 +50,9 @@ from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import ScenarioSamples, TrainerSamples
+from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingComponent
@@ -289,14 +290,17 @@ class CompositeRecipe(Recipe):
                     raise ValueError(f"two job components of this composite are named {component.name!r}")
         return tuple(found.values())
 
-    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> CompositeRecipe:
+    def with_job_components(
+        self, components: Mapping[str, TrainingComponent], data_store: DataStore
+    ) -> CompositeRecipe:
         check_job_components(self, components)
         return replace(
             self,
             training_component=(None if self.training_component is None else components[self.training_component.name]),
+            data_store=data_store,
             components={
                 name: recipe.with_job_components(
-                    {component.name: components[component.name] for component in recipe.job_components()}
+                    {component.name: components[component.name] for component in recipe.job_components()}, data_store
                 )
                 for name, recipe in self.components.items()
             },
@@ -351,7 +355,7 @@ class CompositeRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: CommittedArtifacts | None = None,
-        samples: ScenarioSamples | None = None,
+        samples: SampleStore | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []

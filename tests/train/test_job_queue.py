@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import STUB_ROOT
 
 from reef.artifact import DefaultStart
@@ -23,7 +24,9 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
+from reef.storage.data import MemoryDataStore
 from reef.storage.sql_coordination import memory_coordination
+from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import NewWork
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.job_queue import (
@@ -92,7 +95,7 @@ class StepComponent(LocalJobComponent):
 
 def job(job_id: str, **parameters: Any) -> TrainingJob:
     data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
-    return TrainingJob(job_id, "steps", "steps:base", data, parameters, scenario="s")
+    return TrainingJob(job_id, "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
 
 
 def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
@@ -109,7 +112,13 @@ def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
 def worked(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
-    worker = TrainingJobWorker(component, queue, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
     worker.start()
     yield queue, component, worker
     worker.stop()
@@ -160,7 +169,13 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
     view.cancel("waiting")
     assert view.status("waiting").state == "failed" and view.status("waiting").error == "cancelled"
 
-    worker = TrainingJobWorker(component, queue, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
     assert worker.run_once() is False  # the cancelled job is final, so nothing is left to take
     worker.stop()
     assert component.closed_count == 1
@@ -187,7 +202,13 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     queue.add_progress(JOBS_QUEUE, "j1", "training-0", checkpoint_json(first), number=0)
     queue.requeue_expired(now=time.time() + 60)
 
-    worker = TrainingJobWorker(StepComponent(tmp_path / "jobs"), queue, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        StepComponent(tmp_path / "jobs"),
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
     assert worker.run_once()
     item = queue.get(JOBS_QUEUE, "j1")
     assert item.state == "finished"
@@ -221,8 +242,11 @@ def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     sample = policy_trajectory("s-j1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     data = JobData("s:request:r1", (sample, sample), request=request)
     parameters = {"method": {"objective": "sft"}, "learning_rate": 1e-5}
-    instructed = TrainingJob("j1", "steps", "steps:base", data, parameters, scenario="s")
-    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(instructed), serial_key="s"), now=0)
+    instructed = TrainingJob("j1", "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
+    summary = {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
+    queue.add(
+        NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(instructed, summary), serial_key="s"), now=0
+    )
 
     queued = job_json(queue.get(JOBS_QUEUE, "j1"))
     assert queued["parameters"] == parameters
@@ -244,9 +268,9 @@ def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
 
     # A job of the auto mode has no request; a task job names its kind, and an empty job has none.
     automatic = TrainingJob(
-        "j2", "steps", "steps:base", JobData("s:data:1", (TaskSample(tmp_path),)), {}, scenario="s"
+        "j2", "steps", "steps:base", job_data_ref(JobData("s:data:1", (TaskSample(tmp_path),))), {}, scenario="s"
     )
-    empty = TrainingJob("j3", "steps", "steps:base", JobData("s:data:2"), {}, scenario="s")
+    empty = TrainingJob("j3", "steps", "steps:base", job_data_ref(JobData("s:data:2")), {}, scenario="s")
     for value in (automatic, empty):
         queue.add(NewWork(JOBS_QUEUE, value.job_id, "s", job_kind("steps"), job_payload(value), serial_key="s"))
     listed = {listed_job["id"]: listed_job for listed_job in scenario_jobs(queue, "s")}
