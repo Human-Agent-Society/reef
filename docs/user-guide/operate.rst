@@ -419,8 +419,8 @@ the same artifact backend.
 layout, control does not serve these routes. The data service also answers the
 reads of what each scenario stores: the scenario list, settings, contract,
 records, commits, artifacts, samples, tasks, and evaluations with their
-rollouts. Control answers these reads too. Writes to a scenario, the buffer
-routes, the cancel of a training job, ``/reef/status`` and the harness pages
+rollouts. Control answers these reads too. Writes to a scenario, the next-job
+read, the cancel of a training job, ``/reef/status`` and the harness pages
 stay with control; the harness client routes go to the harness service (see
 `Harness clients`_ below). The data service needs no control lease,
 so you can run several replicas of it behind one address.

@@ -82,7 +82,7 @@ def test_client_command_report_is_bounded() -> None:
     assert normalized["client"] == {"commands": {f"tool-{index}": True for index in range(64)}}
 
 
-def test_an_instruction_carries_json_job_parameters_and_omits_empty_ones() -> None:
+def test_a_request_carries_json_job_parameters_and_omits_empty_ones() -> None:
     base = {"text": "train", "session": "s", "artifact_id": "r"}
     parameters = {"method": {"objective": "task_group"}, "learning_rate": 1e-5}
     request = TrainingRequest.from_dict({**base, "parameters": parameters}, request_id="train-1")

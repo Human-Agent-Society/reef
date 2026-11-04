@@ -176,7 +176,7 @@ class SDPOSamples(ReportSamples):
 
 @dataclass(frozen=True)
 class SDPODemonstrationSettings(Sample2JobSettings):
-    """The config of ``SDPOJobData``: which sibling the teacher reads, whether it reads the feedback, the buffer and the job size."""
+    """The config of ``SDPOJobData``: which sibling the teacher reads, whether it reads the feedback, ``buffer_size`` and the job size."""
 
     success_reward_threshold: float = config_option(0.5, help="An attempt at or above this score is correct.")
     allow_own_success_as_demonstration: bool = config_option(

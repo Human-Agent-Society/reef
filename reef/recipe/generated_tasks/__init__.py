@@ -13,7 +13,7 @@ generator's method:
 - ``processor``: the two stages. ``GeneratedTaskSamples`` holds the source
   sessions, starts each task-generation round when it is due, and hands the saved train tasks
   to the sample store; and
-  ``GeneratedTaskJobData`` makes task jobs of the buffer's tasks, which the
+  ``GeneratedTaskJobData`` makes task jobs of the generated tasks, which the
   training component rolls out on its own sampler. ``GenerationRunner`` owns
   generation, validation, task publication and result delivery on the stage's worker.
 - ``results``: each train task's first rollout result and the generations

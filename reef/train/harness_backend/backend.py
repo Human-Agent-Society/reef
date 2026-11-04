@@ -16,8 +16,8 @@ component (``reef.train.harness_backend.component``):
     3. Read the tree it left in ``harness/``. An unchanged tree, or one that
        fails validation for the adapter, skips the step.
     4. Add the tree to the history with its parent and the method's
-       summary, and make it a ``HarnessCandidate`` against the head. On an
-       instruction step the method's ``requires`` join the request's, after
+       summary, and make it a ``HarnessCandidate`` against the head. On a
+       request step the method's ``requires`` join the request's, after
        the screens a person's items pass.
 ``evaluate``
     Score the sides that the publication policy names with
@@ -80,7 +80,7 @@ STEP_PHASES = ("running tasks", "proposing", "evaluating")
 class StepProgress:
     """Where the running step stands, for a page a person watches.
 
-    Values: ``request_id`` names the instruction the step answers, ``None``
+    Values: ``request_id`` names the request the step answers, ``None``
     for an automatic step. ``phase`` is one of
     ``STEP_PHASES``: ``"running tasks"`` while an offline step runs the head
     tree on its train tasks, ``"evaluating"`` while the evaluation's
