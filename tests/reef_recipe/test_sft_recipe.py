@@ -556,7 +556,7 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
         record2sample=_samples(),
         sample2job=SFTJobData(context, None, 1),
     )
-    samples = pipeline.store.samples
+    samples = pipeline.store.store
     metadata = {"kind": "trajectory", "scenarios": {"science": "train"}}
     samples.data.create(samples.owner, [NewItem("t1", dict(_uploaded(ASK, ANSWER).trajectory), metadata)])
     data = pipeline.build_job_data(1)

@@ -310,9 +310,9 @@ class Recipe:
         separate workers that take turns, one step at a time.
         ``algorithm_states`` carries each one's recovered state under its
         component name. ``task_storage`` opens the generated task stores of
-        the scenario session, and ``samples`` is its samples. Each trainer
-        gives them to its pipeline; a trainer reads the samples as
-        ``TrainerSamples`` of its key (``""`` for the only trainer).
+        the scenario session, and ``samples`` is the data items that it trains
+        on. Each trainer gives them to its pipeline as its own
+        (``SampleStore.for_trainer``, ``""`` for the only trainer).
         ``releases`` reads the scenario's committed releases; each trainer
         reads those of its own component. ``root`` is the scenario's root
         release, where a new trainer starts; a recipe of several components
@@ -335,7 +335,7 @@ class Recipe:
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
                     releases=None if releases is None else ComponentArtifacts(releases, component),
-                    samples=None if samples is None else TrainerSamples(samples),
+                    samples=None if samples is None else samples.for_trainer(""),
                     root=root,
                 ),
             ),

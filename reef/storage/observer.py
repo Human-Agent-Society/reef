@@ -136,10 +136,6 @@ class ObservedScenarioStore(ScenarioStore):
         return self._inner.training_state
 
     @property
-    def samples(self) -> SampleStore | None:
-        return self._inner.samples
-
-    @property
     def evaluations(self) -> EvaluationStore:
         return self._inner.evaluations
 
@@ -187,6 +183,9 @@ class ObservedScenarioStorage(ScenarioStorage):
 
     def open(self, scenario: str) -> ScenarioStore:
         return ObservedScenarioStore(self._inner.open(scenario), self._observer)
+
+    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
+        return self._inner.sample_store(scenario, session)
 
     def archive(self, scenario: str) -> tuple[str, ...]:
         return self._inner.archive(scenario)
