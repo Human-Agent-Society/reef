@@ -22,6 +22,7 @@ pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
 from reef.artifact import Artifact, ModelDirectory
@@ -170,6 +171,12 @@ def batch_for(step: int, *, rewards: tuple[float, ...] = (1.0, 1.0)) -> JobData:
     )
 
 
+def submitted_data(data: JobData) -> dict[str, Any]:
+    """The data of a job file that ``LocalJobComponent.submit`` wrote: the job data reference with its local path."""
+    ref = job_data_ref(data)
+    return {**ref.to_dict(), "path": str(ref.path)}
+
+
 def parameters(method: TrainingMethod) -> dict[str, Any]:
     """A job's parameters with the default step schedule: one optimizer step per sample, two steps a batch."""
     return {"method": method.to_dict()}
@@ -227,7 +234,9 @@ class Stack:
     def run(self, method: TrainingMethod, *, step: int, batch: JobData | None = None) -> JobStatus:
         job_id = f"job-{step}"
         data = batch_for(step) if batch is None else batch
-        self.component.submit(TrainingJob(job_id, "slime", self.start, data, parameters(method), scenario="s"))
+        self.component.submit(
+            TrainingJob(job_id, "slime", self.start, job_data_ref(data), parameters(method), scenario="s")
+        )
         status = finished(self.component, job_id)
         if status.checkpoints:
             self.start = status.checkpoints[-1].path
@@ -278,7 +287,12 @@ def test_a_job_trains_one_rollout_and_saves_it_as_the_start_of_the_next_job(tmp_
     # Submitting the same job again does nothing.
     stack.component.submit(
         TrainingJob(
-            "job-0", "slime", stack.component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+            "job-0",
+            "slime",
+            stack.component.base_start,
+            job_data_ref(batch_for(0)),
+            parameters(TrainingMethod("sft")),
+            scenario="s",
         )
     )
     assert stack.component.status("job-0") == first
@@ -298,7 +312,7 @@ def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpo
         "job-0",
         "slime",
         stack.component.base_start,
-        batch_for(0),
+        job_data_ref(batch_for(0)),
         {**parameters(TrainingMethod("sft")), "save_interval": 1},
         scenario="s",
     )
@@ -331,7 +345,7 @@ def test_each_rollout_of_a_job_records_the_schedule_progress_up_to_it(tmp_path, 
             "job-0",
             "slime",
             stack.component.base_start,
-            batch_for(0),
+            job_data_ref(batch_for(0)),
             {**parameters(method), "save_interval": 1},
             scenario="s",
         )
@@ -351,7 +365,7 @@ def test_a_restarted_job_continues_after_its_last_saved_rollout(tmp_path, stacks
         {
             "scenario": "s",
             "start": str(tmp_path / "reef-starts" / "base"),
-            "data": batch_for(0).to_dict(),
+            "data": submitted_data(batch_for(0)),
             "parameters": job_parameters,
         },
     )
@@ -395,7 +409,7 @@ def test_a_packed_job_trains_global_batch_size_packs_per_step(tmp_path, stacks) 
         "job-0",
         "slime",
         stack.component.base_start,
-        batch_for(0),
+        job_data_ref(batch_for(0)),
         {**parameters(TrainingMethod("sft")), "scheduling": scheduling},
         scenario="s",
     )
@@ -413,23 +427,37 @@ def test_a_job_starts_only_from_the_weights_the_workers_hold(tmp_path, stacks) -
     with pytest.raises(ValueError, match="cannot load a published release"):
         stack.component.import_start(tmp_path)
     job = TrainingJob(
-        "elsewhere", "slime", str(tmp_path / "other"), batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+        "elsewhere",
+        "slime",
+        str(tmp_path / "other"),
+        job_data_ref(batch_for(0)),
+        parameters(TrainingMethod("sft")),
+        scenario="s",
     )
     with pytest.raises(ValueError, match="other is not a Slime start"):
         stack.component.submit(job)
     other = tmp_path / "rollout_5"
     SlimeStart(5, None, {}, None).write(other)
-    job = TrainingJob("elsewhere", "slime", str(other), batch_for(0), parameters(TrainingMethod("sft")), scenario="s")
+    job = TrainingJob(
+        "elsewhere", "slime", str(other), job_data_ref(batch_for(0)), parameters(TrainingMethod("sft")), scenario="s"
+    )
     with pytest.raises(ValueError, match="continues the startup weights; a job cannot start from rollout 5"):
         stack.component.submit(job)
     stack.run(TrainingMethod("sft"), step=0)
     # After a job, the workers hold its rollout: a job from any other start is refused.
-    job = TrainingJob("other", "slime", str(other), batch_for(1), parameters(TrainingMethod("sft")), scenario="s")
+    job = TrainingJob(
+        "other", "slime", str(other), job_data_ref(batch_for(1)), parameters(TrainingMethod("sft")), scenario="s"
+    )
     with pytest.raises(ValueError, match="continues the weights of rollout 0"):
         stack.component.submit(job)
     # A start without a rollout names the startup weights, which the workers no longer hold.
     job = TrainingJob(
-        "again", "slime", stack.component.base_start, batch_for(1), parameters(TrainingMethod("sft")), scenario="s"
+        "again",
+        "slime",
+        stack.component.base_start,
+        job_data_ref(batch_for(1)),
+        parameters(TrainingMethod("sft")),
+        scenario="s",
     )
     with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
         stack.component.submit(job)
@@ -448,7 +476,9 @@ def test_restarted_workers_continue_from_the_checkpoint_they_loaded_and_refuse_t
     other = tmp_path / "rollout_5"
     SlimeStart(5, None, {}, None).write(other)
     for start in (str(other), stack.component.base_start):
-        job = TrainingJob("other", "slime", start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s")
+        job = TrainingJob(
+            "other", "slime", start, job_data_ref(batch_for(0)), parameters(TrainingMethod("sft")), scenario="s"
+        )
         with pytest.raises(ValueError, match="continues the weights of rollout 2"):
             stack.component.submit(job)
 
@@ -467,7 +497,12 @@ def test_a_queued_job_whose_start_the_workers_left_fails_when_it_runs(tmp_path, 
     # Both jobs named the startup weights when they were submitted; the first one moved the workers on.
     stack.run(TrainingMethod("sft"), step=0)
     late = TrainingJob(
-        "late", "slime", stack.component.base_start, batch_for(1), parameters(TrainingMethod("sft")), scenario="s"
+        "late",
+        "slime",
+        stack.component.base_start,
+        job_data_ref(batch_for(1)),
+        parameters(TrainingMethod("sft")),
+        scenario="s",
     )
     with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
         stack.component.run(late, tmp_path / "late")
@@ -485,7 +520,12 @@ def test_the_default_start_is_the_startup_model_and_the_base_start_names_the_sta
     # The first job of a trainer starts from the startup weights, which the workers hold.
     stack.component.submit(
         TrainingJob(
-            "job-0", "slime", stack.component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+            "job-0",
+            "slime",
+            stack.component.base_start,
+            job_data_ref(batch_for(0)),
+            parameters(TrainingMethod("sft")),
+            scenario="s",
         )
     )
     assert finished(stack.component, "job-0").state == "finished"
@@ -546,10 +586,11 @@ def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_pat
 )
 def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks, job_parameters, message) -> None:
     stack = stacks(tmp_path)
+    (tmp_path / "task").mkdir()
     data = JobData("tasks", (TaskSample(tmp_path / "task"),)) if "rollout engines" in message else batch_for(0)
     with pytest.raises(ValueError, match=message):
         stack.component.submit(
-            TrainingJob("job-0", "slime", stack.component.base_start, data, job_parameters, scenario="s")
+            TrainingJob("job-0", "slime", stack.component.base_start, job_data_ref(data), job_parameters, scenario="s")
         )
     with pytest.raises(KeyError):
         stack.component.status("job-0")
@@ -615,7 +656,7 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
         {
             "scenario": "s",
             "start": str(tmp_path / "reef-starts" / "base"),
-            "data": data.to_dict(),
+            "data": submitted_data(data),
             "parameters": parameters(TrainingMethod("sft")),
         },
     )
@@ -974,7 +1015,12 @@ def test_closing_releases_the_critic_then_the_actor_then_the_resources(tmp_path)
     with pytest.raises(RuntimeError, match="closed"):
         component.submit(
             TrainingJob(
-                "late", "slime", component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+                "late",
+                "slime",
+                component.base_start,
+                job_data_ref(batch_for(0)),
+                parameters(TrainingMethod("sft")),
+                scenario="s",
             )
         )
 

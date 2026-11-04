@@ -495,11 +495,6 @@ class Trainer:
         with self._lock:
             self._pipeline.check_request(request)
 
-    def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
-        """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""
-        with self._lock:
-            self._pipeline.forget_samples(sample_ids)
-
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
         with self._lock:
@@ -522,25 +517,6 @@ class Trainer:
         that trains nothing is never ready.
         """
         return self.trains and self._pipeline.ready(self.job_samples)
-
-    def _build_validated_job_data(self) -> JobData:
-        """Build the next job's data and hold the pipeline to its declared schema.
-
-        ``Sample2Job.output_schema`` is the recipe's published contract for
-        what the training component receives; enforcing it at the only place
-        job data enters the trainer turns a drifting recipe into a loud error
-        instead of a backend-side shape failure.
-        """
-        if not self.trains:
-            raise RuntimeError("a trainer that trains nothing builds no job data")
-        data = self._pipeline.build_job_data(self.job_samples)
-        schema = self._pipeline.output_schema
-        if not isinstance(data, schema):
-            raise TypeError(
-                f"{type(self._pipeline.sample2job).__name__} declared output_schema "
-                f"{schema.__name__} but built {type(data).__name__}"
-            )
-        return data
 
     def push_retained(self, item: AgentRecord) -> None:
         """Consumption state is independent of record visibility in storage."""
@@ -683,7 +659,7 @@ class Trainer:
         # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
         if not self.pipeline_ready():
             return None
-        data = self._build_validated_job_data()
+        data = self._pipeline.build_job_data(self.job_samples)
         self.pending_step = JobDataReservation(data)
         return data
 

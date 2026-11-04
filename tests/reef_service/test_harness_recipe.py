@@ -48,6 +48,7 @@ from tests.support.harness_steps import (
     runtime,
     traced,
 )
+from tests.support.samples import data_storage, sample_store
 
 from reef.artifact import Artifact
 from reef.core.activation import MadeArtifact
@@ -75,20 +76,21 @@ from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, Mo
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
+from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobLoop
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.sample2job.traces import TrainTaskJobData
+from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.service.app import create_app
-from reef.storage.samples import TrainerSamples
+from reef.storage.data import NewItem
+from reef.storage.samples import StoredSample
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
-from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
@@ -412,36 +414,47 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         runtime=runtime(),
     )
     assert built.configured_tasks() == ()
+    # The recipe's harness stage names the eval split in each job; without imported tasks it names none.
+    assert built.stages().sample2job.config["evaluation_split"] is True
+    configured = from_config(evolution_config(binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "c")))
+    assert "evaluation_split" not in configured.stages().sample2job.config
     root = tmp_path / "tasks"
-    with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
-        samples = session.samples
+    with closing(data_storage()) as storage, closing(storage.open("s")) as session:
+        samples = sample_store(storage, "s", session)
+
+        def import_task(name: str, split: str) -> StoredSample:
+            metadata = {"kind": "task", "scenarios": {"s": split}}
+            samples.data.create(samples.owner, [NewItem(name, write_task(root, name), metadata)])
+            (task,) = samples.get([name])
+            return task
+
         backend = build_harness_backend(built, "s")
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-        # A job names the eval split as its trainer reads it at submit time, and its step evaluates on it.
-        loop = HarnessJobLoop(
-            built.harness_component,
-            scenario="s",
-            releases=releases_for(built),
-            eval_samples=TrainerSamples(samples),
-            layout=get_adapter("pi").layout,
+        # The harness stage names the eval split as the trainer reads it when it makes the job's parameters, and the
+        # step evaluates on it.
+        stage = TraceJobData(
+            PipelineContext("s", samples=samples.for_trainer(""), job_parameters={"trajectory": {}}),
+            None,
+            None,
+            evaluation_split=True,
         )
 
         def evaluation_tasks() -> list[str]:
-            tasks = loop.harness_parameters(batch, JobLoopState("start"))["evaluation_tasks"]
+            tasks = stage.job_parameters(batch)["evaluation_tasks"]
             prepared = backend.prepare_step(
                 batch, HarnessState().to_json(), 0, head=head_of(backend), seed_tasks=tuple(tasks)
             )
             assert prepared.metrics["evaluation_task_count"] == len(tasks)
             return tasks
 
-        # The sample store opens empty; a task it gets later is in the next job's list, and a train task is not.
+        # The scenario uses no task at first; a task it uses later is in the next job's list, and a train task is not.
         assert evaluation_tasks() == []
-        (first,) = samples.add_tasks((write_task(root, "held-1"),), "eval")
-        samples.add_tasks((write_task(root, "train-1"),), "train")
+        first = import_task("held-1", "eval")
+        import_task("train-1", "train")
         assert evaluation_tasks() == [str(first.sample.task_path)]
-        (second,) = samples.add_tasks((write_task(root, "held-2"),), "eval")
+        second = import_task("held-2", "eval")
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
-        with pytest.raises(RecipeConfigError, match="needs the sample store"):
+        with pytest.raises(RecipeConfigError, match="needs the samples of a scenario session"):
             built.build("s", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     retired = {"tasks": [], "task_store": "imported-tasks"}
     with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):

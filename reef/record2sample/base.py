@@ -98,7 +98,7 @@ class Record2Sample(ABC, Plugin):
     (``settle``): a set that has samples waits in a record set unit, and a set without samples ends. When the
     pipeline looks for job data, it first advances the stage to the current time (``advance``): the stage takes in
     background work that ended, such as judgments, and forms the sets that are due. The pipeline takes the units
-    that became ready (``take_ready_units``), saves the samples of each one (``unit_samples``) to the sample store,
+    that became ready (``take_ready_units``), saves the samples of each one (``unit_samples``) as data items,
     and the stage ends it (``consume``). The stage never calls the pipeline.
 
     The stage also runs the staleness check. No other part of Reef checks how far the training data lags behind the

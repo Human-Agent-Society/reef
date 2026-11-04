@@ -1,7 +1,7 @@
 """The sample-to-job contract: the size of a job, and the samples of the next job become its data.
 
 The record-to-sample stage makes the samples of each record set, and the
-pipeline stores the samples of each ready unit in the scenario's sample store.
+pipeline saves the samples of each ready unit as data items that the scenario uses.
 In ``auto``, the next job takes the untrained samples: the first
 ``buffer_size`` of them in store order, and the rest of each group that those
 touch. When at least ``job_samples`` samples wait, the trainer asks the
@@ -92,13 +92,12 @@ class Sample2Job(ABC, Plugin):
     builds the stage in ``from_config``.
     """
 
-    #: The job data type ``make_job_data`` returns; the trainer validates it.
-    output_schema: type[JobData] = JobData
     #: The training modes that the recipe's job data supports. ``auto`` makes job data when ``job_samples``
     #: samples wait; ``manual`` makes it of the samples that a queued training request names.
     supported_training_modes: frozenset[str] = frozenset({"auto", "manual"})
-    #: Whether the job reads the request in its data, as a harness proposer does. In ``manual`` such a stage
-    #: runs a request that names no sample too. Another stage needs a request that names samples.
+    #: Whether the job reads its training request, as a harness proposer does: its job parameters carry the request.
+    #: In ``manual`` such a stage runs a request that names no sample too. Another stage needs a request that names
+    #: samples.
     reads_requests: bool = False
     #: The kinds of record that the trainer gives the pipeline.
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import RecordingComponent
+from tests.support.samples import made_task
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
@@ -26,7 +26,6 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import JobData, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskSample
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 
@@ -50,7 +49,7 @@ def imported(record_id, payload=None, request_type="inference"):
 
 class FeedbackSamples(ReportSamples):
     def make_sample(self, context):
-        return TaskSample(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
+        return made_task(context.report.agent_record_id, metadata=context.inferences[0].payload)
 
 
 class FeedbackJobData(Sample2Job):

@@ -17,8 +17,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.core.job_data import JobData
 from reef.storage.durable_files import read_json, write_json
+from reef.storage.job_data import JobDataRef
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
 
 logger = logging.getLogger(__name__)
@@ -31,11 +31,28 @@ RESULT_FILE = "result.json"
 CHECKPOINTS_FILE = "checkpoints.json"
 
 
+def submitted_job(job_id: str, backend: str, submitted: Mapping[str, Any]) -> TrainingJob:
+    """The ``TrainingJob`` that ``LocalJobComponent.submit`` wrote as ``JOB_FILE`` of the job ``job_id``."""
+    data = submitted["data"]
+    return TrainingJob(
+        job_id,
+        backend,
+        submitted["start"],
+        JobDataRef.from_dict(data, Path(data["path"])),
+        submitted["parameters"],
+        scenario=submitted["scenario"],
+        request_id=submitted.get("request_id"),
+        component=submitted.get("component"),
+        previous_job_id=submitted.get("previous_job_id"),
+    )
+
+
 class LocalJobComponent(TrainingComponent):
     """A training component that runs each job in its own thread, one job at a time.
 
     ``jobs_root`` holds one directory per job, named by the job ID, with
-    ``job.json`` (the submitted job), ``checkpoints.json`` (the checkpoints
+    ``job.json`` (the submitted job, whose data is the reference of its job data directory with its local
+    ``path``), ``checkpoints.json`` (the checkpoints
     saved so far, each ``{"step", "path", "release_path", "metrics"}``) and,
     once the job ended, ``result.json`` (``{"state", "metrics", "error"?}``).
     A job's metrics and its checkpoints' metrics must encode as JSON. The job
@@ -147,8 +164,11 @@ class LocalJobComponent(TrainingComponent):
                 {
                     "scenario": job.scenario,
                     "start": job.start,
-                    "data": job.data.to_dict(),
+                    "data": {**job.data.to_dict(), "path": str(job.data_dir)},
                     "parameters": dict(job.parameters),
+                    "request_id": job.request_id,
+                    "component": job.component,
+                    "previous_job_id": job.previous_job_id,
                 },
             )
             self.queue.append(job.job_id)
@@ -205,14 +225,7 @@ class LocalJobComponent(TrainingComponent):
                     submitted = read_json(directory / JOB_FILE)
                     if submitted is None:
                         raise RuntimeError(f"training job {job_id} has no job file")
-                    job = TrainingJob(
-                        job_id,
-                        self.name,
-                        submitted["start"],
-                        JobData.from_dict(submitted["data"]),
-                        submitted["parameters"],
-                        scenario=submitted["scenario"],
-                    )
+                    job = submitted_job(job_id, self.name, submitted)
                     result = {"state": "finished", "metrics": dict(self.run(job, directory))}
                 except Exception as exc:
                     logger.exception("%s training job %s failed", self.name, job_id)

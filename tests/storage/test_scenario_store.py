@@ -235,7 +235,7 @@ def sqlite_session(*, database=None, initial_step=0):
         records,
         records.commit_history(),
         tasks=tasks,
-        samples=records.sample_store(files, "math"),
+        training_state=records.training_state(),
         evaluations=records.evaluation_store(),
         initial_step=initial_step,
     )

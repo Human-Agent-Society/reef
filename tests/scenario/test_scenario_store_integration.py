@@ -17,7 +17,7 @@ from reef.recipe.base import Recipe
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -51,8 +51,8 @@ class OpaqueStore(ScenarioStore):
         return self._inner.tasks
 
     @property
-    def samples(self) -> SampleStore:
-        return self._inner.samples
+    def training_state(self) -> TrainingState:
+        return self._inner.training_state
 
     @property
     def evaluations(self) -> EvaluationStore:
@@ -136,7 +136,7 @@ class FailingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentArtifacts | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
         raise RuntimeError("injected recipe failure")

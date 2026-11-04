@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String, Table, Text, and_, func, select
+from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String, Table, Text, and_, select
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -37,15 +37,12 @@ class TaskTables:
     """The task tables of one database, and the namespace values that ``scope`` gives them.
 
     ``generations`` holds one row for each generation. ``candidates`` holds one row for each saved
-    candidate, with the digest of its task files and its outcome.
-    ``published`` holds one row for each published task name, with its
-    position in publication order and the digest of its task files.
+    candidate, with the digest of its task files and its outcome: a published candidate has its split.
     ``documents`` holds one row for each document key with its text.
     """
 
     generations: Table
     candidates: Table
-    published: Table
     documents: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
@@ -84,15 +81,6 @@ def task_tables(metadata: MetaData, *, foreign_key: str | None = None) -> TaskTa
             Column("files_digest", String(64), nullable=False),
             Column("split", Text),
             Column("error", Text, nullable=False),
-        ),
-        published=Table(
-            "published_task",
-            metadata,
-            *key_columns(),
-            Column("task_name", Text, primary_key=True),
-            Column("sequence", BigInteger, nullable=False),
-            Column("files_digest", String(64), nullable=False),
-            Column("split", Text, nullable=False),
         ),
         documents=Table(
             "task_document",
@@ -194,9 +182,15 @@ class SQLTaskStore(TaskStore):
             candidate = self.require_candidate(connection, generation, index)
             if candidate["error"]:
                 raise TaskStoreError(f"candidate {index} of generation {generation} is rejected")
-            published = self.publish(connection, candidate["task_name"], candidate["files_digest"], split)
+            name = candidate["task_name"]
+            for task in self.published_tasks(connection, task_name=name):
+                if task.files_digest != candidate["files_digest"]:
+                    raise TaskConflict(f"task {name!r} is published with other files")
+                if task.split != split:
+                    raise TaskConflict(f"task {name!r} is published to {task.split}, not {split}")
             if candidate["split"] is None:
                 self.set_outcome(connection, generation, index, split=split)
+            (published,) = self.published_tasks(connection, task_name=name)
         return published
 
     def reject_task(self, *, generation: int, index: int, reason: str) -> None:
@@ -266,42 +260,19 @@ class SQLTaskStore(TaskStore):
             )
             return {row.document_key: row.document for row in rows}
 
-    def publish(self, connection: Connection, name: str, digest: str, split: SplitName) -> StoredTask:
-        """Record ``name`` as published with the files ``digest`` to ``split``, and return the published task.
-
-        If ``name`` is published with the same files and split, return that
-        task. Raise ``TaskConflict`` if it is published with other files or in
-        the other split.
-        """
-        existing = self.published_tasks(connection, task_name=name)
-        if existing:
-            (task,) = existing
-            if task.files_digest != digest:
-                raise TaskConflict(f"task {name!r} is published with other files")
-            if task.split != split:
-                raise TaskConflict(f"task {name!r} is published to {task.split}, not {split}")
-            return task
-        published = self.tables.published
-        last_sequence = connection.execute(
-            select(func.coalesce(func.max(published.c.sequence), 0)).where(self.matching(published))
-        ).scalar_one()
-        connection.execute(
-            published.insert().values(
-                **self.key, task_name=name, sequence=last_sequence + 1, files_digest=digest, split=split
-            )
-        )
-        (task,) = self.published_tasks(connection, task_name=name)
-        return task
-
     def published_tasks(self, connection: Connection, **columns: object) -> tuple[StoredTask, ...]:
-        """Read the published tasks of this store that have the given column values, in publication order."""
-        published = self.tables.published
+        """Read the published tasks of this store whose candidates have the given column values, in generation and
+        candidate order. A name that several candidates published is the task of the first one."""
+        candidates = self.tables.candidates
         rows = connection.execute(
-            select(published.c.task_name, published.c.split, published.c.files_digest)
-            .where(self.matching(published, **columns))
-            .order_by(published.c.sequence)
+            select(candidates.c.task_name, candidates.c.split, candidates.c.files_digest)
+            .where(self.matching(candidates, **columns), candidates.c.split.is_not(None))
+            .order_by(candidates.c.generation, candidates.c.candidate_index)
         ).mappings()
-        return tuple(StoredTask(row["task_name"], row["split"], row["files_digest"]) for row in rows)
+        tasks: dict[str, StoredTask] = {}
+        for row in rows:
+            tasks.setdefault(row["task_name"], StoredTask(row["task_name"], row["split"], row["files_digest"]))
+        return tuple(tasks.values())
 
     def matching(self, table: Table, **columns: object) -> ColumnElement[bool]:
         """Select the rows of this store in ``table`` that have the given column values."""

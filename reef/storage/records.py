@@ -68,8 +68,7 @@ class RecordRetention:
     """Deployment-wide budget for all record bodies, regardless of consumption.
 
     Retry metadata, indexes and database overhead are outside the body budget.
-    Capacity alone triggers automatic eviction; records do not expire by age. Eviction keeps the records that a
-    stored sample holds (``reef.storage.sql_records.sample_record_table``).
+    Capacity alone triggers automatic eviction; records do not expire by age.
     """
 
     max_bytes: int = 20 * 1024**3

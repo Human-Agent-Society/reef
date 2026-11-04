@@ -34,7 +34,6 @@ from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import TrainStepResult
-from reef.train.types import JobData
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -304,7 +303,6 @@ def test_recipe_pipeline_has_no_update_algorithm() -> None:
     ).get_or_create_scenario("math")
 
     assert not runtime.trainer.trains
-    assert runtime.trainer.pipeline.output_schema is JobData
 
 
 @pytest.mark.unit

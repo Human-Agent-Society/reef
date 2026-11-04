@@ -35,7 +35,8 @@ from reef.dispatcher import Dispatcher, local_workers
 from reef.recipe.base import Recipe
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_snapshot
-from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
+from reef.storage.job_data import read_job_data
+from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import Trainer
@@ -368,7 +369,7 @@ class RecordingComponent(StubTrainingComponent):
         self.trained_data: list[list[str]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.trained_data.append([source_record_id(sample) for sample in job.data.samples])
+        self.trained_data.append([source_record_id(sample) for sample in read_job_data(job.data_dir).samples])
         return super().train(job)
 
 
@@ -482,7 +483,7 @@ class _SavedArtifactJobs(StubTrainingComponent):
         self.data_ids: list[str] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.data_ids.append(job.data.data_id)
+        self.data_ids.append(job.data_id)
         return (SavedCheckpoint(0, str(self.artifact_path), str(self.artifact_path)),)
 
 
@@ -548,11 +549,11 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     submitted, _, finished = records[:3]
     # The submission consumes the batch's records; the later commits of the job consume none.
     assert submitted.algorithm_state["job"] == {"job_id": first_job, "checkpoints_handled": 0}
-    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
+    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("math", "r1:0"))})
     assert submitted.high_water_sequence == 2
     assert finished.algorithm_state["finished_jobs"] == 1
     assert finished.consumed_ids == frozenset()
-    assert records[3].consumed_ids == frozenset({"i2", "r2", consumed_sample_id("r2:0")})
+    assert records[3].consumed_ids == frozenset({"i2", "r2", consumed_sample_id(stage_item_id("math", "r2:0"))})
     assert records[3].high_water_sequence == 4
     # The record's ref is exactly the serving head the scenario advanced to.
     scenario = dispatcher.get_or_create_scenario("math")
@@ -1306,7 +1307,7 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     state = JobLoopState.from_dict(ended.algorithm_state)
     assert state.job is None and state.finished_jobs == 1 and state.last_job.event == "finished"
     assert submitted.high_water_sequence == ended.high_water_sequence == 2
-    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
+    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("skills", "r1:0"))})
 
     second = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")

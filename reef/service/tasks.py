@@ -76,7 +76,7 @@ def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]
             {
                 "name": task.sample_id,
                 "split": task.split,
-                "files_digest": task.files_digest,
+                "files_digest": task.sample.metadata["task"]["files_digest"],
                 "trained": bool(task.train_counts),
             }
             for task in dispatcher.imported_tasks(scenario)
