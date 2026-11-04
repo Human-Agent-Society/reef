@@ -317,7 +317,8 @@ class DataStore(Plugin, ABC):
       are given. Without ``content``, each item's ``content`` is None, and the store does not read it.
     * ``scenario_items(owner, scenario, kinds, after, limit)`` returns the items of ``kinds`` of ``owner`` that
       ``scenario`` uses, with content, each with the sequence of its use, in the order of those sequences: the uses
-      after ``after``, at most ``limit``. The store reads no item of another kind. Each use of an item by a scenario
+      after ``after``, at most ``limit``. The store reads no item of another kind; without ``content``, each item's
+      ``content`` is None, and the store does not read it. Each use of an item by a scenario
       has its own sequence, which increases across the store: a new use, also of an older item, and a use whose
       split changes get a new one. A trainer reads its scenario's items with
       it.
@@ -399,7 +400,14 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def scenario_items(
-        self, owner: str, scenario: str, *, kinds: Sequence[str], after: int = 0, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        scenario: str,
+        *,
+        kinds: Sequence[str],
+        after: int = 0,
+        limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
     ) -> tuple[tuple[int, StoredItem], ...]: ...
 
     @abstractmethod
@@ -665,7 +673,14 @@ class MemoryDataStore(DataStore):
         return tuple(item if content else replace(item, content=None) for item in matched[:limit])
 
     def scenario_items(
-        self, owner: str, scenario: str, *, kinds: Sequence[str], after: int = 0, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        scenario: str,
+        *,
+        kinds: Sequence[str],
+        after: int = 0,
+        limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
     ) -> tuple[tuple[int, StoredItem], ...]:
         check_query(owner, None, scenario, after, limit)
         stored = self.items.get(owner, {})
@@ -674,7 +689,10 @@ class MemoryDataStore(DataStore):
             for (use_owner, item_id, use_scenario), (_, sequence) in self.uses.items()
             if use_owner == owner and use_scenario == scenario and sequence > after and stored[item_id].kind in kinds
         )
-        return tuple((sequence, stored[item_id]) for sequence, item_id in used[:limit])
+        return tuple(
+            (sequence, stored[item_id] if content else replace(stored[item_id], content=None))
+            for sequence, item_id in used[:limit]
+        )
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)
