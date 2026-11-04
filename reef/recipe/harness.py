@@ -71,7 +71,7 @@ from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
-from reef.storage.job_data import JobDataStore
+from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -203,12 +203,12 @@ class HarnessJobLoop(JobLoop):
         component: TrainingComponent,
         *,
         scenario: str,
-        job_data: JobDataStore | None = None,
+        data_store: DataStore | None = None,
         releases: ComponentArtifacts,
         eval_samples: TrainerSamples | None,
         layout: TreeLayout,
     ) -> None:
-        super().__init__(component, scenario=scenario, job_data=job_data)
+        super().__init__(component, scenario=scenario, data_store=data_store)
         self.releases = releases
         self.eval_samples = eval_samples
         self.layout = layout
@@ -383,10 +383,10 @@ class HarnessEvolutionRecipe(Recipe):
         return () if self.harness_component is None else (self.harness_component,)
 
     def with_job_components(
-        self, components: Mapping[str, TrainingComponent], job_data: JobDataStore
+        self, components: Mapping[str, TrainingComponent], data_store: DataStore
     ) -> HarnessEvolutionRecipe:
         check_job_components(self, components)
-        return replace(self, harness_component=next(iter(components.values())), job_data=job_data)
+        return replace(self, harness_component=next(iter(components.values())), data_store=data_store)
 
     def runs_offline(self) -> bool:
         """Whether the steps roll out the imported train tasks (``TrainTaskJobData``)."""
@@ -623,7 +623,7 @@ class HarnessEvolutionRecipe(Recipe):
             job_loop=HarnessJobLoop(
                 self.harness_component,
                 scenario=scenario,
-                job_data=self.job_data,
+                data_store=self.data_store,
                 releases=releases,
                 eval_samples=samples if self.evaluation.imported_tasks else None,
                 layout=get_adapter(self.evolution.adapter).layout,

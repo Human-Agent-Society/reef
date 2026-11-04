@@ -319,9 +319,10 @@ it, so a component must not write in it. A component reads it with
 component that runs the job elsewhere, such as in a container, gives that
 place ``job.data_uri`` and mounts or copies the directory there.
 
-The data store keeps the directories (``JobDataStore``), in its segment store
-(``storage.segment_backend``), or in ``<agent_record_dir>/job-files`` when
-none is set. The key of a directory is the SHA-256 of its samples and of the
+The data store keeps the directories (``DataStore.write_job_directory``,
+``open_job_directory`` and ``delete_unused_job_directories``) in its segment
+store (``storage.segment_backend``), or in
+``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its samples and of the
 files of its tasks (``job_data_key``). So a job of the same samples, such as
 a second job on one dataset, uses the directory that exists and writes
 nothing. The data store records when a job last used each directory. Control

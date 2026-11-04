@@ -13,8 +13,8 @@ Format 1 of a directory:
 - ``tasks/<n>/<directory name>/``: the directory of the ``n``-th task, where ``n`` counts the tasks from 0.
 
 ``key`` is ``job_data_key`` of the samples, so two jobs of the same samples share one directory. A directory does
-not change after it is written. The data store keeps the directories (``JobDataStore``), and deletes a directory
-that no job used for the time to live.
+not change after it is written. The data store keeps the directories (``DataStore.write_job_directory``), and deletes a
+directory that no job used for the time to live.
 """
 
 from __future__ import annotations
@@ -24,22 +24,19 @@ import json
 import os
 import shutil
 import tempfile
-import time
-from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
 
 from reef.core.job_data import JobData, TaskSample
-from reef.storage.segments import LocalSegmentStore, SegmentStore
 
 #: The format of the directories that ``write_job_data`` writes.
 JOB_DATA_FORMAT = 1
 JOB_FILE = "job.json"
 SAMPLES_FILE = "samples.jsonl"
 TASKS_DIR = "tasks"
-#: The segment store keeps the directory of the key ``k`` as ``job-data/<k>``.
+#: The data store's segment store keeps the directory of the key ``k`` as ``job-data/<k>``.
 JOB_DATA_PREFIX = "job-data"
 JobDataKind = Literal["trajectory", "task"]
 
@@ -117,7 +114,7 @@ class JobDataRef:
     """The job data directory of one training job.
 
     Values: ``uri`` is the URI that the store gives the directory. ``path`` is a local directory with its content,
-    which ``JobDataStore.open_job_data`` gives. ``data_id`` is the ``JobData.data_id`` of the job's data,
+    which ``DataStore.open_job_directory`` gives. ``data_id`` is the ``JobData.data_id`` of the job's data,
     ``sample_count`` its number of samples, and ``kind`` the kind of its samples, or None without samples.
     Purpose: ``TrainingJob.data`` holds it. The jobs queue keeps it without ``path``, as ``to_dict`` gives it.
     """
@@ -154,89 +151,6 @@ class JobDataRef:
             raise ValueError(f"malformed job data reference: {exc!r}") from exc
 
 
-class JobDataStore(ABC):
-    """Keeps the job data directories in a segment store, one per key, and deletes a directory that no job used for
-    the time to live.
-
-    Values: ``job_files`` is the segment store of the directories. A store records when a job last used each key:
-    ``use_job_data(key, now)``, ``unused_job_data(before)`` (the keys last used before it) and
-    ``forget_job_data(key)``.
-
-    Operations:
-
-    * ``write_job_data(data)`` writes the directory of ``data`` unless the store holds it, records the use, and
-      returns its reference.
-    * ``open_job_data(value)`` is the reference that ``JobDataRef.to_dict`` wrote, with a local directory of its
-      content; it records the use.
-    * ``expire_job_data(before)`` deletes each directory that no job used since ``before``; it returns the count.
-
-    Purpose: the data store is one (``reef.storage.data.DataStore``). Control writes the directory of each job that
-    it submits, the training service opens it, and control expires the directories.
-    """
-
-    job_files: SegmentStore
-
-    @abstractmethod
-    def use_job_data(self, key: str, now: float) -> None: ...
-
-    @abstractmethod
-    def unused_job_data(self, before: float) -> tuple[str, ...]: ...
-
-    @abstractmethod
-    def forget_job_data(self, key: str) -> None: ...
-
-    def write_job_data(self, data: JobData) -> JobDataRef:
-        key = job_data_key(data)
-        name = f"{JOB_DATA_PREFIX}/{key}"
-        uri = self.job_files.find_directory(name)
-        if uri is None:
-            with tempfile.TemporaryDirectory() as staging:
-                directory = Path(staging) / key
-                write_job_data(data, directory)
-                uri = self.job_files.put_directory(name, directory)
-        self.use_job_data(key, time.time())
-        return JobDataRef(
-            uri, self.job_files.open_directory(uri), data.data_id, len(data.samples), job_data_kind(data)
-        )
-
-    def open_job_data(self, value: Mapping[str, Any]) -> JobDataRef:
-        uri = value.get("uri")
-        if not isinstance(uri, str) or not uri:
-            raise ValueError("a job data reference has a uri")
-        path = self.job_files.open_directory(uri)
-        header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
-        self.use_job_data(header["key"], time.time())
-        return JobDataRef.from_dict(value, path)
-
-    def expire_job_data(self, before: float) -> int:
-        expired = self.unused_job_data(before)
-        for key in expired:
-            self.job_files.delete_directory(f"{JOB_DATA_PREFIX}/{key}")
-            self.forget_job_data(key)
-        return len(expired)
-
-
-class LocalJobDataStore(JobDataStore):
-    """Job data directories in a local segment store at ``directory``, with the times of use in memory.
-
-    Purpose: the store of a process that has no data store, and of tests.
-    """
-
-    def __init__(self, directory: Path | None = None) -> None:
-        root = Path(tempfile.mkdtemp(prefix="reef-job-data-")) if directory is None else Path(directory)
-        self.job_files = LocalSegmentStore(root)
-        self.used: dict[str, float] = {}
-
-    def use_job_data(self, key: str, now: float) -> None:
-        self.used[key] = now
-
-    def unused_job_data(self, before: float) -> tuple[str, ...]:
-        return tuple(key for key, used in self.used.items() if used < before)
-
-    def forget_job_data(self, key: str) -> None:
-        self.used.pop(key, None)
-
-
 __all__ = [
     "JOB_DATA_FORMAT",
     "JOB_DATA_PREFIX",
@@ -245,8 +159,6 @@ __all__ = [
     "TASKS_DIR",
     "JobDataKind",
     "JobDataRef",
-    "JobDataStore",
-    "LocalJobDataStore",
     "job_data_key",
     "job_data_kind",
     "read_job_data",

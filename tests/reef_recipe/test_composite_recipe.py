@@ -41,10 +41,11 @@ from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
-from reef.storage.job_data import LocalJobDataStore
+from reef.storage.data import MemoryDataStore
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.train import Trainer, TrainStepResult
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.jobs import JobLoop
@@ -312,14 +313,16 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
     shared = recipe.training_component
     assert recipe.job_components() == (shared,)
     queued = StubTrainingComponent(name=shared.name)
-    moved = recipe.with_job_components({shared.name: queued}, LocalJobDataStore(tmp_path / "job-data"))
+    moved = recipe.with_job_components(
+        {shared.name: queued}, MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
+    )
     assert moved.job_components() == (queued,)
     assert all(
         component.training_component is (None if original.training_component is None else queued)
         for component, original in zip(moved.components.values(), recipe.components.values(), strict=True)
     )
     with pytest.raises(ValueError, match=r"the job components of CompositeRecipe are \['stub'\], not \[\]"):
-        recipe.with_job_components({}, LocalJobDataStore(tmp_path / "job-data"))
+        recipe.with_job_components({}, MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")))
 
     # A flat weight recipe setting has no place at the top of a composite.
     with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):

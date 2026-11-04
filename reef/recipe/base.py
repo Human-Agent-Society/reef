@@ -31,7 +31,7 @@ from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
 from reef.sample2job import NoJobData
-from reef.storage.job_data import JobDataStore
+from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -108,7 +108,7 @@ class Recipe:
     training_component: TrainingComponent | None = None
     #: The store of the job data directories that the trainers write for their jobs; the dispatcher binds it
     #: (``with_job_components``).
-    job_data: JobDataStore | None = field(default=None, repr=False, compare=False)
+    data_store: DataStore | None = field(default=None, repr=False, compare=False)
 
     training_mode: str = config_field("auto")
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
@@ -164,14 +164,14 @@ class Recipe:
         weight trainer's ``training_component``, and the ones that a recipe adds, such as a harness's."""
         return () if self.training_component is None else (self.training_component,)
 
-    def with_job_components(self, components: Mapping[str, TrainingComponent], job_data: JobDataStore) -> Recipe:
+    def with_job_components(self, components: Mapping[str, TrainingComponent], data_store: DataStore) -> Recipe:
         """This recipe whose trainers submit the jobs of each job component to ``components[name]``, such as the
-        jobs queue's view of it, and write the data of each job to ``job_data``. Raise ``ValueError`` unless
+        jobs queue's view of it, and write the data of each job to ``data_store``. Raise ``ValueError`` unless
         ``components`` names exactly the job components."""
         check_job_components(self, components)
         if self.training_component is None:
-            return replace(self, job_data=job_data)
-        return replace(self, training_component=components[self.training_component.name], job_data=job_data)
+            return replace(self, data_store=data_store)
+        return replace(self, training_component=components[self.training_component.name], data_store=data_store)
 
     @classmethod
     def from_environment(
@@ -657,7 +657,7 @@ class WeightTrainingRecipe(Recipe):
                 scenario,
                 records,
                 pipeline_factory=self.build_pipeline,
-                job_loop=JobLoop(self.training_component, scenario=scenario, job_data=self.job_data),
+                job_loop=JobLoop(self.training_component, scenario=scenario, data_store=self.data_store),
                 root=root,
                 job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,

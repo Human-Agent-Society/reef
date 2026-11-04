@@ -21,7 +21,8 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.job_data import JobData, JobOutcome
-from reef.storage.job_data import JobDataStore, LocalJobDataStore
+from reef.storage.data import DataStore, MemoryDataStore
+from reef.storage.tasks import LocalTaskFileStore
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainStepResult
 
@@ -136,19 +137,19 @@ class JobLoop:
 
     ``component`` runs the jobs; ``scenario`` is the non-empty name of the
     trainer's scenario, which is part of each job's identity, so two scenarios
-    never share a job. ``job_data`` keeps the job data directory of each job that ``submit`` submits; None keeps
+    never share a job. ``data_store`` keeps the job data directory of each job that ``submit`` submits; None keeps
     them in a new temporary directory, for a process that keeps no state across restarts. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
     """
 
-    def __init__(self, component: TrainingComponent, *, scenario: str, job_data: JobDataStore | None = None) -> None:
+    def __init__(self, component: TrainingComponent, *, scenario: str, data_store: DataStore | None = None) -> None:
         if not isinstance(component, TrainingComponent):
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
         self.component = component
         self.scenario = scenario
-        self.job_data = LocalJobDataStore() if job_data is None else job_data
+        self.data_store = MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
@@ -185,7 +186,7 @@ class JobLoop:
             job_id,
             backend,
             state.start,
-            self.job_data.write_job_data(data),
+            self.data_store.write_job_directory(data),
             parameters,
             scenario=self.scenario,
             request_id=None if data.request is None else data.request.id,

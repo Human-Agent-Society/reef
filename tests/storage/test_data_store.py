@@ -554,16 +554,16 @@ def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable
 
 def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):
     sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
-    first = store.write_job_data(JobData("s:data:1", (sample,)))
+    first = store.write_job_directory(JobData("s:data:1", (sample,)))
     # A job of the same samples, under another data ID, uses the same directory.
-    again = store.write_job_data(JobData("s:request:r1", (sample,)))
+    again = store.write_job_directory(JobData("s:request:r1", (sample,)))
     assert (again.uri, again.data_id, again.sample_count, again.kind) == (first.uri, "s:request:r1", 1, "trajectory")
-    assert read_job_data(store.open_job_data(again.to_dict()).path).samples == (sample,)
-    other = store.write_job_data(JobData("s:data:2", (sample, sample)))
+    assert read_job_data(store.open_job_directory(again.to_dict()).path).samples == (sample,)
+    other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
     assert other.uri != first.uri
-    # A directory that no job used since the cutoff goes; a used one stays.
-    store.use_job_data(job_data_key(JobData("x", (sample,))), 10.0)
-    assert store.expire_job_data(before=100.0) == 1
+    # A directory that no job used since the time goes; a used one stays.
+    store.record_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
+    assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
-        store.open_job_data(first.to_dict())
-    assert read_job_data(store.open_job_data(other.to_dict()).path).samples == (sample, sample)
+        store.open_job_directory(first.to_dict())
+    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)

@@ -23,14 +23,13 @@ are local; a split deployment gives control and the training service one volume 
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
 (``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
-store's job files before the component runs the job. An item that an earlier Reef added holds its data inline; the
-worker writes that data to a temporary directory when it reads the item.
+store before the component runs the job. An item that an earlier Reef added holds its data inline; the
+worker writes that data to the data store when it reads the item.
 """
 
 from __future__ import annotations
 
 import logging
-import tempfile
 import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -51,8 +50,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.storage.job_data import JobDataRef, job_data_kind, write_job_data
-from reef.storage.segments import SegmentStore
+from reef.storage.data import DataStore
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.training_requests import TRAINING_REQUESTS_QUEUE
@@ -99,24 +97,22 @@ def json_text(value: JsonValue, name: str) -> str:
     return value
 
 
-def job_from_item(item: WorkItem, job_files: SegmentStore) -> TrainingJob:
+def job_from_item(item: WorkItem, data_store: DataStore) -> TrainingJob:
     """The ``TrainingJob`` that ``job_payload`` wrote into ``item``, with its data directory opened in
-    ``job_files``; ``ValueError`` for another payload.
+    ``data_store``; ``ValueError`` for another payload.
 
-    An item that an earlier Reef added holds ``JobData.to_dict`` as its data: the function writes it to a new
-    temporary directory.
+    An item that an earlier Reef added holds ``JobData.to_dict`` as its data: the function writes it to
+    ``data_store`` first.
     """
     payload = item.payload
     data = json_object(payload.get("data"), "a job's data")
     request = request_summary(item)
-    if "samples" in data:
-        inline = JobData.from_dict(data)
-        directory = Path(tempfile.mkdtemp(prefix="reef-job-data-")) / "data"
-        write_job_data(inline, directory)
-        ref = JobDataRef(directory.as_uri(), directory, inline.data_id, len(inline.samples), job_data_kind(inline))
-    else:
-        uri = json_text(data.get("uri"), "a job's data uri")
-        ref = JobDataRef.from_dict(data, job_files.open_directory(uri))
+    # An item that an earlier Reef added holds its data inline.
+    ref = (
+        data_store.write_job_directory(JobData.from_dict(data))
+        if "samples" in data
+        else data_store.open_job_directory(data)
+    )
     return TrainingJob(
         item.id,
         json_text(payload.get("backend"), "a job's backend"),
@@ -433,8 +429,8 @@ class JobExperimentRecorder(ExperimentTracker):
 class TrainingJobWorker(QueueWorker):
     """One worker of the training service: it takes the jobs of one component from the jobs queue and runs them.
 
-    Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``job_files`` are the data store's
-    job files, which hold the data directory of each job; ``poll_seconds`` is also the wait between two looks at a
+    Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``data_store`` is the data store,
+    which keeps the data directory of each job; ``poll_seconds`` is also the wait between two looks at a
     running job.
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
@@ -447,7 +443,7 @@ class TrainingJobWorker(QueueWorker):
         self,
         component: TrainingComponent,
         queue: WorkQueue,
-        job_files: SegmentStore,
+        data_store: DataStore,
         *,
         worker_id: str,
         poll_seconds: float = 0.5,
@@ -456,7 +452,7 @@ class TrainingJobWorker(QueueWorker):
             raise TypeError("a training worker runs jobs on the component itself, not on a jobs-queue component")
         super().__init__(queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds)
         self.component = component
-        self.job_files = job_files
+        self.data_store = data_store
 
     def start(self) -> None:
         """Start the component's jobs in this process (``TrainingComponent.start_jobs``), then the worker."""
@@ -479,7 +475,7 @@ class TrainingJobWorker(QueueWorker):
         worker continues it at once: the component keeps running it, and that worker's ``submit`` continues from
         the job's latest checkpoint.
         """
-        job = job_from_item(item, self.job_files)
+        job = job_from_item(item, self.data_store)
         self.component.submit(job)
         reported = {checkpoint_from_json(entry).step for entry in item.progress}
         progress_count = len(item.progress)

@@ -39,9 +39,9 @@ from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
     build_artifact_backend,
+    build_data_store,
     build_dispatcher,
-    build_job_files,
-    build_segment_store,
+    build_task_files,
     default_served_url,
     open_scenario_storage,
     open_service_coordination,
@@ -53,8 +53,9 @@ from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import build_inference_app
 from reef.service.web import service_application
 from reef.storage.coordination import Coordination, instance_id
+from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
-from reef.storage.segments import SegmentStore
+from reef.storage.tasks import TaskFileStore
 from reef.train.job_queue import TrainingJobWorker
 
 
@@ -163,8 +164,8 @@ class TrainingApp(ComponentApp):
 
     Values: this stateless builder returns an app with one worker per recipe job component, and refuses a recipe
     with no job component. The app owns these workers, their components, the runtime and the coordination store.
-    Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario, artifact or data stores. It
-    reads each job's data directory from the data store's job files (``build_job_files``).
+    Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario or artifact stores. It opens
+    the data store, which keeps the data directory of each job.
     """
 
     def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
@@ -176,7 +177,8 @@ class TrainingApp(ComponentApp):
         components = recipe.job_components()
         runtime = recipe.runtime
         coordination: Coordination | None = None
-        job_files: SegmentStore | None = None
+        task_files: TaskFileStore | None = None
+        data_store: DataStore | None = None
         workers: list[TrainingJobWorker] = []
 
         def close_training() -> None:
@@ -193,7 +195,8 @@ class TrainingApp(ComponentApp):
                 errors.extend(close_runtimes(unclosed_components, runtime))
             except BaseException as exc:
                 errors.append(exc)
-            for store in (coordination, job_files):
+            # The data store does not own the task file store, so the task files close after it.
+            for store in (coordination, data_store, task_files):
                 if store is not None:
                     try:
                         store.close()
@@ -206,12 +209,13 @@ class TrainingApp(ComponentApp):
             if not components:
                 raise ValueError(f"recipe {settings.recipe!r} submits no training job, so it has no training service")
             coordination = open_service_coordination(settings)
-            job_files = build_job_files(settings, build_segment_store(settings))
+            task_files = build_task_files(settings)
+            data_store = build_data_store(settings, task_files)
             workers.extend(
                 TrainingJobWorker(
                     component,
                     coordination.work_queue,
-                    job_files,
+                    data_store,
                     worker_id=instance_id(f"training-{component.name}"),
                 )
                 for component in components

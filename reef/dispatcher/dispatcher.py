@@ -48,13 +48,13 @@ from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
-from reef.storage.data import DataStore, check_owner
+from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
-from reef.storage.job_data import JobDataStore, LocalJobDataStore
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import WorkItem
 from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
 from reef.train.trainer import Trainer
@@ -171,7 +171,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
         # training service runs one worker for each of them.
         #: The store of the job data directories of the training jobs.
-        self.job_data: JobDataStore = LocalJobDataStore() if data_store is None else data_store
+        self.job_directory_store: DataStore = (
+            MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
+        )
         job_components = recipe.job_components()
         if job_components:
             if self.services.runs_training:
@@ -180,7 +182,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                         TrainingJobWorker(
                             component,
                             self.queue,
-                            self.job_data.job_files,
+                            self.job_directory_store,
                             worker_id=instance_id(f"training-{component.name}"),
                         )
                     )
@@ -191,7 +193,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                     )
                     for component in job_components
                 },
-                self.job_data,
+                self.job_directory_store,
             )
         #: The deployment's recipe; its trainers submit to the jobs queue.
         self.recipe = recipe
@@ -249,7 +251,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 EndedWorkSweeper(
                     coordination.work_queue,
                     retention_seconds=work_retention_seconds,
-                    job_data=self.job_data,
+                    data_store=self.job_directory_store,
                     job_data_ttl_seconds=job_data_ttl_seconds,
                 )
             )

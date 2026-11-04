@@ -113,8 +113,8 @@ UNUSED_SEGMENT_SECONDS = 24 * 3600
 
 
 def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table]:
-    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment`` and ``data_job_data`` in
-    ``metadata``. ``data_job_data`` has the time that a job last used each job data directory, by its key.
+    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment`` and ``data_job_directory`` in
+    ``metadata``. ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
 
     ``sequence`` orders the items as they arrived. ``data_item_scenario`` has one row per use of an item by a
     scenario, with its split; its own ``sequence`` orders the uses as they began, and a use whose split changes is a
@@ -180,13 +180,13 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("byte_count", BigInteger, nullable=False),
         PrimaryKeyConstraint("owner", "segment_id"),
     )
-    job_data = Table(
-        "data_job_data",
+    job_directories = Table(
+        "data_job_directory",
         metadata,
         Column("key", String(64), primary_key=True),
-        Column("used_at", Float, nullable=False),
+        Column("last_used_at", Float, nullable=False),
     )
-    return items, scenarios, nodes, segments, job_data
+    return items, scenarios, nodes, segments, job_directories
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -202,8 +202,8 @@ class SQLDataStore(DataStore):
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
     ``ItemConflict``, never in a failed insert. ``create`` and ``delete`` both take ``lock_creates``, since they
     change the trajectory nodes of an owner. ``segments`` is None, or the segment store that keeps the content of
-    trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_files`` keeps
-    the job data directories: ``job_files`` when given, else ``segments``, else a local segment store in a new
+    trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
+    the job data directories: ``job_directories`` when given, else ``segments``, else a local segment store in a new
     temporary directory, which only this process reads.
     """
 
@@ -212,28 +212,29 @@ class SQLDataStore(DataStore):
         tables: tuple[Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
-        job_files: SegmentStore | None = None,
+        job_directories: SegmentStore | None = None,
     ) -> None:
-        self.items_table, self.scenarios_table, self.nodes_table, self.segment_table, self.job_data_table = tables
+        self.items_table, self.scenarios_table, self.nodes_table, self.segment_table, self.job_directory_table = tables
         self.task_files = task_files
         self.segments = segments
-        self.job_files = job_files or segments or LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-data-")))
+        self.job_directories = (
+            job_directories or segments or LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-data-")))
+        )
 
-    def use_job_data(self, key: str, now: float) -> None:
+    def record_job_directory_use(self, key: str, time: float) -> None:
+        table = self.job_directory_table
         with self.transaction() as connection:
-            connection.execute(delete(self.job_data_table).where(self.job_data_table.c.key == key))
-            connection.execute(insert(self.job_data_table).values(key=key, used_at=now))
+            connection.execute(delete(table).where(table.c.key == key))
+            connection.execute(insert(table).values(key=key, last_used_at=time))
 
-    def unused_job_data(self, before: float) -> tuple[str, ...]:
+    def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
+        table = self.job_directory_table
         with self.transaction(read_only=True) as connection:
-            rows = connection.execute(
-                select(self.job_data_table.c.key).where(self.job_data_table.c.used_at < before)
-            ).scalars()
-            return tuple(rows)
+            return tuple(connection.execute(select(table.c.key).where(table.c.last_used_at < time)).scalars())
 
-    def forget_job_data(self, key: str) -> None:
+    def delete_job_directory_record(self, key: str) -> None:
         with self.transaction() as connection:
-            connection.execute(delete(self.job_data_table).where(self.job_data_table.c.key == key))
+            connection.execute(delete(self.job_directory_table).where(self.job_directory_table.c.key == key))
 
     @abstractmethod
     @contextmanager
@@ -720,11 +721,11 @@ class SQLiteDataStore(SQLDataStore):
         directory: Path | None,
         task_files: TaskFileStore,
         segments: SegmentStore | None = None,
-        job_files: SegmentStore | None = None,
+        job_directories: SegmentStore | None = None,
     ) -> None:
         metadata = MetaData()
         tables = data_tables(metadata, sqlite=True)
-        super().__init__(tables, task_files, segments, job_files)
+        super().__init__(tables, task_files, segments, job_directories)
         if directory is None:
             database = ":memory:"
         else:
@@ -821,12 +822,12 @@ class PostgresDataStore(SQLDataStore):
         *,
         schema: str = "reef_data",
         segments: SegmentStore | None = None,
-        job_files: SegmentStore | None = None,
+        job_directories: SegmentStore | None = None,
     ) -> None:
         validate_postgres_schema(schema)
         metadata = MetaData(schema=schema)
         tables = data_tables(metadata, sqlite=False)
-        super().__init__(tables, task_files, segments, job_files)
+        super().__init__(tables, task_files, segments, job_directories)
         try:
             self.engine: Engine | None = create_engine(
                 postgres_url(database_url), pool_pre_ping=True, hide_parameters=True

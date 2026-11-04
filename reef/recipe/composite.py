@@ -50,7 +50,7 @@ from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.storage.job_data import JobDataStore
+from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
@@ -291,16 +291,16 @@ class CompositeRecipe(Recipe):
         return tuple(found.values())
 
     def with_job_components(
-        self, components: Mapping[str, TrainingComponent], job_data: JobDataStore
+        self, components: Mapping[str, TrainingComponent], data_store: DataStore
     ) -> CompositeRecipe:
         check_job_components(self, components)
         return replace(
             self,
             training_component=(None if self.training_component is None else components[self.training_component.name]),
-            job_data=job_data,
+            data_store=data_store,
             components={
                 name: recipe.with_job_components(
-                    {component.name: components[component.name] for component in recipe.job_components()}, job_data
+                    {component.name: components[component.name] for component in recipe.job_components()}, data_store
                 )
                 for name, recipe in self.components.items()
             },

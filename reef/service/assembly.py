@@ -306,12 +306,6 @@ def build_segment_store(settings: ServiceConfig) -> SegmentStore | None:
     return SegmentStore.referenced_class(reference).from_config(reference.config, directory=directory)
 
 
-def build_job_files(settings: ServiceConfig, segments: SegmentStore | None) -> SegmentStore:
-    """Where the data store keeps the job data directories: ``segments``, else ``<agent_record_dir>/job-files``, which
-    control and the training service share."""
-    return segments if segments is not None else LocalSegmentStore(Path(settings.agent_record_dir) / "job-files")
-
-
 def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> DataStore:
     """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it, and owning the
     segment store of ``storage.segment_backend``.
@@ -324,17 +318,18 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     if choice is None:
         choice = "postgres" if settings.record_backend == "postgres" else "sqlite"
     segments = build_segment_store(settings)
-    job_files = build_job_files(settings, segments)
+    # Without a segment store, the job data directories stay in a directory that the services share.
+    job_directories = segments if segments is not None else LocalSegmentStore(directory / "job-directories")
     try:
         if choice == "postgres":
             return PostgresDataStore(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 task_files,
                 segments=segments,
-                job_files=job_files,
+                job_directories=job_directories,
             )
         if choice == "sqlite":
-            return SQLiteDataStore(directory / "data", task_files, segments, job_files)
+            return SQLiteDataStore(directory / "data", task_files, segments, job_directories)
         reference = DataStore.reference(choice, setting="storage.data_store")
         return DataStore.referenced_class(reference).from_config(
             reference.config, directory=directory, task_files=task_files, segments=segments
@@ -363,17 +358,19 @@ def open_service_coordination(settings: ServiceConfig) -> Coordination:
     )
 
 
+def build_task_files(settings: ServiceConfig) -> TaskFileStore:
+    """The task file store that ``storage.task_file_backend`` names, in ``storage.task_file_dir``."""
+    task_file_directory = Path(settings.task_file_dir)
+    if settings.task_file_backend == "local":
+        return LocalTaskFileStore(task_file_directory)
+    reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
+    return TaskFileStore.referenced_class(reference).from_config(reference.config, directory=task_file_directory)
+
+
 def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, TaskFileStore]:
     """The deployment's scenario storage (``storage.record_backend``) and its task file store, which it owns."""
     record_directory = Path(settings.agent_record_dir)
-    task_file_directory = Path(settings.task_file_dir)
-    task_files: TaskFileStore
-    if settings.task_file_backend == "local":
-        task_files = LocalTaskFileStore(task_file_directory)
-    else:
-        reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
-        store_class = TaskFileStore.referenced_class(reference)
-        task_files = store_class.from_config(reference.config, directory=task_file_directory)
+    task_files = build_task_files(settings)
     try:
         if settings.record_backend == "postgres":
             storage: ScenarioStorage = PostgresScenarioStorage(

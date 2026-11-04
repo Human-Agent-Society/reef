@@ -7,7 +7,7 @@ import threading
 import time
 
 from reef.execution.workers import ServiceWorker
-from reef.storage.job_data import JobDataStore
+from reef.storage.data import DataStore
 from reef.storage.work_queue import WorkQueue
 
 logger = logging.getLogger(__name__)
@@ -20,9 +20,9 @@ class EndedWorkSweeper(ServiceWorker):
     """Deletes the final work items that changed last more than ``retention_seconds`` ago, every
     ``interval_seconds``.
 
-    Values: ``queue`` holds the items; ``retention_seconds`` and ``interval_seconds`` are positive. ``job_data``, when
+    Values: ``queue`` holds the items; ``retention_seconds`` and ``interval_seconds`` are positive. ``data_store``, when
     given, keeps the data directories of the training jobs: a sweep also deletes each directory that no job used for
-    ``job_data_ttl_seconds`` (``JobDataStore.expire_job_data``). A failed sweep is logged, and the next one runs after
+    ``job_data_ttl_seconds`` (``DataStore.delete_unused_job_directories``). A failed sweep is logged, and the next one runs after
     ``interval_seconds``.
 
     Purpose: the dispatcher of a control instance runs one, so that the queues hold the items that a producer may
@@ -35,7 +35,7 @@ class EndedWorkSweeper(ServiceWorker):
         *,
         retention_seconds: float,
         interval_seconds: float = SWEEP_INTERVAL_SECONDS,
-        job_data: JobDataStore | None = None,
+        data_store: DataStore | None = None,
         job_data_ttl_seconds: float = 7 * 24 * 3600.0,
     ) -> None:
         if retention_seconds <= 0 or interval_seconds <= 0 or job_data_ttl_seconds <= 0:
@@ -43,7 +43,7 @@ class EndedWorkSweeper(ServiceWorker):
         self.queue = queue
         self.retention_seconds = retention_seconds
         self.interval_seconds = interval_seconds
-        self.job_data = job_data
+        self.data_store = data_store
         self.job_data_ttl_seconds = job_data_ttl_seconds
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
@@ -71,8 +71,8 @@ class EndedWorkSweeper(ServiceWorker):
         time to live; return how many items, 0 when the store failed."""
         try:
             now = time.time()
-            if self.job_data is not None:
-                self.job_data.expire_job_data(now - self.job_data_ttl_seconds)
+            if self.data_store is not None:
+                self.data_store.delete_unused_job_directories(now - self.job_data_ttl_seconds)
             return self.queue.delete_final(finished_before=now - self.retention_seconds)
         except Exception:
             logger.exception("could not delete the ended work items")

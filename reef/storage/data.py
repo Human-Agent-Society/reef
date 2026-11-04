@@ -13,8 +13,10 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
+import json
 import re
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -22,11 +24,12 @@ from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
+from reef.core.job_data import JobData
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
-from reef.storage.job_data import JobDataStore
+from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
 from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
@@ -289,7 +292,7 @@ class RecordLink:
             raise ValueError("a record link's entry_count is a non-negative int")
 
 
-class DataStore(Plugin, JobDataStore, ABC):
+class DataStore(Plugin, ABC):
     """The data of a deployment: items of content and metadata, each in one owner.
 
     Values: the state of a store is a finite set of ``StoredItem`` values. Within one owner, no two items have
@@ -327,8 +330,19 @@ class DataStore(Plugin, JobDataStore, ABC):
     * ``maintain()`` does the store's periodic work, such as moving content into segments. It changes no item.
       The data service calls it every few minutes. The default does nothing.
 
-    The store also keeps the data directories of training jobs (``JobDataStore``): ``job_files`` holds them, and the
-    store records when a job last used each one (``use_job_data``, ``unused_job_data``, ``forget_job_data``).
+    The store also keeps the data directory of each training job (``reef.storage.job_data``), one directory for each
+    content, in the segment store ``job_directories``:
+
+    * ``write_job_directory(data)`` writes the directory of ``data`` if the store does not hold it, records its use,
+      and returns its reference.
+    * ``open_job_directory(value)`` gives the reference that ``JobDataRef.to_dict`` wrote, with a local copy of the
+      directory, and records its use.
+    * ``delete_unused_job_directories(time)`` deletes each directory that no job used since ``time``, and returns
+      their number.
+
+    A subclass sets ``job_directories`` and keeps the time of the last use of each directory, by its key:
+    ``record_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
+    ``delete_job_directory_record(key)``.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
     ``scenarios`` names only scenarios of the owner.
@@ -416,6 +430,48 @@ class DataStore(Plugin, JobDataStore, ABC):
     def maintain(self) -> None:
         """Do the store's periodic work. The default does nothing."""
 
+    #: The segment store of the job data directories.
+    job_directories: SegmentStore
+
+    @abstractmethod
+    def record_job_directory_use(self, key: str, time: float) -> None: ...
+
+    @abstractmethod
+    def job_directories_unused_since(self, time: float) -> tuple[str, ...]: ...
+
+    @abstractmethod
+    def delete_job_directory_record(self, key: str) -> None: ...
+
+    def write_job_directory(self, data: JobData) -> JobDataRef:
+        key = job_data_key(data)
+        name = f"{JOB_DATA_PREFIX}/{key}"
+        uri = self.job_directories.find_directory(name)
+        if uri is None:
+            with tempfile.TemporaryDirectory() as staging:
+                directory = Path(staging) / key
+                write_job_data(data, directory)
+                uri = self.job_directories.put_directory(name, directory)
+        self.record_job_directory_use(key, time.time())
+        return JobDataRef(
+            uri, self.job_directories.open_directory(uri), data.data_id, len(data.samples), job_data_kind(data)
+        )
+
+    def open_job_directory(self, value: Mapping[str, Any]) -> JobDataRef:
+        uri = value.get("uri")
+        if not isinstance(uri, str) or not uri:
+            raise ValueError("a job data reference has a uri")
+        path = self.job_directories.open_directory(uri)
+        header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
+        self.record_job_directory_use(header["key"], time.time())
+        return JobDataRef.from_dict(value, path)
+
+    def delete_unused_job_directories(self, time: float) -> int:
+        unused = self.job_directories_unused_since(time)
+        for key in unused:
+            self.job_directories.delete_directory(f"{JOB_DATA_PREFIX}/{key}")
+            self.delete_job_directory_record(key)
+        return len(unused)
+
     @abstractmethod
     def close(self) -> None:
         """Release the store's resources. A second call does nothing."""
@@ -491,8 +547,8 @@ class MemoryDataStore(DataStore):
 
     def __init__(self, task_files: TaskFileStore) -> None:
         self.task_files = task_files
-        self.job_files = LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-data-")))
-        self.job_data_used: dict[str, float] = {}
+        self.job_directories = LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-data-")))
+        self.job_directory_uses: dict[str, float] = {}
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
         self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
@@ -525,14 +581,14 @@ class MemoryDataStore(DataStore):
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
         return cls(task_files)
 
-    def use_job_data(self, key: str, now: float) -> None:
-        self.job_data_used[key] = now
+    def record_job_directory_use(self, key: str, time: float) -> None:
+        self.job_directory_uses[key] = time
 
-    def unused_job_data(self, before: float) -> tuple[str, ...]:
-        return tuple(key for key, used in self.job_data_used.items() if used < before)
+    def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
+        return tuple(key for key, last_used in self.job_directory_uses.items() if last_used < time)
 
-    def forget_job_data(self, key: str) -> None:
-        self.job_data_used.pop(key, None)
+    def delete_job_directory_record(self, key: str) -> None:
+        self.job_directory_uses.pop(key, None)
 
     def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
