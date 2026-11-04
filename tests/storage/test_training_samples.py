@@ -98,6 +98,24 @@ def test_a_scenario_reads_the_items_that_it_uses_in_use_order(scenario):
     assert scenario.ids(after_sequence=scenario.samples.page()[-1].sequence) == []
 
 
+def test_a_listing_shows_the_samples_without_reading_their_content(scenario, monkeypatch):
+    scenario.data.create("acme", [upload("t1", math="train")])
+    scenario.task("task-a", "eval")
+    stored = scenario.samples.page()
+    read = scenario.data.scenario_items
+
+    def without_content(*args, **options):
+        assert options["content"] is False
+        return read(*args, **options)
+
+    monkeypatch.setattr(scenario.data, "scenario_items", without_content)
+    listed = scenario.samples.listing()
+    assert [(row.sequence, row.sample_id, row.kind, row.split, row.component, row.group) for row in listed] == [
+        (row.sequence, row.sample_id, row.kind, row.split, row.component, row.group) for row in stored
+    ]
+    assert scenario.samples.listing(after_sequence=listed[-1].sequence) == ()
+
+
 def test_get_reads_the_samples_of_the_ids_that_the_scenario_uses_in_item_order(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2"), upload("t3", math="train")])
     assert [stored.sample_id for stored in scenario.samples.get(("t3", "t1", "t2", "missing"))] == ["t1", "t3"]
