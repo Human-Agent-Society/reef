@@ -1088,7 +1088,7 @@ def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_pa
     assert job["experiment"] is None
 
 
-def _accept_receipts(dispatcher, *receipts):
+def accept_receipts(dispatcher, *receipts):
     for receipt in receipts:
         dispatcher.accept_record(
             AgentRecord.create(
@@ -1101,17 +1101,17 @@ def _accept_receipts(dispatcher, *receipts):
         dispatcher.accept_record(report(receipt))
 
 
-def _request_from(dispatcher, receipt, samples, artifact_id):
+def request_from(dispatcher, receipt, samples, artifact_id):
     """Queue the request ``receipt``, whose job starts from ``artifact_id``."""
     body = {**train_body(receipt, samples), "train_from_artifact_id": artifact_id}
     return dispatcher.accept_request("s", body, request_id=receipt)
 
 
-def _train_from_records(scenario):
+def train_from_records(scenario):
     return [record.operation for record in scenario.release_queries.records()].count("train_from")
 
 
-class _HeldFirstJob(StubTrainingComponent):
+class HeldFirstJob(StubTrainingComponent):
     """The first job runs until ``release`` is set; ``cancelled`` lists the jobs that Reef cancelled."""
 
     def __init__(self, checkpoint_root):
@@ -1129,7 +1129,7 @@ class _HeldFirstJob(StubTrainingComponent):
         super().cancel(job_id)
 
 
-class _RefusesReleases(StubTrainingComponent):
+class RefusesStarts(StubTrainingComponent):
     def import_start(self, release):
         raise ValueError("these weights do not fit")
 
@@ -1141,13 +1141,13 @@ def test_a_requests_job_starts_from_the_artifact_that_it_names_and_the_next_job_
     dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
     scenario = dispatcher.get_or_create_scenario("s")
     assert scenario.capabilities().request_train_from is True
-    _accept_receipts(dispatcher, "a", "b", "c")
+    accept_receipts(dispatcher, "a", "b", "c")
     creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
     file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
     assert _wait(
         lambda: ("one", "submitted") in _job_events(dispatcher) and (None, "finished") in _job_events(dispatcher)
     )
-    _request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
+    request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
     file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
     assert _wait(lambda: len(component.submitted) == 3 and _job_events(dispatcher)[-1] == (None, "finished"))
 
@@ -1157,7 +1157,7 @@ def test_a_requests_job_starts_from_the_artifact_that_it_names_and_the_next_job_
     assert second.start == str(component.imported[0])
     assert third.train_from_artifact_id not in (None, creation)
     assert third.start == str(tmp_path / "checkpoints" / "2")
-    assert _train_from_records(scenario) == 1
+    assert train_from_records(scenario) == 1
 
     async def listing():
         async with TestClient(TestServer(create_app(dispatcher))) as client:
@@ -1171,14 +1171,14 @@ def test_a_requests_job_starts_from_the_artifact_that_it_names_and_the_next_job_
 
 
 def test_a_request_that_names_a_start_waits_for_the_running_job_and_does_not_cancel_it(tmp_path, open_dispatcher):
-    component = _HeldFirstJob(tmp_path / "checkpoints")
+    component = HeldFirstJob(tmp_path / "checkpoints")
     dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
     scenario = dispatcher.get_or_create_scenario("s")
-    _accept_receipts(dispatcher, "a", "b")
+    accept_receipts(dispatcher, "a", "b")
     creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
     file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
     assert _wait(lambda: len(component.submitted) == 1 and scenario.trainer.job_running)
-    _request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
+    request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
     time.sleep(0.3)
     assert (len(component.submitted), component.cancelled, component.imported) == (1, [], [])
 
@@ -1190,29 +1190,29 @@ def test_a_request_that_names_a_start_waits_for_the_running_job_and_does_not_can
 
 
 def test_a_start_that_the_trainer_refuses_fails_only_its_request(tmp_path, open_dispatcher):
-    component = _RefusesReleases(tmp_path / "checkpoints")
+    component = RefusesStarts(tmp_path / "checkpoints")
     dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
     scenario = dispatcher.get_or_create_scenario("s")
-    _accept_receipts(dispatcher, "a", "b", "c")
+    accept_receipts(dispatcher, "a", "b", "c")
     creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
     file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
     assert _wait(lambda: (None, "finished") in _job_events(dispatcher))
-    _request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
+    request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
     file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
     assert _wait(lambda: scenario.pending_requests() == 0 and len(component.submitted) == 2)
     assert [job.request_id for job in component.submitted] == ["one", "three"]
-    assert _train_from_records(scenario) == 0
+    assert train_from_records(scenario) == 0
 
 
 def test_a_request_is_refused_when_it_names_an_unknown_artifact_or_a_malformed_one(tmp_path, open_dispatcher):
     component = StubTrainingComponent(tmp_path / "checkpoints")
     dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
-    _accept_receipts(dispatcher, "a")
+    accept_receipts(dispatcher, "a")
     samples = stored_samples_of(dispatcher, "a")
     with pytest.raises(ValueError, match="nope"):
-        _request_from(dispatcher, "one", samples, "nope")
+        request_from(dispatcher, "one", samples, "nope")
     with pytest.raises(ValueError, match="train_from_artifact_id must be a non-empty string"):
-        _request_from(dispatcher, "two", samples, "")
+        request_from(dispatcher, "two", samples, "")
     assert component.submitted == []
 
 
