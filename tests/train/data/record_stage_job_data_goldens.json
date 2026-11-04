@@ -9,8 +9,8 @@
     "closer",
     "e",
     "f",
-    "sample:c:0",
-    "sample:e:0"
+    "sample:s.c:0",
+    "sample:s.e:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -79,8 +79,8 @@
     "closer",
     "e",
     "f",
-    "sample:c:0",
-    "sample:e:0"
+    "sample:s.c:0",
+    "sample:s.e:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -152,8 +152,8 @@
     "r2",
     "r3",
     "r4",
-    "sample:r1:0",
-    "sample:r2:0"
+    "sample:s.r1:0",
+    "sample:s.r2:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -218,8 +218,8 @@
   },
   {
    "consumed": [
-    "sample:r3:0",
-    "sample:r4:0"
+    "sample:s.r3:0",
+    "sample:s.r4:0"
    ],
    "data_id": "s:data:2",
    "items": [
@@ -287,7 +287,7 @@
     "r-c-3",
     "r-c-4",
     "r-c-5",
-    "sample:r-c-0:0",
+    "sample:s.r-c-0:0",
     "train-1"
    ],
    "data_id": "s:request:train-1",
@@ -324,7 +324,7 @@
    "consumed": [
     "i-c-6",
     "r-c-6",
-    "sample:r-c-1:0",
+    "sample:s.r-c-1:0",
     "train-2"
    ],
    "data_id": "s:request:train-2",
@@ -357,7 +357,7 @@
     "r0",
     "r1",
     "r2",
-    "sample:r0:0"
+    "sample:s.r0:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -403,7 +403,7 @@
   },
   {
    "consumed": [
-    "sample:r1:0"
+    "sample:s.r1:0"
    ],
    "data_id": "s:data:2",
    "items": [
@@ -442,7 +442,7 @@
   },
   {
    "consumed": [
-    "sample:r2:0"
+    "sample:s.r2:0"
    ],
    "data_id": "s:data:3",
    "items": [
@@ -489,9 +489,9 @@
     "r-a-0",
     "r-single-0",
     "r-z-0",
-    "sample:r-a-0:0",
-    "sample:r-single-0:0",
-    "sample:r-z-0:0"
+    "sample:s.r-a-0:0",
+    "sample:s.r-single-0:0",
+    "sample:s.r-z-0:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -552,8 +552,8 @@
     "s1r1",
     "s2r0",
     "s2r1",
-    "sample:report-s0r0:0",
-    "sample:report-s0r1:0"
+    "sample:s.report-s0r0:0",
+    "sample:s.report-s0r1:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -684,8 +684,8 @@
   },
   {
    "consumed": [
-    "sample:report-s2r0:0",
-    "sample:report-s2r1:0"
+    "sample:s.report-s2r0:0",
+    "sample:s.report-s2r1:0"
    ],
    "data_id": "s:data:2",
    "items": [
@@ -817,8 +817,8 @@
     "r-g2-0",
     "r-g2-1",
     "r-g2-2",
-    "sample:r-g1-0:0",
-    "sample:r-g1-1:0"
+    "sample:s.r-g1-0:0",
+    "sample:s.r-g1-1:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -865,8 +865,8 @@
     "i-g1-3",
     "r-g1-2",
     "r-g1-3",
-    "sample:r-g1-2:0",
-    "sample:r-g1-3:0"
+    "sample:s.r-g1-2:0",
+    "sample:s.r-g1-3:0"
    ],
    "data_id": "s:data:2",
    "items": [
@@ -919,10 +919,10 @@
     "r-1-0-1",
     "r-1-1-0",
     "r-1-1-1",
-    "sample:r-1-0-0:0",
-    "sample:r-1-0-1:0",
-    "sample:r-1-1-0:0",
-    "sample:r-1-1-1:0"
+    "sample:s.r-1-0-0:0",
+    "sample:s.r-1-0-1:0",
+    "sample:s.r-1-1-0:0",
+    "sample:s.r-1-1-1:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -1031,8 +1031,8 @@
     "i-a-1",
     "r-a-0",
     "r-a-1",
-    "sample:r-a-0:0",
-    "sample:r-a-1:0"
+    "sample:s.r-a-0:0",
+    "sample:s.r-a-1:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -1073,8 +1073,8 @@
     "r-a-2",
     "r-a-3",
     "r-a-4",
-    "sample:r-a-2:0",
-    "sample:r-a-3:0"
+    "sample:s.r-a-2:0",
+    "sample:s.r-a-3:0"
    ],
    "data_id": "s:data:2",
    "items": [
@@ -1117,8 +1117,8 @@
     "i-a-1",
     "r-a-0",
     "r-a-1",
-    "sample:r-a-0:0",
-    "sample:r-a-1:0"
+    "sample:s.r-a-0:0",
+    "sample:s.r-a-1:0"
    ],
    "data_id": "s:data:1",
    "items": [
@@ -1159,8 +1159,8 @@
     "r-a-2",
     "r-a-3",
     "r-a-4",
-    "sample:r-a-2:0",
-    "sample:r-a-3:0"
+    "sample:s.r-a-2:0",
+    "sample:s.r-a-3:0"
    ],
    "data_id": "s:data:1",
    "items": [

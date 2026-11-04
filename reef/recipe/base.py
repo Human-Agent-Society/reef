@@ -32,7 +32,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, ScenarioSamples, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
@@ -293,7 +293,7 @@ class Recipe:
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: CommittedArtifacts | None = None,
-        samples: SampleStore | None = None,
+        samples: ScenarioSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
@@ -305,7 +305,7 @@ class Recipe:
         separate workers that take turns, one step at a time.
         ``algorithm_states`` carries each one's recovered state under its
         component name. ``task_storage`` opens the generated task stores of
-        the scenario session, and ``samples`` is its sample store. Each trainer
+        the scenario session, and ``samples`` is its samples. Each trainer
         gives them to its pipeline; a trainer reads the samples as
         ``TrainerSamples`` of its key (``""`` for the only trainer).
         ``releases`` reads the scenario's committed releases; each trainer

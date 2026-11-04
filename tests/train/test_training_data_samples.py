@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from tests.support._trajectories import policy_trajectory, recorded_trajectory
+from tests.support.samples import made_task
 
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
@@ -232,7 +233,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
         def make_sample(self, context):
             source = context.inferences[0]
             return (
-                TaskSample(Path(source.payload["task_path"]))
+                made_task(source.payload["task_path"])
                 if "task_path" in source.payload
                 else make_trajectory(context.inferences)
             )
@@ -273,10 +274,10 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
     batch = processor.build_job_data(1)
     assert processor.build_job_data(1) is batch
     assert [type(sample) for sample in batch.samples] == [TrajectorySample]
-    assert processor.acknowledge(batch.data_id) == {"sample:report-0:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:mixed.report-0:0"}
     batch = processor.build_job_data(1)
     assert [type(sample) for sample in batch.samples] == [TaskSample]
-    assert processor.acknowledge(batch.data_id) == {"sample:report-1:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:mixed.report-1:0"}
     assert not processor.ready(1)
 
 

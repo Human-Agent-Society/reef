@@ -18,6 +18,7 @@ from tests.support.runtime_stubs import (
     StubTrainingComponent,
     runtime_bindings,
 )
+from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
@@ -288,7 +289,7 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
     # The single report's sample is stored, which consumes its records; the failed report keeps its inputs held.
     assert {"i1", "single"} <= processor.releasable_record_ids()
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
-    assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:single:0"}
+    assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:math.single:0"}
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
 
 
@@ -313,7 +314,7 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
 
     batch = processor.build_job_data(1)
     assert len(batch.samples) == 1 and trajectory_reward(batch.samples[0]) == 1.0
-    assert processor.acknowledge(batch.data_id) == {"sample:r1:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:math.r1:0"}
     assert not processor.ready(1)
     assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
 
@@ -332,7 +333,7 @@ def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored()
     assert processor.releasable_record_ids() == {"i1", "low"}
     batch = processor.build_job_data(1)
     assert trajectory_reward(batch.samples[0]) == 0.1
-    assert processor.acknowledge(batch.data_id) == {"sample:low:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:math.low:0"}
 
 
 @pytest.mark.unit
@@ -556,7 +557,7 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
 
 @pytest.mark.unit
 def test_trainer_restores_algorithm_state_from_metadata() -> None:
-    session = SQLiteScenarioStorage(None).open("math")
+    session = data_storage().open("math")
     records = session.records
     samples = TrainerSamples(session.samples)
     for item in (
@@ -607,7 +608,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
 @pytest.mark.unit
 def test_commit_retains_readable_records_and_recovery_skips_committed_consumption(tmp_path) -> None:
-    storage = SQLiteScenarioStorage(tmp_path)
+    storage = data_storage(tmp_path)
     first_inference = positioned_inference(1)
     first_report = positioned_report(2, first_inference.agent_record_id, 1.0)
     second_inference = positioned_inference(3)
