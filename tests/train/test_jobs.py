@@ -424,13 +424,19 @@ class TrajectoryAndTaskJobData(Sample2Job):
         return JobData(data_id, samples)
 
 
-def train_record(record_id: str, parameters: dict) -> TrainingRequest:
-    payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": parameters}
+def train_record(record_id: str, parameters: dict, sample_id: str) -> TrainingRequest:
+    payload = {
+        "text": "train",
+        "session": "s-1",
+        "release_id": "r-1",
+        "parameters": parameters,
+        "samples": [sample_id],
+    }
     return TrainingRequest.from_dict(payload, request_id=record_id)
 
 
 @pytest.mark.unit
-def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruction(component, tmp_path):
+def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request(component, tmp_path):
     session = SQLiteScenarioStorage(tmp_path / "records").open("math")
     trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     session.samples.add_trajectories((("t1", trajectory),))
@@ -444,26 +450,23 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         job_loop=loop_with(component),
         training_mode="manual",
         samples=TrainerSamples(session.samples),
-        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their instruction.
+        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
         job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
         root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
 
-    def train(sample_id: str, record: TrainingRequest) -> dict:
-        pipeline.insert_into_buffer((sample_id,))
-        pipeline.queue_instructions([record])
+    def train(record: TrainingRequest) -> dict:
+        pipeline.queue_requests([record])
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         job = component.jobs[-1]
         component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
-        # A scenario's commit removes the trained sample from the manual buffer; this trainer has no scenario.
-        pipeline.remove_from_buffer((sample_id,))
         return dict(job.parameters)
 
-    assert train("t1", train_record("sft", {"learning_rate": 2e-5})) == {"method": "sft", "learning_rate": 2e-5}
+    assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"method": "sft", "learning_rate": 2e-5}
     rl = {"method": "task_group", "rollout": {"rollouts_per_task": 4}}
-    assert train("task-a", train_record("rl", rl)) == rl
+    assert train(train_record("rl", rl, "task-a")) == rl
     assert [type(sample).__name__ for job in component.jobs for sample in job.data.samples] == [
         "TrajectorySample",
         "TaskSample",

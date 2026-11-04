@@ -1,4 +1,4 @@
-"""The dataset recipe's job stage: one job, with no samples, for each training instruction."""
+"""The dataset recipe's job stage: one job, with no samples, for each training request."""
 
 from __future__ import annotations
 
@@ -14,15 +14,15 @@ from reef.train.types import JobData, Sample
 
 
 class DatasetJobData(Sample2Job):
-    """Make the job of a training instruction: no samples, and the recipe's parameters under the instruction's.
+    """Make the job of a training request: no samples, and the recipe's parameters under the request's.
 
-    The instruction's ``parameters`` name the job's ``dataset``, which the
+    The request's ``parameters`` name the job's ``dataset``, which the
     recipe's ``job_parameters`` can also set; the training component checks
     it. The stage runs in ``manual`` only and takes no samples.
     """
 
     supported_training_modes = frozenset({"manual"})
-    reads_instructions = True
+    reads_requests = True
 
     @classmethod
     def from_config(
@@ -37,7 +37,7 @@ class DatasetJobData(Sample2Job):
         return cls(context)
 
     def __init__(self, context: PipelineContext) -> None:
-        # The trainer requires a job size; this stage makes a job per instruction, in manual only, so the
+        # The trainer requires a job size; this stage makes a job per request, in manual only, so the
         # size never makes data ready (an empty buffer holds no sample).
         super().__init__(context, None, 1)
 
@@ -45,7 +45,7 @@ class DatasetJobData(Sample2Job):
         return JobData(data_id, ())
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:
-        """The recipe's parameters, which every kind shares, with the instruction's ``parameters`` merged in."""
+        """The recipe's parameters, which every kind shares, with the request's ``parameters`` merged in."""
         defaults = self.context.job_parameters.get("trajectory") or {}
         overrides = {} if data.request is None else data.request.parameters
         return deep_merge(defaults, overrides)

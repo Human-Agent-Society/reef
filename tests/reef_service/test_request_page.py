@@ -52,7 +52,7 @@ QUERY = {"scenario": SCENARIO, "key": KEY}
 
 
 def _record(text: str = TEXT, requires: list | None = None) -> dict:
-    """The agent record as ``Dispatcher.read_record`` answers it for a ``POST /reef/train`` instruction."""
+    """The agent record as ``Dispatcher.read_record`` answers it for a ``POST /reef/train`` training request."""
     payload = {"text": text, "session": SESSION, "artifact_id": "rel-0", "requires": requires or []}
     return {
         "sequence": 1,
@@ -315,7 +315,7 @@ def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_its_candidat
     """A skip row whose candidate reached its evaluation says where the step failed, on both pages, and lists the
     change the candidate made instead of saying no change was produced."""
     metrics = _answered(
-        skipped="instruction failed",
+        skipped="request failed",
         error="AttributeError: 'str' object has no attribute 'get'",
         failed_stage="evaluating",
         patch=PATCH,
@@ -348,7 +348,7 @@ def test_a_settled_request_shows_what_the_method_said_and_why_a_step_failed() ->
     # A published step without either shows the result and the change alone.
     plain = request_page(_record(), [CREATION, _row(_answered(selected=True, patch=PATCH))], now=1_100.0)
     assert _sections(plain) == ["Request", "Result", "What changed"]
-    failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison method"), artifact_id="rel-0")
+    failed = _row(_answered(skipped="request failed", error="RuntimeError: poison method"), artifact_id="rel-0")
     page = request_page(_record(), [CREATION, failed], now=1_100.0)
     assert '<span class="failed">Failed</span>' in page
     assert "The step failed before evaluation. Nothing was published" in _section(page, "Result")
@@ -548,7 +548,7 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
                 assert '<span class="tag operation-write">write</span><span class="node-id">rules.md</span>' in page
             assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in page
 
-            # An unknown id, and a record that is no training instruction, are 404s naming the id.
+            # An unknown id, and a record that is no training request, are 404s naming the id.
             response = await client.get("/reef/harness/requests/nope/page", params=QUERY)
             assert response.status == 404 and "has no harness request 'nope'" in await response.text()
             inference = AgentRecord.create(

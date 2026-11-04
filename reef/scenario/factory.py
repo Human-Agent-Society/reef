@@ -46,8 +46,8 @@ from reef.storage.commits import (
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
 from reef.train.component import ScenarioRoot
-from reef.train.instructions import InstructionQueue
 from reef.train.trainer import ComponentTrainer
+from reef.train.training_requests import TrainingRequestQueue
 
 
 def committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
@@ -167,11 +167,11 @@ class ScenarioFactory:
         experiment_reports: ExperimentReportQueue | None = None,
         activates_runtime: bool = True,
         served_models: ServedModels | None = None,
-        instructions: InstructionQueue | None = None,
+        training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._recipe = recipe
-        #: The training instructions of every scenario; None builds scenarios that take no instruction.
-        self._instructions = instructions
+        #: The training requests of every scenario; None builds scenarios that take no request.
+        self._training_requests = training_requests
         self._activates_runtime = activates_runtime
         self.served_models = served_models
         self._backend_factory = backend_factory
@@ -470,7 +470,7 @@ class ScenarioFactory:
                 store=store,
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,
-                instructions=None if self._instructions is None else self._instructions.of(name),
+                training_requests=None if self._training_requests is None else self._training_requests.of(name),
             )
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed

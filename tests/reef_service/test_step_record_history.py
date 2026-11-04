@@ -128,8 +128,8 @@ def test_failed_method_records_remain_linked_after_reload_and_retry(tmp_path: Pa
         await client.start_server()
         headers = {"Authorization": "Bearer test-token", "x-reef-scenario": SCENARIO}
         try:
-            for step, instruction in enumerate(("fail", "retry"), 1):
-                response = await client.post("/reef/train", json=train_request(instruction), headers=headers)
+            for step, text in enumerate(("fail", "retry"), 1):
+                response = await client.post("/reef/train", json=train_request(text), headers=headers)
                 assert response.status == 200
                 for _ in range(200):
                     scenario = dispatcher.get_or_create_scenario(SCENARIO)
@@ -137,16 +137,16 @@ def test_failed_method_records_remain_linked_after_reload_and_retry(tmp_path: Pa
                         break
                     await asyncio.sleep(0.05)
                 else:
-                    raise AssertionError("instruction did not commit")
+                    raise AssertionError("the training request did not commit")
                 row = catalog(scenario)[0]
                 metrics = row["metrics"]
-                assert metrics["training_request"]["text"] == instruction
+                assert metrics["training_request"]["text"] == text
                 if step == 1:
                     assert metrics["error"] == "ModelBindingError: model endpoint returned non-text content"
-                    assert metrics["skipped"] == "instruction failed"
+                    assert metrics["skipped"] == "request failed"
                     assert Path(metrics["step_record"]).name == "1"
                 else:
-                    # The failed instruction committed step 1, so the retry is step 2 and its record is named so.
+                    # The failed request committed step 1, so the retry is step 2 and its record is named so.
                     assert Path(metrics["step_record"]).name == "2"
                 url = f"/reef/harness/releases/{step}/records"
                 response = await client.get(url, headers=headers)

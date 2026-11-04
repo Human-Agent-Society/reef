@@ -536,11 +536,7 @@ The session contract is:
        order: the uploaded trajectories, the imported Harbor tasks of the
        ``train`` and ``eval`` splits, and the samples that each trainer made
        from records. Each sample has ``train_counts``, the
-       number of committed jobs of each trainer that trained it. It also keeps
-       each trainer's manual buffer (``manual_buffer``,
-       ``insert_into_buffer``, ``remove_from_buffer``); a commit removes the
-       samples that it trained from its trainer's manual buffer in the same
-       transaction. It closes with the session and survives restarts when
+       number of committed jobs of each trainer that trained it. It closes with the session and survives restarts when
        ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
@@ -1244,7 +1240,7 @@ sample2job=...)``):
   ``advance(now)`` when the work ends (see `Slow work
   <../developer-guide/processors.rst#slow-work>`__). The stage's staleness
   check (``is_stale``) keeps samples with data more than ``max_staleness``
-  artifacts behind the served artifact out of the buffer. ``max_staleness``
+  artifacts behind the served artifact out of the next automatic job. ``max_staleness``
   is the stage's own setting, from ``Record2SampleSettings`` (see `the
   staleness check <../developer-guide/processors.rst#staleness>`__). The
   default, ``NoSamples``, makes no sample, so nothing trains.
@@ -1253,17 +1249,17 @@ sample2job=...)``):
   ``ValueError`` to refuse the upload (see `Uploaded trajectories
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
 - ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
-  Its ``make_job_data(samples, data_id)`` shapes the samples of the buffer,
+  Its ``make_job_data(samples, data_id)`` shapes the samples of the next job,
   in store order, into one job's data with the ID ``data_id``. The pipeline assigns the
-  ID. Automatic job data gets ``<scenario>:data:<number>``. An instruction's
-  data gets ``<scenario>:instruction:<request id>``. The number counts the
+  ID. Automatic job data gets ``<scenario>:data:<number>``. A request's
+  data gets ``<scenario>:request:<request id>``. The number counts the
   job data of one pipeline. It is not a training step.
   ``Sample2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
-  sets the most samples that one job takes from the buffer and the fewest
+  sets the most samples that one automatic job takes and the fewest
   samples of one job. A ``job_samples`` of ``None`` is a stage that sets no
   job size, which ``Trainer.build`` refuses for a trainer that trains; a
   ``buffer_size`` of ``None`` takes ``job_samples``. The constructor raises ``PluginConfigError`` for
-  a buffer smaller than ``job_samples`` and for a ``job_samples`` above
+  a ``buffer_size`` smaller than ``job_samples`` and for a ``job_samples`` above
   ``max_job_samples`` (an SDPO or TTTD grid).
   ``Trainer.build`` raises ``PluginConfigError`` for a training trainer whose
   stage has no ``job_samples``. ``Sample2JobSettings`` parses the
@@ -1296,12 +1292,12 @@ network or model latency. Reports must reference existing inference records
 in the same scenario.
 
 ``TrainingPipeline.training_mode`` selects automatic (``auto``) or
-instruction-triggered (``manual``) training. A ``Sample2Job`` declares
-``supported_training_modes``. In ``manual`` an instruction's data takes the
-samples that automatic job data would; ``Sample2Job.reads_instructions`` says
-whether the instruction may run with fewer than ``job_samples`` samples. Record push, sample storage, acknowledgement, retention
+request-triggered (``manual``) training. A ``Sample2Job`` declares
+``supported_training_modes``. In ``manual`` a request's data holds the
+samples that the request names; ``Sample2Job.reads_requests`` says
+whether a request that names no sample runs. Record push, sample storage, acknowledgement, retention
 and background derivation are shared. See
-`Training pipeline <../developer-guide/processors.rst>`__ for the instruction queue and job data contract.
+`Training pipeline <../developer-guide/processors.rst>`__ for the training request queue and job data contract.
 
 Every stage gets the scenario's experiment logger as
 ``context.experiment_logger`` (``self.experiment_logger`` on a ``Sample2Job``).
@@ -1379,8 +1375,8 @@ a complete step, then trains several comparison groups within it.
 The pipeline stores the samples of a report or a ready group when it is
 ready, and that consumes their records. A group is fixed when it is first
 ready; later reports for its key form a new group. ``make_job_data``
-receives the samples of the `buffer
-<../developer-guide/processors.rst#the-buffer>`__ in store order: units in
+receives the samples of the `next job
+<../developer-guide/processors.rst#the-next-job>`__ in store order: units in
 the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
 when the recipe omits constant-reward groups from its output. Samples stored
 after the job data was built wait for later job data.
@@ -1506,7 +1502,7 @@ Job data
 ``Sample = TrajectorySample | TaskSample``. Every processor returns a frozen
 ``JobData(data_id, samples, request=None)`` with an ordered tuple of samples.
 One job's data holds samples of one kind. ``request`` is keyword-only and carries
-an optional explicit training instruction; request-only job data may be empty.
+an optional explicit training request; request-only job data may be empty.
 The pipeline returns the same pending job data until its id is acknowledged.
 Reef submits one training job for each value. The training component cuts the
 samples into its own optimizer batches.
@@ -1733,10 +1729,10 @@ training job by the kind of the job's samples: ``trajectory`` or ``task``.
 The trainer gives them to its pipeline (``PipelineContext.job_parameters``).
 When a job's data is ready and no job runs, the pipeline's sample-to-job stage
 gives the job's parameters, ``Sample2Job.job_parameters(data)``: those of the
-kind of the data's samples, with the instruction's ``parameters``
+kind of the data's samples, with the request's ``parameters``
 (``TrainingRequest.parameters``) merged in by ``reef.core.values.deep_merge``:
-nested objects merge key by key, and every other value of the instruction wins. It refuses data that holds
-both kinds, and a kind that the recipe does not name when no instruction gives
+nested objects merge key by key, and every other value of the request wins. It refuses data that holds
+both kinds, and a kind that the recipe does not name when no request gives
 parameters. A kind that the recipe does not name never trains in ``auto``. Reef reads none of the parameters; it submits
 them to the deployment's training component, whose name is the job's
 ``backend``. ``TrainingMethod`` (``reef.train.method``) is an objective

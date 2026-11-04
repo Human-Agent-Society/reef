@@ -1,4 +1,4 @@
-"""Harness instructions through ``POST /reef/train`` and its mode switch, and the ``requires`` a request carries
+"""Harness requests through ``POST /reef/train`` and its mode switch, and the ``requires`` a request carries
 through the route, the commit, the manifest and the activation."""
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ async def committed(scenario: Scenario, count: int, seconds: float = 30.0) -> li
     raise AssertionError(f"{count} request step(s) did not commit in {seconds}s: {request_rows(scenario)}")
 
 
-def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_route(tmp_path: Path) -> None:
+def test_a_request_needs_a_request_mode_and_commits_through_the_train_route(tmp_path: Path) -> None:
     seen: list[tuple] = []
 
     def method(workspace, services):
@@ -221,7 +221,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
             response = await post_request(client, {**train_request(), "requires": [*REQUIRES, twilio]})
             assert response.status == 200, await response.text()
             answer = await response.json()
-            stored = scenario.instructions.get(answer["agent_record_id"])
+            stored = scenario.training_requests.get(answer["agent_record_id"])
             assert stored is not None
             assert stored.payload["requires"] == [
                 *REQUIRES,
@@ -230,7 +230,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
             assert await asyncio.to_thread(entered.wait, 5)
             # A request without the field is stored with an empty list, so every record has one shape.
             plain = await (await post_request(client, train_request("plain"))).json()
-            assert scenario.instructions.get(plain["agent_record_id"]).payload["requires"] == []
+            assert scenario.training_requests.get(plain["agent_record_id"]).payload["requires"] == []
             # The two screens run over every name and check; the reason names the rule, never the literal.
             for item, rule in (
                 (
@@ -284,12 +284,12 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
             ):
                 response = await post_request(client, {**train_request(), "requires": requires})
                 assert response.status == 400 and message in await response.text()
-            # Only the two accepted instructions are stored; the first one's job submission consumed it.
+            # Only the two accepted requests are stored; the first one's job submission consumed it.
             for _ in range(200):
-                if scenario.instructions.get(answer["agent_record_id"]).final:
+                if scenario.training_requests.get(answer["agent_record_id"]).final:
                     break
                 await asyncio.sleep(0.05)
-            assert [request.id for request in scenario.instructions.queued()] == [plain["agent_record_id"]]
+            assert [request.id for request in scenario.training_requests.queued()] == [plain["agent_record_id"]]
         finally:
             release.set()
             await client.close()
@@ -400,7 +400,7 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     backend, _ = harness_backend(tmp_path, extending)
     initial = HarnessState().to_json()
-    result = backend_step(backend, JobData("demo:instruction:ask-1", (), request=request), initial)
+    result = backend_step(backend, JobData("demo:request:ask-1", (), request=request), initial)
     if added_count > 2:
         assert result.metrics["skipped"] == "the step requires 9 items; at most 8"
         assert "selected" not in result.metrics and result.artifact is None
@@ -470,7 +470,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
             root=seed_root(recipe),
         )
         try:
-            trainer.queue_instructions([TrainingRequest.from_dict(payload, request_id="ask-1")])
+            trainer.queue_requests([TrainingRequest.from_dict(payload, request_id="ask-1")])
             make_samples(trainer)
             result = drive_trainer_job(trainer)
             assert result is not None

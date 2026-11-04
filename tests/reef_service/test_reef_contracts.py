@@ -1214,7 +1214,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
                 )
             )
         with pytest.raises(ValueError, match="training_mode"):
-            dispatcher.accept_instruction("math", {"text": "train"})
+            dispatcher.accept_request("math", {"text": "train"})
         scenario = dispatcher.get_or_create_scenario("math")
 
         def fail_write(item: AgentRecord) -> None:
