@@ -40,7 +40,10 @@ async def create_scenario(client: TestClient) -> None:
 
 
 def sample_ids(dispatcher: Dispatcher) -> list[str]:
-    return [stored.sample_id for stored in dispatcher.get_or_create_scenario("s").store.samples.page()]
+    return [
+        stored.sample_id
+        for stored in dispatcher.storage.sample_store("s", dispatcher.get_or_create_scenario("s").store).page()
+    ]
 
 
 def test_trajectory_items_train_once_also_after_a_restart(tmp_path):

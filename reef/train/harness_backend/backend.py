@@ -268,7 +268,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
         if automatic and self.limits.max_failure_streak and state.failure_streak >= self.limits.max_failure_streak:
             return skipped(state, metrics, f"failure streak of {state.failure_streak} rejections")
         head_tree = HarnessTree(head.files)
-        metrics["head_artifact_id"] = head.artifact_id
+        metrics["head_checksum"] = head_tree.checksum()
         self.history.add_candidate(head_tree, step=step, origin="release" if self.history.candidates else "seed")
         step_tasks = self.tasks.for_step(samples, state.collected_tasks, state.collected_clients, seed=seed_tasks)
         state = replace(
@@ -424,7 +424,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
     def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
         """Fold ``decision`` into the state and the history; a selected tree is the step's kept tree.
 
-        The head the step prepared against is ``prepared.metrics["head_artifact_id"]``; no activation, new training
+        The head the step prepared against is ``prepared.metrics["head_checksum"]``; no activation, new training
         start, import or sync moves it while a step runs. The commit keeps the evaluation's sums, not its score
         vectors: the history holds every run. The metrics gain ``selected`` and ``selection``: the candidate
         id, the decision's ``selected``, ``policy``, ``reason`` and ``metrics``, and the ``evaluation`` that the

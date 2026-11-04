@@ -31,23 +31,28 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.config import ConfiguredFactory
 from reef.core.errors import RuntimeConfigError
-from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
+from reef.storage.job_data import JobDataKind, JobDataRef
 
 JobState = Literal["running", "finished", "failed"]
 
 
 @dataclass(frozen=True)
 class TrainingJob:
-    """One bounded training job: a data snapshot, the weights it starts from, and the backend's parameters.
+    """One bounded training job: its data directory, the weights it starts from, and the backend's parameters.
 
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
     (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root release),
-    ``data`` (the job data that the job trains; the component cuts it into
-    optimizer batches by its own batch size),
+    ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
+    with ``read_job_data(job.data_dir, job.data_id)`` and cuts it into optimizer batches by its own batch size),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
     trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
+    ``request_id`` is the ID of the training request that the job trains, or None. Reef's job listing reads it; a
+    component does not need it. ``component`` is the scenario component that the job trains, or None when the
+    trainer names none. ``previous_job_id`` is the last job whose end the trainer committed, or None before the
+    first: a component whose state advances also in a job that saves no checkpoint, such as a harness, continues the
+    state after it.
 
     Reef makes the value and names the job with ``job_id_for``, so a retry of
     the same request has the same ID. A component reads it in ``submit``.
@@ -56,9 +61,12 @@ class TrainingJob:
     job_id: str
     backend: str
     start: str
-    data: JobData
+    data: JobDataRef
     parameters: Mapping[str, Any] = field(default_factory=dict)
     scenario: str = field(kw_only=True)
+    request_id: str | None = field(default=None, kw_only=True)
+    component: str | None = field(default=None, kw_only=True)
+    previous_job_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not self.job_id:
@@ -69,11 +77,38 @@ class TrainingJob:
             raise ValueError("TrainingJob.backend must be a non-empty string")
         if not isinstance(self.start, str) or not self.start:
             raise ValueError("TrainingJob.start must be a non-empty string")
-        if not isinstance(self.data, JobData):
-            raise TypeError("TrainingJob.data must be a JobData")
+        if not isinstance(self.data, JobDataRef):
+            raise TypeError("TrainingJob.data must be a JobDataRef")
         if not isinstance(self.parameters, Mapping):
             raise TypeError("TrainingJob.parameters must be a mapping")
+        for name in ("request_id", "component", "previous_job_id"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"TrainingJob.{name} must be a non-empty string or None")
         json.dumps(dict(self.parameters), allow_nan=False)
+
+    @property
+    def data_dir(self) -> Path:
+        """The local job data directory: read it with ``read_job_data``."""
+        return self.data.path
+
+    @property
+    def data_uri(self) -> str:
+        """The URI of the job data directory, which a component that runs a container mounts."""
+        return self.data.uri
+
+    @property
+    def data_id(self) -> str:
+        return self.data.data_id
+
+    @property
+    def sample_count(self) -> int:
+        return self.data.sample_count
+
+    @property
+    def kind(self) -> JobDataKind | None:
+        """The kind of the job's samples, or None for a job without samples."""
+        return self.data.kind
 
 
 def job_id_for(backend: str, start: str, data_identity: object, parameters: Mapping[str, Any]) -> str:
@@ -185,7 +220,7 @@ class TrainingComponent(ABC):
     """A training backend that runs whole jobs with its framework's own training loop.
 
     A component never learns which scenario a job is for: a job carries
-    everything it trains (its start, data and parameters). ``submit`` records
+    everything it trains (its start, data directory and parameters). ``submit`` records
     a job durably and returns; the job then runs in the background.
     ``status`` reports a submitted job, also after the component restarts: a
     restarted component resumes each unfinished job or reports it failed.
@@ -305,6 +340,11 @@ class TrainingComponent(ABC):
         modules = config.get("target_modules")
         if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
             raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
+
+    def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
+        """The parts of the scenario component that ``checkpoint`` changed from ``start``, which the scenario's
+        activation rule reads (``TrainStepResult.changed_kinds``). The default is none."""
+        return frozenset()
 
     @abstractmethod
     def import_start(self, release: Path) -> str:

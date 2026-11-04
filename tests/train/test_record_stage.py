@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
 from tests.support.runtime_stubs import STUB_ROOT
-from tests.support.samples import data_storage, made_task
+from tests.support.samples import data_storage, made_task, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 from tests.train.test_record_stage_job_data_parity import counting_jobs, inference, report
@@ -37,7 +37,7 @@ from reef.record2sample import (
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
-from reef.storage.samples import ScenarioSamples, TrainerSamples, consumed_sample_id, stage_item_id
+from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -418,7 +418,7 @@ class UploadJobData(PairJobData):
 TRAJECTORY = TrajectorySample({"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1}]})
 
 
-def upload(samples: ScenarioSamples, *trajectory_ids: str) -> None:
+def upload(samples: SampleStore, *trajectory_ids: str) -> None:
     """Upload ``TRAJECTORY`` under each of ``trajectory_ids`` for the training of the scenario."""
     metadata = {"kind": "trajectory", "scenarios": {samples.scenario: "train"}}
     samples.data.create(
@@ -434,7 +434,7 @@ def test_uploaded_trajectories_train_in_store_order_and_count_as_one_sample_each
         record2sample=InferenceSamples(),
         sample2job=UploadJobData(context, None, None),
     )
-    upload(processor.store.samples, "t1", "t2")
+    upload(processor.store.store, "t1", "t2")
     processor.push(inference("i1"))
     assert processor.ready(2)
     # The task sample of i1 is another kind of sample, so it waits for a job of its own.
@@ -448,7 +448,7 @@ def test_uploaded_trajectories_train_in_store_order_and_count_as_one_sample_each
     assert processor.acknowledge(batch.data_id) == {"sample:t1", "sample:t2"}
 
     # A trained trajectory that is uploaded again does not queue again; job data takes the samples in store order.
-    upload(processor.store.samples, "t1", "t3")
+    upload(processor.store.store, "t1", "t3")
     batch = processor.build_job_data(1)
     assert task_names(batch) == ["i1"] and batch.samples[0].source_agent_record_ids == ("i1",)
     assert processor.acknowledge(batch.data_id) == {"sample:s.i1:0"}
@@ -467,7 +467,8 @@ def upload_pipeline(context: PipelineContext) -> TrainingPipeline:
 def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() -> None:
     storage = data_storage()
     session = storage.open("s")
-    upload(session.samples, "t1", "t2")
+    samples = sample_store(storage, "s", session)
+    upload(samples, "t1", "t2")
     session.commit_step(
         expected_step=0,
         commit=CommitRecord(
@@ -489,7 +490,7 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
             session.records,
             pipeline_factory=upload_pipeline,
             job_loop=counting_jobs(),
-            samples=TrainerSamples(session.samples, component),
+            samples=samples.for_trainer(component),
             root=STUB_ROOT,
         )
         consumed[component] = trainer.prepare_commit(trainer.run_once()).consumed_ids
@@ -506,7 +507,7 @@ def test_a_pipeline_refuses_a_trajectory_that_its_task_to_job_stage_does_not_acc
     with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
         processor.uploaded_sample(TRAJECTORY)
     # A stored upload does not reach its job data either.
-    upload(processor.store.samples, "t1")
+    upload(processor.store.store, "t1")
     assert not processor.ready(1)
     assert processor.status()["ready_samples"] == 0
 
@@ -615,7 +616,7 @@ def test_samples_beyond_the_buffer_size_wait_for_the_next_job_data() -> None:
     reserved = processor.build_job_data(1)
     for record_id in ("i2", "i3", "i4"):
         processor.push(inference(record_id))
-    upload(processor.store.samples, "t1", "t2", "t3")
+    upload(processor.store.store, "t1", "t2", "t3")
     processor.push(inference("i5"))
     processor.advance()
     # The reserved job data stays, nothing is dropped, and the buffer holds buffer_size samples of one kind.
@@ -793,9 +794,9 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
 def test_a_request_names_stored_samples_of_one_kind_that_the_trainer_can_train() -> None:
     context = PipelineContext("s", training_mode="manual")
     processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
-    upload(processor.store.samples, "upload")
+    upload(processor.store.store, "upload")
     processor.store.add_record_samples(None, ("r1",), (("r1:0", named_task("task")),))
-    TrainerSamples(processor.store.samples, "other").add_record_samples(None, ("r2",), (("other:r2:0", TRAJECTORY),))
+    processor.store.store.for_trainer("other").add_record_samples(None, ("r2",), (("other:r2:0", TRAJECTORY),))
     processor.check_request(training_request("upload"))
     with pytest.raises(ValueError, match="one kind"):
         processor.check_request(training_request("upload", "s.r1:0"))
@@ -819,10 +820,10 @@ class TaskJobData(RecordingJobData):
 
 @pytest.mark.unit
 def test_imported_train_tasks_are_buffer_samples_of_a_stage_that_trains_them(tmp_path: Path) -> None:
-    session = data_storage(tmp_path / "records").open("s")
+    _session, samples = open_sample_store(tmp_path / "records", "s")
     tasks = {"task-a": ("record-1", 9000, "train"), "held": ("record-2", 9001, "eval")}
-    session.samples.data.create(
-        session.samples.owner,
+    samples.data.create(
+        samples.owner,
         [
             NewItem(
                 name,
@@ -834,7 +835,7 @@ def test_imported_train_tasks_are_buffer_samples_of_a_stage_that_trains_them(tmp
     )
 
     def pipeline(stage: type[RecordingJobData], **context: Any) -> TrainingPipeline:
-        built = PipelineContext("s", samples=TrainerSamples(session.samples), **context)
+        built = PipelineContext("s", samples=samples.for_trainer(""), **context)
         return TrainingPipeline(built, record2sample=RecordingSamples(), sample2job=stage(built))
 
     trains = pipeline(TaskJobData)

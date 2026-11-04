@@ -36,8 +36,10 @@ Training components
 -------------------
 
 A ``TrainingJob`` is one bounded job. It has a job ID, the backend name, the
-start, the job data it trains, the backend's parameters and the scenario whose
-trainer submits it. The start is the
+start, the job data directory that it trains (``data_dir``, and its URI
+``data_uri``; see `The job data directory
+<processors.rst#the-job-data-directory>`__), the backend's parameters and the
+scenario whose trainer submits it. The start is the
 directory of the weights that the job starts from, or ``None`` for the base
 model. Reef reads none of the parameters. The component contract is:
 
@@ -50,6 +52,10 @@ model. Reef reads none of the parameters. The component contract is:
    restarted component resumes each unfinished job or reports it failed.
 ``cancel(job_id)``
    Stop the job; it then reports ``failed``.
+``changed_parts(start, checkpoint)``
+   The parts of the scenario component that the checkpoint changed from
+   ``start``, which the scenario's activation rule reads. The default is
+   none; the harness component diffs the trees.
 ``import_start(release)``
    Copy a published release into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``

@@ -117,6 +117,24 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     return normalized
 
 
+def request_parameter(request: TrainingRequest) -> dict[str, Any]:
+    """``request`` as the ``request`` job parameter of a stage that reads training requests: its ID and its fields
+    without ``samples``, which the job data directory holds."""
+    fields = {key: value for key, value in request.to_dict().items() if key != "samples"}
+    return {"id": request.id, **fields}
+
+
+def request_from_parameters(parameters: Mapping[str, Any]) -> TrainingRequest | None:
+    """The training request of the ``request`` parameter that ``request_parameter`` wrote, or None; ``ValueError``
+    for another value."""
+    value = parameters.get("request")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not isinstance(value.get("id"), str) or not value["id"]:
+        raise ValueError("parameters.request must be a training request with its id, or null")
+    return TrainingRequest.from_dict({key: item for key, item in value.items() if key != "id"}, request_id=value["id"])
+
+
 @dataclass(frozen=True)
 class TrainingRequest:
     """A training request, independent of inference batches and feedback.

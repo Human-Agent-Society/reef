@@ -321,7 +321,8 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
    from reef.pipeline_context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
    from reef.recipe.generated_tasks.processor import GenerationJob, next_generation
-   from reef.storage.samples import TrainerSamples
+   from reef.storage.samples import SampleStore
+   from reef.storage.sql_data import SQLiteDataStore
    from reef.storage.sqlite import SQLiteScenarioStorage
    from reef.storage.tasks import LocalTaskFileStore
 
@@ -330,8 +331,10 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
        """Run the generator's generations with no trainer: generate, validate, and save the tasks."""
        task_files = LocalTaskFileStore(Path(state_dir) / "task-files")
        storage = SQLiteScenarioStorage(Path(state_dir) / "agent-record", task_files=task_files)
+       data = SQLiteDataStore(Path(state_dir) / "data", task_files)
        session = storage.open("autoenvscaling")
-       context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+       samples = SampleStore(data, "autoenvscaling", "autoenvscaling", session.training_state).for_trainer("")
+       context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=samples)
        generator = AutoEnvScalingGenerator.from_config(generator_config, scenario=context.scenario, environ=os.environ)
        settings = GeneratedTaskSettings(
            rounds=rounds,
@@ -345,6 +348,7 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
        finally:
            tasks.close()
            session.close()
+           data.close()
            storage.close()
    ```
 

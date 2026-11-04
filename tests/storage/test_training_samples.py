@@ -17,7 +17,7 @@ from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, MemoryDataStore, NewItem
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.samples import ScenarioSamples, consumed_sample_id, stage_item_id
+from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -42,15 +42,16 @@ class Scenario:
 
     session: ScenarioStore
     data: DataStore
-    samples: ScenarioSamples
+    samples: SampleStore
     root: Path
 
     def task(self, name: str, split: str, port: int = 9000) -> None:
         directory = write_harbor_task(task_for(name, "record-1", port), self.root / "tasks" / str(port))
         self.data.create("acme", [NewItem(name, directory, {"kind": "task", "scenarios": {"math": split}})])
 
-    def ids(self, **page) -> list[str]:
-        return [stored.sample_id for stored in self.samples.page(**page)]
+    def ids(self, trainer: str | None = None, **page) -> list[str]:
+        samples = self.samples if trainer is None else self.samples.for_trainer(trainer)
+        return [stored.sample_id for stored in samples.page(**page)]
 
 
 @pytest.fixture(params=["memory", "sqlite", "postgres"])
@@ -67,7 +68,7 @@ def scenario(request, tmp_path):
         storage = SQLiteScenarioStorage(task_files=task_files)
         data = MemoryDataStore(task_files)
     with closing(storage), closing(data), closing(storage.open("math")) as session:
-        yield Scenario(session, data, ScenarioSamples(data, "acme", "math", session.training_state), tmp_path)
+        yield Scenario(session, data, SampleStore(data, "acme", "math", session.training_state), tmp_path)
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -108,9 +109,9 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
     made = trajectory("a1", group_id="g", source_agent_record_ids=("r1",))
     task = made_task("x", source_agent_record_ids=("r2",), metadata={"task": {"name": "x"}})
     grid = (("a:r1:0", made), ("generated-tasks/x", task))
-    assert samples.add_stage_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == 2
-    assert samples.add_stage_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == 0
-    samples.add_stage_samples("b", None, ("r3",), (("b:r3:0", trajectory("b")),))
+    assert samples.for_trainer("a").add_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 2
+    assert samples.for_trainer("a").add_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 0
+    samples.for_trainer("b").add_record_samples(None, ("r3",), (("b:r3:0", trajectory("b")),))
 
     item_id = stage_item_id("math", "a:r1:0")
     assert (item_id, stage_item_id("math", "generated-tasks/x")) == ("math.a:r1:0", "math.generated-tasks.x")
@@ -125,17 +126,17 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
     assert scenario.ids(trainer="a") == ["upload", item_id, "math.generated-tasks.x"]
     assert scenario.ids(trainer="b") == ["upload", "math.b:r3:0"]
     assert len(scenario.ids()) == 4
-    _, stored, stored_task = samples.page(trainer="a")
+    _, stored, stored_task = samples.for_trainer("a").page()
     assert (stored.sample, stored.component, stored.group) == (made, "a", "a:r1")
     assert isinstance(stored_task.sample, TaskSample) and stored_task.component == "a"
     assert stored_task.sample.metadata == {"task": {"name": "x"}}
     assert stored_task.sample.source_agent_record_ids == ("r2",)
     assert (stored_task.sample.task_path / "instruction.md").read_text() == "Solve x.\n"
-    (other,) = samples.page(trainer="b")[1:]
+    (other,) = samples.for_trainer("b").page()[1:]
     assert (other.component, other.group, other.sample.source_agent_record_ids) == ("b", None, ())
 
     # An item that exists stays as it is.
-    assert samples.add_stage_samples("a", None, ("r4",), (("a:r1:0", trajectory("other")),)) == 0
+    assert samples.for_trainer("a").add_record_samples(None, ("r4",), (("a:r1:0", trajectory("other")),)) == 0
     assert samples.get((item_id,))[0].sample == made
     state = samples.state
     assert state.consumed_record_ids("a") == {"r1", "i1", "r2", "r4"}
@@ -157,7 +158,7 @@ def training_commit(step: int, *consumed: str, component: str | None = None) -> 
     )
 
 
-def train_counts(samples: ScenarioSamples) -> dict[str, dict[str, int]]:
+def train_counts(samples: SampleStore) -> dict[str, dict[str, int]]:
     return {stored.sample_id: dict(stored.train_counts) for stored in samples.page()}
 
 
@@ -211,7 +212,9 @@ def test_imported_tasks_are_the_tasks_that_no_stage_made(scenario):
     scenario.data.create("acme", [upload("t1", math="train")])
     scenario.task("task-a", "train")
     scenario.task("held", "eval", 9001)
-    samples.add_stage_samples("", None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),))
+    samples.for_trainer("").add_record_samples(
+        None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),)
+    )
     assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [
         ("task-a", "train"),
         ("held", "eval"),
