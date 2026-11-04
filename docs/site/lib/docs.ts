@@ -97,6 +97,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "developer-guide/harness-adapters.rst",
       "developer-guide/sandboxes.rst",
       "developer-guide/executors.rst",
+      "developer-guide/training-backend-services.rst",
       "developer-guide/loss-families.rst",
       "developer-guide/components.rst",
       "developer-guide/processors.rst",
