@@ -325,8 +325,9 @@ store (``storage.segment_backend``), or in
 ``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its samples and of the
 files of its tasks (``job_data_key``). So a job of the same samples, such as
 a second job on one dataset, uses the directory that exists and writes
-nothing. The data store records when a job last used each directory. Control
-deletes a directory that no job used for ``storage.job_data_ttl_s`` (7 days by
+nothing. The data store records when a job last used each directory, and its
+periodic work (``DataStore.maintain``, which the data service calls) deletes a
+directory that no job used for ``storage.job_directory_ttl_s`` (7 days by
 default). Keep this time above the longest job, since a component can read
 the directory again when it resumes the job.
 

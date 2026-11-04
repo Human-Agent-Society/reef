@@ -320,6 +320,7 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     segments = build_segment_store(settings)
     # Without a segment store, the job data directories stay in a directory that the services share.
     job_directories = segments if segments is not None else LocalSegmentStore(directory / "job-directories")
+    ttl_seconds = settings.job_directory_ttl_s
     try:
         if choice == "postgres":
             return PostgresDataStore(
@@ -327,12 +328,17 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
                 task_files,
                 segments=segments,
                 job_directories=job_directories,
+                job_directory_ttl_seconds=ttl_seconds,
             )
         if choice == "sqlite":
-            return SQLiteDataStore(directory / "data", task_files, segments, job_directories)
+            return SQLiteDataStore(directory / "data", task_files, segments, job_directories, ttl_seconds)
         reference = DataStore.reference(choice, setting="storage.data_store")
         return DataStore.referenced_class(reference).from_config(
-            reference.config, directory=directory, task_files=task_files, segments=segments
+            reference.config,
+            directory=directory,
+            task_files=task_files,
+            segments=segments,
+            job_directory_ttl_seconds=ttl_seconds,
         )
     except BaseException:
         # The data store owns the segment store after it exists. Until then, this code closes it.
@@ -507,7 +513,6 @@ def build_dispatcher(
             ),
             components=components,
             work_retention_seconds=settings.work_retention_s,
-            job_data_ttl_seconds=settings.job_data_ttl_s,
         )
         if dispatcher.services.runs_evaluation:
             # Each worker serves its rollout's candidate itself, from the scenario's repository.

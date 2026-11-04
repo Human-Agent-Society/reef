@@ -890,7 +890,7 @@ persistent.
    ``storage.task-file-dir`` : .reef/task-files
        the files of generated tasks for ``local``, or the local cache of a plugin store
 
-   ``storage.job-data-ttl-s`` : 604800
+   ``storage.job-directory-ttl-s`` : 604800
        seconds that the data store keeps a job data directory that no training job used; a job of the same samples uses the directory again (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__)
 
    ``storage.agent-record-retention-max-bytes`` : 21474836480

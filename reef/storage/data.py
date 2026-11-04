@@ -292,6 +292,10 @@ class RecordLink:
             raise ValueError("a record link's entry_count is a non-negative int")
 
 
+#: How long a data store keeps a job data directory that no job used: 7 days.
+JOB_DIRECTORY_TTL_SECONDS = 7 * 24 * 3600.0
+
+
 class DataStore(Plugin, ABC):
     """The data of a deployment: items of content and metadata, each in one owner.
 
@@ -327,8 +331,9 @@ class DataStore(Plugin, ABC):
     * ``groups(owner, kind, key, before, limit)`` groups the items of ``owner`` and ``kind`` by the string under
       ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
       when given, newest first, at most ``limit``.
-    * ``maintain()`` does the store's periodic work, such as moving content into segments. It changes no item.
-      The data service calls it every few minutes. The default does nothing.
+    * ``maintain()`` does the store's periodic work: it deletes the job data directories that no job used for
+      ``job_directory_ttl_seconds``, and a subclass can do more, such as moving content into segments. It changes
+      no item. The data service calls it every few minutes.
 
     The store also keeps the data directory of each training job (``reef.storage.job_data``), one directory for each
     content, in the segment store ``job_directories``:
@@ -340,7 +345,8 @@ class DataStore(Plugin, ABC):
     * ``delete_unused_job_directories(time)`` deletes each directory that no job used since ``time``, and returns
       their number.
 
-    A subclass sets ``job_directories`` and keeps the time of the last use of each directory, by its key:
+    A subclass sets ``job_directories`` and ``job_directory_ttl_seconds``, and keeps the time of the last use of each
+    directory, by its key:
     ``record_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
     ``delete_job_directory_record(key)``.
 
@@ -360,6 +366,7 @@ class DataStore(Plugin, ABC):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         """Build the store a deployment names.
 
@@ -367,7 +374,8 @@ class DataStore(Plugin, ABC):
         ``storage.agent_record_dir``, for local files. ``task_files`` keeps the directories of task items, in the
         partition of each owner (``task_partition``); the caller owns it and closes it. ``segments`` is the
         ``storage.segment_backend`` store, or None when it is unset; a store can keep large content there, in the
-        partition of each owner. The data store owns it and closes it with itself.
+        partition of each owner. The data store owns it and closes it with itself. ``job_directory_ttl_seconds`` is
+        ``storage.job_directory_ttl_s``.
         """
 
     @abstractmethod
@@ -428,10 +436,13 @@ class DataStore(Plugin, ABC):
         return tuple(group for group in newest if before is None or group.first_sequence < before)[:limit]
 
     def maintain(self) -> None:
-        """Do the store's periodic work. The default does nothing."""
+        """Do the store's periodic work: delete the job data directories that no job used for the time to live."""
+        self.delete_unused_job_directories(time.time() - self.job_directory_ttl_seconds)
 
     #: The segment store of the job data directories.
     job_directories: SegmentStore
+    #: How long the store keeps a job data directory that no job used, in seconds.
+    job_directory_ttl_seconds: float
 
     @abstractmethod
     def record_job_directory_use(self, key: str, time: float) -> None: ...
@@ -545,9 +556,12 @@ class MemoryDataStore(DataStore):
     they are created; a deleted item stays there as a link of later calls.
     """
 
-    def __init__(self, task_files: TaskFileStore) -> None:
+    def __init__(
+        self, task_files: TaskFileStore, job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS
+    ) -> None:
         self.task_files = task_files
-        self.job_directories = LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-data-")))
+        self.job_directories = LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-directories-")))
+        self.job_directory_ttl_seconds = job_directory_ttl_seconds
         self.job_directory_uses: dict[str, float] = {}
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
@@ -576,10 +590,11 @@ class MemoryDataStore(DataStore):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         if config:
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
-        return cls(task_files)
+        return cls(task_files, job_directory_ttl_seconds)
 
     def record_job_directory_use(self, key: str, time: float) -> None:
         self.job_directory_uses[key] = time

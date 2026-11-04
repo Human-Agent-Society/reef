@@ -110,7 +110,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         workers: ServiceWorkers | None = None,
         components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
         work_retention_seconds: float = 7 * 24 * 3600.0,
-        job_data_ttl_seconds: float = 7 * 24 * 3600.0,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -137,8 +136,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         embedded dispatcher, gives it ``reef.storage.sql_coordination.memory_coordination()``.
 
         The data store keeps the data directory of each training job (``reef.storage.job_data``): control writes
-        it, the training service opens it, and control deletes a directory that no job used for
-        ``job_data_ttl_seconds``. Without a data store, a new temporary directory keeps them.
+        it, and the training service opens it. Without a data store, a ``MemoryDataStore`` keeps them.
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
         the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
 
@@ -247,14 +245,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
-            self.workers.add(
-                EndedWorkSweeper(
-                    coordination.work_queue,
-                    retention_seconds=work_retention_seconds,
-                    data_store=self.job_directory_store,
-                    job_data_ttl_seconds=job_data_ttl_seconds,
-                )
-            )
+            self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
         if self.services.runs_inference and recipe.runtime is not None and recipe.runtime.serves_requests:

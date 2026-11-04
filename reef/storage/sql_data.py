@@ -68,6 +68,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.trajectory_index import call_key
 from reef.storage.data import (
+    JOB_DIRECTORY_TTL_SECONDS,
     MAX_QUERY_LIMIT,
     DataStore,
     ItemConflict,
@@ -204,7 +205,8 @@ class SQLDataStore(DataStore):
     change the trajectory nodes of an owner. ``segments`` is None, or the segment store that keeps the content of
     trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
     the job data directories: ``job_directories`` when given, else ``segments``, else a local segment store in a new
-    temporary directory, which only this process reads.
+    temporary directory, which only this process reads. ``job_directory_ttl_seconds`` is how long the store keeps a
+    job data directory that no job used.
     """
 
     def __init__(
@@ -213,13 +215,15 @@ class SQLDataStore(DataStore):
         task_files: TaskFileStore,
         segments: SegmentStore | None,
         job_directories: SegmentStore | None = None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> None:
         self.items_table, self.scenarios_table, self.nodes_table, self.segment_table, self.job_directory_table = tables
         self.task_files = task_files
         self.segments = segments
         self.job_directories = (
-            job_directories or segments or LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-data-")))
+            job_directories or segments or LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-directories-")))
         )
+        self.job_directory_ttl_seconds = job_directory_ttl_seconds
 
     def record_job_directory_use(self, key: str, time: float) -> None:
         table = self.job_directory_table
@@ -632,6 +636,7 @@ class SQLDataStore(DataStore):
         return moved
 
     def maintain(self) -> None:
+        super().maintain()
         if self.segments is None:
             return
         owners: set[str] = set()
@@ -722,10 +727,11 @@ class SQLiteDataStore(SQLDataStore):
         task_files: TaskFileStore,
         segments: SegmentStore | None = None,
         job_directories: SegmentStore | None = None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> None:
         metadata = MetaData()
         tables = data_tables(metadata, sqlite=True)
-        super().__init__(tables, task_files, segments, job_directories)
+        super().__init__(tables, task_files, segments, job_directories, job_directory_ttl_seconds)
         if directory is None:
             database = ":memory:"
         else:
@@ -760,12 +766,13 @@ class SQLiteDataStore(SQLDataStore):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         if config:
             raise PluginConfigError(
                 f"the sqlite data store takes no config, got {', '.join(sorted(map(str, config)))}"
             )
-        return cls(directory, task_files, segments)
+        return cls(directory, task_files, segments, job_directory_ttl_seconds=job_directory_ttl_seconds)
 
     @contextmanager
     def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
@@ -823,11 +830,12 @@ class PostgresDataStore(SQLDataStore):
         schema: str = "reef_data",
         segments: SegmentStore | None = None,
         job_directories: SegmentStore | None = None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> None:
         validate_postgres_schema(schema)
         metadata = MetaData(schema=schema)
         tables = data_tables(metadata, sqlite=False)
-        super().__init__(tables, task_files, segments, job_directories)
+        super().__init__(tables, task_files, segments, job_directories, job_directory_ttl_seconds)
         try:
             self.engine: Engine | None = create_engine(
                 postgres_url(database_url), pool_pre_ping=True, hide_parameters=True
@@ -857,9 +865,16 @@ class PostgresDataStore(SQLDataStore):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         settings = PostgresDataStoreSettings.parse(config, plugin_class=cls)
-        return cls(settings.database_url, task_files, schema=settings.schema, segments=segments)
+        return cls(
+            settings.database_url,
+            task_files,
+            schema=settings.schema,
+            segments=segments,
+            job_directory_ttl_seconds=job_directory_ttl_seconds,
+        )
 
     @contextmanager
     def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
