@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -30,6 +31,7 @@ from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.recipe import Recipe
+from reef.record2sample.service import SAMPLES_QUEUE
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -654,6 +656,18 @@ def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) ->
     current = dispatcher.registry.get(scenario)
     current.commit(TrainStepResult(state=None, artifact=Artifact.local(checkpoint)))
     dispatcher.scenario_committed(current)
+
+
+@pytest.mark.unit
+def test_a_commit_asks_the_samples_service_for_a_selection_of_each_trainer_that_trains(tmp_path) -> None:
+    # A commit can end a job, and the job's end can make background work due, such as the next round of generated
+    # tasks. No record arrives to ask the samples service for it.
+    dispatcher = weight_dispatcher(tmp_path)
+    trains = SimpleNamespace(component="weights", trainer=SimpleNamespace(trains=True))
+    idle = SimpleNamespace(component="harness", trainer=SimpleNamespace(trains=False))
+    dispatcher.scenario_committed(SimpleNamespace(name="chat", trainers=(trains, idle)))
+    [selection] = dispatcher.queue.items(SAMPLES_QUEUE, scenario="chat")
+    assert selection.payload == {"scenario": "chat", "component": "weights"}
 
 
 def serving_weight_dispatcher(tmp_path, *, training: bool = False) -> Dispatcher:
