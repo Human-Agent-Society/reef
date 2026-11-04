@@ -496,14 +496,16 @@ class SQLDataStore(DataStore):
             return self.stored_items(connection, owner, found, content=content)
 
     def scenario_items(
-        self, owner: str, scenario: str, *, after: int = 0, limit: int = MAX_QUERY_LIMIT
+        self, owner: str, scenario: str, *, kinds: Sequence[str], after: int = 0, limit: int = MAX_QUERY_LIMIT
     ) -> tuple[tuple[int, StoredItem], ...]:
         check_query(owner, None, scenario, after, limit)
         items, uses = self.items_table, self.scenarios_table
         statement = (
             select(items, uses.c.sequence.label("use_sequence"))
             .join(uses, (uses.c.owner == items.c.owner) & (uses.c.item_id == items.c.item_id))
-            .where(uses.c.owner == owner, uses.c.scenario == scenario, uses.c.sequence > after)
+            .where(
+                uses.c.owner == owner, uses.c.scenario == scenario, uses.c.sequence > after, items.c.kind.in_(kinds)
+            )
             .order_by(uses.c.sequence)
             .limit(limit)
         )
