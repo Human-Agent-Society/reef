@@ -37,7 +37,6 @@ from reef.core.activation import ActivationRule
 from reef.core.config import Settings, config_option
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
-from reef.core.job_data import JobData, TaskSample
 from reef.core.model_metadata import ModelMetadata
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
@@ -76,20 +75,14 @@ from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentArtifacts
-from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingComponent
+from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
-from reef.train.harness_backend.component import (
-    HISTORY_DIR,
-    STEPS_DIR,
-    HarnessSteps,
-    HarnessTrainingComponent,
-    request_parameter,
-)
+from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
-from reef.train.jobs import JobCommit, JobLoop, JobLoopState
-from reef.train.pipeline import PipelineSpec
+from reef.train.jobs import JobLoop
+from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.trainer import Trainer
 
 #: The directory of the harness training component's jobs and starts under ``evolution.state_dir``.
@@ -180,76 +173,6 @@ class HarnessLayout(ArtifactLayout):
             raise ValueError(f"the harness tree fails validation: {validation.message()}")
 
 
-class HarnessJobLoop(JobLoop):
-    """The ``JobLoop`` of a harness scenario component: each job carries the harness parameters, and each
-    checkpoint names the parts of the tree that it changed.
-
-    Values: ``component`` and ``scenario`` as ``JobLoop``. ``releases`` reads the scenario component's head, whose
-    release is the job's start. ``eval_samples`` reads the sample store, whose imported eval split the job evaluates on,
-    or ``None`` for the configured tasks. ``layout`` is the adapter's tree layout.
-
-    Operations: ``submit(state, data, parameters)`` is ``JobLoop.submit`` with ``harness_parameters(data,
-    state)`` added to ``parameters``; ``ValueError`` when ``parameters`` names one of them. ``publish(state,
-    checkpoint)`` is ``JobLoop.publish`` whose result's ``changed_kinds`` are the names of the parts that take a
-    path of the diff from the tree in the directory ``state.start`` to the tree at ``checkpoint.release_path``: the parts
-    that the job's step changed, which the scenario's activation rule reads.
-
-    Purpose: ``HarnessEvolutionRecipe.build`` makes one for its trainer; ``HarnessTrainingComponent`` reads the
-    parameters.
-    """
-
-    def __init__(
-        self,
-        component: TrainingComponent,
-        *,
-        scenario: str,
-        data_store: DataStore | None = None,
-        releases: ComponentArtifacts,
-        eval_samples: TrainerSamples | None,
-        layout: TreeLayout,
-    ) -> None:
-        super().__init__(component, scenario=scenario, data_store=data_store)
-        self.releases = releases
-        self.eval_samples = eval_samples
-        self.layout = layout
-
-    def harness_parameters(self, data: JobData, state: JobLoopState) -> dict[str, Any]:
-        """``{component, head_artifact_id, evaluation_tasks, previous_job, request}``: the component's name, its
-        starting artifact ID, the eval split's task paths in arrival order or ``None``, the ID of the last job that the
-        trainer committed the end of (``state.last_job``), whose harness state the job continues, or ``None`` before
-        the first, and the training request that the job runs (``request_parameter``) or ``None``. The job data
-        directory holds no request, so the harness backend reads it here."""
-        tasks = (
-            None
-            if self.eval_samples is None
-            else [
-                str(stored.sample.task_path)
-                for stored in self.eval_samples.imported_tasks(split="eval")
-                if isinstance(stored.sample, TaskSample)
-            ]
-        )
-        return {
-            "component": self.releases.component,
-            "head_artifact_id": self.releases.head().artifact_id,
-            "evaluation_tasks": tasks,
-            "previous_job": None if state.last_job is None else state.last_job.job_id,
-            "request": None if data.request is None else request_parameter(data.request),
-        }
-
-    def submit(self, state: JobLoopState, data: JobData, parameters: Mapping[str, Any]) -> JobCommit:
-        added = self.harness_parameters(data, state)
-        shared = sorted(set(added) & set(parameters))
-        if shared:
-            raise ValueError(f"the stage's job parameters already name {shared}")
-        return super().submit(state, data, {**parameters, **added})
-
-    def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
-        commit = super().publish(state, checkpoint)
-        changes = HarnessTree.read(Path(state.start)).diff(HarnessTree.read(Path(checkpoint.release_path))).changes
-        changed_kinds = frozenset(self.layout.part_names(changes).values())
-        return replace(commit, result=replace(commit.result, changed_kinds=changed_kinds))
-
-
 @dataclass(frozen=True)
 class RecipeSteps(HarnessSteps):
     """The ``HarnessSteps`` of ``recipe``: its seed, its state directories, its backend and its selection policy.
@@ -277,6 +200,10 @@ class RecipeSteps(HarnessSteps):
         validation = validate_tree(tree, get_adapter(self.recipe.evolution.adapter))
         if not validation.passed:
             raise ValueError(f"the harness tree fails validation: {validation.message()}")
+
+    @property
+    def layout(self) -> TreeLayout:
+        return get_adapter(self.recipe.evolution.adapter).layout
 
 
 @dataclass(frozen=True)
@@ -427,6 +354,16 @@ class HarnessEvolutionRecipe(Recipe):
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=TraceSamples, sample2job=TraceJobData)
+
+    def stages(self) -> PipelineConfig:
+        """The pipeline's stages, whose harness stage names the eval split in each job when the steps evaluate on the
+        imported tasks (``evolution.evaluation.imported_tasks``)."""
+        stages = super().stages()
+        sample2job = stages.sample2job
+        if not self.evaluation.imported_tasks or not issubclass(sample2job.plugin_class, TraceJobData):
+            return stages
+        config = {**sample2job.config, "evaluation_split": True}
+        return replace(stages, sample2job=replace(sample2job, config=config))
 
     @property
     def harness_adapter(self) -> str | None:
@@ -620,13 +557,11 @@ class HarnessEvolutionRecipe(Recipe):
             scenario,
             records,
             pipeline_factory=self.build_pipeline,
-            job_loop=HarnessJobLoop(
+            job_loop=JobLoop(
                 self.harness_component,
                 scenario=scenario,
+                scenario_component=releases.component,
                 data_store=self.data_store,
-                releases=releases,
-                eval_samples=samples if self.evaluation.imported_tasks else None,
-                layout=get_adapter(self.evolution.adapter).layout,
             ),
             root=root,
             algorithm_state=algorithm_state,

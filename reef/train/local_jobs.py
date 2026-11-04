@@ -41,6 +41,9 @@ def submitted_job(job_id: str, backend: str, submitted: Mapping[str, Any]) -> Tr
         JobDataRef.from_dict(data, Path(data["path"])),
         submitted["parameters"],
         scenario=submitted["scenario"],
+        request_id=submitted.get("request_id"),
+        component=submitted.get("component"),
+        previous_job_id=submitted.get("previous_job_id"),
     )
 
 
@@ -163,6 +166,9 @@ class LocalJobComponent(TrainingComponent):
                     "start": job.start,
                     "data": {**job.data.to_dict(), "path": str(job.data_dir)},
                     "parameters": dict(job.parameters),
+                    "request_id": job.request_id,
+                    "component": job.component,
+                    "previous_job_id": job.previous_job_id,
                 },
             )
             self.queue.append(job.job_id)

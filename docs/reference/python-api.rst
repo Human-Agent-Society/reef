@@ -2186,6 +2186,9 @@ these fields:
   the data.
 - ``request_id``: the ID of the training request that the job trains, or
   ``None``.
+- ``component``: the scenario component that the job trains, or ``None``.
+- ``previous_job_id``: the last job whose end the trainer committed, or
+  ``None`` before the first.
 - ``start``: the directory of the weights the job starts from, or ``None``
   for the backend's base model.
 - ``parameters``: the backend's parameters. Reef reads none of them; they
@@ -2297,11 +2300,17 @@ commits:
    metrics. The scenario's activation rule decides whether it serves.
 3. When the job ends, the trainer commits its outcome.
 
-A recipe may subclass the loop. The harness recipe's ``HarnessJobLoop``
-(``reef.recipe.harness``) adds the parameters that only the scenario knows at
-submit time, such as its model and its eval split. It also names, on each
-checkpoint's commit, the parts of the tree that the checkpoint changed from
-the job's start, which the scenario's activation rule reads.
+Weight training and harness evolution share the loop: every job carries the
+same fields. The loop sets ``TrainingJob.component``, the scenario component
+that the trainer trains, and ``TrainingJob.previous_job_id``, the last job
+whose end the trainer committed. A harness continues its state after that
+job, since a step that keeps no tree still advances it; a weight component
+ignores it. What a job needs beside its data comes from its stage's
+``job_parameters``: the harness stage (``TraceJobData``) adds the training
+request and the task paths of the scenario's eval split. On each checkpoint's
+commit, the loop asks the component for the parts that the checkpoint changed
+from the job's start (``TrainingComponent.changed_parts``, empty by default),
+which the scenario's activation rule reads (``changed_kinds``).
 
 Training is linear: the next job starts from the newest saved checkpoint,
 whether or not it serves. A restarted job replaces the trainer's start

@@ -49,7 +49,10 @@ class TrainingJob:
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
     trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
     ``request_id`` is the ID of the training request that the job trains, or None. Reef's job listing reads it; a
-    component does not need it.
+    component does not need it. ``component`` is the scenario component that the job trains, or None when the
+    trainer names none. ``previous_job_id`` is the last job whose end the trainer committed, or None before the
+    first: a component whose state advances also in a job that saves no checkpoint, such as a harness, continues the
+    state after it.
 
     Reef makes the value and names the job with ``job_id_for``, so a retry of
     the same request has the same ID. A component reads it in ``submit``.
@@ -62,6 +65,8 @@ class TrainingJob:
     parameters: Mapping[str, Any] = field(default_factory=dict)
     scenario: str = field(kw_only=True)
     request_id: str | None = field(default=None, kw_only=True)
+    component: str | None = field(default=None, kw_only=True)
+    previous_job_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not self.job_id:
@@ -76,8 +81,10 @@ class TrainingJob:
             raise TypeError("TrainingJob.data must be a JobDataRef")
         if not isinstance(self.parameters, Mapping):
             raise TypeError("TrainingJob.parameters must be a mapping")
-        if self.request_id is not None and (not isinstance(self.request_id, str) or not self.request_id):
-            raise ValueError("TrainingJob.request_id must be a non-empty string or None")
+        for name in ("request_id", "component", "previous_job_id"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"TrainingJob.{name} must be a non-empty string or None")
         json.dumps(dict(self.parameters), allow_nan=False)
 
     @property
@@ -333,6 +340,11 @@ class TrainingComponent(ABC):
         modules = config.get("target_modules")
         if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
             raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
+
+    def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
+        """The parts of the scenario component that ``checkpoint`` changed from ``start``, which the scenario's
+        activation rule reads (``TrainStepResult.changed_kinds``). The default is none."""
+        return frozenset()
 
     @abstractmethod
     def import_start(self, release: Path) -> str:

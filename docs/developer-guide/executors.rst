@@ -52,6 +52,10 @@ model. Reef reads none of the parameters. The component contract is:
    restarted component resumes each unfinished job or reports it failed.
 ``cancel(job_id)``
    Stop the job; it then reports ``failed``.
+``changed_parts(start, checkpoint)``
+   The parts of the scenario component that the checkpoint changed from
+   ``start``, which the scenario's activation rule reads. The default is
+   none; the harness component diffs the trees.
 ``import_start(release)``
    Copy a published release into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``

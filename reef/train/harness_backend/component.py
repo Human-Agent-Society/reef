@@ -8,13 +8,16 @@ its ``JobLoop``; a training worker runs it here, and control commits the selecte
   directory that holds a tree, which ``import_start`` or an earlier job's checkpoint wrote.
 - ``data``: the job data directory of the step's material: the traces of traffic and the train tasks of an
   offline step.
-- ``parameters``: ``component``, the scenario component that the step evolves; ``head_artifact_id``, the component artifact
-  used as the start; ``evaluation_tasks``, the eval split of the scenario's imported tasks, or ``None`` for the
-  configured tasks; ``previous_job``, the last job whose end the trainer committed, or ``None`` before the first;
-  ``request``, the training request that the step runs (``request_parameter``), or ``None``.
+- ``component`` and ``previous_job_id``, the fields of every ``TrainingJob``: the scenario component that the step
+  evolves, and the last job whose end the trainer committed, whose harness state the step continues.
+- ``parameters``, which the harness stage gives (``TraceJobData.job_parameters``): ``evaluation_tasks``, the eval
+  split of the scenario's imported tasks, which the step evaluates on instead of its configured tasks, when the
+  stage names it; and ``request``, the training request that the step runs
+  (``reef.core.training_request.request_parameter``), or ``None``. A job that an earlier Reef queued holds
+  ``component`` and ``previous_job`` in its parameters instead.
 
 A job's directory keeps ``outcome.json``: the settled step, with the steps that ended and the ``HarnessState``
-after it; and ``tree/``, its selected tree. A job continues the state after ``previous_job``, so the harness state
+after it; and ``tree/``, its selected tree. A job continues the state after ``previous_job_id``, so the harness state
 follows the jobs that control committed: a job that ran but whose end no commit recorded changes no later step.
 Under ``HarnessSteps.state_root(scenario, component)`` the component keeps the history and step records of the
 backend, and ``progress.json`` while a step runs.
@@ -35,8 +38,9 @@ from reef.artifact.components import TextFileTree
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
-from reef.core.training_request import TrainingRequest
+from reef.core.training_request import request_from_parameters
 from reef.core.weight_layout import ReleaseFormat
+from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
 from reef.storage.durable_files import read_json, write_json
 from reef.storage.job_data import read_job_data
@@ -59,32 +63,6 @@ OUTCOME_FILE = "outcome.json"
 TREE_DIR = "tree"
 
 
-def head_artifact_id(parameters: Mapping[str, Any]) -> str:
-    """The artifact that a harness job starts from: ``head_artifact_id``, or ``head_release_id`` of an older job."""
-    head = parameters.get("head_artifact_id", parameters.get("head_release_id"))
-    if not isinstance(head, str) or not head:
-        raise ValueError("a harness job names the artifact of its start in parameters.head_artifact_id")
-    return head
-
-
-def request_parameter(request: TrainingRequest) -> dict[str, Any]:
-    """``request`` as the ``request`` parameter of a harness job: its ID and its fields without ``samples``, which
-    the job data directory holds."""
-    fields = {key: value for key, value in request.to_dict().items() if key != "samples"}
-    return {"id": request.id, **fields}
-
-
-def request_from_parameters(parameters: Mapping[str, Any]) -> TrainingRequest | None:
-    """The training request of the ``request`` parameter that ``request_parameter`` wrote, or None; ``ValueError``
-    for another value."""
-    value = parameters.get("request")
-    if value is None:
-        return None
-    if not isinstance(value, Mapping) or not isinstance(value.get("id"), str) or not value["id"]:
-        raise ValueError("parameters.request of a harness job must be a request with its id, or null")
-    return TrainingRequest.from_dict({key: item for key, item in value.items() if key != "id"}, request_id=value["id"])
-
-
 class HarnessSteps(ABC):
     """What the harness training component reads from its recipe to run the steps of a scenario component.
 
@@ -93,6 +71,7 @@ class HarnessSteps(ABC):
     reads no releases (each job names its head). ``policy(backend)`` is the selection policy that measures through
     ``backend``.
     ``check_tree(tree)`` raises ``ValueError`` for a tree that fails validation for the recipe's adapter.
+    ``layout`` is the adapter's tree layout, which names the parts of a tree.
 
     Purpose: ``HarnessEvolutionRecipe`` makes one for its ``HarnessTrainingComponent``.
     """
@@ -112,6 +91,25 @@ class HarnessSteps(ABC):
 
     @abstractmethod
     def check_tree(self, tree: HarnessTree) -> None: ...
+
+    @property
+    @abstractmethod
+    def layout(self) -> TreeLayout: ...
+
+
+def job_component(job: TrainingJob) -> str:
+    """The scenario component that ``job`` evolves: ``job.component``, or the ``component`` parameter of a job that an
+    earlier Reef queued; ``ValueError`` without one."""
+    component = job.component or job.parameters.get("component")
+    if not isinstance(component, str) or not component:
+        raise ValueError("a harness job names the scenario component that it evolves")
+    return component
+
+
+def previous_job(submitted: Mapping[str, Any]) -> str | None:
+    """The previous job of the job file ``submitted``: its ``previous_job_id``, or the ``previous_job`` parameter of
+    a job that an earlier Reef queued."""
+    return submitted.get("previous_job_id") or submitted["parameters"].get("previous_job")
 
 
 def read_step_progress(path: Path) -> StepProgress | None:
@@ -206,18 +204,17 @@ class HarnessTrainingComponent(LocalJobComponent):
         self.steps.check_tree(HarnessTree({path: files.read_bytes(path).decode("utf-8") for path in files.paths()}))
 
     def check_job(self, job: TrainingJob) -> None:
-        parameters = job.parameters
-        component = parameters.get("component")
-        if not isinstance(component, str) or not component:
-            raise ValueError("a harness job names the scenario component that it evolves in parameters.component")
-        head_artifact_id(parameters)
-        tasks = parameters.get("evaluation_tasks")
+        job_component(job)
+        tasks = job.parameters.get("evaluation_tasks")
         if tasks is not None and (not isinstance(tasks, list) or not all(isinstance(task, str) for task in tasks)):
             raise ValueError("parameters.evaluation_tasks of a harness job must be a list of task paths or null")
-        previous = parameters.get("previous_job")
-        if previous is not None and (not isinstance(previous, str) or not previous):
-            raise ValueError("parameters.previous_job of a harness job must be a job ID or null")
-        request_from_parameters(parameters)
+        request_from_parameters(job.parameters)
+
+    def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
+        """The parts of the tree that the step changed: the parts of the paths of the diff from the start's tree to
+        the checkpoint's."""
+        changes = HarnessTree.read(Path(start)).diff(HarnessTree.read(Path(checkpoint.release_path))).changes
+        return frozenset(self.steps.layout.part_names(changes).values())
 
     def import_start(self, release: Path) -> str:
         """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
@@ -258,7 +255,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         initial ``(0, HarnessState())`` for ``None``.
 
         A job that has no outcome, such as one cancelled before its step settled, changed nothing: its state is the
-        state after the job that it names as ``previous_job``.
+        state after its previous job (``previous_job_id``).
         """
         while job_id is not None:
             directory = self.job_directory(job_id)
@@ -266,11 +263,11 @@ class HarnessTrainingComponent(LocalJobComponent):
             if outcome is not None:
                 return int(outcome["steps"]), HarnessState.from_json(outcome["harness"])
             submitted = read_json(directory / JOB_FILE)
-            job_id = None if submitted is None else submitted["parameters"].get("previous_job")
+            job_id = None if submitted is None else previous_job(submitted)
         return 0, HarnessState()
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
-        """Run the job's step from the state after ``parameters.previous_job``, then save its selected tree as the
+        """Run the job's step from the state after its previous job, then save its selected tree as the
         job's checkpoint.
 
         The step's outcome is durable before its checkpoint, so a resumed job runs no second step. The job's metrics
@@ -304,10 +301,12 @@ class HarnessTrainingComponent(LocalJobComponent):
         data = replace(read_job_data(job.data_dir, job.data_id), request=request)
         # The row of a request's step names the request, so its request page settles on that row.
         named = {} if request is None else {"training_request": {"id": request.id, **request.to_dict()}}
-        component = str(parameters["component"])
+        component = job_component(job)
         backend = self.backend_for(job.scenario, component)
-        steps, state = self.state_after(parameters.get("previous_job"))
-        head = ArtifactTextFiles(head_artifact_id(parameters), dict(HarnessTree.read(Path(job.start)).files))
+        steps, state = self.state_after(job.previous_job_id or parameters.get("previous_job"))
+        tree = HarnessTree.read(Path(job.start))
+        # The tree's checksum names the head: a step needs no artifact ID of its start.
+        head = ArtifactTextFiles(tree.checksum(), dict(tree.files))
         tasks = parameters.get("evaluation_tasks")
         progress = self.steps.state_root(job.scenario, component) / PROGRESS_FILE
         try:
@@ -346,11 +345,11 @@ class HarnessTrainingComponent(LocalJobComponent):
             raise TypeError("a settled harness step carries the state after it")
         checkpoint = None
         if result.artifact is not None and result.artifact.local_path is not None:
-            tree = directory / TREE_DIR
-            shutil.rmtree(tree, ignore_errors=True)
-            shutil.copytree(result.artifact.local_path, tree)
+            kept = directory / TREE_DIR
+            shutil.rmtree(kept, ignore_errors=True)
+            shutil.copytree(result.artifact.local_path, kept)
             backend.discard_kept_tree()
-            checkpoint = {"path": str(tree)}
+            checkpoint = {"path": str(kept)}
         return {
             "steps": steps + 1,
             "harness": dict(result.state),
@@ -373,7 +372,6 @@ __all__ = [
     "HarnessSteps",
     "HarnessTrainingComponent",
     "ProgressFile",
+    "job_component",
     "read_step_progress",
-    "request_from_parameters",
-    "request_parameter",
 ]

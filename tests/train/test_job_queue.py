@@ -35,6 +35,7 @@ from reef.train.job_queue import (
     JobQueueComponent,
     TrainingJobWorker,
     checkpoint_json,
+    job_from_item,
     job_json,
     job_kind,
     job_payload,
@@ -122,6 +123,24 @@ def worked(tmp_path):
     worker.start()
     yield queue, component, worker
     worker.stop()
+
+
+@pytest.mark.unit
+def test_a_queued_job_keeps_its_component_and_previous_job():
+    queue = memory_coordination(lease_seconds=300).work_queue
+    job = TrainingJob(
+        "j1",
+        "steps",
+        "steps:base",
+        job_data_ref(JobData("s:data:1")),
+        {},
+        scenario="s",
+        component="harness",
+        previous_job_id="j0",
+    )
+    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job), serial_key="s"))
+    taken = job_from_item(queue.get(JOBS_QUEUE, "j1"), MemoryDataStore(LocalTaskFileStore()))
+    assert (taken.component, taken.previous_job_id) == ("harness", "j0")
 
 
 @pytest.mark.unit

@@ -76,11 +76,12 @@ from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, Mo
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
+from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobLoop
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.sample2job.traces import TrainTaskJobData
+from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.service.app import create_app
 from reef.storage.data import NewItem
 from reef.storage.samples import StoredSample
@@ -90,7 +91,6 @@ from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
-from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
@@ -414,6 +414,10 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         runtime=runtime(),
     )
     assert built.configured_tasks() == ()
+    # The recipe's harness stage names the eval split in each job; without imported tasks it names none.
+    assert built.stages().sample2job.config["evaluation_split"] is True
+    configured = from_config(evolution_config(binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "c")))
+    assert "evaluation_split" not in configured.stages().sample2job.config
     root = tmp_path / "tasks"
     with closing(data_storage()) as storage, closing(storage.open("s")) as session:
         samples = sample_store(storage, "s", session)
@@ -426,17 +430,17 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
 
         backend = build_harness_backend(built, "s")
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-        # A job names the eval split as its trainer reads it at submit time, and its step evaluates on it.
-        loop = HarnessJobLoop(
-            built.harness_component,
-            scenario="s",
-            releases=releases_for(built),
-            eval_samples=samples.for_trainer(""),
-            layout=get_adapter("pi").layout,
+        # The harness stage names the eval split as the trainer reads it when it makes the job's parameters, and the
+        # step evaluates on it.
+        stage = TraceJobData(
+            PipelineContext("s", samples=samples.for_trainer(""), job_parameters={"trajectory": {}}),
+            None,
+            None,
+            evaluation_split=True,
         )
 
         def evaluation_tasks() -> list[str]:
-            tasks = loop.harness_parameters(batch, JobLoopState("start"))["evaluation_tasks"]
+            tasks = stage.job_parameters(batch)["evaluation_tasks"]
             prepared = backend.prepare_step(
                 batch, HarnessState().to_json(), 0, head=head_of(backend), seed_tasks=tuple(tasks)
             )

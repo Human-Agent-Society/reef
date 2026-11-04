@@ -621,6 +621,7 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
+            releases=releases,
             samples=samples,
             root=root,
         )
@@ -633,6 +634,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
@@ -657,7 +659,12 @@ class WeightTrainingRecipe(Recipe):
                 scenario,
                 records,
                 pipeline_factory=self.build_pipeline,
-                job_loop=JobLoop(self.training_component, scenario=scenario, data_store=self.data_store),
+                job_loop=JobLoop(
+                    self.training_component,
+                    scenario=scenario,
+                    scenario_component=None if releases is None else releases.component,
+                    data_store=self.data_store,
+                ),
                 root=root,
                 job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,
