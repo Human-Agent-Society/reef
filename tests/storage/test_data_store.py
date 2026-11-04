@@ -183,7 +183,7 @@ def test_a_scenario_reads_its_items_in_the_order_that_their_uses_began(store, tm
     def used(after=0):
         return [
             (item.item_id, sequence)
-            for sequence, item in store.scenario_items("acme", "coding", kinds=("trajectory",), after=after)
+            for sequence, item in store.scenario_items("acme", "coding", kinds=("trajectory", "task"), after=after)
         ]
 
     first = used()

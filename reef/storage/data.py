@@ -317,8 +317,9 @@ class DataStore(Plugin, ABC):
       are given. Without ``content``, each item's ``content`` is None, and the store does not read it.
     * ``scenario_items(owner, scenario, kinds, after, limit)`` returns the items of ``kinds`` of ``owner`` that
       ``scenario`` uses, with content, each with the sequence of its use, in the order of those sequences: the uses
-      after ``after``, at most ``limit``. The store reads no item of another kind. Each use of an item by a scenario has its own sequence, which increases across the store: a new use,
-      also of an older item, and a use whose split changes get a new one. A trainer reads its scenario's items with
+      after ``after``, at most ``limit``. The store reads no item of another kind. Each use of an item by a scenario
+      has its own sequence, which increases across the store: a new use, also of an older item, and a use whose
+      split changes get a new one. A trainer reads its scenario's items with
       it.
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
