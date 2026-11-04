@@ -51,7 +51,7 @@ from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_se
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore, TrainerSamples
+from reef.storage.samples import ScenarioSamples, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingComponent
@@ -351,7 +351,7 @@ class CompositeRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: CommittedArtifacts | None = None,
-        samples: SampleStore | None = None,
+        samples: ScenarioSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []

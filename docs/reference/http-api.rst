@@ -140,7 +140,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel``                         | cancel one training job of the scenario           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in store order   |
+| ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in use order     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/sample-processing``                             | the scenario's sample processing tasks and counts |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -393,11 +393,10 @@ owner. Archiving a scenario does not delete its items. It removes the
 scenario from their ``scenarios``, except from the record items that the
 scenario made.
 
-Training reads the items in the scenario's sample store: Reef copies each item
-that a scenario uses into it, and removes the copy when the item leaves the
-scenario. Each trajectory counts as one sample toward ``job_samples`` and
-``buffer_size``. Job data takes the samples in the order they joined the
-scenario. A train task trains like a trajectory. In ``sft`` it trains only in
+Training reads the items that a scenario uses from the data store; an item that
+leaves the scenario before a job takes it does not train. Each trajectory
+counts as one sample toward ``job_samples`` and ``buffer_size``. Job data takes
+the samples in the order they joined the scenario. A train task trains like a trajectory. In ``sft`` it trains only in
 ``manual`` mode, for a request that gives the job's parameters (see
 `Manual training <#manual-training>`__). For the recipe side, see `Uploaded
 trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
@@ -745,18 +744,18 @@ without a signature, because the download needs none.
 Choose the samples that train
 -----------------------------
 
-Every training sample of a scenario is in its sample store: the uploaded
-trajectories, the imported tasks, and the samples that a trainer's record
-stages made. ``GET /reef/scenarios/{scenario}/samples`` lists them in store
-order, at most ``limit`` (default and maximum 1000) after the sequence
-``after`` (default 0):
+Every training sample of a scenario is a data item that it uses: an uploaded
+trajectory, an imported task, or a trajectory or task that a trainer's stages
+made (RFC #1140). ``GET /reef/scenarios/{scenario}/samples`` lists them in the
+order that their uses began, at most ``limit`` (default and maximum 1000) after
+the sequence ``after`` (default 0):
 
 .. code:: json
 
    {"scenario": "my-agent", "next": null, "samples": [
      {"sample_id": "trajectory-0001", "sequence": 1, "kind": "trajectory", "split": "train",
       "component": null, "group": null, "train_counts": {}},
-     {"sample_id": "report-17:0", "sequence": 2, "kind": "trajectory", "split": "train",
+     {"sample_id": "my-agent.report-17:0", "sequence": 2, "kind": "trajectory", "split": "train",
       "component": "", "group": null, "train_counts": {"": 1}}]}
 
 ``component`` is the trainer that made the sample from records (``""`` for the
@@ -766,7 +765,7 @@ trainer, the number of committed jobs that trained the sample. ``next`` is the
 ``after`` of the next page, or ``null`` after the last one.
 
 ``GET /reef/scenarios/{scenario}/next-job`` returns the samples that the next
-automatic job trains, in store order, with the trainer's ``training_mode``.
+automatic job trains, in use order, with the trainer's ``training_mode``.
 Each sample has ``sample_id``, ``kind``, ``group``, ``component`` and the
 trainer's ``train_count``. A scenario of several components needs
 ``?component=<name>``.

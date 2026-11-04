@@ -972,7 +972,7 @@ It has two values:
   once: the method gets the request and the traces that it names,
   possibly none.
 
-Records arrive and the sample store fills in both modes, so a switch from
+Records arrive and stages make samples in both modes, so a switch from
 ``manual`` to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
 declares ``supported_training_modes``; an unsupported mode raises
 ``NotImplementedError``. Harness evolution supports both modes, and every
@@ -993,8 +993,8 @@ job data completes under its original mode. Reef stores the selected mode in
 the scenario's settings, so reloads and restarts apply it again, and it takes
 precedence over the configured mode. A stored mode that the recipe does not
 support keeps the configured mode and logs a warning. In every mode, the
-samples of ready record sets wait in the scenario's sample store until a job
-trains them.
+samples of ready record sets wait as data items that the scenario uses until a
+job trains them.
 
 .. container:: config
 
@@ -1604,7 +1604,7 @@ and ``buffer_size``. A recipe's page lists the other keys of its stage.
        the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
 
    ``pipeline.sample2job.config.buffer_size`` : ``job_samples``
-       the most samples that one automatic job takes, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait in the sample store for later jobs.
+       the most samples that one automatic job takes, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait for later jobs.
 
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
@@ -1716,8 +1716,8 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-The saved train tasks go to the scenario's sample store, as samples
-``generated-tasks/<task name>``, and train like every other
+The saved train tasks become task items that the scenario uses,
+``<scenario>.generated-tasks.<task name>``, and train like every other
 sample. ``GeneratedTaskJobData`` makes one task job of the next job's tasks,
 whatever Tinker's batch size (``training.options.batch-size``) is:
 
@@ -2098,7 +2098,7 @@ The following names are relative to ``operations/``:
    * - ``processor/tracked_records``, ``processor/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
    * - ``processor/waiting_candidates``
-     - Computed-feedback candidates that wait for the sample store.
+     - Computed-feedback candidates that wait to become samples.
    * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
      - Samples that the next automatic job can take now, samples that
        automatic job data needs, and the most samples that one automatic job

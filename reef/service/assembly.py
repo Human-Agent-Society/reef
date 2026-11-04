@@ -465,7 +465,7 @@ def build_dispatcher(
             scenario_storage = ObservedScenarioStorage(scenario_storage, new_artifacts)
         # The inference path and the data service append and read records without opening a scenario.
         record_storage = scenario_storage
-        # Each scenario's session opens with copies of the data items that the scenario uses.
+        # Each scenario's session reads its training samples from the data store.
         scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
         backend_factory = build_artifact_backend(settings)
         if not isinstance(settings.training_settings, Mapping):
