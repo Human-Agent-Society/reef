@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.support.samples import sample_store
 from tests.support.task_service_stubs import task_for
 
 from reef.core.job_data import TaskSample
@@ -56,7 +57,7 @@ def data_storage(tmp_path: Path, task_import: TaskImport | None) -> Iterator[Dat
 
 def imported(storage: DataScenarioStorage) -> list[tuple[str, str]]:
     with closing(storage.open("math")) as session:
-        return [(task.sample_id, task.split) for task in session.samples.imported_tasks()]
+        return [(task.sample_id, task.split) for task in sample_store(storage, "math", session).imported_tasks()]
 
 
 def test_each_open_imports_the_manifest_as_items_that_the_scenario_uses(tmp_path: Path) -> None:
@@ -74,7 +75,7 @@ def test_each_open_imports_the_manifest_as_items_that_the_scenario_uses(tmp_path
             ("c-task", {"math": "eval"}),
         ]
         with closing(storage.open("math")) as session:
-            (evaluated,) = session.samples.imported_tasks(split="eval")
+            (evaluated,) = sample_store(storage, "math", session).imported_tasks(split="eval")
             assert isinstance(evaluated.sample, TaskSample)
             assert (evaluated.sample.task_path / "environment" / "image.png").read_bytes() == IMAGE
 
@@ -139,7 +140,7 @@ def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> 
     )
     dispatcher = build_dispatcher(settings)
     try:
-        samples = dispatcher.get_or_create_scenario("math").store.samples
+        samples = dispatcher.storage.sample_store("math", dispatcher.get_or_create_scenario("math").store)
         assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [("a-task", "eval")]
     finally:
         dispatcher.close()

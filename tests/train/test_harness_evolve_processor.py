@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.support.samples import data_storage
+from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import task_for
 
 from reef.artifact import SnapshotRef
@@ -28,7 +28,7 @@ from reef.record2sample.traces import InferenceSamples, TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
-from reef.storage.samples import SampleStore, TrainerSamples, consumed_sample_id
+from reef.storage.samples import SampleStore, consumed_sample_id
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import JobData
 
@@ -287,7 +287,7 @@ def add_tasks(samples: SampleStore, root: Path, split: str, *names: str) -> None
 
 def offline_pipeline(samples: SampleStore, *, job_samples: int, buffer_size: int | None = None) -> TrainingPipeline:
     """An offline pipeline of the scenario whose samples are ``samples``, in ``auto``."""
-    context = PipelineContext("offline", samples=TrainerSamples(samples))
+    context = PipelineContext("offline", samples=samples.for_trainer(""))
     return TrainingPipeline(context, sample2job=TrainTaskJobData(context, buffer_size, job_samples))
 
 
@@ -297,10 +297,10 @@ def task_names(data: JobData) -> list[str]:
 
 
 def test_imported_train_tasks_reach_the_job_data_through_the_buffer_and_each_trains_once(tmp_path: Path) -> None:
-    session = data_storage(tmp_path / "records").open("offline")
-    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
-    add_tasks(session.samples, tmp_path / "tasks", "eval", "held-out")
-    pipeline = offline_pipeline(session.samples, job_samples=2)
+    session, samples = open_sample_store(tmp_path / "records", "offline")
+    add_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
+    add_tasks(samples, tmp_path / "tasks", "eval", "held-out")
+    pipeline = offline_pipeline(samples, job_samples=2)
     assert pipeline.accepts_imported_tasks and not TraceJobData.accepts_imported_tasks
 
     data = pipeline.build_job_data(2)
@@ -311,7 +311,7 @@ def test_imported_train_tasks_reach_the_job_data_through_the_buffer_and_each_tra
     assert not pipeline.ready(2)
 
     # A later upload joins the buffer; a task uploaded again with the same files does not train again.
-    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-d")
+    add_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-d")
     data = pipeline.build_job_data(2)
     assert task_names(data) == ["task-c", "task-d"]
     pipeline.acknowledge(data.data_id)
@@ -321,8 +321,8 @@ def test_imported_train_tasks_reach_the_job_data_through_the_buffer_and_each_tra
 
 
 def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
-    session = data_storage(tmp_path / "records").open("s")
-    context = PipelineContext("s", samples=TrainerSamples(session.samples))
+    session, samples = open_sample_store(tmp_path / "records", "s")
+    context = PipelineContext("s", samples=samples.for_trainer(""))
     pipeline = TrainingPipeline(
         context,
         record2sample=TraceSamples(context),
@@ -330,7 +330,7 @@ def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
     )
     pipeline.push(_inference("inf-1", {"messages": []}))
     pipeline.push(_report("rep-1", 0.0, ["inf-1"]))
-    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b")
+    add_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-b")
 
     # The buffer takes up to four samples, but the trace came first, so its job holds the trace alone.
     traces = pipeline.build_job_data(1)
@@ -343,9 +343,9 @@ def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
 
 
 def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_commit_trained(tmp_path: Path) -> None:
-    session = data_storage(tmp_path / "records").open("offline")
-    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
-    first = offline_pipeline(session.samples, job_samples=1)
+    session, samples = open_sample_store(tmp_path / "records", "offline")
+    add_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
+    first = offline_pipeline(samples, job_samples=1)
     durable = first.build_job_data(1)
     session.commit_step(
         expected_step=0,
@@ -365,9 +365,9 @@ def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_com
     first.acknowledge(lost.data_id)
     first.close()
 
-    (trained,) = session.samples.get(("task-a",))
+    (trained,) = samples.get(("task-a",))
     assert task_names(durable) == ["task-a"] and trained.train_count("") == 1
-    restarted = offline_pipeline(session.samples, job_samples=1)
+    restarted = offline_pipeline(samples, job_samples=1)
     rest = []
     while restarted.ready(1):
         data = restarted.build_job_data(1)

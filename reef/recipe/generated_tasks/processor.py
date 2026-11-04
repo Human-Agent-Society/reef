@@ -763,7 +763,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             )
         #: Rounds that ended without a job, such as a round of sessions that a complete generation already used.
         self.ended_rounds: list[RoundResult] = []
-        #: The sample store as this trainer reads it, where the published train tasks train from.
+        #: The scenario's samples as this trainer reads them, where the published train tasks train from.
         self.samples: TrainerSamples | None = context.samples
         #: The published train tasks that the pipeline has not stored yet (``made_samples``).
         self.made: list[TaskSample] = []

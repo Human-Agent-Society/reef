@@ -25,7 +25,7 @@ from tests.support.runtime_stubs import (
     job_sized_stages,
     runtime_bindings,
 )
-from tests.support.samples import data_storage
+from tests.support.samples import data_storage, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
@@ -44,7 +44,6 @@ from reef.record2sample.assembly import SampleAssemblySettings
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
 from reef.storage.job_data import read_job_data
-from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
@@ -597,7 +596,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     # restart.
     component = _SAOComponent(tmp_path / "checkpoints")
 
-    def _trainer(session, algorithm_state: Mapping[str, Any] | None = None) -> Trainer:
+    def _trainer(storage, session, algorithm_state: Mapping[str, Any] | None = None) -> Trainer:
         return Trainer.build(
             "math",
             session.records,
@@ -606,7 +605,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             job_parameters=SAORecipe(**runtime_bindings(component)).parameters_by_kind(),
             root=STUB_ROOT,
             algorithm_state=algorithm_state,
-            samples=TrainerSamples(session.samples),
+            samples=sample_store(storage, "math", session).for_trainer(""),
         )
 
     first_storage = data_storage(tmp_path / "records")
@@ -618,7 +617,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         _sao_report("r2", "i2", 0.5),
     ):
         first_session.records.append(item)
-    first = _trainer(first_session)
+    first = _trainer(first_storage, first_session)
     make_samples(first)
     consumed: set[str] = set()
     # Submission, the checkpoint decision and the job's end are one commit each.
@@ -649,7 +648,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     second_storage = data_storage(tmp_path / "records")
     second_session = second_storage.open("math")
     try:
-        second = _trainer(second_session, prepared.algorithm_state)
+        second = _trainer(second_storage, second_session, prepared.algorithm_state)
         second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=frozenset(consumed))
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         make_samples(second)

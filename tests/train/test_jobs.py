@@ -10,7 +10,7 @@ import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import STUB_ROOT
-from tests.support.samples import data_storage
+from tests.support.samples import open_sample_store
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 
@@ -25,7 +25,6 @@ from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.data import NewItem
 from reef.storage.job_data import read_job_data
-from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
@@ -440,11 +439,11 @@ def train_record(record_id: str, parameters: dict, sample_id: str) -> TrainingRe
 
 @pytest.mark.unit
 def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request(component, tmp_path):
-    session = data_storage(tmp_path / "records").open("math")
+    session, samples = open_sample_store(tmp_path / "records", "math")
     trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     task = write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path)
-    session.samples.data.create(
-        session.samples.owner,
+    samples.data.create(
+        samples.owner,
         [
             NewItem("t1", trajectory.trajectory, {"kind": "trajectory", "scenarios": {"math": "train"}}),
             NewItem("task-a", task, {"kind": "task", "scenarios": {"math": "train"}}),
@@ -458,7 +457,7 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         ),
         job_loop=loop_with(component),
         training_mode="manual",
-        samples=TrainerSamples(session.samples),
+        samples=samples.for_trainer(""),
         # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
         job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
         root=STUB_ROOT,
