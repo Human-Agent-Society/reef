@@ -402,3 +402,11 @@ def migrate_manual_buffers(connection: Connection, schema: str | None) -> None:
     buffers are lost. Run in the caller's schema transaction. A schema without the table is left unchanged."""
     if inspect(connection).has_table("manual_buffer", schema=schema):
         Table("manual_buffer", MetaData(), schema=schema, autoload_with=connection).drop(connection)
+
+
+def migrate_published_tasks(connection: Connection, schema: str | None) -> None:
+    """Drop the old ``published_task`` table: a published task is a candidate with a split, and each published
+    candidate already has its split. Run in the caller's schema transaction. A schema without the table is left
+    unchanged."""
+    if inspect(connection).has_table("published_task", schema=schema):
+        Table("published_task", MetaData(), schema=schema, autoload_with=connection).drop(connection)

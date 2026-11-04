@@ -646,9 +646,9 @@ in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
 
 A task is a Harbor task directory. The database keeps the state of the store
 and the digest of each task directory. The task file store keeps the files,
-text or binary, under that digest. ``publish_task`` records the publication of
-a saved candidate. A ``StoredTask`` holds the task ``name``, its ``split`` and
-its ``files_digest``.
+text or binary, under that digest. ``publish_task`` gives a saved candidate
+its split. The published tasks are the candidates with a split. A
+``StoredTask`` holds the task ``name``, its ``split`` and its ``files_digest``.
 
 .. list-table::
    :header-rows: 1
@@ -673,8 +673,8 @@ its ``files_digest``.
    * - ``generation(generation)``, ``generations()``
      - Return one checkpoint or all checkpoints.
    * - ``tasks(split=None)``
-     - Return the published tasks in publication order. Give a ``split`` to
-       return only the tasks of that split.
+     - Return the published tasks in generation and candidate order, each
+       name once. Give a ``split`` to return only the tasks of that split.
    * - ``path(files_digest)``
      - Return the local task directory of a candidate or a published task,
        for example for ``read_harbor_task`` or ``TaskRolloutRunner.run``. Do not

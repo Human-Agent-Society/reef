@@ -47,6 +47,7 @@ from reef.core.plugins import PluginSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     migrate_manual_buffers,
+    migrate_published_tasks,
     migrate_record_storage,
     migrate_record_trajectories,
     migrate_scenario_settings,
@@ -68,7 +69,7 @@ from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 18
+POSTGRES_SCHEMA_VERSION = 19
 
 
 def postgres_url(database_url: str) -> URL:
@@ -229,13 +230,15 @@ class PostgresRecordDatabase:
                 # model override of its own (RFC #1062). Version 17 drops manual_buffer (migrate_manual_buffers): a
                 # training request names its samples (RFC #1140). Version 18 drops training_sample and
                 # sample_record, and adds stage_record (migrate_training_samples): every training sample is a data
-                # item, and the scenario keeps only its training state (RFC #1140).
+                # item, and the scenario keeps only its training state (RFC #1140). Version 19 drops published_task
+                # (migrate_published_tasks): a published task is a candidate with a split.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 migrate_record_trajectories(connection, self.tables.records, self.tables.nodes)
                 migrate_training_samples(connection, self.sample_train_count_table)
                 migrate_scenario_settings(connection, self.tables.settings)
                 migrate_manual_buffers(connection, schema)
+                migrate_published_tasks(connection, schema)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
                 if versions and versions != [POSTGRES_SCHEMA_VERSION]:
