@@ -345,11 +345,11 @@ class HarnessTrainingComponent(LocalJobComponent):
             raise TypeError("a settled harness step carries the state after it")
         checkpoint = None
         if result.artifact is not None and result.artifact.local_path is not None:
-            tree = directory / TREE_DIR
-            shutil.rmtree(tree, ignore_errors=True)
-            shutil.copytree(result.artifact.local_path, tree)
+            kept = directory / TREE_DIR
+            shutil.rmtree(kept, ignore_errors=True)
+            shutil.copytree(result.artifact.local_path, kept)
             backend.discard_kept_tree()
-            checkpoint = {"path": str(tree)}
+            checkpoint = {"path": str(kept)}
         return {
             "steps": steps + 1,
             "harness": dict(result.state),
