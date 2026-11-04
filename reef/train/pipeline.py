@@ -12,15 +12,16 @@ stages; it does not subclass the pipeline:
   decides which records train, in which record sets and units, and turns each
   record set into samples;
 * the sample-to-job stage (:class:`~reef.sample2job.Sample2Job`) bounds
-  the sample buffer and shapes the samples of the buffer into one job's data.
+  the size of a job and shapes its samples into the job's data.
 
 The pipeline owns what is the same for every recipe: it routes records, saves the samples of each
-ready unit to the scenario's sample store, computes the buffer from the store
-(the first ``buffer_size`` untrained samples in store order, and the rest of
-each group that those touch), hands out the data of one job at a time until the
+ready unit to the scenario's sample store, selects the samples of the next job
+(in ``auto``, the first ``buffer_size`` untrained samples in store order, and the
+rest of each group that those touch; in ``manual``, the samples that the
+request names), hands out the data of one job at a time until the
 trainer acknowledges or releases it, and runs the training modes and the
-training instructions, which the scenario gives it from the instructions queue
-(``reef.train.instructions``). ``ready`` and ``build_job_data`` take a sample count:
+training requests, which the scenario gives it from the training request queue
+(``reef.train.training_requests``). ``ready`` and ``build_job_data`` take a sample count:
 the trainer asks for its stage's ``job_samples``, and a test or a tool may ask
 for another count. Automatic job data holds at least that many samples. It
 takes whole groups, so it can hold more.
@@ -32,8 +33,7 @@ sample. It waits in the store with the other samples, in store order.
 
 A record-to-sample stage can also make samples from no record set, such as the
 generated-task recipe's tasks (``Record2Sample.made_samples``). The pipeline
-stores them like the samples of a unit, and they train from the buffer like any
-other sample. The stage reads each job's end (``Record2Sample.job_ended``).
+stores them like the samples of a unit, and they train like any other sample. The stage reads each job's end (``Record2Sample.job_ended``).
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from reef.core.errors import ManualBufferRefused
 from reef.core.job_data import JobOutcome
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.core.records_types import AgentRecord, RequestType
@@ -150,9 +149,10 @@ class TrainingPipeline:
 
     A ready unit's samples are stored in the scenario's sample store; an uploaded
     trajectory is one stored sample. In ``auto``, ``ready(sample_count)`` is True if
-    and only if the buffer (``buffer``) holds at least ``sample_count`` samples.
-    ``build_job_data(sample_count)`` takes the samples of the buffer, in store
-    order. Samples beyond the buffer stay in the store for later job data.
+    and only if the next automatic job (``auto_entries``) holds at least ``sample_count``
+    samples, and ``build_job_data(sample_count)`` takes them, in store order. Other
+    samples stay in the store for later job data. In ``manual``, a queued request's
+    job takes the samples that it names (``request_entries``).
 
     The trainer-facing methods (``push``, ``ready``, ``build_job_data``, and
     the others) run under the trainer's lock, whichever thread calls them (the
@@ -176,13 +176,12 @@ class TrainingPipeline:
         self.scenario = context.scenario
         #: The record-to-sample stage that turns the records into samples.
         self.record2sample = NoSamples() if record2sample is None else record2sample
-        #: The sample-to-job stage that shapes the samples of the buffer into job data.
+        #: The sample-to-job stage that shapes the samples of a job into its data.
         self.sample2job = NoJobData(context) if sample2job is None else sample2job
         self.supported_training_modes = self.sample2job.supported_training_modes
         self.training_requests: dict[str, TrainingRequest] = {}
         self.consumed_requests: set[str] = set()
-        # The error of each buffered instruction whose step failed; its next job data is a skip row, not a run.
-        #: What the failed step of each failed instruction said, by instruction ID.
+        #: What the failed step of each failed request said, by request ID.
         self.failed_requests: dict[str, str] = {}
         #: The job data handed out and not yet acknowledged. While it exists the
         #: pipeline is ready, hands out the same object, and must not
@@ -193,7 +192,7 @@ class TrainingPipeline:
         self.store = TrainerSamples(MemorySampleStore()) if context.samples is None else context.samples
         #: The sequence of the last stored sample that the pipeline read.
         self.store_sequence = 0
-        #: Whether the pipeline stored a new sample or read a new training instruction since ``produce`` returned.
+        #: Whether the pipeline stored a new sample or read a new training request since ``produce`` returned.
         self.received_input = False
         #: The number of new samples that this pipeline stored.
         self.stored_sample_count = 0
@@ -241,23 +240,14 @@ class TrainingPipeline:
         """The scenario logger shared by its recipe, pipeline, and backend."""
         return self.context.experiment_logger
 
-    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
-        """Select future job data while preserving the handed out job data.
-
-        With ``fill_manual_buffer``, a switch from ``auto`` to ``manual`` adds the buffer that automatic job data
-        would take next to the manual buffer: a person who switches starts from what auto would train. A mode that
-        a reload restores fills nothing. A switch back leaves the manual buffer stored, unused.
-        """
+    def set_training_mode(self, training_mode: str) -> None:
+        """Select future job data while preserving the handed out job data."""
         if training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(
                 f"{type(self.sample2job).__name__} does not implement training_mode={training_mode!r}"
             )
-        if fill_manual_buffer and self.context.training_mode == "auto" and training_mode == "manual":
-            # Manual starts from what automatic job data would take next, with the samples stored since the last read.
-            self.read_store()
-            self.store.insert_into_buffer(self.buffer())
         self.context = replace(self.context, training_mode=training_mode)
         self.record2sample.context_changed(self.context)
 
@@ -266,16 +256,12 @@ class TrainingPipeline:
         self.context = replace(self.context, admitted_report_type=report_type)
         self.record2sample.context_changed(self.context)
 
-    # ------------------------------------------------------------ instructions
+    # ------------------------------------------------------------ requests
 
-    def buffered_requests(self) -> int:
-        """How many instructions are read into memory and not yet consumed."""
-        return len(self.training_requests)
+    def queue_requests(self, requests: Iterable[TrainingRequest]) -> None:
+        """Hold the scenario's queued requests, oldest first: each one that this pipeline did not consume yet.
 
-    def queue_instructions(self, requests: Iterable[TrainingRequest]) -> None:
-        """Hold the scenario's queued instructions, oldest first: each one that this pipeline did not consume yet.
-
-        The scenario reads them from the instructions queue before each step. An instruction that left the queue,
+        The scenario reads them from the training request queue before each step. A request that left the queue,
         because a commit consumed it, leaves the pipeline with its failure.
         """
         queued = {request.id: request for request in requests if request.id not in self.consumed_requests}
@@ -285,23 +271,23 @@ class TrainingPipeline:
         self.failed_requests = {key: value for key, value in self.failed_requests.items() if key in queued}
 
     def request_failure(self, request_id: str) -> str | None:
-        """What the instruction's failed step said, when it failed at all."""
+        """What the request's failed step said, when it failed at all."""
         return self.failed_requests.get(request_id)
 
     def request_failures(self) -> Mapping[str, str]:
-        """The failed instructions still buffered, by id, with what their step said."""
+        """The failed requests that the pipeline still holds, by id, with what their step said."""
         return dict(self.failed_requests)
 
     def mark_request_failed(self, request_id: str, error: str) -> None:
-        """Record that the instruction's step failed with ``error``; its next job data is consumed with a skip row."""
+        """Record that the request's step failed with ``error``; its next job data is consumed with a skip row."""
         self.failed_requests[request_id] = error
 
     def set_request_failures(self, failures: Mapping[str, str]) -> None:
-        """Carry the failed instructions of a replaced pipeline into this one."""
+        """Carry the failed requests of a replaced pipeline into this one."""
         self.failed_requests = dict(failures)
 
     def discard_request(self, request_id: str) -> frozenset[str]:
-        """Consume one queued instruction without job data; the committed row that names it is what recovery skips."""
+        """Consume one queued request without job data; the committed row that names it is what recovery skips."""
         if self.pending is not None and self.pending.request is not None and self.pending.request.id == request_id:
             raise ValueError(f"training request {request_id!r} is reserved; release its job data first")
         if request_id not in self.training_requests:
@@ -310,7 +296,7 @@ class TrainingPipeline:
         return frozenset({request_id})
 
     def consume_request(self, request_id: str) -> None:
-        """Take a queued instruction out of the pipeline; ``queue_instructions`` no longer holds it."""
+        """Take a queued request out of the pipeline; ``queue_requests`` no longer holds it."""
         self.training_requests.pop(request_id, None)
         self.failed_requests.pop(request_id, None)
         self.consumed_requests.add(request_id)
@@ -397,7 +383,7 @@ class TrainingPipeline:
 
     # --------------------------------------------------------- job data cycle
 
-    # Make job data when the buffer holds the trainer's sample count (auto) or an instruction is queued (manual),
+    # Make job data when the trainer's sample count waits (auto) or a request is queued (manual),
     # hand the same data out until it is acknowledged, then count its samples trained.
 
     def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
@@ -453,32 +439,17 @@ class TrainingPipeline:
         """Whether the store holds samples after the store cursor that this trainer reads."""
         return bool(self.store.page(after_sequence=self.store_sequence, limit=1))
 
-    def buffer(self) -> tuple[str, ...]:
-        """The IDs of the samples that the next job data takes, in store order (``buffer_entries``)."""
-        return tuple(stored.sample_id for stored, _ in self.buffer_entries())
+    def auto_entries(self) -> tuple[tuple[StoredSample, Sample], ...]:
+        """The samples that the next automatic job takes, in store order, each with the sample that it trains.
 
-    def buffer_entries(self) -> tuple[tuple[StoredSample, Sample], ...]:
-        """The samples that the next job data takes, in store order, each with the sample that it trains.
-
-        In ``manual``, the buffer is the trainer's manual buffer (``TrainerSamples.manual_buffer``), which only a
-        client changes (``insert_into_buffer``, ``remove_from_buffer``), less the reserved samples and those that
-        this process trained, of the kind of the first of them. Staleness does not apply: the client decides.
-
-        In ``auto``, the candidates are the held samples that no job data reserved, of a kind that the recipe gives
-        job parameters (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), of the
-        kind of the first of them, and that are not stale: a sample that the record-to-sample stage made is stale when
-        the stage's staleness check finds its data too many versions behind (``Record2Sample.is_stale``), and so is every
-        sample of its group. The buffer is the first ``buffer_size`` candidates, or all of them without a
-        ``buffer_size``, and the other candidates of every group that those touch, so a group trains whole.
+        The candidates are the held samples that no job data reserved, of a kind that the recipe gives job parameters
+        (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), of the kind of the first
+        of them, and that are not stale: a sample that the record-to-sample stage made is stale when the stage's
+        staleness check finds its data too many versions behind (``Record2Sample.is_stale``), and so is every sample
+        of its group. The job takes the first ``buffer_size`` candidates, or all of them without a ``buffer_size``,
+        and the other candidates of every group that those touch, so a group trains whole.
         """
-        if self.training_mode == "manual":
-            excluded = {*self.reserved_sample_ids, *self.trained_sample_ids}
-            held = tuple(sample_id for sample_id in self.store.manual_buffer() if sample_id not in excluded)
-            entries = [
-                (stored, sample) for stored in self.store.get(held) if (sample := self.trainable(stored)) is not None
-            ]
-            return tuple(entry for entry in entries if entry[0].kind == entries[0][0].kind)
-        # A kind that the recipe gives no parameters trains only with an instruction that gives them.
+        # A kind that the recipe gives no parameters trains only with a request that gives them.
         kinds = set(self.context.job_parameters) or set(SAMPLE_KINDS)
         unreserved = [
             (stored, sample)
@@ -497,41 +468,47 @@ class TrainingPipeline:
         prefix_ids = {stored.sample_id for stored, _ in prefix}
         return tuple(entry for entry in fresh if entry[0].sample_id in prefix_ids or entry[0].group in groups)
 
-    def insert_into_buffer(self, sample_ids: tuple[str, ...]) -> None:
-        """Add ``sample_ids`` to the manual buffer, also samples that trained before; only in ``manual``.
+    def request_entries(self, request: TrainingRequest) -> tuple[tuple[StoredSample, Sample], ...]:
+        """The samples that ``request`` names and the store holds, in store order, each with the sample that it
+        trains. A sample that trained before trains again; staleness does not apply, since the client chose.
 
-        Raise ``ManualBufferRefused`` in ``auto``, and ``ValueError`` for an ID that the store does not hold, a
-        sample that this trainer cannot train (an eval or an imported task, an upload that its stage does not
-        take), samples of another kind than the buffer's, and a buffer of more than the stage's
-        ``max_job_samples``. Then the buffer does not change.
+        Raise ``ValueError`` when this trainer cannot train one of them (another trainer's sample, an ``eval`` or an
+        imported task that it does not take, an upload that its stage cannot render), for samples of more than one
+        kind, and for more than the stage's ``max_job_samples``.
         """
-        if self.training_mode != "manual":
-            raise ManualBufferRefused("the buffer changes by hand only in manual training mode")
-        stored = {item.sample_id: item for item in self.store.get(sample_ids)}
-        unknown = sorted(set(sample_ids) - set(stored))
+        entries: list[tuple[StoredSample, Sample]] = []
+        untrainable: list[str] = []
+        for stored in self.store.get(request.samples):
+            sample = self.trainable(stored)
+            if sample is None:
+                untrainable.append(stored.sample_id)
+            else:
+                entries.append((stored, sample))
+        if untrainable:
+            raise ValueError(f"this trainer cannot train the samples {sorted(untrainable)}")
+        if len({stored.kind for stored, _ in entries}) > 1:
+            raise ValueError("a request names samples of one kind: trajectories or tasks")
+        limit = self.sample2job.max_job_samples
+        if limit is not None and len(entries) > limit:
+            raise ValueError(f"one job's data holds at most {limit} samples")
+        return tuple(entries)
+
+    def check_request(self, request: TrainingRequest) -> None:
+        """Raise ``ValueError`` unless this trainer can run ``request``: the store holds each sample that it names,
+        and ``request_entries`` takes them; a request that names none needs a stage that
+        ``reads_requests``."""
+        if not request.samples:
+            if not self.sample2job.reads_requests:
+                raise ValueError("the request names no samples to train")
+            return
+        unknown = sorted(set(request.samples) - {stored.sample_id for stored in self.store.get(request.samples)})
         if unknown:
             raise ValueError(f"the scenario holds no samples {unknown}")
-        untrainable = sorted(sample_id for sample_id, item in stored.items() if self.trainable(item) is None)
-        if untrainable:
-            raise ValueError(f"this trainer cannot train the samples {untrainable}")
-        buffered = self.store.get(self.store.manual_buffer())
-        if len({item.kind for item in (*stored.values(), *buffered)}) > 1:
-            raise ValueError("the buffer holds samples of one kind: trajectories or tasks")
-        limit = self.sample2job.max_job_samples
-        if limit is not None and len(set(sample_ids) | {item.sample_id for item in buffered}) > limit:
-            raise ValueError(f"one job's data holds at most {limit} samples")
-        self.trained_sample_ids -= set(sample_ids)
-        self.store.insert_into_buffer(tuple(sample_ids))
+        self.request_entries(request)
 
-    def remove_from_buffer(self, sample_ids: tuple[str, ...]) -> None:
-        """Remove ``sample_ids`` from the manual buffer; only in ``manual``, else ``ManualBufferRefused``."""
-        if self.training_mode != "manual":
-            raise ManualBufferRefused("the buffer changes by hand only in manual training mode")
-        self.store.remove_from_buffer(tuple(sample_ids))
-
-    def buffer_listing(self) -> tuple[Mapping[str, Any], ...]:
-        """The samples of the buffer as JSON: ``sample_id``, ``kind``, ``group``, ``component``, ``train_count``
-        of this trainer, and ``stale``, whether the staleness check finds a record sample's data too old."""
+    def next_job_listing(self) -> tuple[Mapping[str, Any], ...]:
+        """The samples of the next automatic job (``auto_entries``) as JSON: ``sample_id``, ``kind``, ``group``,
+        ``component`` and ``train_count`` of this trainer."""
         return tuple(
             {
                 "sample_id": stored.sample_id,
@@ -539,9 +516,8 @@ class TrainingPipeline:
                 "group": stored.group,
                 "component": stored.component,
                 "train_count": stored.train_count(self.store.trainer),
-                "stale": stored.component is not None and self.record2sample.is_stale((sample,)),
             }
-            for stored, sample in self.buffer_entries()
+            for stored, _ in self.auto_entries()
         )
 
     def advance(self) -> None:
@@ -554,7 +530,7 @@ class TrainingPipeline:
     def produce(self) -> bool:
         """Advance the record-to-sample work: take in background work and store the samples that it made;
         return whether the trainer received new input since the last call: a sample stored here or by ``push`` when
-        a record completed a set, or a training instruction that ``push`` read.
+        a record completed a set, or a training request that ``push`` read.
 
         The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the sample store.
         """
@@ -565,7 +541,7 @@ class TrainingPipeline:
         return stored
 
     def ready(self, sample_count: int | None) -> bool:
-        """Advance the pipeline and check readiness; auto mode needs ``sample_count`` samples in the buffer.
+        """Advance the pipeline and check readiness; auto mode needs ``sample_count`` samples for the next job.
 
         With ``sample_count`` None, held samples never make the pipeline ready in ``auto``.
         """
@@ -575,39 +551,47 @@ class TrainingPipeline:
     def holds_job_data(self, sample_count: int | None) -> bool:
         """Whether the pipeline holds the next job's data now, as ``ready`` decides it, without advancing it.
 
-        Handed out job data holds. Else ``auto`` needs ``sample_count`` samples in the buffer. ``manual`` needs a
-        queued instruction and one or more samples in the manual buffer, whatever ``sample_count``: the instruction
-        trains the samples that the client chose. A stage that reads instructions (``Sample2Job.reads_instructions``)
-        runs an instruction with no sample too.
+        Handed out job data holds. Else ``auto`` needs ``sample_count`` samples for the next job (``auto_entries``).
+        ``manual`` needs a queued request whose samples this trainer trains (``request_entries``), one or
+        more, whatever ``sample_count``. A stage that reads requests (``Sample2Job.reads_requests``) runs a
+        request with no sample too.
         """
         if self.pending is not None:
             return True
-        if self.training_mode == "manual":
-            return bool(self.training_requests) and (self.sample2job.reads_instructions or bool(self.buffer_entries()))
-        return sample_count is not None and len(self.buffer_entries()) >= sample_count
+        if self.training_mode == "auto":
+            return sample_count is not None and len(self.auto_entries()) >= sample_count
+        request = next(iter(self.training_requests.values()), None)
+        if request is None:
+            return False
+        if not request.samples:
+            return self.sample2job.reads_requests
+        try:
+            return bool(self.request_entries(request))
+        except ValueError:
+            # Another trainer's request.
+            return False
 
     def build_job_data(self, sample_count: int | None) -> JobData:
-        """Return the handed out job data, or build the data of the buffer when ``ready`` for ``sample_count``."""
+        """Return the handed out job data, or build the next job's data when ``ready`` for ``sample_count``."""
         if self.pending is None:
             if not self.ready(sample_count):
                 raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
             self.data_number += 1
-            # Manual runs the oldest queued instruction with the samples of the manual buffer; auto leaves the
-            # queue to manual.
+            # Manual runs the oldest queued request with the samples that it names; auto leaves the queue to manual.
             request = next(iter(self.training_requests.values())) if self.training_mode == "manual" else None
-            entries = self.buffer_entries()
+            entries = self.auto_entries() if request is None else self.request_entries(request)
             self.reserved_sample_ids = tuple(stored.sample_id for stored, _ in entries)
             samples = tuple(grouped(stored, sample) for stored, sample in entries)
             if request is None:
                 self.pending = self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
             else:
-                data = self.sample2job.make_job_data(samples, f"{self.scenario}:instruction:{request.id}")
+                data = self.sample2job.make_job_data(samples, f"{self.scenario}:request:{request.id}")
                 self.pending = replace(data, request=request)
         return self.pending
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
         """The commit that submits the job data's job consumed it: return the consumed IDs, ``sample:<id>`` for each
-        stored sample of the data, and the instruction's ID. The commit counts the samples trained, whatever the
+        stored sample of the data, and the request's ID. The commit counts the samples trained, whatever the
         job's outcome; this process no longer holds them."""
         if self.pending is None or self.pending.data_id != data_id:
             raise ValueError(f"unknown data_id {data_id!r}")
@@ -655,10 +639,7 @@ class TrainingPipeline:
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         """Numeric queue state, sampled under the trainer lock without advancing work."""
-        return {
-            "buffered_requests": self.buffered_requests(),
-            **self.record2sample.operational_metrics(),
-        }
+        return dict(self.record2sample.operational_metrics())
 
     def status(self) -> Mapping[str, Any]:
         """Return JSON-safe state that callers need while waiting.
@@ -672,12 +653,7 @@ class TrainingPipeline:
         The stages add terminal outcomes that can never train, so a bounded
         external wait can fail explicitly.
         """
-        state: dict[str, Any] = {
-            "ready_samples": len(self.buffer_entries()),
-            "buffer_size": self.buffer_size,
-        }
-        if "manual" in self.supported_training_modes:
-            state["buffered_requests"] = self.buffered_requests()
+        state = {"ready_samples": len(self.auto_entries()), "buffer_size": self.buffer_size}
         return {**state, **self.record2sample.status(), **self.sample2job.status()}
 
     def close(self) -> None:

@@ -120,7 +120,7 @@ the model endpoint directly.
 
 `terminal_bench.yaml` trains in `manual` mode, so a training request starts
 each step, as `POST /reef/train` does in a deployment. For each step,
-`run.py` queues one request with the dispatcher's `accept_instruction`, the
+`run.py` queues one request with the dispatcher's `accept_request`, the
 call behind that route, and commits the step's job. The method proposes a
 candidate from the search history. Reef evaluates it on the selected suite
 against the incumbent's cached scores, adds it to the history, and commits

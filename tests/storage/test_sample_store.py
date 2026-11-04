@@ -317,6 +317,27 @@ def test_a_start_turns_the_trained_marks_of_generated_tasks_into_train_counts(op
             )
 
 
+def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_storage):
+    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
+        records = session.samples.records
+        schema = session.samples.table.table.schema
+        with records._transaction(write=True) as connection:
+            legacy = Table(
+                "manual_buffer",
+                MetaData(schema=schema),
+                *(Column(key, Text, primary_key=True) for key in ("trainer", "sample_id")),
+            )
+            legacy.create(connection)
+            connection.execute(legacy.insert().values(trainer="", sample_id="t1"))
+
+    with (
+        closing(open_durable_storage()) as storage,
+        closing(storage.open("math")) as session,
+        session.samples.records._transaction(write=False) as connection,
+    ):
+        assert not inspect(connection).has_table("manual_buffer", schema=session.samples.table.table.schema)
+
+
 def test_record_samples_belong_to_their_trainer_and_consume_their_records(storage):
     with closing(storage.open("math")) as session:
         samples = session.samples
@@ -357,34 +378,22 @@ def test_sqlite_adds_the_record_sample_columns_to_an_older_sample_table(tmp_path
         assert session.samples.consumed_record_ids("") == {"r1"}
 
 
-def test_a_trainers_manual_buffer_keeps_store_order_and_a_commit_removes_what_it_trained(storage):
+def test_get_reads_the_stored_samples_of_the_ids_in_store_order(storage):
     with closing(storage.open("math")) as session:
         samples = session.samples
         samples.add_trajectories((("t1", trajectory("a")), ("t2", trajectory("b")), ("t3", trajectory("c"))))
-        samples.insert_into_buffer("", ("t3", "t1"))
-        samples.insert_into_buffer("", ("t1",))
-        samples.insert_into_buffer("other", ("t2",))
-        assert samples.manual_buffer("") == ("t1", "t3")
         assert [item.sample_id for item in samples.get(("t3", "t1", "missing"))] == ["t1", "t3"]
-        samples.remove_from_buffer("", ("t3", "missing"))
-        assert samples.manual_buffer("") == ("t1",)
-        # The commit of the lone trainer trains t1: it leaves that trainer's buffer, not another's.
-        samples.insert_into_buffer("", ("t2",))
-        session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
-        assert samples.manual_buffer("") == ("t2",) and samples.manual_buffer("other") == ("t2",)
 
 
-def test_removing_uploads_keeps_stage_samples_and_train_counts_and_empties_the_buffers(storage):
+def test_removing_uploads_keeps_stage_samples_and_train_counts(storage):
     with closing(storage.open("math")) as session:
         samples = session.samples
         samples.add_trajectories((("t1", trajectory("a")), ("t2", trajectory("b"))))
         samples.add_record_samples("", None, ("record-1",), (("record-1:0", trajectory("made")),))
         session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
-        samples.insert_into_buffer("", ("t2", "record-1:0"))
         last = samples.page()[-1].sequence
         assert samples.remove_uploads(("t2", "t1", "record-1:0", "missing")) == ("t1", "t2")
         assert [stored.sample_id for stored in samples.page()] == ["record-1:0"]
-        assert samples.manual_buffer("") == ("record-1:0",)
         # An upload that comes back gets a new sequence and keeps its train counts.
         samples.add_trajectories((("t1", trajectory("a")),))
         (again,) = samples.get(("t1",))

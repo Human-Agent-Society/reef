@@ -27,6 +27,7 @@ from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     migrate_generated_task_marks,
     migrate_imported_tasks,
+    migrate_manual_buffers,
     migrate_record_storage,
     migrate_record_trajectories,
     migrate_sample_columns,
@@ -45,7 +46,7 @@ from reef.storage.sql_records import (
     sample_record_table,
     trajectory_node_table,
 )
-from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
+from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
@@ -117,7 +118,6 @@ _SCENARIO_SETTING = Table(
 TASK_TABLES = task_tables(_METADATA)
 SAMPLE_TABLE = ScopedTable(sample_table(_METADATA))
 SAMPLE_TRAIN_COUNT_TABLE = ScopedTable(sample_train_count_table(_METADATA))
-MANUAL_BUFFER_TABLE = ScopedTable(manual_buffer_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
@@ -266,6 +266,7 @@ class SQLiteRecordStore(SQLRecordStore):
                 )
                 migrate_generated_task_marks(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
                 migrate_scenario_settings(self._connection, _SCENARIO_SETTING)
+                migrate_manual_buffers(self._connection, None)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -292,7 +293,7 @@ class SQLiteRecordStore(SQLRecordStore):
 
     def sample_store(self, files: TaskFileStore, scenario: str) -> SQLSampleStore:
         """Open the training samples of ``scenario`` in this database, with its task files in ``files``."""
-        return SQLSampleStore(self, SAMPLE_TABLE, SAMPLE_TRAIN_COUNT_TABLE, MANUAL_BUFFER_TABLE, files, scenario)
+        return SQLSampleStore(self, SAMPLE_TABLE, SAMPLE_TRAIN_COUNT_TABLE, files, scenario)
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
@@ -304,7 +305,6 @@ class SQLiteRecordStore(SQLRecordStore):
             self,
             COMMIT_TABLE,
             SAMPLE_TRAIN_COUNT_TABLE,
-            MANUAL_BUFFER_TABLE,
             label=f"{self._database}#scenario_commit",
             durable=self._database != ":memory:",
         )

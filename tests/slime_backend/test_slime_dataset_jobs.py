@@ -202,14 +202,14 @@ def test_dataset_jobs_and_the_slime_family_go_together(tmp_path, dataset_args) -
 
 
 @pytest.mark.unit
-def test_the_dataset_stage_makes_an_instructions_job_with_its_parameters() -> None:
+def test_the_dataset_stage_makes_a_requests_job_with_its_parameters() -> None:
     from reef.recipe.dataset import DatasetJobData
 
     stage = DatasetJobData.__new__(DatasetJobData)
     stage.context = SimpleNamespace(job_parameters={"trajectory": {"method": METHOD.to_dict(), "save_interval": 4}})
     request = TrainingRequest("train", "s", "r", id="r1", parameters={"dataset": {"path": "/d"}})
-    data = JobData("scenario:instruction:r1", (), request=request)
-    assert stage.make_job_data((), "scenario:instruction:r1").samples == ()
+    data = JobData("scenario:request:r1", (), request=request)
+    assert stage.make_job_data((), "scenario:request:r1").samples == ()
     assert stage.job_parameters(data) == {"method": METHOD.to_dict(), "save_interval": 4, "dataset": {"path": "/d"}}
 
 

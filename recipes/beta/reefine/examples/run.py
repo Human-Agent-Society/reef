@@ -3,7 +3,7 @@
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
     ask     - the request goes to ``POST /reef/train`` as a training
-              instruction, and the deployment, in ``training_mode: manual``,
+              request, and the deployment, in ``training_mode: manual``,
               runs one evolve step for it at once
     step    - the service's Reefine method designs the change, writes it
               and reviews it; the evaluation runs the candidate on the
@@ -154,7 +154,7 @@ def training_rows(rows):
 
 
 def request_text_of(row):
-    """The request the step answered, from the row the trainer writes for every instruction step; None otherwise."""
+    """The request the step answered, from the row the trainer writes for every request step; None otherwise."""
     return ((row.get("metrics") or {}).get("training_request") or {}).get("text")
 
 
@@ -285,11 +285,11 @@ def install(artifact_id=None):
 
 
 def ask(text):
-    """The request as a training instruction; the id of the training record the service accepted.
+    """Queue ``text`` as a training request; return the id of the training record that the service accepted.
 
-    The instruction names the installed release and this demo's session, and
+    The request names the installed release and this demo's session, and
     the deployment's manual mode runs one step for it. A refusal (the
-    screens, a mode that takes no instructions) is a stop, with the service's
+    screens, a mode that takes no requests) is a stop, with the service's
     answer saying why."""
     say(f"ask: POST /reef/train {text!r}")
     payload = {"text": text, "session": SCENARIO, "artifact_id": installed_artifact() or ""}
@@ -307,7 +307,7 @@ def wait_for_step(client, text, before, deadline):
     """The catalog and the training row whose request is ``text``, once that step settled; every new row is
     printed as it lands. ``(rows, None)`` at the deadline.
 
-    Manual mode answers the accepted instructions oldest first, so a request
+    Manual mode answers the accepted requests oldest first, so a request
     a stopped run left queued gets its step before ours; that row is printed
     as an earlier request's and the wait goes on for the row carrying our
     text."""
