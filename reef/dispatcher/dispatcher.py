@@ -52,7 +52,7 @@ from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
-from reef.storage.samples import StoredSample
+from reef.storage.samples import ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import WorkItem
@@ -760,6 +760,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         with self.locked_scenario(scenario) as current:
             samples = self.storage.sample_store(scenario, current.store)
             return () if samples is None else samples.page(after_sequence=after_sequence, limit=limit)
+
+    def listed_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[ListedSample, ...]:
+        """The listing of the scenario's stored samples after ``after_sequence``, at most ``limit``, without content."""
+        with self.locked_scenario(scenario) as current:
+            samples = self.storage.sample_store(scenario, current.store)
+            return () if samples is None else samples.listing(after_sequence=after_sequence, limit=limit)
 
     @staticmethod
     def trainer_of(current: Scenario, component: str | None) -> Trainer:
