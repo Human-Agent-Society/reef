@@ -20,7 +20,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.data import check_owner
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import ScenarioSamples, TrainingState
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
 
@@ -98,11 +98,16 @@ class ScenarioStore(ABC):
 
     @property
     @abstractmethod
-    def samples(self) -> SampleStore:
-        """The training samples of this scenario, such as the trajectories that clients uploaded.
+    def training_state(self) -> TrainingState:
+        """The training state of this scenario: the train counts of its samples and the records that its stages
+        consumed. It closes with this session, and survives a restart if ``durable`` is true."""
 
-        The store closes with this session. Its samples survive a restart if ``durable`` is true.
-        """
+    @property
+    def samples(self) -> ScenarioSamples | None:
+        """The training samples of this scenario: the items of the deployment's data store that it uses (RFC #1140).
+        A session that ``DataScenarioStorage`` opens has them; a session of a storage without a data store has none,
+        and its trainers keep their samples in memory."""
+        return None
 
     @property
     @abstractmethod

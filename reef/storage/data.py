@@ -106,8 +106,8 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
 
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
     defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
-    ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); any other kind
-    refuses it. Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
+    ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
+    when a trainer's stage made it (``check_stage_origin``). Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
@@ -127,8 +127,25 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("an artifact item's metadata.origin names its artifact_id")
         created["origin"] = origin
     elif "origin" in metadata:
-        raise ValueError(f"only a record or an artifact has metadata.origin, not a {kind}")
+        created["origin"] = check_stage_origin(metadata["origin"])
     return created
+
+
+def check_stage_origin(value: object) -> dict[str, Any]:
+    """Return ``value`` as the ``origin`` of a trajectory or a task that a trainer's stage made, or raise
+    ``ValueError``: ``{scenario, component, records}``, the scenario (the rules of ``check_owner``), the trainer's
+    component (``""`` for the only trainer of a scenario) and the IDs of the records that the sample came from."""
+    if not isinstance(value, Mapping) or set(value) != {"scenario", "component", "records"}:
+        raise ValueError("a stage sample's metadata.origin must be {scenario, component, records}")
+    check_owner(value["scenario"])
+    records = value["records"]
+    if (
+        not isinstance(value["component"], str)
+        or not isinstance(records, list)
+        or not all(isinstance(record_id, str) and record_id for record_id in records)
+    ):
+        raise ValueError("metadata.origin.component is a string and metadata.origin.records a list of record IDs")
+    return {"scenario": value["scenario"], "component": value["component"], "records": list(records)}
 
 
 def merge_patch(target: Any, patch: Any) -> Any:
@@ -289,6 +306,11 @@ class DataStore(Plugin, ABC):
     * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
       ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
       are given. Without ``content``, each item's ``content`` is None, and the store does not read it.
+    * ``scenario_items(owner, scenario, after, limit)`` returns the items of ``owner`` that ``scenario`` uses, with
+      content, each with the sequence of its use, in the order of those sequences: the uses after ``after``, at most
+      ``limit``. Each use of an item by a scenario has its own sequence, which increases across the store: a new use,
+      also of an older item, and a use whose split changes get a new one. A trainer reads its scenario's items with
+      it.
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
@@ -346,6 +368,11 @@ class DataStore(Plugin, ABC):
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
     ) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def scenario_items(
+        self, owner: str, scenario: str, *, after: int = 0, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[tuple[int, StoredItem], ...]: ...
 
     @abstractmethod
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]: ...
@@ -451,8 +478,9 @@ def prepared_items(
 class MemoryDataStore(DataStore):
     """A data store in memory, for tests and for a deployment that keeps nothing.
 
-    It keeps the items of each owner in a dict from ID to item, and the next sequence. Task directories go to the
-    task file store that it is given. ``trajectories`` links the record items of each owner and origin scenario as
+    It keeps the items of each owner in a dict from ID to item, the use sequence of each item, scenario and split
+    (``uses``), and the next sequence, which items and uses share. Task directories go to the task file store that it
+    is given. ``trajectories`` links the record items of each owner and origin scenario as
     they are created; a deleted item stays there as a link of later calls.
     """
 
@@ -460,7 +488,22 @@ class MemoryDataStore(DataStore):
         self.task_files = task_files
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
+        self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
         self.next_sequence = 1
+
+    def take_sequence(self) -> int:
+        """The next sequence of an item or a use."""
+        self.next_sequence += 1
+        return self.next_sequence - 1
+
+    def write_uses(self, owner: str, item_id: str, scenarios: Mapping[str, str]) -> None:
+        """Keep the use of each unchanged scenario and split, and give each new one its sequence."""
+        for key in [key for key in self.uses if key[:2] == (owner, item_id) and key[2] not in scenarios]:
+            self.uses.pop(key)
+        for scenario, split in scenarios.items():
+            used = self.uses.get((owner, item_id, scenario))
+            if used is None or used[0] != split:
+                self.uses[(owner, item_id, scenario)] = (split, self.take_sequence())
 
     @classmethod
     def from_config(
@@ -489,9 +532,9 @@ class MemoryDataStore(DataStore):
                 result.append(existing)
                 continue
             content = copy.deepcopy(dict(item.content)) if isinstance(item.content, Mapping) else None
-            created = StoredItem(self.next_sequence, owner, item.item_id, metadata, digest, content)
-            self.next_sequence += 1
+            created = StoredItem(self.take_sequence(), owner, item.item_id, metadata, digest, content)
             stored[item.item_id] = created
+            self.write_uses(owner, item.item_id, metadata["scenarios"])
             if content is not None and metadata["kind"] == "record" and content["request_type"] == "inference":
                 scenario = metadata["origin"]["scenario"]
                 self.trajectories.setdefault((owner, scenario), TrajectoryIndex()).add(
@@ -533,6 +576,18 @@ class MemoryDataStore(DataStore):
         )
         return tuple(item if content else replace(item, content=None) for item in matched[:limit])
 
+    def scenario_items(
+        self, owner: str, scenario: str, *, after: int = 0, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[tuple[int, StoredItem], ...]:
+        check_query(owner, None, scenario, after, limit)
+        stored = self.items.get(owner, {})
+        used = sorted(
+            (sequence, item_id)
+            for (use_owner, item_id, use_scenario), (_, sequence) in self.uses.items()
+            if use_owner == owner and use_scenario == scenario and sequence > after
+        )
+        return tuple((sequence, stored[item_id]) for sequence, item_id in used[:limit])
+
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)
         stored = self.items.get(owner, {})
@@ -552,10 +607,12 @@ class MemoryDataStore(DataStore):
         ]
         for item in updated:
             stored[item.item_id] = item
+            self.write_uses(owner, item.item_id, item.scenarios)
         return tuple(updated)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
+        self.write_uses(owner, item_id, {})
         return self.items.get(owner, {}).pop(item_id, None) is not None
 
     def task_path(self, item: StoredItem) -> Path:

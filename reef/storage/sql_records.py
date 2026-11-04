@@ -26,7 +26,6 @@ from sqlalchemy import (
     Table,
     Text,
     and_,
-    exists,
     func,
     select,
     true,
@@ -90,14 +89,12 @@ def batches[T](values: Iterable[T], size: int = IN_LIST_SIZE) -> Iterable[list[T
 
 @dataclass(frozen=True)
 class RecordTables:
-    """Tables for record bodies, trajectory nodes, retry hashes, consumption, capacity losses, scenario settings, and
-    the records that stored samples hold.
+    """Tables for record bodies, trajectory nodes, retry hashes, consumption, capacity losses and scenario settings.
 
     The adapter owns schema types, constraints, indexes, and migrations. Table
     columns retain the names consumed by SQLRecordStore; backend-specific
     generated keys or indexes may be added without replacing record operations.
-    ``nodes`` is the node table of ``TrajectoryNodes``, and ``sample_records`` the table of
-    ``sample_record_table``.
+    ``nodes`` is the node table of ``TrajectoryNodes``.
     """
 
     records: Table
@@ -106,7 +103,6 @@ class RecordTables:
     eviction: Table
     settings: Table
     nodes: Table
-    sample_records: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
     def condition(self, table: Table) -> ColumnElement[bool]:
@@ -180,24 +176,6 @@ def trajectory_node_table(metadata: MetaData, name: str, *scope_columns: Column[
         *segment_columns,
         Index(f"{name}_by_prefix", *scope_names, "scenario", "list_sha256"),
         Index(f"{name}_by_record", *scope_names, "scenario", "agent_record_id"),
-    )
-
-
-def sample_record_table(metadata: MetaData, *scope_columns: Column[str]) -> Table:
-    """Define the ``sample_record`` table in ``metadata``: the records that a stored sample holds.
-
-    A row ``(sample_id, agent_record_id)`` says that the stored sample ``sample_id`` renders its trajectory from the
-    record ``agent_record_id`` (``SQLSampleStore``), so capacity eviction keeps the record. ``scope_columns`` are the
-    columns of a store's namespace, as for ``trajectory_node_table``. An index finds the samples of a record.
-    """
-    scope_names = [column.name for column in scope_columns]
-    return Table(
-        "sample_record",
-        metadata,
-        *scope_columns,
-        Column("sample_id", Text, primary_key=True),
-        Column("agent_record_id", Text, primary_key=True),
-        Index("sample_record_by_record", *scope_names, "agent_record_id"),
     )
 
 
@@ -543,17 +521,6 @@ class SQLRecordRetention:
             )
         return total
 
-    def unheld(self) -> ColumnElement[bool]:
-        """The condition of the record rows that no stored sample holds (``sample_record_table``); eviction takes only
-        those, so a stored sample can always render its trajectory."""
-        records, held = self._records, self._tables.sample_records
-        return ~exists(
-            select(held.c.agent_record_id).where(
-                held.c.agent_record_id == records.c.agent_record_id,
-                *(held.c[name] == records.c[name] for name in self.scope_names()),
-            )
-        )
-
     def eviction_sizes(self) -> EvictionSizes:
         """New eviction sizes for this database's records and trajectory nodes."""
         return EvictionSizes(self._tables.nodes, self.scope_names())
@@ -565,8 +532,7 @@ class SQLRecordRetention:
     def page(
         self, connection: Connection, sizes: EvictionSizes, *, after_time: float, after_sequence: int, limit: int = 256
     ) -> tuple[tuple[float, int, int], ...]:
-        """Read the oldest records after a position that no stored sample holds, across scenarios, using their stored
-        timestamps.
+        """Read the oldest records after a position, across scenarios, using their stored timestamps.
 
         Return ``(created_at, sequence, size)`` of each record, where ``size`` is the bytes that evicting it frees
         after the records that ``sizes`` counted before; ``sizes`` counts each returned record.
@@ -584,7 +550,6 @@ class SQLRecordRetention:
                 .where(
                     self._tables.condition(records),
                     tuple_(records.c.created_at, records.c.sequence) > (after_time, after_sequence),
-                    self.unheld(),
                 )
                 .order_by(records.c.created_at, records.c.sequence)
                 .limit(limit)
@@ -598,15 +563,14 @@ class SQLRecordRetention:
     def evict(self, connection: Connection, sequences: Sequence[int]) -> tuple[tuple[str, RecordLoss], ...]:
         """Delete bodies and persist retry hashes and loss totals in the same transaction.
 
-        The trajectory nodes that no remaining record needs are deleted with the records. A record that a stored sample
-        holds stays. The adapter serializes this operation with record writes. Loss totals are per storage generation and scenario; their bytes are the
+        The trajectory nodes that no remaining record needs are deleted with the records. The adapter serializes this operation with record writes. Loss totals are per storage generation and scenario; their bytes are the
         bytes that the eviction frees. Metadata never includes payloads.
         """
         tables = self._tables
         rows = (
             connection.execute(
                 select(self._records)
-                .where(tables.condition(self._records), self._records.c.sequence.in_(sequences), self.unheld())
+                .where(tables.condition(self._records), self._records.c.sequence.in_(sequences))
                 .order_by(self._records.c.created_at, self._records.c.sequence)
             )
             .mappings()
@@ -1155,36 +1119,6 @@ class SQLRecordStore(RecordStore):
             path.append((str(row["agent_record_id"]), int(row["entry_count"])))
             node = None if row["parent_sequence"] is None else int(row["parent_sequence"])
         return trajectory_calls(path[::-1])
-
-    def records_by_id(
-        self, connection: Connection, scenario: str, agent_record_ids: Iterable[str]
-    ) -> dict[str, AgentRecord]:
-        """The stored records of ``scenario`` among ``agent_record_ids``, by ID, read in ``connection``; an ID that the
-        store does not keep is absent."""
-        ids = list(dict.fromkeys(agent_record_ids))
-        if not ids:
-            return {}
-        records = self._tables.records
-        rows = (
-            connection.execute(
-                select(records).where(
-                    self._tables.condition(records), records.c.scenario == scenario, records.c.agent_record_id.in_(ids)
-                )
-            )
-            .mappings()
-            .all()
-        )
-        return {record.agent_record_id: record for record in self._decode(connection, rows)}
-
-    def hold_records(self, connection: Connection, sample_id: str, agent_record_ids: Iterable[str]) -> None:
-        """Write in ``connection`` that the stored sample ``sample_id`` holds the records ``agent_record_ids``:
-        capacity eviction keeps them (``sample_record_table``)."""
-        rows = [
-            {**self._tables.scope, "sample_id": sample_id, "agent_record_id": record_id}
-            for record_id in dict.fromkeys(agent_record_ids)
-        ]
-        if rows:
-            self._insert_if_absent(connection, self._tables.sample_records, rows)
 
     def loss(self, scenario: str) -> RecordLoss:
         table = self._tables.eviction

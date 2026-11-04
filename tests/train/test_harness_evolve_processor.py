@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.support.samples import data_storage
 from tests.support.task_service_stubs import task_for
 
 from reef.artifact import SnapshotRef
@@ -26,8 +27,8 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample.traces import InferenceSamples, TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import SampleStore, TrainerSamples, consumed_sample_id
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.data import NewItem
+from reef.storage.samples import ScenarioSamples, TrainerSamples, consumed_sample_id
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import JobData
 
@@ -242,7 +243,7 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     assert retention == frozenset({"inf-1", "inf-2"})
 
     consumed = processor.acknowledge(batch.data_id)
-    assert consumed == frozenset({"sample:inf-1:0", "sample:inf-2:0"})
+    assert consumed == frozenset({"sample:s.inf-1:0", "sample:s.inf-2:0"})
     assert not processor.ready(2)
 
 
@@ -266,7 +267,7 @@ def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> 
         processor.push(_inference(f"inf-{index}", {"messages": []}))
     batch = processor.build_job_data(2)
     assert [source_record_id(s) for s in batch.samples] == ["inf-0", "inf-1"]
-    assert processor.acknowledge(batch.data_id) == {"sample:inf-0:0", "sample:inf-1:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:s.inf-0:0", "sample:s.inf-1:0"}
     # The overflow sample waits for the next job data.
     assert processor.status()["ready_samples"] == 1
     assert not processor.ready(2)
@@ -274,16 +275,20 @@ def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> 
     assert [source_record_id(s) for s in processor.build_job_data(2).samples] == ["inf-2", "inf-3"]
 
 
-def add_tasks(samples: SampleStore, root: Path, split: str, *names: str) -> None:
-    """Add one Harbor task per name to ``split`` of the scenario's imported tasks, each with its own files."""
-    directories = tuple(
-        write_harbor_task(task_for(name, "record-1", 9000 + sum(name.encode())), root / split) for name in names
-    )
-    samples.add_tasks(directories, split)
+def add_tasks(samples: ScenarioSamples, root: Path, split: str, *names: str) -> None:
+    """Import one Harbor task per name into ``split`` of the scenario, each with its own files."""
+    metadata = {"kind": "task", "scenarios": {samples.scenario: split}}
+    tasks = [
+        NewItem(name, write_harbor_task(task_for(name, "record-1", 9000 + sum(name.encode())), root / split), metadata)
+        for name in names
+    ]
+    samples.data.create(samples.owner, tasks)
 
 
-def offline_pipeline(samples: SampleStore, *, job_samples: int, buffer_size: int | None = None) -> TrainingPipeline:
-    """An offline pipeline of the scenario whose sample store is ``samples``, in ``auto``."""
+def offline_pipeline(
+    samples: ScenarioSamples, *, job_samples: int, buffer_size: int | None = None
+) -> TrainingPipeline:
+    """An offline pipeline of the scenario whose samples are ``samples``, in ``auto``."""
     context = PipelineContext("offline", samples=TrainerSamples(samples))
     return TrainingPipeline(context, sample2job=TrainTaskJobData(context, buffer_size, job_samples))
 
@@ -294,7 +299,7 @@ def task_names(data: JobData) -> list[str]:
 
 
 def test_imported_train_tasks_reach_the_job_data_through_the_buffer_and_each_trains_once(tmp_path: Path) -> None:
-    session = SQLiteScenarioStorage(tmp_path / "records").open("offline")
+    session = data_storage(tmp_path / "records").open("offline")
     add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
     add_tasks(session.samples, tmp_path / "tasks", "eval", "held-out")
     pipeline = offline_pipeline(session.samples, job_samples=2)
@@ -318,7 +323,7 @@ def test_imported_train_tasks_reach_the_job_data_through_the_buffer_and_each_tra
 
 
 def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
-    session = SQLiteScenarioStorage(tmp_path / "records").open("s")
+    session = data_storage(tmp_path / "records").open("s")
     context = PipelineContext("s", samples=TrainerSamples(session.samples))
     pipeline = TrainingPipeline(
         context,
@@ -340,7 +345,7 @@ def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
 
 
 def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_commit_trained(tmp_path: Path) -> None:
-    session = SQLiteScenarioStorage(tmp_path / "records").open("offline")
+    session = data_storage(tmp_path / "records").open("offline")
     add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
     first = offline_pipeline(session.samples, job_samples=1)
     durable = first.build_job_data(1)

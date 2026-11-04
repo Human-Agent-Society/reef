@@ -10,6 +10,7 @@ from typing import Any
 
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.samples import data_storage
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
@@ -24,7 +25,6 @@ from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobCommit, JobLoop, JobLoopState
@@ -393,11 +393,14 @@ def _dispatcher(
             **seeds,
         )
     records = tmp_path / "records" if records_dir is None else records_dir
+    storage = data_storage(records)
     dispatcher = Dispatcher(
         recipe,
         repository,
         local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(records),
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        data_store=storage.data,
         experiment_tracker=experiment_tracker,
         hold_local_cycles=hold_local_cycles,
         # The work queues live beside the records, so a restarted dispatcher finds the running job, as in a deployment.

@@ -46,14 +46,11 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
-    migrate_generated_task_marks,
-    migrate_imported_tasks,
     migrate_manual_buffers,
     migrate_record_storage,
     migrate_record_trajectories,
-    migrate_sample_columns,
     migrate_scenario_settings,
-    migrate_uploaded_trajectories,
+    migrate_training_samples,
 )
 from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -64,15 +61,14 @@ from reef.storage.sql_records import (
     ScopedTable,
     SQLRecordRetention,
     SQLRecordStore,
-    sample_record_table,
     trajectory_node_table,
 )
-from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
+from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 17
+POSTGRES_SCHEMA_VERSION = 18
 
 
 def postgres_url(database_url: str) -> URL:
@@ -167,10 +163,7 @@ def _record_tables(metadata: MetaData) -> RecordTables:
         Column("name", Text, primary_key=True),
         Column("value_json", Text, nullable=False),
     )
-    sample_records = sample_record_table(
-        metadata, Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True)
-    )
-    return RecordTables(records, consumed, receipts, eviction, settings, nodes, sample_records)
+    return RecordTables(records, consumed, receipts, eviction, settings, nodes)
 
 
 class PostgresRecordDatabase:
@@ -197,7 +190,7 @@ class PostgresRecordDatabase:
         version = Table("schema_version", metadata, Column("version", Integer, primary_key=True))
         self.tables = _record_tables(metadata)
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
-        self.sample_table = sample_table(metadata, foreign_key="record_store.storage_id")
+        self.stage_record_table = stage_record_table(metadata, foreign_key="record_store.storage_id")
         self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
@@ -234,22 +227,13 @@ class PostgresRecordDatabase:
                 # Version 15 adds sample_record, the records whose trajectory nodes a stored sample renders from.
                 # Version 16 deletes the model_config scenario settings (migrate_scenario_settings): a scenario has no
                 # model override of its own (RFC #1062). Version 17 drops manual_buffer (migrate_manual_buffers): a
-                # training request names its samples (RFC #1140).
+                # training request names its samples (RFC #1140). Version 18 drops training_sample and
+                # sample_record, and adds stage_record (migrate_training_samples): every training sample is a data
+                # item, and the scenario keeps only its training state (RFC #1140).
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 migrate_record_trajectories(connection, self.tables.records, self.tables.nodes)
-                migrate_sample_columns(connection, self.sample_table)
-                migrate_uploaded_trajectories(
-                    connection, self.sample_table, self.sample_train_count_table, self.commit_table
-                )
-                migrate_imported_tasks(
-                    connection,
-                    self.sample_table,
-                    self.sample_train_count_table,
-                    self.commit_table,
-                    self.task_tables.published,
-                )
-                migrate_generated_task_marks(connection, self.sample_train_count_table)
+                migrate_training_samples(connection, self.sample_train_count_table)
                 migrate_scenario_settings(connection, self.tables.settings)
                 migrate_manual_buffers(connection, schema)
                 for index in self.tables.records.indexes:
@@ -422,15 +406,13 @@ class PostgresRecordStore(SQLRecordStore):
         tables = replace(self._database.task_tables, scope={"storage_id": self.storage_id})
         return SQLTaskStorage(self, tables, files, scenario)
 
-    def sample_store(self, files: TaskFileStore, scenario: str) -> SQLSampleStore:
-        """Open the training samples of this store generation, with the task files of ``scenario`` in ``files``."""
+    def training_state(self) -> SQLTrainingState:
+        """Open the training state of this store generation."""
         scope = {"storage_id": self.storage_id}
-        return SQLSampleStore(
+        return SQLTrainingState(
             self,
-            ScopedTable(self._database.sample_table, scope=scope),
             ScopedTable(self._database.sample_train_count_table, scope=scope),
-            files,
-            scenario,
+            ScopedTable(self._database.stage_record_table, scope=scope),
         )
 
     def evaluation_store(self) -> SQLEvaluationStore:
@@ -509,7 +491,7 @@ class PostgresScenarioStorage(ScenarioStorage):
                     records,
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
-                    samples=records.sample_store(self.task_files, scenario),
+                    training_state=records.training_state(),
                     evaluations=records.evaluation_store(),
                 )
             except BaseException:

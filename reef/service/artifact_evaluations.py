@@ -12,7 +12,7 @@ rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No 
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
 artifact on request (``InferenceRuntime.serves_artifacts_on_request``), with a Harbor agent, on the Harbor tasks of the eval
-split of the scenario's imported tasks (its sample store). It refuses a harness artifact, and a model artifact on any
+split of the scenario's imported tasks (its samples). It refuses a harness artifact, and a model artifact on any
 other runtime.
 """
 
@@ -461,9 +461,10 @@ class ArtifactEvaluations:
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             request, _artifact, model = self.checked(current, artifact_id, settings)
+            samples = current.store.samples
             held = {
                 stored.sample_id: stored.sample.task_path
-                for stored in current.store.samples.imported_tasks(split="eval")
+                for stored in (() if samples is None else samples.imported_tasks(split="eval"))
                 if isinstance(stored.sample, TaskSample)
             }
         unknown = sorted(set(request.task_names) - set(held))

@@ -178,7 +178,7 @@ class HarnessJobLoop(JobLoop):
     checkpoint names the parts of the tree that it changed.
 
     Values: ``component`` and ``scenario`` as ``JobLoop``. ``releases`` reads the scenario component's head, whose
-    release is the job's start. ``eval_samples`` is the sample store whose imported eval split the job evaluates on,
+    release is the job's start. ``eval_samples`` holds the scenario's samples, whose imported eval split the job evaluates on,
     or ``None`` for the configured tasks. ``layout`` is the adapter's tree layout.
 
     Operations: ``submit(state, data, parameters)`` is ``JobLoop.submit`` with ``harness_parameters(data,
@@ -435,7 +435,7 @@ class HarnessEvolutionRecipe(Recipe):
             evaluation_section = section.get("evaluation", {})
             if isinstance(evaluation_section, Mapping) and "task_store" in evaluation_section:
                 raise ValueError(
-                    "evolution.evaluation.task_store is gone: imported tasks are in the scenario's sample store; "
+                    "evolution.evaluation.task_store is gone: imported tasks are task items that the scenario uses; "
                     "set evolution.evaluation.imported_tasks: true"
                 )
             evolution = EvolutionSettings.from_config(
@@ -601,7 +601,7 @@ class HarnessEvolutionRecipe(Recipe):
         if releases is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
         if self.evaluation.imported_tasks and samples is None:
-            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the sample store of a scenario session")
+            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the samples of a scenario session")
         if self.harness_component is None:
             raise RecipeConfigError("harness evolution has no training component to run its steps")
         return Trainer.build(

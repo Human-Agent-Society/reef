@@ -16,6 +16,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
@@ -40,7 +41,7 @@ from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
-from reef.storage.samples import consumed_sample_id
+from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import Trainer, TrainStepResult
@@ -177,11 +178,14 @@ def _root_of(recipe: CompositeRecipe, directory: Path) -> ScenarioRoot:
 
 
 def _serve(recipe: CompositeRecipe, tmp_path: Path, *, hold_local_cycles: bool = False) -> Dispatcher:
+    storage = data_storage(tmp_path / "records")
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        data_store=storage.data,
         coordination=memory_coordination(),
         hold_local_cycles=hold_local_cycles,
     )
@@ -452,7 +456,11 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         assert "component" not in rows[1]
         # The config component runs no step: the one commit is the harness's job submission, naming the rows it
         # consumed and the harness's sample of them.
-        assert scenario.store.history()[-1].consumed_ids == {"i1", "r1", consumed_sample_id("harness:r1:0")}
+        assert scenario.store.history()[-1].consumed_ids == {
+            "i1",
+            "r1",
+            consumed_sample_id(stage_item_id("agent", "harness:r1:0")),
+        }
         # The job ended in submit: its checkpoint and its end follow, and consume nothing.
         checkpoint = None
         while scenario.trainer_for("harness").job_running:

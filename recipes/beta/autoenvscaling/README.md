@@ -406,7 +406,7 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
 
    `generator_config` is the generator's `config` from the example, with its environment references filled in. `state_dir` is the deployment's state directory, so the generations save each valid task in the task store that the example's `storage` uses. The band is only recorded in the generation report. A restart continues with the next generation.
 
-2. **Train from the saved tasks.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it stores their train tasks in the scenario's sample store and trains them, up to `buffer_size` tasks in one job.
+2. **Train from the saved tasks.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it saves their train tasks as task items that the scenario uses and trains them, up to `buffer_size` tasks in one job.
 
    ```bash
    reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2sample.config.rounds 4
