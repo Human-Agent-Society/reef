@@ -968,9 +968,9 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     recipe = training_recipe()
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
     built = recipe.build_pipeline(PipelineContext("one"))
-    assert isinstance(built.record2sample, GeneratedTaskSamples) and built.record2sample.worker is None, (
-        "no round runs"
-    )
+    assert (
+        isinstance(built.record2sample, GeneratedTaskSamples) and built.record2sample.worker is None
+    ), "no round runs"
     assert isinstance(built.sample2job, GeneratedTaskJobData)
     assert (built.sample2job.job_samples, built.buffer_size) == (1, 4), "a job takes one to four tasks"
     built.close()
