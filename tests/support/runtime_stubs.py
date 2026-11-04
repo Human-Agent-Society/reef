@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from reef.artifact import Artifact, DefaultStart
 from reef.core.evaluation import PolicyModel
-from reef.core.job_data import JobData
+from reef.core.job_data import Sample
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ReleaseFormat
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceBackend
 from reef.inference.serving import OpenedEngines, ServingEngines
+from reef.storage.job_data_store import read_job_data
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
@@ -121,19 +123,29 @@ class StubTrainingComponent(TrainingComponent):
         self.closed = True
 
 
+@dataclass(frozen=True)
+class RecordedJob:
+    """What a component got for one job: the data of its job data directory, and the ID of its training request."""
+
+    data_id: str
+    samples: tuple[Sample, ...]
+    request_id: str | None
+
+
 class RecordingComponent(StubTrainingComponent):
-    """A training component that keeps the data of every job it ran, in ``batches``, and saves no checkpoint, so each
-    job ends at once in ``submit``.
+    """A training component that keeps what it got for every job it ran, in ``batches``, and saves no checkpoint, so
+    each job ends at once in ``submit``.
 
     Purpose: a test of how a trainer reads, batches and commits records, which trains nothing worth publishing.
     """
 
-    def __init__(self, batches: list[JobData] | None = None, *, name: str = "recording") -> None:
+    def __init__(self, batches: list[RecordedJob] | None = None, *, name: str = "recording") -> None:
         super().__init__(name=name, shares_scenarios=True)
-        self.batches: list[JobData] = [] if batches is None else batches
+        self.batches: list[RecordedJob] = [] if batches is None else batches
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.batches.append(job.data)
+        data = read_job_data(job.data_dir)
+        self.batches.append(RecordedJob(data.data_id, data.samples, job.request_id))
         return ()
 
 

@@ -188,6 +188,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
                 "reef.storage.data",
                 "reef.storage.data_queue",
                 "reef.storage.data_sync",
+                "reef.storage.job_data_store",
                 "reef.storage.record_items",
                 "reef.storage.records",
                 "reef.storage.samples",

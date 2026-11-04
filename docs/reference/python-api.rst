@@ -1384,7 +1384,7 @@ receives the samples of the `next job
 the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
 when the recipe omits constant-reward groups from its output. Samples stored
 after the job data was built wait for later job data.
-``output_schema`` declares the job data type. On the stage, ``exclusive_sources``
+On the stage, ``exclusive_sources``
 controls source release for terminal group/duplicate reports.
 
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
@@ -1610,8 +1610,9 @@ Migration: the former policy/trace sample types and their batch subclasses are
 removed. Construct ATIF trajectory samples directly and return ``JobData(id, samples)``.
 Use ``group_id`` on each member for grouped job data. Read training fields from
 ``item.training`` and rewards through ``trajectory_reward(item)``.
-``output_schema`` defaults to ``JobData``. Keep job data serializable, with
-no handles to services, files, threads or models.
+The component reads job data as a job data directory, so only the fields of
+``JobData`` reach it. Keep job data serializable, with no handles to
+services, files, threads or models.
 
 Chat rendering
 ~~~~~~~~~~~~~~
@@ -2170,7 +2171,12 @@ Training jobs and components
 these fields:
 
 - ``job_id`` and ``backend``, the name of the training component.
-- ``data``, a ``JobData``: the data snapshot that the job trains.
+- ``data``, a ``JobDataRef``: the job data directory that the job trains.
+  ``data_dir`` is its local path, which ``read_job_data`` reads, and
+  ``data_uri`` its URI. ``data_id``, ``sample_count`` and ``kind`` describe
+  the data.
+- ``request_id``: the ID of the training request that the job trains, or
+  ``None``.
 - ``start``: the directory of the weights the job starts from, or ``None``
   for the backend's base model.
 - ``parameters``: the backend's parameters. Reef reads none of them; they

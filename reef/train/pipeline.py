@@ -206,11 +206,6 @@ class TrainingPipeline:
         self.set_training_mode(context.training_mode)
 
     @property
-    def output_schema(self) -> type[JobData]:
-        """The job data type ``build_job_data`` returns; the trainer validates it."""
-        return self.sample2job.output_schema
-
-    @property
     def required_request_types(self) -> frozenset[RequestType]:
         """The kinds of record that the trainer gives the pipeline: the stage's."""
         return self.sample2job.required_request_types

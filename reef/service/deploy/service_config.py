@@ -22,6 +22,7 @@ from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.storage.data import DataStore
+from reef.storage.job_data_store import JobDataStore
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -277,6 +278,20 @@ class ServiceConfig:
         public_path=("storage", "task_file_dir"),
         help="Directory of the generated task files, or the local cache of a plugin store.",
     )
+    #: ``local``, or a ``JobDataStore`` plugin: ``package.module:ClassName`` or module and config.
+    job_data_backend: str | Mapping[str, Any] = config_option(
+        "local",
+        public_path=("storage", "job_data_backend"),
+        help="Store of the data directory of each training job: local, or a JobDataStore plugin reference.",
+    )
+    job_data_dir: str = config_option(
+        ".reef/job-data",
+        public_path=("storage", "job_data_dir"),
+        help=(
+            "Directory of the job data directories, or the local cache of a plugin store. Control and the training "
+            "service must share it."
+        ),
+    )
     task_import_manifest: str | None = config_option(
         None,
         public_path=("task_import", "manifest"),
@@ -442,6 +457,10 @@ class ServiceConfig:
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
             TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
+        if self.job_data_backend != "local":
+            if isinstance(self.job_data_backend, str) and ":" not in self.job_data_backend:
+                raise ValueError("storage.job_data_backend must be local or 'package.module:ClassName'")
+            JobDataStore.reference(self.job_data_backend, setting="storage.job_data_backend")
         if (self.task_import_manifest is None) != (self.task_import_tasks_root is None):
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":

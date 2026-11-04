@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 
 import pytest
 from tests.support._threshold_processor import ThresholdJobData
@@ -15,26 +14,17 @@ from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
 
 
-@dataclass(frozen=True)
-class ExampleJobData(JobData):
-    values: tuple[str, ...] = field(kw_only=True)
-
-
 class ExamplePipeline(TrainingPipeline):
     @property
     def required_request_types(self) -> frozenset[RequestType]:
         return frozenset({RequestType.REPORT})
-
-    @property
-    def output_schema(self) -> type[ExampleJobData]:
-        return ExampleJobData
 
     def __init__(self, context: PipelineContext, events: list[str]) -> None:
         # The stage gives the job size only: one report is one job.
         super().__init__(context, sample2job=ThresholdJobData(context, None, 1))
         self.events = events
         self.items: list[AgentRecord] = []
-        self.pending: ExampleJobData | None = None
+        self.pending: JobData | None = None
 
     def push(self, item: AgentRecord) -> None:
         self.events.append(f"push:{item.agent_record_id}")
@@ -43,9 +33,9 @@ class ExamplePipeline(TrainingPipeline):
     def ready(self, sample_count: int) -> bool:
         return len(self.items) >= sample_count
 
-    def build_job_data(self, sample_count: int) -> ExampleJobData:
+    def build_job_data(self, sample_count: int) -> JobData:
         self.events.append("build")
-        self.pending = ExampleJobData(data_id="batch-1", values=(self.items[0].agent_record_id,))
+        self.pending = JobData(data_id="batch-1")
         return self.pending
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
@@ -64,8 +54,7 @@ class ExampleComponent(StubTrainingComponent):
         self.events = events
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        assert isinstance(job.data, ExampleJobData)
-        self.events.append(f"submit:{job.data.data_id}")
+        self.events.append(f"submit:{job.data_id}")
         return ()
 
 

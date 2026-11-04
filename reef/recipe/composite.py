@@ -50,6 +50,7 @@ from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.storage.job_data_store import JobDataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import ScenarioSamples, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
@@ -289,14 +290,17 @@ class CompositeRecipe(Recipe):
                     raise ValueError(f"two job components of this composite are named {component.name!r}")
         return tuple(found.values())
 
-    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> CompositeRecipe:
+    def with_job_components(
+        self, components: Mapping[str, TrainingComponent], job_data: JobDataStore
+    ) -> CompositeRecipe:
         check_job_components(self, components)
         return replace(
             self,
             training_component=(None if self.training_component is None else components[self.training_component.name]),
+            job_data=job_data,
             components={
                 name: recipe.with_job_components(
-                    {component.name: components[component.name] for component in recipe.job_components()}
+                    {component.name: components[component.name] for component in recipe.job_components()}, job_data
                 )
                 for name, recipe in self.components.items()
             },

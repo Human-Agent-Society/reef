@@ -36,8 +36,10 @@ Training components
 -------------------
 
 A ``TrainingJob`` is one bounded job. It has a job ID, the backend name, the
-start, the job data it trains, the backend's parameters and the scenario whose
-trainer submits it. The start is the
+start, the job data directory that it trains (``data_dir``, and its URI
+``data_uri``; see `The job data directory
+<processors.rst#the-job-data-directory>`__), the backend's parameters and the
+scenario whose trainer submits it. The start is the
 directory of the weights that the job starts from, or ``None`` for the base
 model. Reef reads none of the parameters. The component contract is:
 

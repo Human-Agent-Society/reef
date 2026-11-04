@@ -14,6 +14,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
+from reef.storage.job_data_store import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -104,7 +105,10 @@ def test_a_shared_runtime_trains_each_scenario_on_the_one_training_component(tmp
         _train(dispatcher, "math")
         _train(dispatcher, "code")
         # Each scenario submitted its own job of its own records, and each one's checkpoint became its head.
-        assert [source_record_id(job.data.samples[0]) for job in component.submitted] == ["math-i1", "code-i1"]
+        assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.submitted] == [
+            "math-i1",
+            "code-i1",
+        ]
         for scenario, version in (("math", "w1"), ("code", "w2")):
             head = dispatcher.current_artifact(scenario).materialize()
             assert (Path(head.local_path) / VERSION_FILE).read_text() == version

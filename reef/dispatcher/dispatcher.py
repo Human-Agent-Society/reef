@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import tempfile
 import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -50,6 +51,7 @@ from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
+from reef.storage.job_data_store import JobDataStore, LocalJobDataStore
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
@@ -109,6 +111,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         workers: ServiceWorkers | None = None,
         components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
         work_retention_seconds: float = 7 * 24 * 3600.0,
+        job_data: JobDataStore | None = None,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -133,6 +136,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
         that this process runs. A process that runs every service and keeps no state across restarts, such as an
         embedded dispatcher, gives it ``reef.storage.sql_coordination.memory_coordination()``.
+
+        ``job_data``: the store of the job data directories (``storage.job_data_backend``). Control writes the
+        directory of each training job, the training service opens it, and control deletes it with the job's item.
+        None keeps them in a new temporary directory, for a process that keeps no state across restarts.
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
         the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
 
@@ -164,12 +171,21 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.work_retention_seconds = work_retention_seconds
         # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
         # training service runs one worker for each of them.
+        #: The store of the job data directories of the training jobs.
+        self.job_data = (
+            LocalJobDataStore(Path(tempfile.mkdtemp(prefix="reef-job-data-"))) if job_data is None else job_data
+        )
         job_components = recipe.job_components()
         if job_components:
             if self.services.runs_training:
                 for component in job_components:
                     self.workers.add(
-                        TrainingJobWorker(component, self.queue, worker_id=instance_id(f"training-{component.name}"))
+                        TrainingJobWorker(
+                            component,
+                            self.queue,
+                            self.job_data,
+                            worker_id=instance_id(f"training-{component.name}"),
+                        )
                     )
             recipe = recipe.with_job_components(
                 {
@@ -177,7 +193,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                         component, self.queue, owns_component=not self.services.runs_training
                     )
                     for component in job_components
-                }
+                },
+                self.job_data,
             )
         #: The deployment's recipe; its trainers submit to the jobs queue.
         self.recipe = recipe
@@ -231,7 +248,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
-            self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
+            self.workers.add(
+                EndedWorkSweeper(
+                    coordination.work_queue, retention_seconds=work_retention_seconds, job_data=self.job_data
+                )
+            )
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
         if self.services.runs_inference and recipe.runtime is not None and recipe.runtime.serves_requests:

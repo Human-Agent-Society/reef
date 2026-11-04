@@ -71,6 +71,7 @@ from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
+from reef.storage.job_data_store import JobDataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -78,7 +79,13 @@ from reef.train.backend import ComponentArtifacts
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingComponent
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
-from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
+from reef.train.harness_backend.component import (
+    HISTORY_DIR,
+    STEPS_DIR,
+    HarnessSteps,
+    HarnessTrainingComponent,
+    request_parameter,
+)
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
 from reef.train.jobs import JobCommit, JobLoop, JobLoopState
@@ -196,20 +203,22 @@ class HarnessJobLoop(JobLoop):
         component: TrainingComponent,
         *,
         scenario: str,
+        job_data: JobDataStore | None = None,
         releases: ComponentArtifacts,
         eval_samples: TrainerSamples | None,
         layout: TreeLayout,
     ) -> None:
-        super().__init__(component, scenario=scenario)
+        super().__init__(component, scenario=scenario, job_data=job_data)
         self.releases = releases
         self.eval_samples = eval_samples
         self.layout = layout
 
     def harness_parameters(self, data: JobData, state: JobLoopState) -> dict[str, Any]:
-        """``{component, head_artifact_id, evaluation_tasks, previous_job}``: the component's name, its starting artifact ID,
-        the eval split's task paths in arrival order or ``None``, and the ID of the last job that the trainer
-        committed the end of (``state.last_job``), whose harness state the job continues, or ``None`` before the
-        first."""
+        """``{component, head_artifact_id, evaluation_tasks, previous_job, request}``: the component's name, its
+        starting artifact ID, the eval split's task paths in arrival order or ``None``, the ID of the last job that the
+        trainer committed the end of (``state.last_job``), whose harness state the job continues, or ``None`` before
+        the first, and the training request that the job runs (``request_parameter``) or ``None``. The job data
+        directory holds no request, so the harness backend reads it here."""
         tasks = (
             None
             if self.eval_samples is None
@@ -224,6 +233,7 @@ class HarnessJobLoop(JobLoop):
             "head_artifact_id": self.releases.head().artifact_id,
             "evaluation_tasks": tasks,
             "previous_job": None if state.last_job is None else state.last_job.job_id,
+            "request": None if data.request is None else request_parameter(data.request),
         }
 
     def submit(self, state: JobLoopState, data: JobData, parameters: Mapping[str, Any]) -> JobCommit:
@@ -372,9 +382,11 @@ class HarnessEvolutionRecipe(Recipe):
         """The harness component, whose jobs are this recipe's steps."""
         return () if self.harness_component is None else (self.harness_component,)
 
-    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> HarnessEvolutionRecipe:
+    def with_job_components(
+        self, components: Mapping[str, TrainingComponent], job_data: JobDataStore
+    ) -> HarnessEvolutionRecipe:
         check_job_components(self, components)
-        return replace(self, harness_component=next(iter(components.values())))
+        return replace(self, harness_component=next(iter(components.values())), job_data=job_data)
 
     def runs_offline(self) -> bool:
         """Whether the steps roll out the imported train tasks (``TrainTaskJobData``)."""
@@ -611,6 +623,7 @@ class HarnessEvolutionRecipe(Recipe):
             job_loop=HarnessJobLoop(
                 self.harness_component,
                 scenario=scenario,
+                job_data=self.job_data,
                 releases=releases,
                 eval_samples=samples if self.evaluation.imported_tasks else None,
                 layout=get_adapter(self.evolution.adapter).layout,

@@ -165,7 +165,7 @@ The trainer calls it on its own thread, under its lock; no call may block:
   ``auto``.
 - ``build_job_data(sample_count)``: give the samples of the next job (see `The
   next job <#the-next-job>`__) to ``make_job_data``, in use order, and
-  reserve them. The trainer validates the job data against ``output_schema``.
+  reserve them.
   The same job data stays reserved until it is acknowledged or released
   (``release_job_data``). A released sample can train in a later job.
 - ``acknowledge(data_id)``: the commit that submits the job consumed that job
@@ -288,6 +288,43 @@ request names (see `Training modes <#training-modes>`__).
 ``job_samples``. A stage adds an entry only when a terminal outcome cannot become job data and an
 external runner must stop waiting (TTTD reports a complete mixed-artifact
 step as an invariant failure).
+
+The job data directory
+~~~~~~~~~~~~~~~~~~~~~~
+
+A training component does not get the job data as an object. Before Reef
+submits a job, it writes the job's data as a directory, and the component
+reads the directory (RFC #1140). The jobs queue keeps only a reference to it.
+The directory holds the samples, not the training request: Reef keeps the
+request for its own accounting.
+
+Format 1 of a directory:
+
+.. code:: text
+
+   job.json        {"format": 1, "data_id", "sample_count", "kind"}
+   samples.jsonl   one sample per line, in job order
+   tasks/<n>/<directory name>/
+
+- ``job.json`` gives the job data's ID, its number of samples, and the kind
+  of its samples: ``trajectory``, ``task``, or ``null`` without samples.
+- Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``. A task's
+  ``task_path`` is relative to the directory: ``tasks/<n>/<directory name>``,
+  where ``n`` counts the tasks from 0.
+- ``tasks/`` holds a copy of each task's directory.
+
+A directory does not change after Reef writes it. A component reads it with
+``reef.storage.job_data_store.read_job_data(job.data_dir)``. A component that
+runs the job elsewhere, such as in a container, gives that place
+``job.data_uri`` and mounts or copies the directory there.
+
+The deployment setting ``storage.job_data_backend`` selects the store of the
+directories: ``local`` keeps them in ``storage.job_data_dir``, which control
+and the training service must share. A ``JobDataStore`` plugin keeps them
+elsewhere, for example in an object store. Control deletes the directory of a
+job when it deletes the job's item from the jobs queue. A queued job of an
+earlier Reef holds its data inline: the training service writes its directory
+when it takes the job.
 
 Slow work
 ---------

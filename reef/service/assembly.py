@@ -50,6 +50,7 @@ from reef.service.request_service import RequestService
 from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
+from reef.storage.job_data_store import JobDataStore, LocalJobDataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -306,6 +307,15 @@ def build_segment_store(settings: ServiceConfig) -> SegmentStore | None:
     return SegmentStore.referenced_class(reference).from_config(reference.config, directory=directory)
 
 
+def build_job_data_store(settings: ServiceConfig) -> JobDataStore:
+    """The store of the job data directories that ``storage.job_data_backend`` names, in ``storage.job_data_dir``."""
+    directory = Path(settings.job_data_dir)
+    if settings.job_data_backend == "local":
+        return LocalJobDataStore(directory)
+    reference = JobDataStore.reference(settings.job_data_backend, setting="storage.job_data_backend")
+    return JobDataStore.referenced_class(reference).from_config(reference.config, directory=directory)
+
+
 def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> DataStore:
     """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it, and owning the
     segment store of ``storage.segment_backend``.
@@ -502,6 +512,7 @@ def build_dispatcher(
             ),
             components=components,
             work_retention_seconds=settings.work_retention_s,
+            job_data=build_job_data_store(settings),
         )
         if dispatcher.services.runs_evaluation:
             # Each worker serves its rollout's candidate itself, from the scenario's repository.

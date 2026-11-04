@@ -13,6 +13,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.served_models import ScenarioModel, ServedArtifact
 from reef.observability import NullExperimentTracker
 from reef.scenario.factory import ScenarioFactory
+from reef.storage.job_data_store import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -100,4 +101,6 @@ def test_training_waits_for_the_selected_artifact_then_excludes_old_samples(defe
         assert result is not None
         scenario.commit(result)
         (job,) = scenario.training_component.submitted
-        assert [sample.source_agent_record_ids for sample in job.data.samples] == [("math-i2", "math-r2")]
+        assert [sample.source_agent_record_ids for sample in read_job_data(job.data_dir).samples] == [
+            ("math-i2", "math-r2")
+        ]

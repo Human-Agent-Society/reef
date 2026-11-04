@@ -40,6 +40,7 @@ from reef.service.assembly import (
     build_app,
     build_artifact_backend,
     build_dispatcher,
+    build_job_data_store,
     default_served_url,
     open_scenario_storage,
     open_service_coordination,
@@ -200,9 +201,13 @@ class TrainingApp(ComponentApp):
             if not components:
                 raise ValueError(f"recipe {settings.recipe!r} submits no training job, so it has no training service")
             coordination = open_service_coordination(settings)
+            job_data = build_job_data_store(settings)
             workers.extend(
                 TrainingJobWorker(
-                    component, coordination.work_queue, worker_id=instance_id(f"training-{component.name}")
+                    component,
+                    coordination.work_queue,
+                    job_data,
+                    worker_id=instance_id(f"training-{component.name}"),
                 )
                 for component in components
             )

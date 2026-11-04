@@ -14,6 +14,7 @@ starts from the job's last saved checkpoint, whether or not it serves.
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.job_data import JobData, JobOutcome
+from reef.storage.job_data_store import JobDataStore, LocalJobDataStore
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainStepResult
 
@@ -135,17 +137,21 @@ class JobLoop:
 
     ``component`` runs the jobs; ``scenario`` is the non-empty name of the
     trainer's scenario, which is part of each job's identity, so two scenarios
-    never share a job. ``submit`` and
+    never share a job. ``job_data`` keeps the job data directory of each job that ``submit`` submits; None keeps
+    them in a new temporary directory, for a process that keeps no state across restarts. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
     """
 
-    def __init__(self, component: TrainingComponent, *, scenario: str) -> None:
+    def __init__(self, component: TrainingComponent, *, scenario: str, job_data: JobDataStore | None = None) -> None:
         if not isinstance(component, TrainingComponent):
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
         self.component = component
         self.scenario = scenario
+        self.job_data = (
+            LocalJobDataStore(Path(tempfile.mkdtemp(prefix="reef-job-data-"))) if job_data is None else job_data
+        )
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
@@ -170,14 +176,24 @@ class JobLoop:
 
         The job starts from ``state.start``, under ``job_id``. ``parameters``
         is the mapping that the pipeline's sample-to-job stage gives for
-        ``data``, which encodes as JSON. Raise ``ValueError`` when ``state``
-        has a running job.
+        ``data``, which encodes as JSON. The loop writes ``data`` as the job's data directory first. The directory
+        holds no request: the job keeps only its ID (``TrainingJob.request_id``). Raise ``ValueError`` when
+        ``state`` has a running job.
         """
         if state.job is not None:
             raise ValueError("a weight trainer runs one job at a time")
         backend = self.component.name
         job_id = self.job_id(state, state.start, data, parameters)
-        self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters, scenario=self.scenario))
+        job = TrainingJob(
+            job_id,
+            backend,
+            state.start,
+            self.job_data.ref(job_id, data),
+            parameters,
+            scenario=self.scenario,
+            request_id=None if data.request is None else data.request.id,
+        )
+        self.component.submit(job)
         submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
         return JobCommit(
