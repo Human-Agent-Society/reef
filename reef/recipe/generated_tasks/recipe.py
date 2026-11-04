@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.generated_tasks.objective import TaskGroupObjective
 from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskSamples
 from reef.train.pipeline import PipelineSpec
 
@@ -50,7 +49,8 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective=TaskGroupObjective.name)
+        # The Slime component does not import this recipe. A dotted reference imports the objective there.
+        return WeightTrainingSpec(objective="reef.recipe.generated_tasks:TaskGroupObjective")
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Self
@@ -959,9 +961,19 @@ def training_recipe(**fields: Any) -> GeneratedTaskRecipe:
     )
 
 
+def test_the_objective_resolves_in_a_process_that_never_imported_the_recipe() -> None:
+    # The Slime component trains each job in a driver process of its own, which does not import this recipe.
+    code = "import sys; from reef.train.algos.registry import resolve_objective; print(resolve_objective(sys.argv[1]).name)"
+    reference = GeneratedTaskRecipe.training_spec().objective
+    resolved = subprocess.run([sys.executable, "-c", code, reference], capture_output=True, text=True, timeout=120)
+    assert resolved.returncode == 0, resolved.stderr[-2000:]
+    assert resolved.stdout.strip() == "task_group"
+
+
 def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     spec = GeneratedTaskRecipe.training_spec()
-    assert GeneratedTaskRecipe.pipeline_spec().sample2job is GeneratedTaskJobData and spec.objective == "task_group"
+    assert GeneratedTaskRecipe.pipeline_spec().sample2job is GeneratedTaskJobData
+    assert spec.objective == "reef.recipe.generated_tasks:TaskGroupObjective"
     assert spec.loss_family == "importance_sampling"
     assert TaskGroupObjective.rollout_unit == "sample"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
