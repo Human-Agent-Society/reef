@@ -69,7 +69,7 @@ def test_step_record_http_contract(tmp_path: Path) -> None:
             response = await client.post("/reef/train", json=train_request("add a rule"), headers=headers)
             assert response.status == 200
             await wait_for_rows(scenario, 2)
-            url = "/reef/harness/releases/1/records"
+            url = "/reef/harness/artifacts/1/records"
             assert (await client.get(url)).status == 401
             response = await client.get(url, headers=headers)
             assert response.status == 200 and response.headers["Cache-Control"] == "no-store"
@@ -82,8 +82,8 @@ def test_step_record_http_contract(tmp_path: Path) -> None:
             assert json.loads((await response.json())["text"]) == {"rules": 1}
             assert (await client.get(url, params={"path": "../secret.json"}, headers=headers)).status == 400
             assert (await client.get(url, params={"path": "absent.json"}, headers=headers)).status == 404
-            assert (await client.get("/reef/harness/releases/99/records", headers=headers)).status == 404
-            response = await client.get("/reef/harness/releases/0/records", headers=headers)
+            assert (await client.get("/reef/harness/artifacts/99/records", headers=headers)).status == 404
+            response = await client.get("/reef/harness/artifacts/0/records", headers=headers)
             assert (await response.json())["status"] == "not_recorded"
         finally:
             await client.close()
@@ -148,7 +148,7 @@ def test_failed_method_records_remain_linked_after_reload_and_retry(tmp_path: Pa
                 else:
                     # The failed request committed step 1, so the retry is step 2 and its record is named so.
                     assert Path(metrics["step_record"]).name == "2"
-                url = f"/reef/harness/releases/{step}/records"
+                url = f"/reef/harness/artifacts/{step}/records"
                 response = await client.get(url, headers=headers)
                 assert (await response.json())["status"] == "retained"
                 response = await client.get(url, params={"path": "calls.json"}, headers=headers)

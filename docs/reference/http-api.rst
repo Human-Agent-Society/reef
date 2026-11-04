@@ -167,9 +167,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/artifacts``                                                  | harness artifact catalog, oldest first            |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases``                                                   | legacy harness operation catalog, oldest first    |
-+----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/page``                                       | one HTML page per catalog step: why, the method's |
+| ``GET /reef/harness/artifacts/{step}/page``                                      | one HTML page per catalog step: why, the method's |
 |                                                                                  | summary, what changed, result, the method's       |
 |                                                                                  | notes, setup, chain                               |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -179,7 +177,7 @@ Routes
 | ``GET /reef/harness/requests/{record_id}/progress``                              | the same reading as JSON: the step's phase, for a |
 |                                                                                  | client with no browser to open the page           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/records``                                    | retained raw step file inventory or file body     |
+| ``GET /reef/harness/artifacts/{step}/records``                                   | retained raw step file inventory or file body     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/adapters``                                                   | every harness adapter this process resolves       |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -187,7 +185,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 
 In the split layout, the harness service answers ``GET /reef/harness``,
-``POST /reef/harness/import``, ``GET /reef/harness/releases`` and
+``POST /reef/harness/import``, ``GET /reef/harness/artifacts`` and
 ``GET /reef/harness/adapters``; control answers the other harness routes (`Run
 the services in separate processes
 <../user-guide/operate.rst#run-the-services-in-separate-processes>`__).
@@ -216,7 +214,7 @@ Headers
 | ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
 |                                   | runs itself. It is served like any other call, but no   |
 |                                   | record is kept. The response has no ``training`` block; |
-|                                   | ``x-reef-release-id`` names the artifact that answered. |
+|                                   | ``x-reef-artifact-id`` names the answering artifact.    |
 |                                   | The call must not stream (HTTP 400). Only the service   |
 |                                   | token opens it.                                         |
 +-----------------------------------+---------------------------------------------------------+
@@ -1188,7 +1186,7 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
 - ``attempt_count``: how many times a training worker took the job, an
   integer from 0.
 - ``checkpoints``: the saved checkpoints that the job reported, in step
-  order, each ``{step, path, release_path, metrics}``.
+  order, each ``{step, path, artifact_path, metrics}``.
 - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job
   finished, else ``null``.
 - ``error``: the error of a failed job, or the last retryable error of a
@@ -1230,7 +1228,7 @@ For example:
      "attempt_count": 1,
      "checkpoints": [
        {"step": 1, "path": "/jobs/4f2a9c1e/step-1",
-        "release_path": "/jobs/4f2a9c1e/step-1/release", "metrics": {"loss": 0.41}}
+        "artifact_path": "/jobs/4f2a9c1e/step-1/release", "metrics": {"loss": 0.41}}
      ],
      "result": {"state": "finished", "metrics": {"loss": 0.41}},
      "error": null,
@@ -1536,7 +1534,7 @@ The record-to-record stage excludes aborted records from sample creation and
 training, including when a report references their IDs directly or retained
 records are replayed after a restart.
 
-Every inference response also carries ``x-reef-release-id``: the ID of the
+Every inference response also carries ``x-reef-artifact-id``: the ID of the
 artifact that answered. It does not report harness releases. A client learns
 of a new harness release from the harness routes (`Harness artifacts`_).
 
@@ -1552,7 +1550,7 @@ Artifact of a recorded response
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An inference record holds the provider exchange and ``artifact_id``, the
-artifact that answered: the same ID as ``x-reef-release-id``. The staleness
+artifact that answered: the same ID as ``x-reef-artifact-id``. The staleness
 check reads it (see `Staleness
 <../developer-guide/processors.rst#staleness>`__). Serving returns no training
 tensors. Reef removes any ``training`` block that an engine handler returns
@@ -1674,17 +1672,15 @@ Harness artifacts
 |                                | artifact ID) for several components;                          |
 |                                | ``x-reef-artifact-id`` identifies the tree                    |
 +--------------------------------+---------------------------------------------------------------+
-| ``GET /reef/harness/artifacts``| ``{scenario, artifacts}``, oldest first, containing only      |
-|                                | artifacts of the harness component; see `Artifacts`_          |
-+--------------------------------+---------------------------------------------------------------+
-| ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first: the creation and      |
-|                                | every training step, also a step that published nothing       |
-|                                | (``checkpoint: false``). Each row has ``artifact_id``,        |
-|                                | ``component``, ``active`` (true on exactly one row, the       |
-|                                | active release) and ``activated`` (true when the row's        |
-|                                | artifact has been active at some time); each training row     |
-|                                | carries the evaluation metrics of its step and ``page_path``, |
-|                                | its step's page with the query a browser opens it by          |
+| ``GET /reef/harness/artifacts``| ``{scenario, artifacts}``, oldest first: the creation and     |
+|                                | every training step of the harness component, also a step     |
+|                                | that published nothing (``checkpoint: false``). Each row has  |
+|                                | ``artifact_id``, ``component``, ``active`` (true on exactly   |
+|                                | one row, the active artifact) and ``activated`` (true when    |
+|                                | the row's artifact has been active at some time); each        |
+|                                | training row carries the evaluation metrics of its step and   |
+|                                | ``page_path``, its step's page with the query a browser opens |
+|                                | it by                                                         |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
@@ -1701,13 +1697,6 @@ Harness artifacts
 
 The manifest and catalog reads take ``x-reef-scenario`` and never create a
 scenario. An unknown scenario or one without a harness tree answers HTTP 404.
-
-The older ``/reef/harness/releases`` catalog and the harness fields
-``release_id`` and ``parent_release_id`` remain for pinned
-clients. New callers use the artifact catalog and artifact fields. Inference
-responses retain ``x-reef-release-id`` as an alias of ``x-reef-artifact-id``.
-Harness responses retain the older snapshot revision in ``x-reef-release-id``.
-Neither header selects an artifact on a request.
 
 ``?form=`` chooses what ``files`` holds, path to text:
 
@@ -2210,16 +2199,12 @@ A weights update does not create another harness artifact. Each row's
 ``parent_artifact_id`` identifies the artifact from which it derives, when known.
 Every listed artifact can be requested through ``?artifact_id=``.
 
-The older ``/reef/harness/releases`` catalog also includes training steps
-that created no artifact. Its release and composed-release fields are
-compatibility fields for existing clients, not additional artifact identities.
-
 Version page
 ~~~~~~~~~~~~
 
-``GET /reef/harness/releases/{step}/page`` answers one self-contained HTML
+``GET /reef/harness/artifacts/{step}/page`` answers one self-contained HTML
 page (``text/html``) for one catalog row. ``step`` is the row's position in
-``GET /reef/harness/releases``, oldest first, with the creation row as 0. A
+``GET /reef/harness/artifacts``, oldest first, with the creation row as 0. A
 rejected step creates no artifact. The step number therefore identifies the
 page independently of its artifact.
 
@@ -2236,7 +2221,7 @@ HTTP 404.
 .. code:: bash
 
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: code-repair" \
-     "$REEF_URL/reef/harness/releases/3/page" > harness-step-3.html
+     "$REEF_URL/reef/harness/artifacts/3/page" > harness-step-3.html
 
 Request page
 ~~~~~~~~~~~~
@@ -2280,7 +2265,7 @@ Page links
 A browser sends no header, so the two pages also take the scenario and a
 credential as query parameters, ``?scenario=<name>&key=<page key>``; a header
 wins when present. Clients never build these links: ``POST /reef/train``
-answers ``page_path`` for the request page, and ``GET /reef/harness/releases``
+answers ``page_path`` for the request page, and ``GET /reef/harness/artifacts``
 one per row for its step's page. A client prints its service URL followed by
 that path.
 
@@ -2301,7 +2286,7 @@ itself is never read from a query: ``?token=`` is HTTP 401 on every route, and
 Retained step files
 ~~~~~~~~~~~~~~~~~~~
 
-``GET /reef/harness/releases/{step}/records`` returns the raw file inventory
+``GET /reef/harness/artifacts/{step}/records`` returns the raw file inventory
 of the same catalog step's record directory, authenticated and
 scenario-scoped like the version page. The response is
 ``{"status": "retained", "files": [{"path": "calls.json", "bytes": 123}]}``.
@@ -2480,7 +2465,7 @@ requests may use GET, POST or DELETE with Authorization, Content-Type and
 x-reef-scenario headers. Cookies are not enabled through CORS.
 
 CORS headers also cover errors and streamed responses, exposing
-``x-reef-agent-record-id``, ``x-reef-release-id`` and ``x-reef-artifact-version``
+``x-reef-agent-record-id``, ``x-reef-artifact-id`` and ``x-reef-artifact-version``
 to the browser. Clients without an Origin header keep their existing behavior.
 A browser can also require local network permission or HTTPS. An origin that
 Reef allows does not override browser policy.

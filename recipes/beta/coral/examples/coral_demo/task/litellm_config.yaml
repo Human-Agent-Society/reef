@@ -13,5 +13,5 @@ model_list:
 litellm_settings:
   drop_params: true
   # Surface the upstream's response headers (prefixed) so the reef layer can
-  # capture the x-reef-agent-record-id / x-reef-release-id receipts.
+  # capture the x-reef-agent-record-id / x-reef-artifact-id receipts.
   return_response_headers: true

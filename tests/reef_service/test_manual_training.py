@@ -757,7 +757,7 @@ def raising_method(calls, *, poison="poison", error="poison method", with_traces
 def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_failed(tmp_path, open_dispatcher):
     """The candidate reached its evaluation and the scorer raised: the skip row says the step failed during its
     evaluation, and keeps the candidate's change and the method's notes, so the pages show what was tried."""
-    from reef.service.release_page import failed_words
+    from reef.service.artifact_page import failed_words
 
     def method(workspace, services):
         workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))

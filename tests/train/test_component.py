@@ -9,7 +9,7 @@ from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact.files import DirectoryFiles
-from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
+from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.train.algos.signals import PreparedJob
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob, job_id_for
 from reef.train.types import JobData
@@ -123,14 +123,14 @@ def test_a_prepared_training_step_is_a_train_step_with_a_payload_or_a_skip(value
 )
 def test_a_release_format_sets_the_adapter_rank_and_modules_exactly_for_adapters(values, message):
     with pytest.raises(ValueError, match=message):
-        ReleaseFormat(*values)
+        ArtifactFormat(*values)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("value", [ReleaseFormat("full"), ReleaseFormat("adapter", 16, ("q_proj", "v_proj"))])
+@pytest.mark.parametrize("value", [ArtifactFormat("full"), ArtifactFormat("adapter", 16, ("q_proj", "v_proj"))])
 def test_a_release_format_reads_back_what_it_writes(value):
-    assert ReleaseFormat.from_dict(value.to_dict()) == value
-    assert ReleaseFormat.from_dict({"layout": "full"}) == ReleaseFormat("full")
+    assert ArtifactFormat.from_dict(value.to_dict()) == value
+    assert ArtifactFormat.from_dict({"layout": "full"}) == ArtifactFormat("full")
 
 
 @pytest.mark.unit
@@ -145,7 +145,7 @@ def test_a_release_format_reads_back_what_it_writes(value):
 )
 def test_a_release_format_refuses_another_shape(value, message):
     with pytest.raises(ValueError, match=message):
-        ReleaseFormat.from_dict(value)
+        ArtifactFormat.from_dict(value)
 
 
 @pytest.mark.unit
@@ -153,16 +153,16 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     full, adapter = tmp_path / "full", tmp_path / "adapter"
     full.mkdir()
     (adapter / ADAPTER_DIR).mkdir(parents=True)
-    full_weights = StubTrainingComponent(release_format=ReleaseFormat("full"))
+    full_weights = StubTrainingComponent(artifact_format=ArtifactFormat("full"))
     with pytest.raises(ValueError, match=r"config\.json and weight files"):
-        full_weights.check_release(DirectoryFiles(full))
+        full_weights.check_artifact(DirectoryFiles(full))
     (full / "config.json").write_text("{}")
     (full / "model-00001-of-00002.safetensors").write_bytes(b"w")
-    full_weights.check_release(DirectoryFiles(full))
+    full_weights.check_artifact(DirectoryFiles(full))
 
-    rank_8 = StubTrainingComponent(release_format=ReleaseFormat("adapter", 8, ("q_proj", "v_proj")))
+    rank_8 = StubTrainingComponent(artifact_format=ArtifactFormat("adapter", 8, ("q_proj", "v_proj")))
     with pytest.raises(ValueError, match="holds a PEFT adapter in adapter/"):
-        rank_8.check_release(DirectoryFiles(adapter))
+        rank_8.check_artifact(DirectoryFiles(adapter))
     (adapter / ADAPTER_DIR / "adapter_model.safetensors").write_bytes(b"a")
     for config, message in (
         ({"r": 16, "target_modules": ["q_proj"]}, "at most 8"),
@@ -171,10 +171,12 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     ):
         (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps(config))
         with pytest.raises(ValueError, match=message):
-            rank_8.check_release(DirectoryFiles(adapter))
+            rank_8.check_artifact(DirectoryFiles(adapter))
     (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps({"r": 4, "target_modules": ["q_proj"]}))
-    rank_8.check_release(DirectoryFiles(adapter))
+    rank_8.check_artifact(DirectoryFiles(adapter))
     # ``("all",)`` takes any target modules.
-    StubTrainingComponent(release_format=ReleaseFormat("adapter", 8, ("all",))).check_release(DirectoryFiles(adapter))
+    StubTrainingComponent(artifact_format=ArtifactFormat("adapter", 8, ("all",))).check_artifact(
+        DirectoryFiles(adapter)
+    )
     with pytest.raises(ValueError, match="takes no imported releases"):
-        StubTrainingComponent(release_format=None).check_release(DirectoryFiles(full))
+        StubTrainingComponent(artifact_format=None).check_artifact(DirectoryFiles(full))

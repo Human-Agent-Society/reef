@@ -40,17 +40,17 @@ from typing import Any
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureError, CaptureProxy
 from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, LoadError, Session, _Loop, binding_from
-from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
-from reef.harness.runners.native.graph import GraphError, Run, run_graph, run_loop_module
-from reef.harness.runners.native.host import NativeHost
-from reef.harness.runners.native.mounts import HostMounts
-from reef.harness.runners.native.release_client import (
+from reef.harness.runners.native.artifact_client import (
     ArtifactClient,
     ArtifactClientError,
     ArtifactUpdateListener,
     EventWriter,
     HeadWatch,
 )
+from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
+from reef.harness.runners.native.graph import GraphError, Run, run_graph, run_loop_module
+from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.mounts import HostMounts
 from reef.harness.runners.native.selftools import HostTool, ServeState, self_tools
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, validate_patch
@@ -450,7 +450,6 @@ class Server(ServeState, ArtifactUpdateListener):
             self.scenario,
             self.token,
             tags={"artifact_id": release} if release else {},
-            observer=self._watch,
         )
         try:
             self._proxy.start()
@@ -566,14 +565,6 @@ class Server(ServeState, ArtifactUpdateListener):
         # Only the id is queued here: the caller may be the proxy's relay thread, and the manifest fetch belongs
         # to the thread that mounts, so an inference answer is never held behind a round trip to reef.
         self._enqueue(_Pending(artifact_id, "release"))
-        self._drain_if_idle()
-
-    def new_legacy_head(self, revision: str) -> None:
-        """A head that a legacy response header named: queued like ``new_head``; the mount resolves its artifact."""
-        if self.follow == "pinned":
-            self._log.write("artifact/available", {"release_id": revision})
-            return
-        self._enqueue(_Pending(None, "release", revision=revision))
         self._drain_if_idle()
 
     def _enqueue(self, pending: _Pending) -> _Pending:

@@ -24,8 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from reef.core.requirements import required_by
-from reef.service.page_layout import document, escape, requires_table, stamp, status_span
-from reef.service.release_page import (
+from reef.service.artifact_page import (
     failed_words,
     floor_tasks_note,
     method_notes,
@@ -38,6 +37,7 @@ from reef.service.release_page import (
     step_href,
     unscored_failures,
 )
+from reef.service.page_layout import document, escape, requires_table, stamp, status_span
 from reef.train.harness_backend.backend import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.

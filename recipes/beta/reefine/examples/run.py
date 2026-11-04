@@ -54,7 +54,7 @@ from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
-from reef.service.release_page import result_of
+from reef.service.artifact_page import result_of
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane
@@ -140,9 +140,9 @@ def fetch_text(path):
 
 
 def catalog_rows(client):
-    """The catalog oldest first, as GET /reef/harness/releases lists it; empty before the scenario exists."""
+    """The catalog oldest first, as GET /reef/harness/artifacts lists it; empty before the scenario exists."""
     try:
-        return client.get("/reef/harness/releases", extra_headers=scenario_headers())["releases"]
+        return client.get("/reef/harness/artifacts", extra_headers=scenario_headers())["artifacts"]
     except ReefClientError as exc:
         if exc.status != 404:
             raise
@@ -345,7 +345,7 @@ def activate(client, rows, row, run_dir):
     """Save the inactive step's page beside the run, print its URL, activate the row's artifact; the id of the
     active release that the activation names."""
     step = rows.index(row)
-    page = f"/reef/harness/releases/{step}/page"
+    page = f"/reef/harness/artifacts/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(fetch_text(page), encoding="utf-8")
     say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")

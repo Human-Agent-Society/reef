@@ -54,7 +54,7 @@ class LocalJobComponent(TrainingComponent):
     ``jobs_root`` holds one directory per job, named by the job ID, with
     ``job.json`` (the submitted job, whose data is the reference of its job data directory with its local
     ``path``), ``checkpoints.json`` (the checkpoints
-    saved so far, each ``{"step", "path", "release_path", "metrics"}``) and,
+    saved so far, each ``{"step", "path", "artifact_path", "metrics"}``) and,
     once the job ended, ``result.json`` (``{"state", "metrics", "error"?}``).
     A job's metrics and its checkpoints' metrics must encode as JSON. The job
     thread writes a job's last checkpoint before its result, so a job with a
@@ -120,7 +120,7 @@ class LocalJobComponent(TrainingComponent):
         if value is None:
             return ()
         return tuple(
-            SavedCheckpoint(entry["step"], entry["path"], entry["release_path"], entry["metrics"])
+            SavedCheckpoint(entry["step"], entry["path"], entry["artifact_path"], entry["metrics"])
             for entry in value["checkpoints"]
         )
 
@@ -138,7 +138,7 @@ class LocalJobComponent(TrainingComponent):
                 {
                     "step": saved.step,
                     "path": saved.path,
-                    "release_path": saved.release_path,
+                    "artifact_path": saved.artifact_path,
                     "metrics": dict(saved.metrics),
                 }
                 for saved in (*self.saved(directory), checkpoint)

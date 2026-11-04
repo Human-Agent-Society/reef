@@ -397,8 +397,8 @@ class Trainer:
     @property
     def can_train_from(self) -> bool:
         """Whether ``start_from`` can take an artifact: a trainer whose training component takes releases
-        (``TrainingComponent.starts_from_releases``); a trainer that trains nothing never can."""
-        return self._job_loop is not None and self._job_loop.component.starts_from_releases
+        (``TrainingComponent.starts_from_artifacts``); a trainer that trains nothing never can."""
+        return self._job_loop is not None and self._job_loop.component.starts_from_artifacts
 
     @property
     def job_running(self) -> bool:
