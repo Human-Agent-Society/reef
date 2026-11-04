@@ -181,11 +181,15 @@ def test_a_scenario_reads_its_items_in_the_order_that_their_uses_began(store, tm
     store.create("acme", [trajectory("t3", "three", scenarios={"coding": "train"})])
 
     def used(after=0):
-        return [(item.item_id, sequence) for sequence, item in store.scenario_items("acme", "coding", after=after)]
+        return [
+            (item.item_id, sequence)
+            for sequence, item in store.scenario_items("acme", "coding", kinds=("trajectory",), after=after)
+        ]
 
     first = used()
     assert [item_id for item_id, _ in first] == ["t1", "t3"]
-    assert store.scenario_items("acme", "coding")[0][1].content == ATIF
+    assert store.scenario_items("acme", "coding", kinds=("task",)) == ()
+    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0][1].content == ATIF
     # An older item that joins later is read after the others; a metadata change keeps a use's sequence.
     store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
     store.update("acme", ["t1"], {"label": "week 43"})
@@ -220,9 +224,12 @@ def test_an_upgrade_gives_each_use_its_own_sequence_and_split(open_durable_store
             legacy.create(connection)
             connection.execute(legacy.insert(), [{"owner": "acme", "item_id": "t1", "scenario": "coding"}])
     with closing(open_durable_store()) as store:
-        assert [item.item_id for _, item in store.scenario_items("acme", "coding")] == ["t1"]
+        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == ["t1"]
         store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
-        assert [item.item_id for _, item in store.scenario_items("acme", "coding")] == ["t1", "t2"]
+        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == [
+            "t1",
+            "t2",
+        ]
 
 
 def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store):
