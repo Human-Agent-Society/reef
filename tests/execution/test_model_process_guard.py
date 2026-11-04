@@ -83,6 +83,29 @@ def test_a_missing_guard_retires_its_group_once_the_worker_is_gone(tmp_path, mon
         assert retired == [(12345, None)] and (tmp_path / "12345.done").exists()
 
 
+def test_a_guard_that_exited_unreaped_counts_as_gone(tmp_path, monkeypatch):
+    from reef.execution.executor import process_guard
+
+    psutil = pytest.importorskip("psutil")
+    retired: list[tuple[int, float | None]] = []
+    monkeypatch.setattr(process_guard, "_directory", lambda token: tmp_path)
+    monkeypatch.setattr(process_guard, "_worker_alive", lambda group: False)
+    monkeypatch.setattr(process_guard, "_retire_group", lambda group, started: retired.append((group, started)))
+    # Under a container PID 1 that reaps nothing (docker run without --init), an exited guard stays a zombie.
+    guard = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while psutil.Process(guard.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline, "the guard did not exit"
+            time.sleep(0.01)
+        started = psutil.Process(guard.pid).create_time()
+        (tmp_path / "12345.json").write_text(json.dumps({"guard_pid": guard.pid, "guard_started": started}))
+        retire("unused", timeout_s=1)
+        assert retired == [(12345, None)] and (tmp_path / "12345.done").exists()
+    finally:
+        guard.wait()
+
+
 def test_a_group_whose_leader_exited_is_retired_whatever_its_leader_started_at(monkeypatch):
     from reef.execution.executor import process_guard
 

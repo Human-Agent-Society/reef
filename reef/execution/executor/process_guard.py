@@ -152,15 +152,21 @@ def retire(token: str, timeout_s: float = 30) -> None:
                 guard = psutil.Process(metadata["guard_pid"])
                 if guard.create_time() != metadata["guard_started"]:
                     raise RuntimeError("model process guard identity changed")
-                guard.send_signal(signal.SIGTERM)
-            except psutil.NoSuchProcess as exc:
+                # An exited guard stays a zombie until its parent reaps it, which a container whose PID 1 reaps
+                # nothing never does (docker run without --init): it is gone all the same.
+                is_gone = guard.status() == psutil.STATUS_ZOMBIE
+                if not is_gone:
+                    guard.send_signal(signal.SIGTERM)
+            except psutil.NoSuchProcess:
+                is_gone = True
+            if is_gone:
                 if record.with_suffix(".done").exists():
                     continue
                 # Ray kills an exiting worker's children, its guard among them, before the guard retires the
                 # worker's group, whose other processes then outlive both. With the worker gone, retire them here.
                 group = int(record.stem)
                 if _worker_alive(group):
-                    raise RuntimeError("model process guard disappeared before confirming cleanup") from exc
+                    raise RuntimeError("model process guard disappeared before confirming cleanup")
                 _retire_group(group, None)
                 record.with_suffix(".done").touch()
                 continue
