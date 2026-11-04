@@ -244,6 +244,10 @@ class TrainingPipeline:
                 f"{type(self.sample2job).__name__} does not implement training_mode={training_mode!r}"
             )
         self.context = replace(self.context, training_mode=training_mode)
+        if training_mode == "manual":
+            # A later switch to auto reads the store again: the train counts skip the samples that trained.
+            self.held.clear()
+            self.store_sequence = 0
         self.record2sample.context_changed(self.context)
 
     def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
@@ -384,7 +388,12 @@ class TrainingPipeline:
     def read_store(self) -> None:
         """Read the samples after the store cursor that this trainer reads: hold each untrained one that it can train
         (``trainable``). A sample whose use began again, such as a task whose split changed, replaces the held one,
-        or leaves when the trainer cannot train it now."""
+        or leaves when the trainer cannot train it now.
+
+        Manual mode reads nothing: a request names its samples (``request_entries``), and a scenario can hold more
+        trajectories than this process can keep in memory."""
+        if self.training_mode == "manual":
+            return
         while stored_samples := self.store.page(after_sequence=self.store_sequence):
             for stored in stored_samples:
                 self.store_sequence = stored.sequence
@@ -425,7 +434,7 @@ class TrainingPipeline:
 
     def has_unread_samples(self) -> bool:
         """Whether the store holds samples after the store cursor that this trainer reads."""
-        return bool(self.store.page(after_sequence=self.store_sequence, limit=1))
+        return self.training_mode == "auto" and bool(self.store.page(after_sequence=self.store_sequence, limit=1))
 
     def auto_entries(self) -> tuple[tuple[StoredSample, Sample], ...]:
         """The samples that the next automatic job takes, in store order, each with the sample that it trains.
