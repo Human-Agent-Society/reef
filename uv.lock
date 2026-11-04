@@ -4403,7 +4403,7 @@ requires-dist = [
 provides-extras = ["sglang", "vllm", "tinker", "postgres", "s3", "e2b", "modal", "wandb", "opentelemetry", "slime", "dev"]
 
 [package.metadata.requires-dev]
-runtime = [{ name = "slime", git = "https://github.com/THUDM/slime.git?rev=540ea919e45b8b929198abce008a103be9cfc779" }]
+runtime = [{ name = "slime", git = "https://github.com/THUDM/slime.git?rev=8a53b680e82932dabb48cbfcd34f749854400857" }]
 
 [[package]]
 name = "referencing"
@@ -4837,7 +4837,7 @@ wheels = [
 [[package]]
 name = "slime"
 version = "0.4.0"
-source = { git = "https://github.com/THUDM/slime.git?rev=540ea919e45b8b929198abce008a103be9cfc779#540ea919e45b8b929198abce008a103be9cfc779" }
+source = { git = "https://github.com/THUDM/slime.git?rev=8a53b680e82932dabb48cbfcd34f749854400857#8a53b680e82932dabb48cbfcd34f749854400857" }
 dependencies = [
     { name = "accelerate" },
     { name = "anthropic" },

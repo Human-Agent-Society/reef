@@ -2,7 +2,7 @@
 #
 # The base (slimerl/slime) ships the full serving + RL-training stack in the
 # /opt/sglang virtual environment: CUDA 13.0, torch 2.13, Slime-patched SGLang
-# 0.5.21 (/sgl-workspace/sglang), Megatron-Core 0.19.2 (/root/Megatron-LM),
+# 0.5.21 (/sgl-workspace/sglang), Megatron-Core 0.20.0 (/root/Megatron-LM),
 # Transformer Engine 2.18, flash-attention and ray, all pinned by the
 # constraints file that the base's PIP_CONSTRAINT names for every pip install.
 # Reef installs its reviewed Slime pin over the
@@ -26,8 +26,9 @@
 # after the v0.5.9 tag). The base image's SGLang 0.5.21 contains the fix, so
 # tp>1 is expected to work; it has not yet been re-validated on this image.
 
-# The base that Slime's pin (pyproject.toml, dependency group runtime) was released with.
-ARG SLIME_IMAGE_TAG=nightly-dev-20261027a-cu130
+# The base that Slime's pin (pyproject.toml, dependency group runtime) was released with. The digest is necessary:
+# Slime pushes a new image under an existing tag, and its Megatron must match Slime's pin.
+ARG SLIME_IMAGE_TAG=nightly-dev-20261027a-cu130@sha256:2a7437aa771ddcd5928054d4a143a5ac1a10776ead3cf7d641b93dbec51371f4
 FROM slimerl/slime:${SLIME_IMAGE_TAG} AS reef-common
 
 WORKDIR /workspace/Reef
@@ -158,8 +159,8 @@ RUN SLIME_MODELS=$(python -c "import importlib.util, pathlib; \
 
 # Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
 # applies (reef_adapters/megatron/lora.py) and the HF export that publishes
-# adapters. The base does not bundle it. 0.6.2 is the newest release that
-# imports against the base's Megatron-Core 0.19.2 (0.7.0 needs a newer core);
+# adapters. The base does not bundle it. 0.6.2 imports against the base's
+# Megatron-Core 0.20.0, which the check below verifies;
 # reef overrides its Qwen3_5ForConditionalGeneration registration with a
 # bridge for the layout slime builds
 # (reef_adapters/megatron/bridges/qwen3_5.py), which is what makes Qwen3.5
