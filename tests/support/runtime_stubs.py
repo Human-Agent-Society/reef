@@ -12,7 +12,7 @@ from reef.core.evaluation import PolicyModel
 from reef.core.job_data import Sample
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceBackend
 from reef.inference.serving import OpenedEngines, ServingEngines
@@ -21,7 +21,7 @@ from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, Train
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 #: The release format of a stub component that does not name one.
-FULL_WEIGHTS = ReleaseFormat("full")
+FULL_WEIGHTS = ArtifactFormat("full")
 #: The file a stub checkpoint holds: the version name that serving the checkpoint reports.
 VERSION_FILE = "model.txt"
 #: The root release of a trainer that a test builds outside a scenario; a stub's ``root_start`` does not read it.
@@ -38,8 +38,8 @@ class StubTrainingComponent(TrainingComponent):
     version name ``w<n>`` for the ``n``-th job. ``submitted`` lists the jobs
     in submission order and ``imported`` the releases given to
     :meth:`import_start`. ``shares_scenarios`` is what the component reports
-    for :attr:`TrainingComponent.shares_scenarios`, and ``release_format`` for
-    :attr:`TrainingComponent.release_format` (full weights by default). Like
+    for :attr:`TrainingComponent.shares_scenarios`, and ``artifact_format`` for
+    :attr:`TrainingComponent.artifact_format` (full weights by default). Like
     the Tinker component, it runs task jobs that carry a ``rollout`` object.
     """
 
@@ -49,12 +49,12 @@ class StubTrainingComponent(TrainingComponent):
         *,
         name: str = "stub",
         shares_scenarios: bool = False,
-        release_format: ReleaseFormat | None = FULL_WEIGHTS,
+        artifact_format: ArtifactFormat | None = FULL_WEIGHTS,
     ) -> None:
         self.checkpoint_root = checkpoint_root
         self.backend_name = name
         self.scenarios_shared = shares_scenarios
-        self.releases = release_format
+        self.releases = artifact_format
         self.submitted: list[TrainingJob] = []
         self.imported: list[Path] = []
         self.statuses: dict[str, JobStatus] = {}
@@ -69,7 +69,7 @@ class StubTrainingComponent(TrainingComponent):
         return self.scenarios_shared
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
+    def artifact_format(self) -> ArtifactFormat | None:
         return self.releases
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:

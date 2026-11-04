@@ -404,7 +404,7 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
     async def upstream(request):
         received["path"] = request.path
         received["payload"] = await request.json()
-        received["release_id"] = request.headers["x-reef-release-id"]
+        received["release_id"] = request.headers["x-reef-artifact-id"]
         received["artifact_path"] = request.headers["x-reef-artifact-path"]
         return web.json_response({"provider": "ok"})
 
@@ -443,7 +443,7 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
         async def upstream(request):
             received["path"] = request.path
             received["payload"] = await request.json()
-            received["release_id"] = request.headers["x-reef-release-id"]
+            received["release_id"] = request.headers["x-reef-artifact-id"]
             response = web.StreamResponse(
                 headers={
                     "Content-Type": "text/event-stream",

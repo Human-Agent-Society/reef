@@ -357,9 +357,9 @@ def test_the_commit_carries_requires_and_merges_what_the_method_added_by_name(tm
             assert rows[0]["selected"] is True and rows[2]["selected"] is False
             assert rows[3]["skipped"] == "the method left the head tree unchanged"
             # The releases the route serves carry the same lists.
-            catalog = await (await client.get("/reef/harness/releases", headers={"x-reef-scenario": "agents"})).json()
+            catalog = await (await client.get("/reef/harness/artifacts", headers={"x-reef-scenario": "agents"})).json()
             served = [
-                row["metrics"]["training_request"]["requires"] for row in catalog["releases"] if "metrics" in row
+                row["metrics"]["training_request"]["requires"] for row in catalog["artifacts"] if "metrics" in row
             ]
             assert served == expected
         finally:
@@ -504,9 +504,9 @@ def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) ->
             (row,) = await committed(scenario, 1)
             assert row["metrics"]["selected"] is True
             head = await (await client.get("/reef/harness", headers=headers)).json()
-            assert head["release_id"] != base["release_id"]
+            assert head["artifact_id"] != base["artifact_id"]
             assert head["requires"] == REQUIRES and head["evaluation"]["training_request"]["requires"] == REQUIRES
-            pinned = await client.get("/reef/harness", params={"release_id": base["release_id"]}, headers=headers)
+            pinned = await client.get("/reef/harness", params={"artifact_id": base["artifact_id"]}, headers=headers)
             assert (await pinned.json())["requires"] == []
         finally:
             await client.close()
@@ -530,26 +530,26 @@ def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
         await client.start_server()
         try:
             headers = {"x-reef-scenario": "agents"}
-            base = (await (await client.get("/reef/harness", headers=headers)).json())["release_id"]
+            base = (await (await client.get("/reef/harness", headers=headers)).json())["artifact_id"]
             ids = []
             for step, requires in enumerate(([], [first], [second]), start=1):
                 response = await post_request(client, {**train_request(f"ask {step}"), "requires": requires})
                 assert response.status == 200, await response.text()
                 rows = await committed(scenario, step)
                 assert rows[-1]["metrics"]["selected"] is True
-                ids.append((await (await client.get("/reef/harness", headers=headers)).json())["release_id"])
+                ids.append((await (await client.get("/reef/harness", headers=headers)).json())["artifact_id"])
             r1, r2, r3 = ids
             assert len({base, r1, r2, r3}) == 4
             head = await (await client.get("/reef/harness", headers=headers)).json()
-            assert head["release_id"] == r3 and head["parent_release_id"] == r2
+            assert head["artifact_id"] == r3 and head["parent_artifact_id"] == r2
             # Step 3 named one item of its own; its release still needs what step 2 named.
             assert head["evaluation"]["training_request"]["requires"] == [second] and head["requires"] == REQUIRES
-            for release_id, requires in ((r2, [first]), (r1, []), (base, [])):
-                pinned = await client.get("/reef/harness", params={"release_id": release_id}, headers=headers)
+            for artifact_id, requires in ((r2, [first]), (r1, []), (base, [])):
+                pinned = await client.get("/reef/harness", params={"artifact_id": artifact_id}, headers=headers)
                 assert (await pinned.json())["requires"] == requires
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             own = {
-                row["release_id"]: row["metrics"]["training_request"]["requires"] for row in rows if "metrics" in row
+                row["artifact_id"]: row["metrics"]["training_request"]["requires"] for row in rows if "metrics" in row
             }
             assert own == {r1: [], r2: [first], r3: [second]}
         finally:
@@ -614,17 +614,19 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
         await client.start_server()
         try:
             headers = {"x-reef-scenario": "agents"}
-            base = (await (await client.get("/reef/harness", headers=headers)).json())["release_id"]
+            base = (await (await client.get("/reef/harness", headers=headers)).json())["artifact_id"]
             response = await post_request(client, {**train_request(), "requires": REQUIRES})
             assert response.status == 200, await response.text()
             await committed(scenario, 1)
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             (inactive,) = [row for row in rows if row["operation"] == "training"]
             assert not inactive["active"] and inactive["metrics"]["training_request"]["requires"] == REQUIRES
             # Nothing served yet: the head is still the base and needs nothing; the inactive release by id does.
             head = await (await client.get("/reef/harness", headers=headers)).json()
-            assert head["release_id"] == base and head["requires"] == []
-            waiting = await client.get("/reef/harness", params={"release_id": inactive["release_id"]}, headers=headers)
+            assert head["artifact_id"] == base and head["requires"] == []
+            waiting = await client.get(
+                "/reef/harness", params={"artifact_id": inactive["artifact_id"]}, headers=headers
+            )
             assert (await waiting.json())["requires"] == REQUIRES
             response = await client.post(
                 "/reef/scenarios/agents/activate", json={"artifact_id": inactive["artifact_id"]}
@@ -632,12 +634,12 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
             assert response.status == 200
             assert (await response.json())["artifact_id"] == inactive["artifact_id"]
             head = await (await client.get("/reef/harness", headers=headers)).json()
-            assert head["release_id"] == inactive["release_id"] and head["requires"] == REQUIRES
+            assert head["artifact_id"] == inactive["artifact_id"] and head["requires"] == REQUIRES
             assert head["evaluation"] == inactive["metrics"]
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
-            assert [(row["release_id"], row["active"]) for row in rows] == [
+            rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
+            assert [(row["artifact_id"], row["active"]) for row in rows] == [
                 (base, False),
-                (inactive["release_id"], True),
+                (inactive["artifact_id"], True),
             ]
             # The activation serves the release's source tree, the evolved setting included.
             source = await client.get("/reef/harness", params={"form": "source"}, headers=headers)
