@@ -424,7 +424,7 @@ def test_a_weight_stage_in_manual_trains_the_samples_that_a_request_names():
     assert batch.data_id == "s:request:one"
     assert batch.request.id == "one"
     assert [source_record_id(sample) for sample in batch.samples] == ["a", "b"]
-    assert pipeline.acknowledge(batch.data_id) == frozenset({"sample:a:0", "sample:b:0", "one"})
+    assert pipeline.acknowledge(batch.data_id) == frozenset({"sample:s.a:0", "sample:s.b:0", "one"})
     # One named sample is enough, fewer than job_samples; the other held sample waits.
     pipeline.push(inference("c"))
     pipeline.push(inference("d"))
@@ -509,7 +509,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
     expected_id = "s:data:1" if mode == "auto" else "s:request:use-the-trajectory"
     assert backend.batches[0].data_id == expected_id
     prepared = trainer.prepare_commit(result)
-    expected = {"first", "second", "sample:first:0", "sample:second:0"} | (
+    expected = {"first", "second", "sample:s.first:0", "sample:s.second:0"} | (
         {"use-the-trajectory"} if mode == "manual" else set()
     )
     assert prepared.consumed_ids == frozenset(expected)
@@ -541,7 +541,7 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, bu
     assert trainer.pipeline.training_mode == target
     assert trainer.pending_job_data is original
     prepared = trainer.prepare_commit(result)
-    assert prepared.consumed_ids == ({"first", "sample:first:0"} if mode == "auto" else {"first"})
+    assert prepared.consumed_ids == ({"first", "sample:s.first:0"} if mode == "auto" else {"first"})
     trainer.commit(prepared)
     commit_running_job(trainer)
     if target == "manual":
@@ -1298,7 +1298,7 @@ def test_every_mode_keeps_the_samples_beyond_the_next_job_for_later_jobs(caplog,
         with caplog.at_level(logging.WARNING, logger="reef.train.pipeline"):
             for index in range(20):
                 fail(index)
-        # Every ready unit goes to the sample store, which consumes its records; nothing is released untrained.
+        # Every ready unit is saved as items, which consumes its records; nothing is released untrained.
         assert processor.record2sample.ready_units == {}
         retention = processor.releasable_record_ids()
         assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
@@ -1312,7 +1312,7 @@ def test_every_mode_keeps_the_samples_beyond_the_next_job_for_later_jobs(caplog,
         # The handed-out job data keeps the oldest sample; the other samples wait for later jobs.
         assert [source_record_id(sample) for sample in reserved.samples] == ["inf-0"]
         request_ids = {"do-it"} if mode == "manual" else set()
-        assert processor.acknowledge(reserved.data_id) == frozenset({"sample:rep-0:0", *request_ids})
+        assert processor.acknowledge(reserved.data_id) == frozenset({"sample:s.rep-0:0", *request_ids})
         if mode == "manual":
             processor.queue_requests([request("again", sample_ids_of(processor, "inf-1"))])
         following = processor.build_job_data(1)

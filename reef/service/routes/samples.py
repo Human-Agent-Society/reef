@@ -10,7 +10,7 @@ from reef.service.samples import MAX_SAMPLES_PER_PAGE, list_samples, read_next_j
 
 
 def register_sample_reads(app: web.Application, *, request_service: RequestService) -> None:
-    """The list of a scenario's sample store."""
+    """The list of a scenario's samples."""
     dispatcher = request_service.dispatcher
 
     async def samples(request: web.Request) -> web.Response:

@@ -15,7 +15,7 @@ stages; it does not subclass the pipeline:
   the size of a job and shapes its samples into the job's data.
 
 The pipeline owns what is the same for every recipe: it routes records, saves the samples of each
-ready unit to the scenario's sample store, selects the samples of the next job
+ready unit as data items that the scenario uses, selects the samples of the next job
 (in ``auto``, the first ``buffer_size`` untrained samples in store order, and the
 rest of each group that those touch; in ``manual``, the samples that the
 request names), hands out the data of one job at a time until the
@@ -53,7 +53,7 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import NoSamples, Record2Sample, RecordSetUnit
 from reef.sample2job import NoJobData, Sample2Job
-from reef.storage.samples import SAMPLE_KINDS, MemorySampleStore, StoredSample, TrainerSamples, consumed_sample_id
+from reef.storage.samples import SAMPLE_KINDS, StoredSample, TrainerSamples, consumed_sample_id, memory_samples
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
@@ -147,8 +147,8 @@ class TrainingPipeline:
     Without stages it is the no-update default: it reads records for audit
     but never becomes ready and never produces job data.
 
-    A ready unit's samples are stored in the scenario's sample store; an uploaded
-    trajectory is one stored sample. In ``auto``, ``ready(sample_count)`` is True if
+    A ready unit's samples become data items that the scenario uses; an uploaded
+    trajectory is one sample too. In ``auto``, ``ready(sample_count)`` is True if
     and only if the next automatic job (``auto_entries``) holds at least ``sample_count``
     samples, and ``build_job_data(sample_count)`` takes them, in store order. Other
     samples stay in the store for later job data. In ``manual``, a queued request's
@@ -189,7 +189,7 @@ class TrainingPipeline:
         self.pending: JobData | None = None
         self.data_number = 0
         #: The scenario's samples as this trainer reads them; in memory for a trainer without a scenario session.
-        self.store = TrainerSamples(MemorySampleStore()) if context.samples is None else context.samples
+        self.store = TrainerSamples(memory_samples(context.scenario)) if context.samples is None else context.samples
         #: The sequence of the last stored sample that the pipeline read.
         self.store_sequence = 0
         #: Whether the pipeline stored a new sample or read a new training request since ``produce`` returned.
@@ -314,8 +314,8 @@ class TrainingPipeline:
     def store_samples(self) -> bool:
         """Store the samples of each unit that the stage made ready, and the samples that it made from no set.
 
-        When the stage makes a unit ready (``take_ready_units``), the pipeline saves its samples to the sample store
-        in one transaction (``TrainerSamples.add_record_samples``), which consumes its records, and the stage ends
+        When the stage makes a unit ready (``take_ready_units``), the pipeline saves its samples as items
+        (``TrainerSamples.add_record_samples``), which then consumes its records, and the stage ends
         the unit. Return whether one or more stored sample is new.
         """
         ready_units = self.record2sample.take_ready_units()
@@ -342,7 +342,7 @@ class TrainingPipeline:
         return f"{self.store.trainer}:" if self.store.trainer else ""
 
     def store_unit(self, unit: RecordSetUnit) -> bool:
-        """Save the samples of the ready ``unit`` to the sample store, and end the unit in the stage; return
+        """Save the samples of the ready ``unit`` as items, and end the unit in the stage; return
         whether one or more of them is new.
 
         Sample ``i`` of record set ``s`` has the ID ``<trainer>:<s>:<i>``, or ``<s>:<i>`` for the only trainer of a
@@ -386,21 +386,14 @@ class TrainingPipeline:
     # Make job data when the trainer's sample count waits (auto) or a request is queued (manual),
     # hand the same data out until it is acknowledged, then count its samples trained.
 
-    def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
-        """Stop holding ``sample_ids``: the data sync removed their uploads from the store.
-
-        A sample in handed out job data stays in it; its commit counts it as usual. A sample that the store gets
-        again has a new ``sequence``, so ``read_store`` reads it again.
-        """
-        for sample_id in sample_ids:
-            self.held.pop(sample_id, None)
-
     def read_store(self) -> None:
-        """Read the stored samples after the store cursor that this trainer reads: hold each untrained one that it
-        can train (``trainable``)."""
+        """Read the samples after the store cursor that this trainer reads: hold each untrained one that it can train
+        (``trainable``). A sample whose use began again, such as a task whose split changed, replaces the held one,
+        or leaves when the trainer cannot train it now."""
         while stored_samples := self.store.page(after_sequence=self.store_sequence):
             for stored in stored_samples:
                 self.store_sequence = stored.sequence
+                self.held.pop(stored.sample_id, None)
                 if stored.train_count(self.store.trainer) > 0 or stored.sample_id in self.trained_sample_ids:
                     continue
                 sample = self.trainable(stored)
@@ -532,7 +525,7 @@ class TrainingPipeline:
         return whether the trainer received new input since the last call: a sample stored here or by ``push`` when
         a record completed a set, or a training request that ``push`` read.
 
-        The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the sample store.
+        The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the scenario's samples.
         """
         # Background work, such as judgments or finished rounds, forms sets or makes samples without a new record.
         self.record2sample.advance(time.monotonic())
@@ -543,9 +536,18 @@ class TrainingPipeline:
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` samples for the next job.
 
-        With ``sample_count`` None, held samples never make the pipeline ready in ``auto``.
+        With ``sample_count`` None, held samples never make the pipeline ready in ``auto``. A held sample that left
+        the scenario, or left its ``train`` split, since the pipeline read it leaves the next job.
         """
         self.advance()
+        while self.pending is None and self.training_mode == "auto" and self.holds_job_data(sample_count):
+            ids = [stored.sample_id for stored, _ in self.auto_entries()]
+            used = {stored.sample_id for stored in self.store.get(ids) if stored.split == "train"}
+            left = [sample_id for sample_id in ids if sample_id not in used]
+            if not left:
+                return True
+            for sample_id in left:
+                self.held.pop(sample_id, None)
         return self.holds_job_data(sample_count)
 
     def holds_job_data(self, sample_count: int | None) -> bool:

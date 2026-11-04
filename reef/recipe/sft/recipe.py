@@ -33,7 +33,7 @@ class SFTRecipe(WeightTrainingRecipe):
       samples of one job. Slime cuts a job's data into optimizer steps of
       ``--global-batch-size`` samples.
     * ``pipeline.sample2job.config.buffer_size``: the most samples that one
-      job takes; later samples wait in the sample store.
+      job takes; later samples wait for later jobs.
     * ``recipe.config.job_parameters``: the parameters of every job, for
       example ``scheduling.packing_length`` to count steps in packs of tokens.
 
