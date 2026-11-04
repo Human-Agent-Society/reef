@@ -71,7 +71,7 @@ from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
-from reef.storage.job_data_store import JobDataStore
+from reef.storage.job_data import JobDataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage

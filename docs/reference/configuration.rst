@@ -890,11 +890,8 @@ persistent.
    ``storage.task-file-dir`` : .reef/task-files
        the files of generated tasks for ``local``, or the local cache of a plugin store
 
-   ``storage.job-data-backend`` : local
-       where the data directory of each training job lives: ``local``, or a ``JobDataStore`` plugin reference (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__)
-
-   ``storage.job-data-dir`` : .reef/job-data
-       the job data directories for ``local``, or the local cache of a plugin store; control and the training service must share it
+   ``storage.job-data-ttl-s`` : 604800
+       seconds that the data store keeps a job data directory that no training job used; a job of the same samples uses the directory again (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__)
 
    ``storage.agent-record-retention-max-bytes`` : 21474836480
        20 GiB shared across all record bodies, including unconsumed records

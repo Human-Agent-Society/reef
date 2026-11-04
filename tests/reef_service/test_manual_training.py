@@ -33,7 +33,7 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample.traces import InferenceSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination

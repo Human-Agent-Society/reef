@@ -50,7 +50,7 @@ from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.storage.job_data_store import JobDataStore
+from reef.storage.job_data import JobDataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore

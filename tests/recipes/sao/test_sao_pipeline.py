@@ -43,7 +43,7 @@ from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

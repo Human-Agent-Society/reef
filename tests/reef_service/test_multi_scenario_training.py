@@ -14,7 +14,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

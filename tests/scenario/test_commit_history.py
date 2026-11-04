@@ -35,7 +35,7 @@ from reef.dispatcher import Dispatcher, local_workers
 from reef.recipe.base import Recipe
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_snapshot
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage

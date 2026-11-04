@@ -38,7 +38,7 @@ from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage

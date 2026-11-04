@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import re
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -25,7 +26,8 @@ from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
-from reef.storage.segments import SegmentStore
+from reef.storage.job_data import JobDataStore
+from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
@@ -287,7 +289,7 @@ class RecordLink:
             raise ValueError("a record link's entry_count is a non-negative int")
 
 
-class DataStore(Plugin, ABC):
+class DataStore(Plugin, JobDataStore, ABC):
     """The data of a deployment: items of content and metadata, each in one owner.
 
     Values: the state of a store is a finite set of ``StoredItem`` values. Within one owner, no two items have
@@ -324,6 +326,9 @@ class DataStore(Plugin, ABC):
       when given, newest first, at most ``limit``.
     * ``maintain()`` does the store's periodic work, such as moving content into segments. It changes no item.
       The data service calls it every few minutes. The default does nothing.
+
+    The store also keeps the data directories of training jobs (``JobDataStore``): ``job_files`` holds them, and the
+    store records when a job last used each one (``use_job_data``, ``unused_job_data``, ``forget_job_data``).
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
     ``scenarios`` names only scenarios of the owner.
@@ -486,6 +491,8 @@ class MemoryDataStore(DataStore):
 
     def __init__(self, task_files: TaskFileStore) -> None:
         self.task_files = task_files
+        self.job_files = LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-data-")))
+        self.job_data_used: dict[str, float] = {}
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
         self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
@@ -517,6 +524,15 @@ class MemoryDataStore(DataStore):
         if config:
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
         return cls(task_files)
+
+    def use_job_data(self, key: str, now: float) -> None:
+        self.job_data_used[key] = now
+
+    def unused_job_data(self, before: float) -> tuple[str, ...]:
+        return tuple(key for key, used in self.job_data_used.items() if used < before)
+
+    def forget_job_data(self, key: str) -> None:
+        self.job_data_used.pop(key, None)
 
     def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)

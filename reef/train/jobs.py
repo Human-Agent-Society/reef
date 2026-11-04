@@ -14,7 +14,6 @@ starts from the job's last saved checkpoint, whether or not it serves.
 
 from __future__ import annotations
 
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +21,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.job_data import JobData, JobOutcome
-from reef.storage.job_data_store import JobDataStore, LocalJobDataStore
+from reef.storage.job_data import JobDataStore, LocalJobDataStore
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainStepResult
 
@@ -149,9 +148,7 @@ class JobLoop:
             raise ValueError("scenario must be a non-empty string")
         self.component = component
         self.scenario = scenario
-        self.job_data = (
-            LocalJobDataStore(Path(tempfile.mkdtemp(prefix="reef-job-data-"))) if job_data is None else job_data
-        )
+        self.job_data = LocalJobDataStore() if job_data is None else job_data
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
@@ -188,7 +185,7 @@ class JobLoop:
             job_id,
             backend,
             state.start,
-            self.job_data.ref(job_id, data),
+            self.job_data.write_job_data(data),
             parameters,
             scenario=self.scenario,
             request_id=None if data.request is None else data.request.id,

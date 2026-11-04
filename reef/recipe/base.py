@@ -31,7 +31,7 @@ from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
 from reef.sample2job import NoJobData
-from reef.storage.job_data_store import JobDataStore
+from reef.storage.job_data import JobDataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage

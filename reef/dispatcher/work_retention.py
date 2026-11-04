@@ -7,9 +7,8 @@ import threading
 import time
 
 from reef.execution.workers import ServiceWorker
-from reef.storage.job_data_store import JobDataStore
+from reef.storage.job_data import JobDataStore
 from reef.storage.work_queue import WorkQueue
-from reef.train.job_queue import JOBS_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +21,9 @@ class EndedWorkSweeper(ServiceWorker):
     ``interval_seconds``.
 
     Values: ``queue`` holds the items; ``retention_seconds`` and ``interval_seconds`` are positive. ``job_data``, when
-    given, keeps the data directories of the training jobs: a sweep deletes the directory of each job item that it
-    deletes, first. A failed sweep is logged, and the next one runs after ``interval_seconds``.
+    given, keeps the data directories of the training jobs: a sweep also deletes each directory that no job used for
+    ``job_data_ttl_seconds`` (``JobDataStore.expire_job_data``). A failed sweep is logged, and the next one runs after
+    ``interval_seconds``.
 
     Purpose: the dispatcher of a control instance runs one, so that the queues hold the items that a producer may
     still read (a job's trainer, an evaluation's results) and no item forever.
@@ -36,13 +36,15 @@ class EndedWorkSweeper(ServiceWorker):
         retention_seconds: float,
         interval_seconds: float = SWEEP_INTERVAL_SECONDS,
         job_data: JobDataStore | None = None,
+        job_data_ttl_seconds: float = 7 * 24 * 3600.0,
     ) -> None:
-        if retention_seconds <= 0 or interval_seconds <= 0:
-            raise ValueError("retention_seconds and interval_seconds are positive")
+        if retention_seconds <= 0 or interval_seconds <= 0 or job_data_ttl_seconds <= 0:
+            raise ValueError("retention_seconds, interval_seconds and job_data_ttl_seconds are positive")
         self.queue = queue
         self.retention_seconds = retention_seconds
         self.interval_seconds = interval_seconds
         self.job_data = job_data
+        self.job_data_ttl_seconds = job_data_ttl_seconds
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -65,14 +67,13 @@ class EndedWorkSweeper(ServiceWorker):
             self.stopped.wait(self.interval_seconds)
 
     def sweep(self) -> int:
-        """Delete the items that ended before the retention; return how many, 0 when the store failed."""
+        """Delete the items that ended before the retention, and the job data directories that no job used for the
+        time to live; return how many items, 0 when the store failed."""
         try:
-            before = time.time() - self.retention_seconds
+            now = time.time()
             if self.job_data is not None:
-                for item in self.queue.items(JOBS_QUEUE):
-                    if item.final and item.ended_at is not None and item.ended_at < before:
-                        self.job_data.delete(item.id)
-            return self.queue.delete_final(finished_before=before)
+                self.job_data.expire_job_data(now - self.job_data_ttl_seconds)
+            return self.queue.delete_final(finished_before=now - self.retention_seconds)
         except Exception:
             logger.exception("could not delete the ended work items")
             return 0

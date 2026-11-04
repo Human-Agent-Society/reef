@@ -24,7 +24,7 @@ from reef.core.weight_layout import ReleaseFormat
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.data import NewItem
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob

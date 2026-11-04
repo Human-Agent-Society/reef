@@ -24,7 +24,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.storage.job_data_store import LocalJobDataStore
+from reef.storage.segments import LocalSegmentStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.work_queue import NewWork
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingJob
@@ -112,7 +112,7 @@ def worked(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
     worker = TrainingJobWorker(
-        component, queue, LocalJobDataStore(tmp_path / "job-data"), worker_id="training-1", poll_seconds=0.02
+        component, queue, LocalSegmentStore(tmp_path / "job-files"), worker_id="training-1", poll_seconds=0.02
     )
     worker.start()
     yield queue, component, worker
@@ -165,7 +165,7 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
     assert view.status("waiting").state == "failed" and view.status("waiting").error == "cancelled"
 
     worker = TrainingJobWorker(
-        component, queue, LocalJobDataStore(tmp_path / "job-data"), worker_id="training-1", poll_seconds=0.02
+        component, queue, LocalSegmentStore(tmp_path / "job-files"), worker_id="training-1", poll_seconds=0.02
     )
     assert worker.run_once() is False  # the cancelled job is final, so nothing is left to take
     worker.stop()
@@ -196,7 +196,7 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     worker = TrainingJobWorker(
         StepComponent(tmp_path / "jobs"),
         queue,
-        LocalJobDataStore(tmp_path / "job-data"),
+        LocalSegmentStore(tmp_path / "job-files"),
         worker_id="training-1",
         poll_seconds=0.02,
     )

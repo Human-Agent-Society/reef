@@ -33,7 +33,7 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples, stage_item_id
 from reef.storage.sql_coordination import memory_coordination

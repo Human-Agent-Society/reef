@@ -41,7 +41,7 @@ from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
-from reef.storage.job_data_store import LocalJobDataStore
+from reef.storage.job_data import LocalJobDataStore
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

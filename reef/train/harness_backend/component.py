@@ -39,7 +39,7 @@ from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ReleaseFormat
 from reef.harness.tree import HarnessTree
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.backend import HarnessBackend, StepProgress
@@ -301,7 +301,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         raised, which counts as a step and keeps the state."""
         parameters = job.parameters
         request = request_from_parameters(parameters)
-        data = replace(read_job_data(job.data_dir), request=request)
+        data = replace(read_job_data(job.data_dir, job.data_id), request=request)
         # The row of a request's step names the request, so its request page settles on that row.
         named = {} if request is None else {"training_request": {"id": request.id, **request.to_dict()}}
         component = str(parameters["component"])

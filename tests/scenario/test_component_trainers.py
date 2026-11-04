@@ -68,7 +68,7 @@ from reef.storage.commits import (
     parse_scenario_metadata,
     scenario_metadata_for,
 )
-from reef.storage.job_data_store import read_job_data
+from reef.storage.job_data import read_job_data
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ComponentTrainer, Trainer

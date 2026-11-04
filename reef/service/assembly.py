@@ -50,7 +50,6 @@ from reef.service.request_service import RequestService
 from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
-from reef.storage.job_data_store import JobDataStore, LocalJobDataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -307,13 +306,10 @@ def build_segment_store(settings: ServiceConfig) -> SegmentStore | None:
     return SegmentStore.referenced_class(reference).from_config(reference.config, directory=directory)
 
 
-def build_job_data_store(settings: ServiceConfig) -> JobDataStore:
-    """The store of the job data directories that ``storage.job_data_backend`` names, in ``storage.job_data_dir``."""
-    directory = Path(settings.job_data_dir)
-    if settings.job_data_backend == "local":
-        return LocalJobDataStore(directory)
-    reference = JobDataStore.reference(settings.job_data_backend, setting="storage.job_data_backend")
-    return JobDataStore.referenced_class(reference).from_config(reference.config, directory=directory)
+def build_job_files(settings: ServiceConfig, segments: SegmentStore | None) -> SegmentStore:
+    """Where the data store keeps the job data directories: ``segments``, else ``<agent_record_dir>/job-files``, which
+    control and the training service share."""
+    return segments if segments is not None else LocalSegmentStore(Path(settings.agent_record_dir) / "job-files")
 
 
 def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> DataStore:
@@ -328,15 +324,17 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     if choice is None:
         choice = "postgres" if settings.record_backend == "postgres" else "sqlite"
     segments = build_segment_store(settings)
+    job_files = build_job_files(settings, segments)
     try:
         if choice == "postgres":
             return PostgresDataStore(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 task_files,
                 segments=segments,
+                job_files=job_files,
             )
         if choice == "sqlite":
-            return SQLiteDataStore(directory / "data", task_files, segments)
+            return SQLiteDataStore(directory / "data", task_files, segments, job_files)
         reference = DataStore.reference(choice, setting="storage.data_store")
         return DataStore.referenced_class(reference).from_config(
             reference.config, directory=directory, task_files=task_files, segments=segments
@@ -512,7 +510,7 @@ def build_dispatcher(
             ),
             components=components,
             work_retention_seconds=settings.work_retention_s,
-            job_data=build_job_data_store(settings),
+            job_data_ttl_seconds=settings.job_data_ttl_s,
         )
         if dispatcher.services.runs_evaluation:
             # Each worker serves its rollout's candidate itself, from the scenario's repository.

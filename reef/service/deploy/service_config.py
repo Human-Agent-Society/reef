@@ -22,7 +22,6 @@ from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.storage.data import DataStore
-from reef.storage.job_data_store import JobDataStore
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -258,6 +257,14 @@ class ServiceConfig:
         public_path=("storage", "work_retention_s"),
         help="Seconds that control keeps an ended work item before it deletes it. Default: 7 days.",
     )
+    job_data_ttl_s: float = config_option(
+        7 * 24 * 3600.0,
+        public_path=("storage", "job_data_ttl_s"),
+        help=(
+            "Seconds that the data store keeps a job data directory that no training job used; a job of the same "
+            "samples uses it again. Default: 7 days."
+        ),
+    )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
         "local",
@@ -277,20 +284,6 @@ class ServiceConfig:
         ".reef/task-files",
         public_path=("storage", "task_file_dir"),
         help="Directory of the generated task files, or the local cache of a plugin store.",
-    )
-    #: ``local``, or a ``JobDataStore`` plugin: ``package.module:ClassName`` or module and config.
-    job_data_backend: str | Mapping[str, Any] = config_option(
-        "local",
-        public_path=("storage", "job_data_backend"),
-        help="Store of the data directory of each training job: local, or a JobDataStore plugin reference.",
-    )
-    job_data_dir: str = config_option(
-        ".reef/job-data",
-        public_path=("storage", "job_data_dir"),
-        help=(
-            "Directory of the job data directories, or the local cache of a plugin store. Control and the training "
-            "service must share it."
-        ),
     )
     task_import_manifest: str | None = config_option(
         None,
@@ -434,6 +427,8 @@ class ServiceConfig:
             raise ValueError("storage.work_max_attempts must be at least 1")
         if not math.isfinite(self.work_retention_s) or self.work_retention_s <= 0:
             raise ValueError("storage.work_retention_s must be a positive number of seconds")
+        if not math.isfinite(self.job_data_ttl_s) or self.job_data_ttl_s <= 0:
+            raise ValueError("storage.job_data_ttl_s must be a positive number of seconds")
         if self.coordination_backend not in (None, "sqlite", "postgres"):
             raise ValueError("storage.coordination_backend must be sqlite or postgres")
         if self.coordination_backend is None and self.record_backend not in ("sqlite", "postgres"):
@@ -457,10 +452,6 @@ class ServiceConfig:
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
             TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
-        if self.job_data_backend != "local":
-            if isinstance(self.job_data_backend, str) and ":" not in self.job_data_backend:
-                raise ValueError("storage.job_data_backend must be local or 'package.module:ClassName'")
-            JobDataStore.reference(self.job_data_backend, setting="storage.job_data_backend")
         if (self.task_import_manifest is None) != (self.task_import_tasks_root is None):
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":

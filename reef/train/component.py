@@ -33,7 +33,7 @@ from reef.core.config import ConfiguredFactory
 from reef.core.errors import RuntimeConfigError
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
-from reef.storage.job_data_store import JobDataKind, JobDataRef
+from reef.storage.job_data import JobDataKind, JobDataRef
 
 JobState = Literal["running", "finished", "failed"]
 
@@ -44,8 +44,8 @@ class TrainingJob:
 
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
     (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root release),
-    ``data`` (the job data directory that the job trains, ``reef.storage.job_data_store``; the component reads it
-    with ``read_job_data(job.data_dir)`` and cuts it into optimizer batches by its own batch size),
+    ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
+    with ``read_job_data(job.data_dir, job.data_id)`` and cuts it into optimizer batches by its own batch size),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
     trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
     ``request_id`` is the ID of the training request that the job trains, or None. Reef's job listing reads it; a

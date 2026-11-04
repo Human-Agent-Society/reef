@@ -838,6 +838,19 @@ partition per owner. A deployment selects the store in
        segment or a line past its end.
    * - ``delete(partition, segment_id)``
      - Remove the segment. A missing segment is not an error.
+   * - ``find_directory(key)``
+     - The URI of the directory ``key``, or ``None`` when the store does not
+       hold all of it. A key is ``/``-separated names. The data store keeps
+       each job data directory as ``job-data/<key>``.
+   * - ``put_directory(key, source)``
+     - Keep a copy of the files under ``source`` as the directory ``key``,
+       and return its URI. A put of a key that the store holds keeps the
+       first copy.
+   * - ``open_directory(uri)``
+     - A local directory with the files of the directory at ``uri``. A remote
+       store copies them into its local cache.
+   * - ``delete_directory(key)``
+     - Remove the directory. A missing directory is not an error.
    * - ``close()``
      - Release the resources of the store.
 

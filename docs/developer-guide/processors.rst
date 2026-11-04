@@ -302,29 +302,35 @@ Format 1 of a directory:
 
 .. code:: text
 
-   job.json        {"format": 1, "data_id", "sample_count", "kind"}
+   job.json        {"format": 1, "key", "sample_count", "kind"}
    samples.jsonl   one sample per line, in job order
    tasks/<n>/<directory name>/
 
-- ``job.json`` gives the job data's ID, its number of samples, and the kind
+- ``job.json`` gives the directory's key, its number of samples, and the kind
   of its samples: ``trajectory``, ``task``, or ``null`` without samples.
 - Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``. A task's
   ``task_path`` is relative to the directory: ``tasks/<n>/<directory name>``,
   where ``n`` counts the tasks from 0.
 - ``tasks/`` holds a copy of each task's directory.
 
-A directory does not change after Reef writes it. A component reads it with
-``reef.storage.job_data_store.read_job_data(job.data_dir)``. A component that
-runs the job elsewhere, such as in a container, gives that place
-``job.data_uri`` and mounts or copies the directory there.
+A directory does not change after Reef writes it, and several jobs can read
+it, so a component must not write in it. A component reads it with
+``reef.storage.job_data.read_job_data(job.data_dir, job.data_id)``. A
+component that runs the job elsewhere, such as in a container, gives that
+place ``job.data_uri`` and mounts or copies the directory there.
 
-The deployment setting ``storage.job_data_backend`` selects the store of the
-directories: ``local`` keeps them in ``storage.job_data_dir``, which control
-and the training service must share. A ``JobDataStore`` plugin keeps them
-elsewhere, for example in an object store. Control deletes the directory of a
-job when it deletes the job's item from the jobs queue. A queued job of an
-earlier Reef holds its data inline: the training service writes its directory
-when it takes the job.
+The data store keeps the directories (``JobDataStore``), in its segment store
+(``storage.segment_backend``), or in ``<agent_record_dir>/job-files`` when
+none is set. The key of a directory is the SHA-256 of its samples and of the
+files of its tasks (``job_data_key``). So a job of the same samples, such as
+a second job on one dataset, uses the directory that exists and writes
+nothing. The data store records when a job last used each directory. Control
+deletes a directory that no job used for ``storage.job_data_ttl_s`` (7 days by
+default). Keep this time above the longest job, since a component can read
+the directory again when it resumes the job.
+
+A queued job of an earlier Reef holds its data inline: the training service
+writes it to a temporary directory when it takes the job.
 
 Slow work
 ---------
