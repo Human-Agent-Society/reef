@@ -1529,7 +1529,7 @@ that plays task directories (an npm ``install``) and
        cap the runs that the method's ``services.evaluate`` runs in one step; reused runs and the evaluation's own runs do not count; 0 disables the limit
 
    ``evolution.executor`` : local
-       ``local`` runs tasks as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
+       ``local`` runs tasks as a plain subprocess; ``sandbox`` uses the host's local sandbox, a bubblewrap jail on Linux or a Seatbelt profile on macOS; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
 
    ``execution.evolution.workers`` : 1
        fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
@@ -1541,7 +1541,7 @@ that plays task directories (an npm ``install``) and
        ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
 
    ``evolution.sandbox``
-       for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
+       for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``; macOS refuses ``memory_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
 
    ``evolution.agent``
        the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its steps (``services.run_agent``); unset, no agent runs, and such a method is refused at startup
@@ -1553,7 +1553,7 @@ that plays task directories (an npm ``install``) and
        the agent's binary; unset, backend construction installs the adapter's pinned version, as for ``evolution.binary``
 
    ``evolution.agent.sandbox`` : ``REEF_AGENT_SANDBOX``
-       ``bwrap`` jails the agent, with the internet but no host port except its gateway's; ``e2b`` or ``modal`` runs it in a cloud sandbox that reaches the gateway through a tunnel, with that provider's options in the section, as in ``evolution.sandbox``; ``none`` runs it with the service's own privileges and must be chosen. Unset, the agent is jailed where the host can run bwrap and pasta, and off where it cannot
+       ``bwrap`` jails the agent, with the internet but no host port except its gateway's; ``seatbelt`` does the same on macOS, but the host's LAN addresses stay reachable; ``e2b`` or ``modal`` runs it in a cloud sandbox that reaches the gateway through a tunnel, with that provider's options in the section, as in ``evolution.sandbox``; ``none`` runs it with the service's own privileges and must be chosen. Unset, the agent is jailed in the host's local sandbox (bwrap and pasta on Linux, sandbox-exec on macOS) where the host can run it, and off where it cannot
 
    ``evolution.agent.timeout_s`` : 1800
        seconds one agent run may take
