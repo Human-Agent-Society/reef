@@ -171,6 +171,12 @@ def batch_for(step: int, *, rewards: tuple[float, ...] = (1.0, 1.0)) -> JobData:
     )
 
 
+def submitted_data(data: JobData) -> dict[str, Any]:
+    """The data of a job file that ``LocalJobComponent.submit`` wrote: the job data reference with its local path."""
+    ref = job_data_ref(data)
+    return {**ref.to_dict(), "path": str(ref.path)}
+
+
 def parameters(method: TrainingMethod) -> dict[str, Any]:
     """A job's parameters with the default step schedule: one optimizer step per sample, two steps a batch."""
     return {"method": method.to_dict()}
@@ -359,7 +365,7 @@ def test_a_restarted_job_continues_after_its_last_saved_rollout(tmp_path, stacks
         {
             "scenario": "s",
             "start": str(tmp_path / "reef-starts" / "base"),
-            "data": batch_for(0).to_dict(),
+            "data": submitted_data(batch_for(0)),
             "parameters": job_parameters,
         },
     )
@@ -580,6 +586,7 @@ def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_pat
 )
 def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks, job_parameters, message) -> None:
     stack = stacks(tmp_path)
+    (tmp_path / "task").mkdir()
     data = JobData("tasks", (TaskSample(tmp_path / "task"),)) if "rollout engines" in message else batch_for(0)
     with pytest.raises(ValueError, match=message):
         stack.component.submit(
@@ -649,7 +656,7 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
         {
             "scenario": "s",
             "start": str(tmp_path / "reef-starts" / "base"),
-            "data": data.to_dict(),
+            "data": submitted_data(data),
             "parameters": parameters(TrainingMethod("sft")),
         },
     )

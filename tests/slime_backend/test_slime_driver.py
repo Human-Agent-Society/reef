@@ -237,9 +237,16 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
         **parameters(TrainingMethod("sft")),
         **({"rollout": {"rollouts_per_task": 2}} if rollout else {}),
     }
+    # The job file that LocalJobComponent.submit writes: the job data reference with its local path.
+    ref = job_data_ref(data)
     write_json(
         directory / JOB_FILE,
-        {"scenario": "s", "start": str(start), "data": data.to_dict(), "parameters": job_parameters},
+        {
+            "scenario": "s",
+            "start": str(start),
+            "data": {**ref.to_dict(), "path": str(ref.path)},
+            "parameters": job_parameters,
+        },
     )
     write_json(directory / DRIVER_FILE, settings_to_json(SETTINGS))
     return directory
