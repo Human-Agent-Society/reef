@@ -23,7 +23,7 @@ def list_samples(dispatcher: Dispatcher, scenario: str, *, after_sequence: int, 
     """
     if after_sequence < 0 or not 1 <= limit <= MAX_SAMPLES_PER_PAGE:
         raise ValueError(f"after must be non-negative and limit between 1 and {MAX_SAMPLES_PER_PAGE}")
-    page = dispatcher.stored_samples(scenario, after_sequence=after_sequence, limit=limit)
+    page = dispatcher.listed_samples(scenario, after_sequence=after_sequence, limit=limit)
     return {
         "scenario": scenario,
         "samples": [
