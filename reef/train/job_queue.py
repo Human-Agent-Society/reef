@@ -10,7 +10,7 @@ A jobs-queue item:
 - ``id`` is the job ID, which ``JobLoop.job_id`` makes from the job's inputs;
 - ``kind`` is ``training_job:<component name>``, so a worker takes only the jobs of its component;
 - ``scenario`` and ``serial_key`` are the job's scenario, so the jobs of one scenario run one at a time, in the order control added them;
-- ``payload`` is the job (``job_payload``): its backend, start and parameters, the reference of its job data
+- ``payload`` is the job (``job_payload``): its backend, start, parameters, component and previous job, the reference of its job data
   directory (``JobDataRef.to_dict``), and the summary of its training request for the job listing;
 - each ``progress`` entry is one ``SavedCheckpoint``, in step order;
 - ``result`` is ``{"state": "finished", "metrics": {...}}``;
@@ -79,6 +79,8 @@ def job_payload(job: TrainingJob, request: Mapping[str, JsonValue] | None = None
             "data": job.data.to_dict(),
             "parameters": dict(job.parameters),
             "request": None if request is None else dict(request),
+            "component": job.component,
+            "previous_job_id": job.previous_job_id,
         },
     )
 
@@ -121,7 +123,14 @@ def job_from_item(item: WorkItem, data_store: DataStore) -> TrainingJob:
         json_object(payload.get("parameters"), "a job's parameters"),
         scenario=item.scenario,
         request_id=None if request is None else cast(str, request["id"]),
+        component=optional_text(payload.get("component"), "a job's component"),
+        previous_job_id=optional_text(payload.get("previous_job_id"), "a job's previous job"),
     )
+
+
+def optional_text(value: JsonValue, name: str) -> str | None:
+    """``value`` as a non-empty string, or None for null or a missing key; ``ValueError`` for another value."""
+    return None if value is None else json_text(value, name)
 
 
 def request_summary(item: WorkItem) -> dict[str, JsonValue] | None:
@@ -332,6 +341,9 @@ class JobQueueComponent(TrainingComponent):
 
     def import_start(self, release: Path) -> str:
         return self.component.import_start(release)
+
+    def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
+        return self.component.changed_parts(start, checkpoint)
 
     def submit(self, job: TrainingJob) -> None:
         """Check ``job`` and add it to the jobs queue, with the summary of its training request, which the queue

@@ -133,22 +133,32 @@ class JobCommit:
 
 
 class JobLoop:
-    """Submit a weight trainer's jobs to its training component, and turn their checkpoints into commits.
+    """Submit a trainer's jobs to its training component, and turn their checkpoints into commits. Weight training
+    and harness evolution share it: each job carries the same fields (``TrainingJob``).
 
     ``component`` runs the jobs; ``scenario`` is the non-empty name of the
     trainer's scenario, which is part of each job's identity, so two scenarios
-    never share a job. ``data_store`` keeps the job data directory of each job that ``submit`` submits; None keeps
+    never share a job. ``scenario_component`` is the scenario component that the jobs train, or None.
+    ``data_store`` keeps the job data directory of each job that ``submit`` submits; None keeps
     them in a new temporary directory, for a process that keeps no state across restarts. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
     """
 
-    def __init__(self, component: TrainingComponent, *, scenario: str, data_store: DataStore | None = None) -> None:
+    def __init__(
+        self,
+        component: TrainingComponent,
+        *,
+        scenario: str,
+        scenario_component: str | None = None,
+        data_store: DataStore | None = None,
+    ) -> None:
         if not isinstance(component, TrainingComponent):
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
         self.component = component
         self.scenario = scenario
+        self.scenario_component = scenario_component
         self.data_store = MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
@@ -190,6 +200,8 @@ class JobLoop:
             parameters,
             scenario=self.scenario,
             request_id=None if data.request is None else data.request.id,
+            component=self.scenario_component,
+            previous_job_id=None if state.last_job is None else state.last_job.job_id,
         )
         self.component.submit(job)
         submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)
@@ -254,6 +266,7 @@ class JobLoop:
                 metrics=metrics,
                 artifact=Artifact.local(Path(checkpoint.release_path)),
                 training_job_id=job.job_id,
+                changed_kinds=self.component.changed_parts(state.start, checkpoint),
             )
         )
 

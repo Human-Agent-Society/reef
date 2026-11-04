@@ -145,6 +145,18 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
 
 
 @pytest.mark.unit
+def test_every_job_names_its_scenario_component_and_the_job_that_the_trainer_committed_last(component):
+    loop = JobLoop(component, scenario="math", scenario_component="weights")
+    loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS)
+    ended = JobOutcome("job-0", "fake", "finished")
+    loop.submit(JobLoopState("fake:base", finished_jobs=1, last_job=ended), batch(), PARAMETERS)
+    assert [(job.component, job.previous_job_id) for job in component.jobs] == [
+        ("weights", None),
+        ("weights", "job-0"),
+    ]
+
+
+@pytest.mark.unit
 def test_one_job_runs_at_a_time_and_only_a_running_job_is_polled_or_ended(component):
     loop = loop_with(component)
     running = JobLoopState("fake:base", job=RunningJob("job-1"))
