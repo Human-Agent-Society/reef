@@ -536,12 +536,6 @@ The session contract is:
        the number of committed jobs of each trainer that trained each one, and
        the records that each trainer's stages consumed. It closes with the
        session and survives restarts when ``durable``.
-   * - ``samples``
-     - The ``ScenarioSamples`` of the scenario, or None for a storage without
-       a data store: the data items that it uses, in use order (RFC #1140).
-       They are the uploaded trajectories, the imported Harbor tasks of the
-       ``train`` and ``eval`` splits, and the samples that each trainer's
-       stages made, each with its train counts.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
        (including inactive releases), activations, and new training starts.
@@ -626,9 +620,11 @@ give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
 keyword, which the scenario always passes. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store. The scenario's imported tasks are not a task
-store: they are task items that the scenario uses (``ScenarioSamples``), which
-the factory gives to ``Recipe.build_trainers`` as ``samples`` and every
-component reads from ``PipelineContext.samples``.
+store: they are task items that the scenario uses. The factory reads them from
+the data store with the session's ``training_state`` as ``SampleStore``
+(RFC #1140). It gives them to ``Recipe.build_trainers`` as ``samples``. Each
+trainer reads them as itself (``SampleStore.for_trainer``) from
+``PipelineContext.samples``.
 
 The service takes a task item in the ``train`` split of a scenario
 (``POST /reef/namespaces/{owner}/data/tasks``) only when a trainer of the
@@ -650,9 +646,9 @@ in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
 
 A task is a Harbor task directory. The database keeps the state of the store
 and the digest of each task directory. The task file store keeps the files,
-text or binary, under that digest. ``publish_task`` records the publication of
-a saved candidate. A ``StoredTask`` holds the task ``name``, its ``split`` and
-its ``files_digest``.
+text or binary, under that digest. ``publish_task`` gives a saved candidate
+its split. The published tasks are the candidates with a split. A
+``StoredTask`` holds the task ``name``, its ``split`` and its ``files_digest``.
 
 .. list-table::
    :header-rows: 1
@@ -677,8 +673,8 @@ its ``files_digest``.
    * - ``generation(generation)``, ``generations()``
      - Return one checkpoint or all checkpoints.
    * - ``tasks(split=None)``
-     - Return the published tasks in publication order. Give a ``split`` to
-       return only the tasks of that split.
+     - Return the published tasks in generation and candidate order, each
+       name once. Give a ``split`` to return only the tasks of that split.
    * - ``path(files_digest)``
      - Return the local task directory of a candidate or a published task,
        for example for ``read_harbor_task`` or ``TaskRolloutRunner.run``. Do not
@@ -838,6 +834,19 @@ partition per owner. A deployment selects the store in
        segment or a line past its end.
    * - ``delete(partition, segment_id)``
      - Remove the segment. A missing segment is not an error.
+   * - ``find_directory(key)``
+     - The URI of the directory ``key``, or ``None`` when the store does not
+       hold all of it. A key is ``/``-separated names. The data store keeps
+       each job data directory as ``job-data/<key>``.
+   * - ``put_directory(key, source)``
+     - Keep a copy of the files under ``source`` as the directory ``key``,
+       and return its URI. A put of a key that the store holds keeps the
+       first copy.
+   * - ``open_directory(uri)``
+     - A local directory with the files of the directory at ``uri``. A remote
+       store copies them into its local cache.
+   * - ``delete_directory(key)``
+     - Remove the directory. A missing directory is not an error.
    * - ``close()``
      - Release the resources of the store.
 
@@ -1384,7 +1393,7 @@ receives the samples of the `next job
 the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
 when the recipe omits constant-reward groups from its output. Samples stored
 after the job data was built wait for later job data.
-``output_schema`` declares the job data type. On the stage, ``exclusive_sources``
+On the stage, ``exclusive_sources``
 controls source release for terminal group/duplicate reports.
 
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
@@ -1610,8 +1619,9 @@ Migration: the former policy/trace sample types and their batch subclasses are
 removed. Construct ATIF trajectory samples directly and return ``JobData(id, samples)``.
 Use ``group_id`` on each member for grouped job data. Read training fields from
 ``item.training`` and rewards through ``trajectory_reward(item)``.
-``output_schema`` defaults to ``JobData``. Keep job data serializable, with
-no handles to services, files, threads or models.
+The component reads job data as a job data directory, so only the fields of
+``JobData`` reach it. Keep job data serializable, with no handles to
+services, files, threads or models.
 
 Chat rendering
 ~~~~~~~~~~~~~~
@@ -2170,7 +2180,15 @@ Training jobs and components
 these fields:
 
 - ``job_id`` and ``backend``, the name of the training component.
-- ``data``, a ``JobData``: the data snapshot that the job trains.
+- ``data``, a ``JobDataRef``: the job data directory that the job trains.
+  ``data_dir`` is its local path, which ``read_job_data`` reads, and
+  ``data_uri`` its URI. ``data_id``, ``sample_count`` and ``kind`` describe
+  the data.
+- ``request_id``: the ID of the training request that the job trains, or
+  ``None``.
+- ``component``: the scenario component that the job trains, or ``None``.
+- ``previous_job_id``: the last job whose end the trainer committed, or
+  ``None`` before the first.
 - ``start``: the directory of the weights the job starts from, or ``None``
   for the backend's base model.
 - ``parameters``: the backend's parameters. Reef reads none of them; they
@@ -2282,11 +2300,17 @@ commits:
    metrics. The scenario's activation rule decides whether it serves.
 3. When the job ends, the trainer commits its outcome.
 
-A recipe may subclass the loop. The harness recipe's ``HarnessJobLoop``
-(``reef.recipe.harness``) adds the parameters that only the scenario knows at
-submit time, such as its model and its eval split. It also names, on each
-checkpoint's commit, the parts of the tree that the checkpoint changed from
-the job's start, which the scenario's activation rule reads.
+Weight training and harness evolution share the loop: every job carries the
+same fields. The loop sets ``TrainingJob.component``, the scenario component
+that the trainer trains, and ``TrainingJob.previous_job_id``, the last job
+whose end the trainer committed. A harness continues its state after that
+job, since a step that keeps no tree still advances it; a weight component
+ignores it. What a job needs beside its data comes from its stage's
+``job_parameters``: the harness stage (``TraceJobData``) adds the training
+request and the task paths of the scenario's eval split. On each checkpoint's
+commit, the loop asks the component for the parts that the checkpoint changed
+from the job's start (``TrainingComponent.changed_parts``, empty by default),
+which the scenario's activation rule reads (``changed_kinds``).
 
 Training is linear: the next job starts from the newest saved checkpoint,
 whether or not it serves. A restarted job replaces the trainer's start

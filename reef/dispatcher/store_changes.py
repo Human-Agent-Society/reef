@@ -5,7 +5,7 @@ service runs jobs in other processes. Control learns of all three from the store
 ``StoreChangesWatcher`` reads the newest record sequence of each loaded scenario and the changed items of the
 samples, jobs and training request queues. New records make control ask the samples service for a selection; a finished
 selection, or a new training request, wakes the scenario's local workers, which build the next job from the
-scenario's samples; a job that saved a checkpoint or ended wakes them too, so they commit it without waiting for their
+sample store; a job that saved a checkpoint or ended wakes them too, so they commit it without waiting for their
 next poll. In the one-process layout the same events also arrive in process; a second request or wake changes
 nothing.
 """

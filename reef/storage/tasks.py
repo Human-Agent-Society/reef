@@ -124,14 +124,14 @@ class GenerationState:
 
 @dataclass(frozen=True)
 class StoredTask:
-    """A published task and its split.
+    """A published task and its split: the first candidate that published its name.
 
     Values: ``(name, split, files_digest)`` is a stored task if and only if
     ``name`` is a non-empty string, ``split`` is ``train`` or ``eval``, and
     ``files_digest`` is the digest of the task directory in the task file
     store. The directory has the name ``name``.
 
-    Purpose: ``TaskStore`` makes it. The caller reads ``split``, and gives
+    Purpose: ``TaskStore.tasks`` makes it from the candidates. The caller reads ``split``, and gives
     ``files_digest`` to ``TaskStore.path`` to get the task directory.
     """
 
@@ -147,12 +147,13 @@ class StoredTask:
 class TaskStore(ABC):
     """The generations and published tasks of one named store of a scenario.
 
-    Values: the state of a store is a tuple ``(G, P, D)``. ``G`` is a finite
-    sequence of generations in increasing ``generation``. ``P`` is a finite
-    sequence of published tasks in publication order; no two have the same
-    name, and a published task does not change. ``D : K ⇀ Str`` maps non-empty
-    keys to documents, each key written once. Nothing is removed from ``G``,
-    ``P`` or ``D``.
+    Values: the state of a store is a pair ``(G, D)``. ``G`` is a finite
+    sequence of generations in increasing ``generation``, each with its
+    candidates and their outcomes. ``D : K ⇀ Str`` maps non-empty keys to
+    documents, each key written once. Nothing is removed from ``G`` or ``D``.
+    The published tasks are the candidates with a split, in generation and
+    candidate order, each name once: the first candidate that published it.
+    Candidates that publish one name have the same files and split.
 
     Purpose: a record-to-sample stage writes its generations and publishes their
     candidates. Readers take the published tasks of a split (``tasks``) and their
@@ -216,7 +217,7 @@ class TaskStore(ABC):
 
     @abstractmethod
     def tasks(self, *, split: SplitName | None = None) -> tuple[StoredTask, ...]:
-        """Return the published tasks in publication order, optionally of one split."""
+        """Return the published tasks in generation and candidate order, optionally of one split."""
 
     @abstractmethod
     def write_document(self, *, key: str, document: str) -> None:

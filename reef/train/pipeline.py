@@ -53,7 +53,7 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import NoSamples, Record2Sample, RecordSetUnit
 from reef.sample2job import NoJobData, Sample2Job
-from reef.storage.samples import SAMPLE_KINDS, StoredSample, TrainerSamples, consumed_sample_id, memory_samples
+from reef.storage.samples import SAMPLE_KINDS, StoredSample, consumed_sample_id, memory_samples
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
@@ -189,7 +189,7 @@ class TrainingPipeline:
         self.pending: JobData | None = None
         self.data_number = 0
         #: The scenario's samples as this trainer reads them; in memory for a trainer without a scenario session.
-        self.store = TrainerSamples(memory_samples(context.scenario)) if context.samples is None else context.samples
+        self.store = memory_samples(context.scenario).for_trainer("") if context.samples is None else context.samples
         #: The sequence of the last stored sample that the pipeline read.
         self.store_sequence = 0
         #: Whether the pipeline stored a new sample or read a new training request since ``produce`` returned.
@@ -204,11 +204,6 @@ class TrainingPipeline:
         #: The stored samples that job data of this process consumed; their train count may not be durable yet.
         self.trained_sample_ids: set[str] = set()
         self.set_training_mode(context.training_mode)
-
-    @property
-    def output_schema(self) -> type[JobData]:
-        """The job data type ``build_job_data`` returns; the trainer validates it."""
-        return self.sample2job.output_schema
 
     @property
     def required_request_types(self) -> frozenset[RequestType]:
@@ -525,7 +520,7 @@ class TrainingPipeline:
         return whether the trainer received new input since the last call: a sample stored here or by ``push`` when
         a record completed a set, or a training request that ``push`` read.
 
-        The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the scenario's samples.
+        The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the sample store.
         """
         # Background work, such as judgments or finished rounds, forms sets or makes samples without a new record.
         self.record2sample.advance(time.monotonic())

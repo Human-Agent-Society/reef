@@ -33,6 +33,7 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
+from reef.storage.job_data import read_job_data
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
@@ -348,7 +349,9 @@ def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
     while not component.submitted and time.monotonic() < deadline:
         time.sleep(0.01)
     [job] = component.submitted
-    assert [sample.task_path.name for sample in job.data.samples] == [stage_item_id("generated", "generated-task")]
+    assert [sample.task_path.name for sample in read_job_data(job.data_dir).samples] == [
+        stage_item_id("generated", "generated-task")
+    ]
 
 
 def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_without_a_record(

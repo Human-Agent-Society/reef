@@ -41,7 +41,6 @@ from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.sample2job import Sample2Job
-from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.train import ComponentTrainer, Trainer
 from reef.train.jobs import JobLoop
@@ -177,7 +176,7 @@ class _Recipe(_TwoTrainerRecipe):
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
-                    samples=None if samples is None else TrainerSamples(samples, component),
+                    samples=None if samples is None else samples.for_trainer(component),
                     root=root,
                 ),
             )

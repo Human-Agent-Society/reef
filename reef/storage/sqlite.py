@@ -26,6 +26,7 @@ from reef.core.plugins import NoSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     migrate_manual_buffers,
+    migrate_published_tasks,
     migrate_record_storage,
     migrate_record_trajectories,
     migrate_scenario_settings,
@@ -250,6 +251,7 @@ class SQLiteRecordStore(SQLRecordStore):
                 migrate_training_samples(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
                 migrate_scenario_settings(self._connection, _SCENARIO_SETTING)
                 migrate_manual_buffers(self._connection, None)
+                migrate_published_tasks(self._connection, None)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)

@@ -82,7 +82,7 @@ def test_a_trainer_gets_the_queued_requests_and_a_commit_settles_the_one_it_cons
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         training_requests.give([trainer])
-        assert [batch.request.id for batch in component.batches] == ["one", "two"] and training_requests.queued() == ()
+        assert [batch.request_id for batch in component.batches] == ["one", "two"] and training_requests.queued() == ()
         assert trainer.pipeline.training_requests == {}
     finally:
         trainer.close()
