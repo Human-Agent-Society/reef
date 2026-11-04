@@ -130,7 +130,7 @@ tests/reef_service/test_reef_recipe_requests.py
 tests/reef_service/test_reef_removed_lifecycle.py
 tests/reef_service/test_reef_runner.py
 tests/reef_service/test_reef_wire.py
-tests/reef_service/test_release_page.py
+tests/reef_service/test_artifact_page.py
 tests/reef_service/test_reports.py
 tests/reef_service/test_request_body_validation.py
 tests/reef_service/test_request_page.py
