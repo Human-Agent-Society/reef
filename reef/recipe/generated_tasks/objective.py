@@ -16,7 +16,12 @@ from reef.train.types import JobData, trajectory_groups
 
 @register_objective
 class TaskGroupObjective(TrainingObjective):
-    """Each rollout's advantage is its reward centered and scaled within its task group; a constant group gets 0."""
+    """Each rollout's advantage is its reward minus its task group's mean reward; a constant group gets 0.
+
+    The advantage is not divided by the group's standard deviation, as in the AutoEnvScaling and DAPO recipes: with
+    partial credit, a group whose rewards differ a little (1.0 and 0.9) would otherwise train as hard as one whose
+    rewards differ fully (1.0 and 0.0).
+    """
 
     name = "task_group"
     # The advantage on every response token, the rollout log probs as the reference: Tinker's built-in loss, and
@@ -34,7 +39,7 @@ class TaskGroupObjective(TrainingObjective):
             spread = statistics.pstdev(rewards)
             if spread == 0.0:
                 constant_groups += 1
-            advantages.extend((reward - mean) / spread if spread else 0.0 for reward in rewards)
+            advantages.extend(reward - mean if spread else 0.0 for reward in rewards)
         if groups and constant_groups == groups:
             # Zero advantages everywhere train nothing: skip the step and keep the weights and the step count.
             return TrainingSignal(

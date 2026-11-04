@@ -50,7 +50,7 @@ The generator's `config` keys:
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2sample.config`, outside the generator configuration. With the defaults, 0.0 and 0, all tasks train. The task store keeps each published task's split, not these settings. After a restart, published tasks keep their split and new tasks are placed with the settings in force. Reef does not refuse a changed `eval_fraction` or `split_seed`, so keep both fixed for the life of a scenario.
 
-The generated-task recipe uses the `task_group` objective. It centers and scales each rollout's reward within its task group. If all rewards in a group are equal, each advantage is 0. Tinker's `importance_sampling` loss applies that advantage to every response token. The recipe requires the `tinker` backend, which runs the rollouts on its own sampler. Slime refuses a job of tasks.
+The generated-task recipe uses the `task_group` objective. It centers each rollout's reward on its task group's mean reward, without dividing by the group's spread. If all rewards in a group are equal, each advantage is 0. Tinker's `importance_sampling` loss applies that advantage to every response token. The recipe requires the `tinker` backend, which runs the rollouts on its own sampler. Slime refuses a job of tasks.
 
 ## Run it
 

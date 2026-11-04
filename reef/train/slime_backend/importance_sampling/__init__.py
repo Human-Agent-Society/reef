@@ -2,7 +2,7 @@
 
 Tinker has a built-in loss of this name, which the generated-task objective
 (``reef.recipe.generated_tasks.TaskGroupObjective``) trains with: each
-rollout's advantage is its reward centered and scaled within its task's group.
+rollout's advantage is its reward minus its task group's mean reward.
 This family is the same objective's loss on Slime's own rollouts, so a task job
 trains group relative advantages on either backend.
 

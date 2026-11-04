@@ -150,15 +150,22 @@ def sample(task: str, index: int, reward: float) -> TrajectorySample:
     return dataclasses.replace(trajectory, group_id=task)
 
 
-def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> None:
+def test_the_objective_centers_rewards_within_each_task_group() -> None:
     first, second = "harbor-00000-000", "harbor-00000-001"
     data = JobData("d", (sample(first, 0, 1.0), sample(first, 1, 0.0), sample(second, 0, 0.5), sample(second, 1, 0.5)))
     objective = resolve_objective("task_group")
     assert isinstance(objective, TaskGroupObjective) and objective.loss_family == "importance_sampling"
     signal = objective.prepare(data, {})
     assert signal.action == "train"
-    assert signal.advantages == (1.0, -1.0, 0.0, 0.0)
+    assert signal.advantages == (0.5, -0.5, 0.0, 0.0)
     assert signal.metrics["constant_groups"] == 1
+
+
+def test_a_group_whose_rewards_differ_a_little_gets_small_advantages() -> None:
+    # Partial credit: a reward of 0.9 against 1.0 is not scaled up to a full success against a full failure.
+    task = "harbor-00000-000"
+    signal = resolve_objective("task_group").prepare(JobData("d", (sample(task, 0, 1.0), sample(task, 1, 0.9))), {})
+    assert signal.advantages == pytest.approx((0.05, -0.05))
 
 
 def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_count() -> None:
