@@ -61,13 +61,19 @@ from reef.core.tasks import HarborTask, read_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
-from reef.recipe.generated_tasks.processor import GenerationJob, complete_generation_count
+from reef.recipe.generated_tasks.processor import (
+    DEFAULT_GENERATION_DEADLINE_SECONDS,
+    GenerationJob,
+    complete_generation_count,
+)
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
 from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenTask
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
+
+EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
 
 
 @pytest.fixture(autouse=True)
@@ -859,7 +865,7 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
         "TINKER_API_KEY": "tinker-test",
     }.items():
         monkeypatch.setenv(name, value)
-    example = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples/tinker/serve.yaml"
+    example = EXAMPLES / "tinker/serve.yaml"
     resolved, _ = resolve_deployment_config(yaml.safe_load(example.read_text()), None, example)
     settings = service_config_from_mapping(resolved)
     assert settings.recipe == "reef.recipe.generated_tasks:GeneratedTaskRecipe"
@@ -871,6 +877,28 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
     assert isinstance(generator.designer, AgentDesigner)
     assert generator.state_dir == tmp_path / "generations" / "autoenvscaling"
     assert generator.designer.upstream.api_key == "designer-token" and generator.designer.upstream.model == "gpt-6-sol"
+
+
+@pytest.mark.parametrize("name", ["tinker", "tinker-seeds"])
+def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(name: str) -> None:
+    config = yaml.safe_load((EXAMPLES / name / "serve.yaml").read_text())
+    rollout_agent = config["recipe"]["config"]["job_parameters"]["rollout"]["agent"]
+    # The calibration measures a task with the agent that trains on it.
+    assert config["generator"]["agent"] == rollout_agent
+    kwargs = rollout_agent["kwargs"]
+    # A training rollout that fills the context ends and is scored.
+    assert rollout_agent["import_path"] == "reef.record2sample.generator.terminus:VerifiedTerminus2"
+    # The official solver's cap of one reply; on chat completions, model_info caps nothing.
+    assert kwargs["llm_kwargs"]["max_tokens"] == 16384
+    assert kwargs["enable_summarize"] is False and kwargs["record_terminal_session"] is False
+    assert kwargs["llm_kwargs"]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+@pytest.mark.parametrize("name", ["tinker", "tinker-seeds"])
+def test_an_examples_generation_deadline_covers_the_designer_and_the_calibration(name: str) -> None:
+    stage = yaml.safe_load((EXAMPLES / name / "serve.yaml").read_text())["pipeline"]["record2sample"]["config"]
+    # A generation took about 93 minutes in the seed-pool run; the default ends it during the calibration.
+    assert stage["generation_deadline_seconds"] > DEFAULT_GENERATION_DEADLINE_SECONDS
 
 
 def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_path: Path) -> None:

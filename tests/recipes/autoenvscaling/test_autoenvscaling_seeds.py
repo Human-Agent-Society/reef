@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
@@ -74,6 +76,8 @@ from reef.execution.sandbox.process import ProcessOutcome
 from reef.recipe.generated_tasks.generator import HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import split_source_ids
 from reef.record2sample.generator import OracleResult
+from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.service.deploy.service_config import service_config_from_mapping
 
 # The session rules and prompts, rendered before seed tasks existed: a seeded run must not change them.
 SESSION_RULES_SHA256 = "98840322e47c9f267ef5fe41b23439225ed2565f58b58e46979881f20aed4047"
@@ -714,6 +718,34 @@ def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
         environ=environ,
     )
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
+
+
+def test_the_seed_pool_example_builds_claude_code_on_the_seeds_with_a_refusing_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_seeds(tmp_path / "seeds", 2)
+    for name, value in {
+        "REEF_TOKEN": "t",
+        "REEF_AUTOENVSCALING_STATE_DIR": str(tmp_path),
+        "REEF_AUTOENVSCALING_SEEDS_PATH": str(tmp_path / "seeds"),
+        "CLAUDE_CODE_OAUTH_TOKEN": TOKEN,
+        "E2B_API_KEY": "e2b-test",
+        "TINKER_API_KEY": "tinker-test",
+    }.items():
+        monkeypatch.setenv(name, value)
+    example = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples/tinker-seeds/serve.yaml"
+    resolved, _ = resolve_deployment_config(yaml.safe_load(example.read_text()), None, example)
+    settings = service_config_from_mapping(resolved)
+    assert settings.recipe == "reef.recipe.generated_tasks:GeneratedTaskRecipe"
+    section = settings.pipeline_settings["record2sample"]["config"]["generator"]
+    # reef serve publishes the generator's endpoint when it starts the services.
+    config = {**section["config"], "generator_url": "http://127.0.0.1:8910"}
+    generator = AutoEnvScalingGenerator.from_config(config, scenario="autoenvscaling", environ=os.environ)
+    assert isinstance(generator.designer, ClaudeCodeDesigner) and generator.concurrency == 4
+    assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
+    [calibration] = [check for check in generator.task_checks if isinstance(check, CalibrationCheck)]
+    assert calibration.is_refusing
+    assert not any(isinstance(check, ReviewCheck) for check in generator.task_checks)
 
 
 @pytest.mark.parametrize(
