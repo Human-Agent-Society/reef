@@ -1656,7 +1656,7 @@ def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     # The samples service stores the step's sample, but without a training request nothing trains.
     assert scenario.prepare_training_step(WEIGHTS) is None
     trainer = scenario.trainer_for(WEIGHTS)
-    held = tuple(trainer.pipeline.held)
+    held = tuple(stored.sample_id for stored in trainer.pipeline.store.page())
     # In a scenario of several components, a sample's name names its component first.
     assert held == (stage_item_id("agent", f"{WEIGHTS}:r1:0"),)
     dispatcher.accept_request(
