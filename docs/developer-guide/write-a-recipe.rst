@@ -194,7 +194,7 @@ name it.
 .. code:: python
 
    from reef.recipe import WeightTrainingRecipe
-   from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
+   from reef.train.method import LearningRateSchedule, TrainingMethod
 
    POLICY = LearningRateSchedule("policy", 1e-6, warmup_steps=10)
 
@@ -342,7 +342,7 @@ deployment and does not allocate model resources:
   in-process backend, none. It must not download models, allocate devices or
   construct a component.
 * ``component_config(settings, *, loss_family)`` returns the config that
-  ``reef.runtime.deployment.build_training_component`` builds in the HTTP
+  ``reef.train.component.build_training_component`` builds in the HTTP
   process. Its ``type`` is the dotted reference of the component's
   ``TrainingComponentFactory``. ``loss_family`` is the recipe's startup loss
   family.

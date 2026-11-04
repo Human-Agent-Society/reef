@@ -57,7 +57,7 @@
       - any-glob-to-any-file:
           - "reef/artifact/**"
           - "reef/dispatcher/**"
-          - "reef/runtime/**"
+          - "reef/execution/executor/**"
           - "reef/train/**"
           - "recipes/*/examples/*/serve.yaml"
           - "tests/reef_service/test_async*.py"

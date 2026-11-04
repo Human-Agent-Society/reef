@@ -1,4 +1,4 @@
-"""Reefine (beta): harness refinement from a user's training instructions.
+"""Reefine (beta): harness refinement from a user's training requests.
 
 The parts:
 

@@ -14,36 +14,33 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support.chat_templates import CharTemplate
+from tests.support.job_data import job_data_ref
 from tests.support.serving import wait_for_serving
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
 from reef.artifact.files import DirectoryFiles
 from reef.cli import main
+from reef.core.errors import RuntimeConfigError, UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.inference.tinker import TinkerInferenceRuntime
 from reef.recipe.sft import SftObjective
-from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.interfaces import (
-    LearningRateSchedule,
-    LearningRateScheduleState,
-    TrainingMethod,
-    UpstreamStatusError,
-)
-from reef.runtime.jobs import TrainingJob, job_id_for
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.storage.sql_coordination import memory_coordination
-from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.algos.schedule import StepScheduling
+from reef.train.component import TrainingJob, job_id_for
 from reef.train.jobs import JobLoopState
 from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
+from reef.train.method import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
@@ -219,7 +216,7 @@ def submit(component, data, objective_name, *, start=None, schedule=None, **para
     }
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     return job_id
 
 
@@ -349,7 +346,9 @@ def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothi
     parameters = {"method": TrainingMethod(objective.name).to_dict(), **overrides}
     with pytest.raises(ValueError, match=message):
         component.submit(
-            TrainingJob("refused", component.name, component.base_start, batch(), parameters, scenario="s")
+            TrainingJob(
+                "refused", component.name, component.base_start, job_data_ref(batch()), parameters, scenario="s"
+            )
         )
     with pytest.raises(KeyError):
         component.status("refused")

@@ -24,12 +24,12 @@ from pathlib import Path
 from typing import Any
 
 from reef.core import AgentRecord, RequestType
+from reef.core.errors import inference_aborted
 from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.harness.tasks.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2sample.samples import recorded_training
-from reef.runtime.interfaces import inference_aborted
 
 logger = logging.getLogger(__name__)
 

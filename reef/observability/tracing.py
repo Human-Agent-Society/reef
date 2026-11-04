@@ -26,7 +26,7 @@ class TracingConfig:
     When neither the endpoint nor any header is configured the exporter reads
     the standard ``OTEL_EXPORTER_OTLP_ENDPOINT`` and ``OTEL_EXPORTER_OTLP_HEADERS``
     environment variables. Spans carry the exchange itself (prompt,
-    completion, feedback and instruction text) beside identifiers, model
+    completion and feedback text) beside identifiers, model
     names, token usage and scores, so choose a backend trusted with the
     scenario's traffic.
     """

@@ -14,14 +14,16 @@ optimizer steps is the job's ``StepScheduling`` (``reef.train.algos.schedule``).
 A harness step runs the recipe's candidate evaluation (``reef.evaluation``)
 inside its job, between prepare and settle.
 
-The package does not import recipes or service assembly. The harness
-evolution recipe lives in ``reef.recipe.harness``. ``slime_backend.component`` and
+The package does not import recipes, service assembly or ``reef.inference``.
+The harness evolution recipe lives in ``reef.recipe.harness``.
+``reef.train.component`` defines ``TrainingComponent`` and ``TrainingJob``, and
+builds a component from its config. ``slime_backend.component`` and
 ``tinker_backend.component`` are training components over
 ``reef.train.local_jobs.LocalJobComponent``; Reef's service layer assembles
-them and ``reef.runtime.deployment`` owns their lifecycle. Each component
+them. Each component
 saves checkpoints, and an inference runtime serves the published ones:
 Tinker's sampler (``reef.inference.tinker``) reads the checkpoint manifest of
-a release, and ``reef.runtime.serving`` loads a release's weight files.
+a release, and ``reef.inference.serving`` loads a release's weight files.
 Tinker SDK imports stay inside its client adapter, and method loss policy
 remains in the recipe package.
 

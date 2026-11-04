@@ -7,13 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.core.weight_layout import WeightFiles
+from reef.execution.executor.ray import RayExecutor
+from reef.execution.executor.uniproc import UniProcExecutor
+from reef.inference.deployment import InferenceConnection
 from reef.inference.vllm.backend import VLLMInferenceBackend
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.service import INFERENCE_PROTOCOL, VLLMInferenceService
-from reef.runtime.deployment import InferenceConnection
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import WeightFiles
 
 
 class Receiver:

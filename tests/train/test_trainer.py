@@ -18,6 +18,7 @@ from tests.support.runtime_stubs import (
     StubTrainingComponent,
     runtime_bindings,
 )
+from tests.support.samples import data_storage, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
@@ -27,6 +28,7 @@ from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.errors import TrainingStartRefused
+from reef.core.job_data import JobOutcome
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
@@ -34,19 +36,20 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import ScenarioRoot
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import TrainerSamples
+from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
+from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import JobData
+from reef.train.trainer import PendingTrainingResult, PreparedTrainingResult
+from reef.train.types import JobData, PreparedCommit, TrainStepResult
 
 NUM_GPUS = 0
 
@@ -286,7 +289,7 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
     # The single report's sample is stored, which consumes its records; the failed report keeps its inputs held.
     assert {"i1", "single"} <= processor.releasable_record_ids()
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
-    assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:single:0"}
+    assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:math.single:0"}
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
 
 
@@ -311,7 +314,7 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
 
     batch = processor.build_job_data(1)
     assert len(batch.samples) == 1 and trajectory_reward(batch.samples[0]) == 1.0
-    assert processor.acknowledge(batch.data_id) == {"sample:r1:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:math.r1:0"}
     assert not processor.ready(1)
     assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
 
@@ -330,7 +333,7 @@ def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored()
     assert processor.releasable_record_ids() == {"i1", "low"}
     batch = processor.build_job_data(1)
     assert trajectory_reward(batch.samples[0]) == 0.1
-    assert processor.acknowledge(batch.data_id) == {"sample:low:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:math.low:0"}
 
 
 @pytest.mark.unit
@@ -379,7 +382,6 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert trainer.pipeline_status() == {
         "ready_samples": 0,
         "buffer_size": 1,
-        "buffered_requests": 0,
         "job_samples": 1,
     }
     assert len(trainer.pending_job_data.samples) == 1
@@ -391,6 +393,55 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert trainer.job_running
     finish(trainer)
     assert JobLoopState.from_dict(trainer.state).finished_jobs == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("training_job_id", ["another-job", None])
+def test_pending_job_outcome_must_name_the_results_job(training_job_id: str | None) -> None:
+    result = TrainStepResult({}, training_job_id=training_job_id)
+    outcome = JobOutcome("ended-job", "recording", "finished")
+    with pytest.raises(ValueError, match=r"outcome.*result.*job"):
+        PendingTrainingResult(data=None, result=result, ended=outcome)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("prepared_state", "prepared_job_id"),
+    [({"steps": 2}, "job-1"), ({"steps": 1}, "job-2"), ({"steps": 1}, None)],
+)
+def test_prepared_snapshot_must_match_its_training_result(
+    prepared_state: dict[str, int], prepared_job_id: str | None
+) -> None:
+    result = TrainStepResult({"steps": 1}, training_job_id="job-1")
+    prepared = PreparedCommit(prepared_state, 0, 0, training_job_id=prepared_job_id)
+    with pytest.raises(ValueError, match=r"prepared.*match.*result"):
+        PreparedTrainingResult(data=None, result=result, prepared_commit=prepared)
+
+
+@pytest.mark.unit
+def test_prepared_training_result_requires_a_state_mapping() -> None:
+    with pytest.raises(TypeError, match=r"state.*mapping"):
+        PreparedTrainingResult(
+            data=None,
+            result=TrainStepResult(None),
+            prepared_commit=PreparedCommit({}, 0, 0),
+        )
+
+
+@pytest.mark.unit
+def test_annotation_after_preparation_preserves_the_cached_commit() -> None:
+    with one_pair_records() as records, closing(preparing_trainer(records)) as trainer:
+        make_samples(trainer)
+        result = trainer.run_once()
+        assert result is not None
+        prepared = trainer.prepare_commit(result)
+        annotated = trainer.add_commit_metrics(result, {"provider_request_id": "request-1"})
+        assert annotated.metrics["provider_request_id"] == "request-1"
+        assert prepared.metrics is not None and "provider_request_id" not in prepared.metrics
+        assert trainer.prepare_commit(annotated) is prepared
+        trainer.commit(prepared)
+        assert trainer.algorithm_state_dict() == result.state
+        finish(trainer)
 
 
 @pytest.mark.unit
@@ -428,7 +479,6 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
     assert trainer.pipeline_status() == {
         "ready_samples": 1,
         "buffer_size": 2,
-        "buffered_requests": 0,
         "job_samples": 2,
     }
 
@@ -507,9 +557,9 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
 
 @pytest.mark.unit
 def test_trainer_restores_algorithm_state_from_metadata() -> None:
-    session = SQLiteScenarioStorage(None).open("math")
+    session, items = open_sample_store(None, "math")
+    samples = items.for_trainer("")
     records = session.records
-    samples = TrainerSamples(session.samples)
     for item in (
         inference("i1"),
         report("r1", "i1", 1.0),
@@ -558,7 +608,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
 @pytest.mark.unit
 def test_commit_retains_readable_records_and_recovery_skips_committed_consumption(tmp_path) -> None:
-    storage = SQLiteScenarioStorage(tmp_path)
+    storage = data_storage(tmp_path)
     first_inference = positioned_inference(1)
     first_report = positioned_report(2, first_inference.agent_record_id, 1.0)
     second_inference = positioned_inference(3)
@@ -568,7 +618,7 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         first_store = first_session.records
         for item in (first_inference, first_report, second_inference, second_report):
             first_store.append(item)
-        first = preparing_trainer(first_store, samples=TrainerSamples(first_session.samples))
+        first = preparing_trainer(first_store, samples=sample_store(storage, "math", first_session).for_trainer(""))
         make_samples(first)
         first_result = first.run_once()
         assert first_result is not None
@@ -592,7 +642,9 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
     with closing(storage.open("math")) as second_session:
         second_store = second_session.records
         second = preparing_trainer(
-            second_store, algorithm_state=first_state, samples=TrainerSamples(second_session.samples)
+            second_store,
+            algorithm_state=first_state,
+            samples=sample_store(storage, "math", second_session).for_trainer(""),
         )
         second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
@@ -670,8 +722,10 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     [job] = component.submitted
     assert TrainingMethod.from_dict(job.parameters["method"]) == TrainingMethod(_GROUPED_PG_OBJECTIVE)
     # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
-    assert [trajectory_reward(item) for item in job.data.samples] == [0.2, 0.8]
-    prepared = prepare_slime_job(job.data, TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1)
+    assert [trajectory_reward(item) for item in read_job_data(job.data_dir).samples] == [0.2, 0.8]
+    prepared = prepare_slime_job(
+        read_job_data(job.data_dir), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
+    )
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
     # After the root release, the job's checkpoint is what the scenario serves.

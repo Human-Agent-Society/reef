@@ -890,6 +890,9 @@ persistent.
    ``storage.task-file-dir`` : .reef/task-files
        the files of generated tasks for ``local``, or the local cache of a plugin store
 
+   ``storage.job-directory-ttl-s`` : 604800
+       seconds that the data store keeps a job data directory that no training job used; a job of the same samples uses the directory again (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__)
+
    ``storage.agent-record-retention-max-bytes`` : 21474836480
        20 GiB shared across all record bodies, including unconsumed records
 
@@ -960,24 +963,20 @@ the runtime under ``recipe.runtime``. Harness settings live in
 ``recipe.config.training_mode`` is shared by all recipes and defaults to ``auto``.
 It has two values:
 
-- ``auto``: a job starts when the `buffer
-  <../developer-guide/processors.rst#the-buffer>`__ holds ``job_samples``
-  samples: the untrained samples that the next job takes.
-  ``POST /reef/train`` is refused.
-- ``manual``: a job starts only for a ``POST /reef/train`` instruction. The
-  job trains the manual buffer: the samples that a client chose with the
-  buffer routes (`Choose the samples that train
-  <http-api.rst#choose-the-samples-that-train>`__). New samples do not join it
-  by themselves, in any recipe. A weight recipe waits until the manual buffer
-  holds a sample, then trains the whole buffer; the instruction text goes into
-  the commit's ``training_request`` metrics. Harness evolution runs the
-  instruction at once: the method gets the instruction and the traces of the
-  manual buffer, possibly none.
+- ``auto``: a job starts when the `next job
+  <../developer-guide/processors.rst#the-next-job>`__ holds ``job_samples``
+  samples: the untrained samples that it takes. ``POST /reef/train`` is
+  refused.
+- ``manual``: a job starts only for a ``POST /reef/train`` request. The
+  job trains the samples that the request names (`Choose the samples that
+  train <http-api.rst#choose-the-samples-that-train>`__). A weight recipe
+  needs them; the request text goes into the commit's
+  ``training_request`` metrics. Harness evolution runs the request at
+  once: the method gets the request and the traces that it names,
+  possibly none.
 
-Records arrive and the sample store fills in both modes, so a switch from
-``manual`` to ``auto`` can train on data already collected. A switch from
-``auto`` to ``manual`` puts the samples that the next automatic job would take
-into the manual buffer. A recipe's ``Sample2Job``
+Records arrive and stages make samples in both modes, so a switch from
+``manual`` to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
 declares ``supported_training_modes``; an unsupported mode raises
 ``NotImplementedError``. Harness evolution supports both modes, and every
 method takes a request step. Setting ``manual`` on an
@@ -997,13 +996,13 @@ job data completes under its original mode. Reef stores the selected mode in
 the scenario's settings, so reloads and restarts apply it again, and it takes
 precedence over the configured mode. A stored mode that the recipe does not
 support keeps the configured mode and logs a warning. In every mode, the
-samples of ready record sets wait in the scenario's sample store until a job
-trains them.
+samples of ready record sets wait as data items that the scenario uses until a
+job trains them.
 
 .. container:: config
 
    ``recipe.config.training_mode`` : auto
-       ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` instruction
+       ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` request
 
 ``recipe.config.job_parameters`` is an object that a weight recipe sends with
 every job, beside ``method``. The training component
@@ -1213,7 +1212,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
 To evolve offline, on the train split of the scenario's imported tasks
 instead of on traffic, set
 ``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskJobData``. Each
-uploaded train task then joins the buffer and trains once, in upload order. A
+uploaded train task then trains once, in upload order. A
 step holds either traces or train tasks; a step of train tasks rolls out up to
 ``pipeline.sample2job.config.buffer_size`` of them (default ``job_samples``) on
 the head tree as the method's traces. Startup refuses it without an adapter
@@ -1247,7 +1246,7 @@ that plays task directories (an npm ``install``) and
        skip automatic evolve steps once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
 
    ``evolution.max_failure_streak`` : 0
-       stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
+       stop automatic evolve steps after this many consecutive rejected steps, request steps included; 0 disables the limit; a request from ``POST /reef/train`` still runs while the breaker is open
 
    ``evolution.max_model_calls_per_step`` : 0
        cap the method's model calls in one step, through ``services.models`` or ``services.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
@@ -1608,7 +1607,7 @@ and ``buffer_size``. A recipe's page lists the other keys of its stage.
        the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
 
    ``pipeline.sample2job.config.buffer_size`` : ``job_samples``
-       the most samples that one job takes from the buffer, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait in the sample store for later jobs.
+       the most samples that one automatic job takes, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait for later jobs.
 
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
@@ -1720,9 +1719,9 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-The saved train tasks go to the scenario's sample store, as samples
-``generated-tasks/<task name>``, and train from the buffer like every other
-sample. ``GeneratedTaskJobData`` makes one task job of the buffer's tasks,
+The saved train tasks become task items that the scenario uses,
+``<scenario>.generated-tasks.<task name>``, and train like every other
+sample. ``GeneratedTaskJobData`` makes one task job of the next job's tasks,
 whatever Tinker's batch size (``training.options.batch-size``) is:
 
 .. container:: config
@@ -1834,7 +1833,7 @@ them with its reward model, computes the advantages and trains its loss; Reef
 records each saved rollout as a candidate. The deployment selects the built-in
 recipe ``reef.recipe.dataset:DatasetRecipe`` with ``data.training_mode:
 manual``. Its loss family, ``slime``, leaves the training signal to Slime and
-refuses every other job. Each training instruction (``POST /reef/train``)
+refuses every other job. Each training request (``POST /reef/train``)
 whose ``parameters`` hold ``dataset`` is one job:
 
 .. code:: json
@@ -2082,7 +2081,7 @@ The following names are relative to ``operations/``:
        Accepted records include incomplete-stream diagnostics; acceptance does
        not imply a trainable record or successful training.
    * - ``ingest/rejected_report_total``, ``ingest/rejected_request_total``
-     - Report schema/reference violations and invalid training instructions
+     - Report schema/reference violations and invalid training requests
        detected during dispatcher record validation.
    * - ``ingest/rejected_conflict_total``
      - Record identities reused with different content.
@@ -2104,13 +2103,11 @@ The following names are relative to ``operations/``:
    * - ``processor/tracked_records``, ``processor/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
    * - ``processor/waiting_candidates``
-     - Computed-feedback candidates that wait for the sample store.
+     - Computed-feedback candidates that wait to become samples.
    * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
-     - Samples that job data can take now (the buffer), samples that
-       automatic job data needs, and the most samples that one job takes
-       from the buffer.
-   * - ``processor/buffered_requests``
-     - Explicit training instructions already buffered by the processor.
+     - Samples that the next automatic job can take now, samples that
+       automatic job data needs, and the most samples that one automatic job
+       takes.
    * - ``training/reserved_job_data``
      - Zero or one. A reservation can be executing or waiting for settlement;
        it is not necessarily queued job data.
@@ -2222,8 +2219,7 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
 
 A feedback record becomes a ``feedback`` span inside the trace of the first
 inference it references, with ``reef.score`` and ``reef.references``; further
-references are span links. A training instruction becomes a
-``training request`` span. A committed step adds a ``training step N`` span
+references are span links. A committed step adds a ``training step N`` span
 with the commit's step, component artifact IDs, job id, consumed record counts,
 its component as ``reef.component`` when the scenario runs several trainers,
 and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
@@ -2240,7 +2236,7 @@ The stored response and the forwarded stream remain unchanged.
 
 Spans carry the exchange itself: the request messages and the reply as JSON
 in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, feedback text in
-``reef.feedback`` and instruction text in ``reef.instruction``. The backend
+``reef.feedback``. The backend
 therefore sees the scenario's traffic; point tracing only at one trusted with
 it. Export failures are reported in the service log and never
 fail record acceptance or a commit; the exporter batches spans in a background

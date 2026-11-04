@@ -1,4 +1,4 @@
-"""A sample-to-job stage gives each job the parameters of its samples' kind, and its instruction's over them."""
+"""A sample-to-job stage gives each job the parameters of its samples' kind, with its request's merged in."""
 
 from __future__ import annotations
 
@@ -30,18 +30,32 @@ def test_a_job_gets_the_parameters_of_its_samples_kind() -> None:
     assert jobs.experiment_config() == {"job_parameters": parameters}
 
 
-def instruction(**parameters: object) -> TrainingRequest:
+def training_request(**parameters: object) -> TrainingRequest:
     payload = {"text": "train", "session": "s", "release_id": "r", "parameters": parameters}
     return TrainingRequest.from_dict(payload, request_id="train-1")
 
 
-def test_an_instructions_parameters_go_over_the_parameters_of_its_kind() -> None:
-    jobs = stage({"trajectory": {"method": {"objective": "sft"}, "learning_rate": 1e-5}})
-    data = JobData("s:instruction:train-1", (TRAJECTORY,), request=instruction(learning_rate=2e-5, batch_size=8))
-    assert jobs.job_parameters(data) == {"method": {"objective": "sft"}, "learning_rate": 2e-5, "batch_size": 8}
-    # A kind that the recipe gives no parameters trains with the instruction's alone.
+def test_a_requests_parameters_merge_into_the_parameters_of_its_kind() -> None:
+    recipe = {
+        "method": {"objective": "sft"},
+        "learning_rate": 1e-5,
+        "slime": {"seq-length": "32768", "tensor-model-parallel-size": "4"},
+        "env": {"TAGS": ["a", "b"]},
+    }
+    jobs = stage({"trajectory": recipe})
+    overrides = {"learning_rate": 2e-5, "batch_size": 8, "slime": {"seq-length": "131072"}, "env": {"TAGS": ["c"]}}
+    data = JobData("s:request:train-1", (TRAJECTORY,), request=training_request(**overrides))
+    # Nested objects merge key by key; every other value of the request wins, a list included.
+    assert jobs.job_parameters(data) == {
+        "method": {"objective": "sft"},
+        "learning_rate": 2e-5,
+        "batch_size": 8,
+        "slime": {"seq-length": "131072", "tensor-model-parallel-size": "4"},
+        "env": {"TAGS": ["c"]},
+    }
+    # A kind that the recipe gives no parameters trains with the request's alone.
     rl = {"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}
-    assert jobs.job_parameters(JobData("s:instruction:train-1", (TASK,), request=instruction(**rl))) == rl
+    assert jobs.job_parameters(JobData("s:request:train-1", (TASK,), request=training_request(**rl))) == rl
 
 
 def test_mixed_kinds_and_a_kind_without_parameters_are_refused() -> None:

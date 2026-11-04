@@ -75,7 +75,7 @@ def run(
     """Step ``number``, which answers ``request`` (else a request of its own), decided on means; a selected tree
     becomes the next release."""
     request = TrainingRequest("Propose the next candidate.", "", "", f"ask-{number}") if request is None else request
-    data = JobData(f"demo:instruction:{request.id}", (), request=request)
+    data = JobData(f"demo:request:{request.id}", (), request=request)
     result = backend_step(backend, data, state, ComparePolicy(backend, statistic="mean") if policy is None else policy)
     if result.artifact is not None and result.artifact.local_path is not None:
         releases.publish(f"r{number}", HarnessTree.read(result.artifact.local_path))
@@ -250,7 +250,7 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
     with pytest.raises(ValueError, match=r"is not declared under evolution\.models"):
         request = TrainingRequest("Propose the next candidate.", "", "", "ask-1")
         backend.prepare_step(
-            JobData("demo:instruction:ask-1", (), request=request), HarnessState().to_json(), 0, head=head_of(backend)
+            JobData("demo:request:ask-1", (), request=request), HarnessState().to_json(), 0, head=head_of(backend)
         )
 
 

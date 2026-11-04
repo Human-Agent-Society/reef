@@ -12,10 +12,11 @@ from pathlib import Path
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import JobStatus, TrainingJob
+from reef.train.component import JobStatus, TrainingJob
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend.component import SlimeJobRunner
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -254,7 +255,7 @@ class SaoStack:
         )
         method = {"method": TrainingMethod("sao").to_dict()}
         job_id = f"job-{step}"
-        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method, scenario="s"))
+        self.component.submit(TrainingJob(job_id, "slime", self.start, job_data_ref(batch), method, scenario="s"))
         status = finished(self.component, job_id)
         if status.checkpoints:
             self.start = status.checkpoints[-1].path

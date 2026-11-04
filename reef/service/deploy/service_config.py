@@ -21,7 +21,7 @@ from reef.core.config import ConfigArgument, config_arguments, config_metadata, 
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
-from reef.storage.data import DataStore
+from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -257,6 +257,14 @@ class ServiceConfig:
         public_path=("storage", "work_retention_s"),
         help="Seconds that control keeps an ended work item before it deletes it. Default: 7 days.",
     )
+    job_directory_ttl_s: float = config_option(
+        JOB_DIRECTORY_TTL_SECONDS,
+        public_path=("storage", "job_directory_ttl_s"),
+        help=(
+            "Seconds that the data store keeps a job data directory that no training job used; a job of the same "
+            "samples uses it again. Default: 7 days."
+        ),
+    )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
         "local",
@@ -280,7 +288,7 @@ class ServiceConfig:
     task_import_manifest: str | None = config_option(
         None,
         public_path=("task_import", "manifest"),
-        help="Split manifest of the Harbor tasks that each scenario imports into its sample store.",
+        help="Split manifest of the Harbor tasks that each scenario imports into its samples.",
     )
     task_import_tasks_root: str | None = config_option(
         None,
@@ -419,6 +427,8 @@ class ServiceConfig:
             raise ValueError("storage.work_max_attempts must be at least 1")
         if not math.isfinite(self.work_retention_s) or self.work_retention_s <= 0:
             raise ValueError("storage.work_retention_s must be a positive number of seconds")
+        if not math.isfinite(self.job_directory_ttl_s) or self.job_directory_ttl_s <= 0:
+            raise ValueError("storage.job_directory_ttl_s must be a positive number of seconds")
         if self.coordination_backend not in (None, "sqlite", "postgres"):
             raise ValueError("storage.coordination_backend must be sqlite or postgres")
         if self.coordination_backend is None and self.record_backend not in ("sqlite", "postgres"):

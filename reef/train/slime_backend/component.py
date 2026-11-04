@@ -53,17 +53,14 @@ from reef.artifact.repository import DefaultStart, ModelDirectory
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
-from reef.core.weight_layout import ADAPTER_DIR
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.executor import resolve
-from reef.runtime.interfaces import (
-    LearningRateScheduleState,
-    learning_rate_metrics,
-    resolve_learning_rate_schedule_state,
-)
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
+from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
+from reef.execution.executor import resolve
+from reef.storage.durable_files import read_json, write_json
+from reef.storage.job_data import read_job_data
 from reef.train.algos.registry import job_training, resolve_objective
+from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.local_jobs import LocalJobComponent
+from reef.train.method import LearningRateScheduleState, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.checkpoints import (
     START_STATE,
@@ -269,15 +266,13 @@ class SlimeJobs(LocalJobComponent):
         if "dataset" in job.parameters:
             if not dataset_family:
                 raise ValueError(f"a dataset job needs the {SLIME_NATIVE_FAMILY!r} loss family, which Slime trains")
-            if job.data.samples:
+            if job.sample_count:
                 raise ValueError("a dataset job has no samples: Slime rolls out the dataset's prompts")
             DatasetSettings.from_parameters(job.parameters)
         elif dataset_family:
             raise ValueError(f"the {SLIME_NATIVE_FAMILY!r} loss family trains only dataset jobs")
-        tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
-        if tasks and len(tasks) != len(job.data.samples):
-            raise ValueError("a Slime job trains either trajectories or tasks, not both")
-        if tasks:
+        if job.kind == "task":
+            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
@@ -413,8 +408,7 @@ class SlimeJobRunner(SlimeJobs):
         """A task job rolls its tasks out on this runner's rollout engines, as the ``rollout`` parameter says."""
         if self.rollout_group is None:
             raise ValueError(
-                "Slime started no rollout engines for this task job; set training.options.colocate or "
-                "rollout-num-gpus"
+                "Slime started no rollout engines for this task job; set training.options.colocate or rollout-num-gpus"
             )
         super().check_task_jobs(parameters)
 
@@ -433,7 +427,7 @@ class SlimeJobRunner(SlimeJobs):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data.data_id, samples)),
+                trajectories(JobData(job.data_id, samples)),
                 RolloutScores.from_json(kept["scores"]),
                 tuple(RolloutTokens(**item) for item in kept.get("tokens", [])),
             )
@@ -447,7 +441,9 @@ class SlimeJobRunner(SlimeJobs):
             runtime_load_id=f"slime:{held}",
             topk_logprobs=0 if self.score_centering is None else self.score_centering.top_k,
         )
-        tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
+        tasks = tuple(
+            item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)
+        )
         self.rollout_group.sync(self.group)
         try:
             rollouts = run_train_tasks(
@@ -458,7 +454,7 @@ class SlimeJobRunner(SlimeJobs):
         write_json(
             record,
             {
-                "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
+                "samples": JobData(job.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
                 "tokens": [asdict(item) for item in rollouts.tokens],
             },
@@ -512,7 +508,7 @@ class SlimeJobRunner(SlimeJobs):
         if started is None or started["rollout_id"] != self.loaded_rollout_id:
             held = SlimeStart.read(Path(saved[-1].path)) if saved else start
             self.check_held_weights(held.rollout_id, job.start)
-        data = job.data
+        data = read_job_data(job.data_dir, job.data_id)
         rollout_metrics: dict[str, Any] = {}
         if "rollout" in job.parameters:
             rollouts = self.task_rollouts(job, directory, RolloutSettings.from_parameters(job.parameters))

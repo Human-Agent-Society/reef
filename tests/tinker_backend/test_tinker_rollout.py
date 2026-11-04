@@ -9,19 +9,19 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
 from tests.support.chat_templates import CharTemplate
+from tests.support.job_data import job_data_ref
 
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
 from reef.harness.tasks.rollouts import RolloutRow, TaskLab
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
-from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
+from reef.train.component import TrainingJob
+from reef.train.method import TrainingMethod
 from reef.train.task_rollouts import ChatEndpoint, RolloutSettings, RolloutTokens, TaskJobRollouts, run_train_tasks
 from reef.train.tinker_backend import component as component_module
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
@@ -305,7 +305,14 @@ def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
         parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
         with pytest.raises(ValueError, match="distinct names"):
             component.submit(
-                TrainingJob("job-0", "tinker", component.base_start, JobData("d", tasks), parameters, scenario="s")
+                TrainingJob(
+                    "job-0",
+                    "tinker",
+                    component.base_start,
+                    job_data_ref(JobData("d", tasks)),
+                    parameters,
+                    scenario="s",
+                )
             )
     finally:
         component.close()
@@ -333,7 +340,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
             "job-0",
             "tinker",
             component.base_start,
-            JobData("d", (harbor_task(tmp_path, "add"),)),
+            job_data_ref(JobData("d", (harbor_task(tmp_path, "add"),))),
             parameters,
             scenario="s",
         )
@@ -370,7 +377,7 @@ def test_a_task_job_reports_its_rollout_tokens_and_a_resumed_job_keeps_them(tmp_
             "job-0",
             "tinker",
             component.base_start,
-            JobData("d", (harbor_task(tmp_path, "add"),)),
+            job_data_ref(JobData("d", (harbor_task(tmp_path, "add"),))),
             parameters,
             scenario="s",
         )
@@ -404,7 +411,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
                     "j",
                     "tinker",
                     without_sampler.base_start,
-                    JobData("d", (task,)),
+                    job_data_ref(JobData("d", (task,))),
                     {**method, "rollout": ROLLOUT},
                     scenario="s",
                 )
@@ -418,12 +425,19 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     try:
         for items, parameters, message in (
             ((task,), method, "needs the rollout parameter"),
-            ((task, trajectory), {**method, "rollout": ROLLOUT}, "either trajectories or tasks"),
+            ((task, trajectory), {**method, "rollout": ROLLOUT}, "both trajectories and tasks"),
             ((trajectory,), {**method, "rollout": ROLLOUT}, "applies only to a job of tasks"),
         ):
             with pytest.raises(ValueError, match=message):
                 component.submit(
-                    TrainingJob("j", "tinker", component.base_start, JobData("d", items), parameters, scenario="s")
+                    TrainingJob(
+                        "j",
+                        "tinker",
+                        component.base_start,
+                        job_data_ref(JobData("d", items)),
+                        parameters,
+                        scenario="s",
+                    )
                 )
     finally:
         component.close()
@@ -468,7 +482,7 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
                 "job-0",
                 "tinker",
                 component.base_start,
-                JobData("d", (harbor_task(tmp_path, "add"),)),
+                job_data_ref(JobData("d", (harbor_task(tmp_path, "add"),))),
                 parameters,
                 scenario="s",
             )

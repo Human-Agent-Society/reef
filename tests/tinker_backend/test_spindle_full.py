@@ -10,20 +10,23 @@ from types import SimpleNamespace
 import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
+from tests.support.job_data import job_data_ref
 
 from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
+from reef.core.weight_layout import ReleaseFormat
 from reef.inference.tinker import TinkerInferenceRuntime
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
 from reef.service.deploy.training import training_deployment_for
-from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.component import TrainingJob, job_id_for
+from reef.train.method import TrainingMethod
 from reef.train.tinker_backend import client as client_module
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
 from reef.train.tinker_backend.config import SpindleFullConfig
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
@@ -165,7 +168,7 @@ def train(component, start=None):
     parameters = {"method": TrainingMethod(Objective.name).to_dict()}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":
         assert time.monotonic() < deadline, status

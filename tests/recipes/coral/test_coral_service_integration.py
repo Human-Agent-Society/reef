@@ -27,8 +27,8 @@ from recipes.beta.coral.reporter import AttemptReport
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

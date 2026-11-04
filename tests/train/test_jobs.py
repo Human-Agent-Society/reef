@@ -10,6 +10,7 @@ import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.samples import open_sample_store
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 
@@ -19,11 +20,13 @@ from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
+from reef.core.weight_layout import ReleaseFormat
 from reef.pipeline_context import PipelineContext
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.sample2job import Sample2Job
-from reef.storage.samples import TrainerSamples
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.data import NewItem
+from reef.storage.job_data import read_job_data
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -138,6 +141,18 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     # The next job of the same trainer is another job, even with the same data from the same start.
     later = loop.submit(JobLoopState("fake:base", finished_jobs=1, last_job=FINISHED), batch(), PARAMETERS)
     assert later.result.training_job_id != job.job_id
+
+
+@pytest.mark.unit
+def test_every_job_names_its_scenario_component_and_the_job_that_the_trainer_committed_last(component):
+    loop = JobLoop(component, scenario="math", scenario_component="weights")
+    loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS)
+    ended = JobOutcome("job-0", "fake", "finished")
+    loop.submit(JobLoopState("fake:base", finished_jobs=1, last_job=ended), batch(), PARAMETERS)
+    assert [(job.component, job.previous_job_id) for job in component.jobs] == [
+        ("weights", None),
+        ("weights", "job-0"),
+    ]
 
 
 @pytest.mark.unit
@@ -423,17 +438,29 @@ class TrajectoryAndTaskJobData(Sample2Job):
         return JobData(data_id, samples)
 
 
-def train_record(record_id: str, parameters: dict) -> TrainingRequest:
-    payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": parameters}
+def train_record(record_id: str, parameters: dict, sample_id: str) -> TrainingRequest:
+    payload = {
+        "text": "train",
+        "session": "s-1",
+        "release_id": "r-1",
+        "parameters": parameters,
+        "samples": [sample_id],
+    }
     return TrainingRequest.from_dict(payload, request_id=record_id)
 
 
 @pytest.mark.unit
-def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruction(component, tmp_path):
-    session = SQLiteScenarioStorage(tmp_path / "records").open("math")
+def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request(component, tmp_path):
+    session, samples = open_sample_store(tmp_path / "records", "math")
     trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
-    session.samples.add_trajectories((("t1", trajectory),))
-    session.samples.add_tasks((write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path / "a"),), "train")
+    task = write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path)
+    samples.data.create(
+        samples.owner,
+        [
+            NewItem("t1", trajectory.trajectory, {"kind": "trajectory", "scenarios": {"math": "train"}}),
+            NewItem("task-a", task, {"kind": "task", "scenarios": {"math": "train"}}),
+        ],
+    )
     trainer = Trainer.build(
         "math",
         session.records,
@@ -442,28 +469,25 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         ),
         job_loop=loop_with(component),
         training_mode="manual",
-        samples=TrainerSamples(session.samples),
-        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their instruction.
+        samples=samples.for_trainer(""),
+        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
         job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
         root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
 
-    def train(sample_id: str, record: TrainingRequest) -> dict:
-        pipeline.insert_into_buffer((sample_id,))
-        pipeline.queue_instructions([record])
+    def train(record: TrainingRequest) -> dict:
+        pipeline.queue_requests([record])
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         job = component.jobs[-1]
         component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
-        # A scenario's commit removes the trained sample from the manual buffer; this trainer has no scenario.
-        pipeline.remove_from_buffer((sample_id,))
         return dict(job.parameters)
 
-    assert train("t1", train_record("sft", {"learning_rate": 2e-5})) == {"method": "sft", "learning_rate": 2e-5}
+    assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"method": "sft", "learning_rate": 2e-5}
     rl = {"method": "task_group", "rollout": {"rollouts_per_task": 4}}
-    assert train("task-a", train_record("rl", rl)) == rl
-    assert [type(sample).__name__ for job in component.jobs for sample in job.data.samples] == [
+    assert train(train_record("rl", rl, "task-a")) == rl
+    assert [type(sample).__name__ for job in component.jobs for sample in read_job_data(job.data_dir).samples] == [
         "TrajectorySample",
         "TaskSample",
     ]
