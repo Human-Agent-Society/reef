@@ -34,7 +34,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     stand_in_e2b_package,
     write_workspace_task,
 )
-from tests.support.samples import data_storage
+from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
 
 from recipes.beta.autoenvscaling import (
@@ -68,7 +68,6 @@ from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
-from reef.storage.samples import TrainerSamples
 
 
 @pytest.fixture(autouse=True)
@@ -684,8 +683,8 @@ def test_from_config_refuses_a_calibration_that_cannot_run(
 def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", rewards={"plain": 0.5})
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
-    session = data_storage(tmp_path / "records").open("autoenvscaling")
-    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+    session, samples = open_sample_store(tmp_path / "records", "autoenvscaling")
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=samples.for_trainer(""))
     generation = GeneratedTaskSamples(
         context,
         GeneratedTaskSettings(rounds=1, description=DESCRIPTION),
@@ -719,8 +718,8 @@ def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_comp
         band=PassRateBand(0.25, 0.75),
     )
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2, calibration=check)
-    session = data_storage(tmp_path / "records").open("autoenvscaling")
-    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+    session, samples = open_sample_store(tmp_path / "records", "autoenvscaling")
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=samples.for_trainer(""))
     generation = GeneratedTaskSamples(
         context,
         GeneratedTaskSettings(rounds=1, description=DESCRIPTION),

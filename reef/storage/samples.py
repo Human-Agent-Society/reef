@@ -49,7 +49,7 @@ class StoredSample:
     """One item that a scenario uses, as its trainers read it, with the train counts of each trainer.
 
     Values: ``sequence`` is the positive sequence of the scenario's use of the item (``DataStore.scenario_items``),
-    or the item's sequence when ``ScenarioSamples.get`` read it. ``sample_id`` is the item's ID. ``split`` is the
+    or the item's sequence when ``SampleStore.get`` read it. ``sample_id`` is the item's ID. ``split`` is the
     item's split for the scenario: ``train``, or ``eval`` for an imported task that an evaluation runs. ``sample`` is
     the ``TrajectorySample`` or ``TaskSample`` of the item. ``train_counts`` maps each trainer (its component, or
     ``""`` for the only trainer of a scenario) to the positive number of its committed jobs that listed
@@ -57,7 +57,7 @@ class StoredSample:
     or an imported task. ``group`` is None or the name that the samples of one stage unit share, so that they train
     together.
 
-    Purpose: ``ScenarioSamples`` makes it. A trainer's pipeline reads it, and the listings and evaluations too.
+    Purpose: ``SampleStore`` makes it. A trainer's pipeline reads it, and the listings and evaluations too.
     """
 
     sequence: int
@@ -85,7 +85,7 @@ class TrainingState(ABC):
     trainer, for each sample that the commit lists (``consumed_sample_id``), in the commit's transaction. A train
     count stays when its item leaves the scenario, so an item that comes back keeps it.
 
-    Purpose: the scenario storage keeps it with the scenario's commits. ``ScenarioSamples`` reads it.
+    Purpose: the scenario storage keeps it with the scenario's commits. ``SampleStore`` reads it.
     """
 
     @abstractmethod
@@ -119,20 +119,24 @@ class MemoryTrainingState(TrainingState):
 
 
 @dataclass(frozen=True)
-class ScenarioSamples:
-    """The training samples of one scenario: the items of its owner that it uses, and its training state.
+class SampleStore:
+    """The sample store of one scenario: the data items that it trains on, read as samples, with its training state.
 
     Values: ``data`` is the deployment's data store, ``owner`` the scenario's owner there, ``scenario`` its name and
     ``state`` its training state.
 
-    Purpose: ``DataScenarioStore`` makes it for an open scenario. Each trainer reads and writes it through
-    ``TrainerSamples``, and the listings and evaluations read it.
+    Purpose: ``ScenarioStorage.sample_store`` makes it for an open scenario. The listings and evaluations read it,
+    and ``Recipe.build_trainers`` gives each trainer its ``TrainerSamples`` (``for_trainer``).
     """
 
     data: DataStore
     owner: str
     scenario: str
     state: TrainingState
+
+    def for_trainer(self, trainer: str) -> TrainerSamples:
+        """The samples of the scenario as ``trainer``, a ``train_counts`` key, reads and writes them."""
+        return TrainerSamples(self, trainer)
 
     def page(
         self,
@@ -198,44 +202,6 @@ class ScenarioSamples:
         group = None if own is None else item.metadata.get("group")
         return StoredSample(sequence, item.item_id, split, sample, train_counts, component, group)
 
-    def add_stage_samples(
-        self, trainer: str, group: str | None, record_ids: Sequence[str], samples: Sequence[tuple[str, Sample]]
-    ) -> int:
-        """Save the samples that the stages of ``trainer`` made from ``record_ids`` as items that the scenario uses,
-        then mark the records consumed; return the number of new items.
-
-        The sample named ``name`` is the item ``stage_item_id(scenario, name)``. An item that exists stays as it is,
-        so a stage that makes a sample again, after a restart, changes nothing. ``record_ids`` is empty for samples
-        that a stage made from no record set.
-        """
-        new = 0
-        for name, sample in samples:
-            item_id = stage_item_id(self.scenario, name)
-            if self.data.read(self.owner, item_id) is not None:
-                continue
-            origin = {"scenario": self.scenario, "component": trainer, "records": list(sample.source_agent_record_ids)}
-            metadata = {
-                "scenarios": {self.scenario: "train"},
-                "origin": origin,
-                **({"group": group} if group is not None else {}),
-            }
-            try:
-                if isinstance(sample, TrajectorySample):
-                    group_id = {} if sample.group_id is None else {"group_id": sample.group_id}
-                    item = NewItem(item_id, dict(sample.trajectory), {"kind": "trajectory", **metadata, **group_id})
-                    self.data.create(self.owner, [item])
-                else:
-                    with tempfile.TemporaryDirectory(prefix="reef-stage-task-") as directory:
-                        task = shutil.copytree(sample.task_path, Path(directory) / item_id)
-                        task_metadata = {"kind": "task", **metadata, "task_metadata": dict(sample.metadata)}
-                        self.data.create(self.owner, [NewItem(item_id, task, task_metadata)])
-            except ItemConflict:
-                # Another process made the same sample first: its item wins.
-                continue
-            new += 1
-        self.state.consume_records(trainer, record_ids)
-        return new
-
     def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         """Every task that the scenario uses and that no stage of it made, in use order; only ``split``'s if given."""
         found: list[StoredSample] = []
@@ -246,47 +212,85 @@ class ScenarioSamples:
         return tuple(found)
 
 
-def memory_samples(scenario: str) -> ScenarioSamples:
-    """The samples of ``scenario`` in process memory, for a trainer without a scenario session: a data store whose
+def memory_samples(scenario: str) -> SampleStore:
+    """The sample store of ``scenario`` in process memory, for a trainer without a scenario session: a data store whose
     owner is the scenario, with its task files in a temporary directory, and a training state in memory."""
-    return ScenarioSamples(MemoryDataStore(LocalTaskFileStore()), scenario, scenario, MemoryTrainingState())
+    return SampleStore(MemoryDataStore(LocalTaskFileStore()), scenario, scenario, MemoryTrainingState())
 
 
 @dataclass(frozen=True)
 class TrainerSamples:
     """The samples of a scenario as one trainer reads and writes them.
 
-    Values: ``samples`` is the scenario's ``ScenarioSamples``; ``trainer`` is the trainer's ``train_counts`` key, the
-    component that its commits name or ``""`` for the only trainer of a scenario. ``page`` reads the samples that the
-    trainer reads (its own, and the uploads and imported tasks), ``add_record_samples`` saves its own,
-    ``consumed_record_ids`` reads the records that its stages consumed, and ``imported_tasks`` reads the imported
-    tasks.
+    Values: ``store`` is the scenario's ``SampleStore``. ``trainer`` is the trainer's ``train_counts`` key: the
+    component that its commits name, or ``""`` for the only trainer of a scenario.
 
-    Purpose: ``Recipe.build_trainers`` makes one for each trainer; the trainer's pipeline (``PipelineContext.samples``)
-    and its stages read it.
+    Purpose: ``SampleStore.for_trainer`` makes it. The trainer's pipeline (``PipelineContext.samples``) and its stages
+    read the samples that the trainer trains on, save the samples that its stages make, and read the records that
+    they consumed.
     """
 
-    samples: ScenarioSamples
-    trainer: str = ""
+    store: SampleStore
+    trainer: str
 
     def page(
         self, *, after_sequence: int = 0, limit: int = 256, kind: SampleKind | None = None
     ) -> tuple[StoredSample, ...]:
-        return self.samples.page(after_sequence=after_sequence, limit=limit, kind=kind, trainer=self.trainer)
+        """The samples that the trainer reads: its own, and the uploads and imported tasks (``SampleStore.page``)."""
+        return self.store.page(after_sequence=after_sequence, limit=limit, kind=kind, trainer=self.trainer)
 
     def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
-        return self.samples.get(sample_ids)
+        return self.store.get(sample_ids)
+
+    def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
+        return self.store.imported_tasks(split)
 
     def add_record_samples(
         self, group: str | None, record_ids: Sequence[str], samples: Sequence[tuple[str, Sample]]
     ) -> int:
-        return self.samples.add_stage_samples(self.trainer, group, record_ids, samples)
+        """Save the samples that the stages of ``trainer`` made from ``record_ids`` as items that the scenario uses,
+        then mark the records consumed; return the number of new items.
+
+        The sample named ``name`` is the item ``stage_item_id(scenario, name)``. An item that exists stays as it is,
+        so a stage that makes a sample again, after a restart, changes nothing. ``record_ids`` is empty for samples
+        that a stage made from no record set.
+        """
+        store, trainer = self.store, self.trainer
+        new = 0
+        for name, sample in samples:
+            item_id = stage_item_id(store.scenario, name)
+            if store.data.read(store.owner, item_id) is not None:
+                continue
+            origin = {
+                "scenario": store.scenario,
+                "component": trainer,
+                "records": list(sample.source_agent_record_ids),
+            }
+            metadata = {
+                "scenarios": {store.scenario: "train"},
+                "origin": origin,
+                **({"group": group} if group is not None else {}),
+            }
+            try:
+                if isinstance(sample, TrajectorySample):
+                    group_id = {} if sample.group_id is None else {"group_id": sample.group_id}
+                    item = NewItem(item_id, dict(sample.trajectory), {"kind": "trajectory", **metadata, **group_id})
+                    store.data.create(store.owner, [item])
+                else:
+                    with tempfile.TemporaryDirectory(prefix="reef-stage-task-") as directory:
+                        task = shutil.copytree(sample.task_path, Path(directory) / item_id)
+                        task_metadata = {"kind": "task", **metadata, "task_metadata": dict(sample.metadata)}
+                        store.data.create(store.owner, [NewItem(item_id, task, task_metadata)])
+            except ItemConflict:
+                # Another process made the same sample first: its item wins.
+                continue
+            new += 1
+        store.state.consume_records(trainer, record_ids)
+        return new
 
     def consumed_record_ids(self) -> frozenset[str]:
-        return self.samples.state.consumed_record_ids(self.trainer)
-
-    def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
-        return self.samples.imported_tasks(split)
+        """The records that the stages of ``trainer`` consumed."""
+        return self.store.state.consumed_record_ids(self.trainer)
 
 
 __all__ = [
@@ -294,7 +298,7 @@ __all__ = [
     "SAMPLE_KINDS",
     "MemoryTrainingState",
     "SampleKind",
-    "ScenarioSamples",
+    "SampleStore",
     "StoredSample",
     "TrainerSamples",
     "TrainingState",

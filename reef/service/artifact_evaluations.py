@@ -461,7 +461,7 @@ class ArtifactEvaluations:
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             request, _artifact, model = self.checked(current, artifact_id, settings)
-            samples = current.store.samples
+            samples = self.dispatcher.storage.sample_store(scenario, current.store)
             held = {
                 stored.sample_id: stored.sample.task_path
                 for stored in (() if samples is None else samples.imported_tasks(split="eval"))

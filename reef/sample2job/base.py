@@ -92,13 +92,12 @@ class Sample2Job(ABC, Plugin):
     builds the stage in ``from_config``.
     """
 
-    #: The job data type ``make_job_data`` returns; the trainer validates it.
-    output_schema: type[JobData] = JobData
     #: The training modes that the recipe's job data supports. ``auto`` makes job data when ``job_samples``
     #: samples wait; ``manual`` makes it of the samples that a queued training request names.
     supported_training_modes: frozenset[str] = frozenset({"auto", "manual"})
-    #: Whether the job reads the request in its data, as a harness proposer does. In ``manual`` such a stage
-    #: runs a request that names no sample too. Another stage needs a request that names samples.
+    #: Whether the job reads its training request, as a harness proposer does: its job parameters carry the request.
+    #: In ``manual`` such a stage runs a request that names no sample too. Another stage needs a request that names
+    #: samples.
     reads_requests: bool = False
     #: The kinds of record that the trainer gives the pipeline.
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})

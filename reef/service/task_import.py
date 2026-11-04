@@ -1,11 +1,11 @@
-"""The data of each scenario when it opens: its owner, its training samples and the deployment's task import
+"""The data of each scenario when it opens: its owner, its record items and the deployment's task import
 (RFC #1028, RFC #1140).
 
 :class:`DataScenarioStorage` opens each scenario's session in three steps. A scenario without an owner gets the
 owner with its name. Then the deployment's ``task-import`` section, when it is set, adds each task of its split
 manifest as an item of the owner that the scenario uses in the manifest's split. Last, the record items of another
-scenario that it uses are appended to its record store (``sync_scenario_records``). The session's training samples
-are the items of the owner that the scenario uses (``ScenarioSamples``).
+scenario that it uses are appended to its record store (``sync_scenario_records``). The scenario trains on the items
+of the owner that it uses (``SampleStore``).
 
 An identical import changes nothing, so the import runs again at each open and picks up the tasks that the operator
 added to the manifest. A task that conflicts with a stored item stops the open.
@@ -23,15 +23,12 @@ from harbor.models.task.task import Task as HarborTaskLoader
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks.split import read_split_manifest
-from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, NewItem
 from reef.storage.data_sync import release_items
-from reef.storage.evaluations import EvaluationStore
 from reef.storage.record_items import sync_scenario_records
-from reef.storage.records import RecordStore
-from reef.storage.samples import ScenarioSamples, TrainingState
+from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
-from reef.storage.tasks import SplitName, TaskFileStore, TaskStorage
+from reef.storage.tasks import SplitName, TaskFileStore
 
 
 class TaskImportError(ReefError):
@@ -77,62 +74,8 @@ class TaskImport:
                 data.update(owner, [directory.name for directory in directories], {"scenarios": {scenario: split}})
 
 
-class DataScenarioStore(ScenarioStore):
-    """A scenario session whose training samples are the items of the data store that its scenario uses.
-
-    Values: ``inner`` is the session of the scenario storage, and ``samples`` the scenario's ``ScenarioSamples``,
-    whose training state is ``inner.training_state``. Each operation is the operation of ``inner``, except
-    ``samples``.
-
-    Purpose: ``DataScenarioStorage.open`` makes it.
-    """
-
-    def __init__(self, inner: ScenarioStore, samples: ScenarioSamples) -> None:
-        self.inner = inner
-        self._samples = samples
-
-    @property
-    def records(self) -> RecordStore:
-        return self.inner.records
-
-    @property
-    def durable(self) -> bool:
-        return self.inner.durable
-
-    @property
-    def tasks(self) -> TaskStorage:
-        return self.inner.tasks
-
-    @property
-    def training_state(self) -> TrainingState:
-        return self.inner.training_state
-
-    @property
-    def samples(self) -> ScenarioSamples:
-        return self._samples
-
-    @property
-    def evaluations(self) -> EvaluationStore:
-        return self.inner.evaluations
-
-    def history(self) -> tuple[CommitRecord, ...]:
-        return self.inner.history()
-
-    def training_run_position(self) -> tuple[int, int]:
-        return self.inner.training_run_position()
-
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
-        return self.inner.commit_step(expected_step=expected_step, commit=commit)
-
-    def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
-        return self.inner.recover(checkpoint=checkpoint)
-
-    def close(self) -> None:
-        self.inner.close()
-
-
 class DataScenarioStorage(ScenarioStorage):
-    """Scenario storage whose sessions read their training samples from the deployment's data store.
+    """Scenario storage that prepares the data of each scenario in the deployment's data store when it opens.
 
     Values: ``(inner, data, task_import)`` is such a storage if and only if
     ``inner`` is a scenario storage, ``data`` is the deployment's data store,
@@ -144,8 +87,9 @@ class DataScenarioStorage(ScenarioStorage):
     2. runs ``task_import`` for the owner, when it is set;
     3. appends to its record store the copy of each record item of the owner
        that it uses and that another scenario made (``sync_scenario_records``);
-    4. returns the session as a ``DataScenarioStore``, whose samples are the
-       items of the owner that the scenario uses.
+    4. returns the session.
+
+    ``sample_store`` gives the items of the owner that the scenario uses.
 
     If a step raises, ``open`` closes the session and raises. ``archive`` also
     removes the scenario from the ``scenarios`` of its owner's items, except
@@ -188,7 +132,11 @@ class DataScenarioStorage(ScenarioStorage):
         except BaseException:
             session.close()
             raise
-        return DataScenarioStore(session, ScenarioSamples(self.data, owner, scenario, session.training_state))
+        return session
+
+    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
+        owner = self.inner.read_settings(scenario).owner
+        return None if owner is None else SampleStore(self.data, owner, scenario, session.training_state)
 
     def archive(self, scenario: str) -> tuple[str, ...]:
         owner = self.inner.read_settings(scenario).owner

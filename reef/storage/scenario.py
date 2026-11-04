@@ -1,4 +1,4 @@
-"""Storage boundary for a scenario's records, commits, settings, tasks, training samples, evaluations, and recovery.
+"""Storage boundary for a scenario's records, commits, settings, tasks, training state, evaluations, and recovery.
 
 Artifact publication remains the responsibility of the committer. A
 store settles record consumption and the committed scenario state together;
@@ -20,7 +20,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.data import check_owner
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import ScenarioSamples, TrainingState
+from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
 
@@ -103,13 +103,6 @@ class ScenarioStore(ABC):
         consumed. It closes with this session, and survives a restart if ``durable`` is true."""
 
     @property
-    def samples(self) -> ScenarioSamples | None:
-        """The training samples of this scenario: the items of the deployment's data store that it uses (RFC #1140).
-        A session that ``DataScenarioStorage`` opens has them; a session of a storage without a data store has none,
-        and its trainers keep their samples in memory."""
-        return None
-
-    @property
     @abstractmethod
     def evaluations(self) -> EvaluationStore:
         """The artifact evaluations that clients asked this scenario for.
@@ -161,7 +154,7 @@ class ScenarioStorage(Plugin, ABC):
     shared resources only; sessions remain owned by their scenarios.
 
     Every piece of per-scenario state that Reef owns goes through this
-    interface: records, commits, generated tasks, training samples and evaluations through sessions, settings
+    interface: records, commits, generated tasks, training state and evaluations through sessions, settings
     through ``read_settings`` and ``write_settings``. Archiving a scenario
     retires all of it. A deployment names a subclass in ``storage.record_backend``.
     """
@@ -194,6 +187,11 @@ class ScenarioStorage(Plugin, ABC):
     @abstractmethod
     def open(self, scenario: str) -> ScenarioStore:
         """Open an independently owned session for this scenario."""
+
+    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
+        """The data items that ``scenario`` trains on, with the training state of its open ``session`` (RFC #1140).
+        A storage without a data store has none: its trainers keep their samples in memory."""
+        return None
 
     @abstractmethod
     def archive(self, scenario: str) -> tuple[str, ...]:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import time
 import uuid
 from abc import abstractmethod
@@ -67,6 +68,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.trajectory_index import call_key
 from reef.storage.data import (
+    JOB_DIRECTORY_TTL_SECONDS,
     MAX_QUERY_LIMIT,
     DataStore,
     ItemConflict,
@@ -91,7 +93,7 @@ from reef.storage.migrations import (
     migrate_data_uses,
 )
 from reef.storage.postgres import postgres_url, validate_postgres_schema
-from reef.storage.segments import SegmentLine, SegmentPartition, SegmentStore, segment_lines
+from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
     SEGMENT_COLUMNS,
     ScopedTable,
@@ -111,8 +113,9 @@ PACK_BYTES = 64 * 2**20
 UNUSED_SEGMENT_SECONDS = 24 * 3600
 
 
-def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table]:
-    """Define ``data_item``, ``data_item_scenario``, ``data_record_node`` and ``data_segment`` in ``metadata``.
+def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table]:
+    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment`` and ``data_job_directory`` in
+    ``metadata``. ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
 
     ``sequence`` orders the items as they arrived. ``data_item_scenario`` has one row per use of an item by a
     scenario, with its split; its own ``sequence`` orders the uses as they began, and a use whose split changes is a
@@ -178,7 +181,13 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("byte_count", BigInteger, nullable=False),
         PrimaryKeyConstraint("owner", "segment_id"),
     )
-    return items, scenarios, nodes, segments
+    job_directories = Table(
+        "data_job_directory",
+        metadata,
+        Column("key", String(64), primary_key=True),
+        Column("last_used_at", Float, nullable=False),
+    )
+    return items, scenarios, nodes, segments, job_directories
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -194,18 +203,42 @@ class SQLDataStore(DataStore):
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
     ``ItemConflict``, never in a failed insert. ``create`` and ``delete`` both take ``lock_creates``, since they
     change the trajectory nodes of an owner. ``segments`` is None, or the segment store that keeps the content of
-    trajectory items and nodes in the partition of each owner; the store closes it with itself.
+    trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
+    the job data directories: ``job_directories`` when given, else ``segments``, else a local segment store in a new
+    temporary directory, which only this process reads. ``job_directory_ttl_seconds`` is how long the store keeps a
+    job data directory that no job used.
     """
 
     def __init__(
         self,
-        tables: tuple[Table, Table, Table, Table],
+        tables: tuple[Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directories: SegmentStore | None = None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> None:
-        self.items_table, self.scenarios_table, self.nodes_table, self.segment_table = tables
+        self.items_table, self.scenarios_table, self.nodes_table, self.segment_table, self.job_directory_table = tables
         self.task_files = task_files
         self.segments = segments
+        self.job_directories = (
+            job_directories or segments or LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-directories-")))
+        )
+        self.job_directory_ttl_seconds = job_directory_ttl_seconds
+
+    def record_job_directory_use(self, key: str, time: float) -> None:
+        table = self.job_directory_table
+        with self.transaction() as connection:
+            connection.execute(delete(table).where(table.c.key == key))
+            connection.execute(insert(table).values(key=key, last_used_at=time))
+
+    def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
+        table = self.job_directory_table
+        with self.transaction(read_only=True) as connection:
+            return tuple(connection.execute(select(table.c.key).where(table.c.last_used_at < time)).scalars())
+
+    def delete_job_directory_record(self, key: str) -> None:
+        with self.transaction() as connection:
+            connection.execute(delete(self.job_directory_table).where(self.job_directory_table.c.key == key))
 
     @abstractmethod
     @contextmanager
@@ -603,6 +636,7 @@ class SQLDataStore(DataStore):
         return moved
 
     def maintain(self) -> None:
+        super().maintain()
         if self.segments is None:
             return
         owners: set[str] = set()
@@ -688,11 +722,16 @@ class SQLiteDataStore(SQLDataStore):
     """
 
     def __init__(
-        self, directory: Path | None, task_files: TaskFileStore, segments: SegmentStore | None = None
+        self,
+        directory: Path | None,
+        task_files: TaskFileStore,
+        segments: SegmentStore | None = None,
+        job_directories: SegmentStore | None = None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> None:
         metadata = MetaData()
         tables = data_tables(metadata, sqlite=True)
-        super().__init__(tables, task_files, segments)
+        super().__init__(tables, task_files, segments, job_directories, job_directory_ttl_seconds)
         if directory is None:
             database = ":memory:"
         else:
@@ -727,12 +766,13 @@ class SQLiteDataStore(SQLDataStore):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         if config:
             raise PluginConfigError(
                 f"the sqlite data store takes no config, got {', '.join(sorted(map(str, config)))}"
             )
-        return cls(directory, task_files, segments)
+        return cls(directory, task_files, segments, job_directory_ttl_seconds=job_directory_ttl_seconds)
 
     @contextmanager
     def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
@@ -789,11 +829,13 @@ class PostgresDataStore(SQLDataStore):
         *,
         schema: str = "reef_data",
         segments: SegmentStore | None = None,
+        job_directories: SegmentStore | None = None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> None:
         validate_postgres_schema(schema)
         metadata = MetaData(schema=schema)
         tables = data_tables(metadata, sqlite=False)
-        super().__init__(tables, task_files, segments)
+        super().__init__(tables, task_files, segments, job_directories, job_directory_ttl_seconds)
         try:
             self.engine: Engine | None = create_engine(
                 postgres_url(database_url), pool_pre_ping=True, hide_parameters=True
@@ -823,9 +865,16 @@ class PostgresDataStore(SQLDataStore):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         settings = PostgresDataStoreSettings.parse(config, plugin_class=cls)
-        return cls(settings.database_url, task_files, schema=settings.schema, segments=segments)
+        return cls(
+            settings.database_url,
+            task_files,
+            schema=settings.schema,
+            segments=segments,
+            job_directory_ttl_seconds=job_directory_ttl_seconds,
+        )
 
     @contextmanager
     def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:

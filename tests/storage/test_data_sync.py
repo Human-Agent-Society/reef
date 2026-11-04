@@ -7,6 +7,7 @@ from contextlib import closing
 from dataclasses import dataclass, replace
 
 import pytest
+from tests.support.samples import sample_store
 
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.data import NewItem
@@ -43,8 +44,8 @@ def stores(tmp_path) -> Iterator[Stores]:
         storage.close()
 
 
-def sample_ids(session) -> list[str]:
-    return [stored.sample_id for stored in session.samples.page()]
+def sample_ids(storage, session) -> list[str]:
+    return [stored.sample_id for stored in sample_store(storage, "math", session).page()]
 
 
 def test_the_first_open_sets_the_owner_and_each_open_reads_the_owners_items(stores):
@@ -53,22 +54,22 @@ def test_the_first_open_sets_the_owner_and_each_open_reads_the_owners_items(stor
     opened = DataScenarioStorage(stores.storage, stores.data)
     with closing(opened.open("math")) as session:
         assert opened.read_settings("math").owner == "math"
-        assert sample_ids(session) == ["own"]
+        assert sample_ids(opened, session) == ["own"]
     # A scenario of another owner uses that owner's items only.
     stores.storage.write_settings("math", replace(stores.storage.read_settings("math"), owner="acme"))
     with closing(opened.open("math")) as session:
-        assert sample_ids(session) == ["t1"]
+        assert sample_ids(opened, session) == ["t1"]
 
 
 def test_an_archive_releases_the_items_so_a_new_scenario_of_the_name_uses_none(stores):
     stores.data.create("math", [trajectory("t1", math="train")])
     opened = DataScenarioStorage(stores.storage, stores.data)
     with closing(opened.open("math")) as session:
-        assert sample_ids(session) == ["t1"]
+        assert sample_ids(opened, session) == ["t1"]
     opened.archive("math")
     assert stores.data.read("math", "t1").scenarios == {}
     with closing(opened.open("math")) as session:
-        assert sample_ids(session) == []
+        assert sample_ids(opened, session) == []
 
 
 def test_one_queued_sync_covers_each_request_of_its_scenario():
