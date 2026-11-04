@@ -6,7 +6,7 @@ its ``JobLoop``; a training worker runs it here, and control commits the selecte
 
 - ``start``: the tree that the step builds on. ``base:<checksum>`` is the recipe's seed tree; any other start is a
   directory that holds a tree, which ``import_start`` or an earlier job's checkpoint wrote.
-- ``data``: the step's material: the traces of traffic, the train tasks of an offline step, and the instruction.
+- ``data``: the step's material: the traces of traffic, the train tasks of an offline step, and the request.
 - ``parameters``: ``component``, the scenario component that the step evolves; ``head_artifact_id``, the component artifact
   used as the start; ``evaluation_tasks``, the eval split of the scenario's imported tasks, or ``None`` for the
   configured tasks; ``previous_job``, the last job whose end the trainer committed, or ``None`` before the first.
@@ -252,7 +252,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         The step's outcome is durable before its checkpoint, so a resumed job runs no second step. The job's metrics
         are the step's metrics when the step kept no tree; a kept tree's checkpoint carries them instead. When the
         step raised, the job fails: ``status`` then reports the metrics of what the step reached, ``skipped``
-        (``step failed``, or ``instruction failed`` for an instruction's step) and ``error``.
+        (``step failed``, or ``request failed`` for a request's step) and ``error``.
         """
         outcome = read_json(directory / OUTCOME_FILE)
         if outcome is None:
@@ -277,7 +277,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         raised, which counts as a step and keeps the state."""
         parameters = job.parameters
         request = job.data.request
-        # The row of an instruction's step names the instruction, so its request page settles on that row.
+        # The row of a request's step names the request, so its request page settles on that row.
         named = {} if request is None else {"training_request": {"id": request.id, **request.to_dict()}}
         component = str(parameters["component"])
         backend = self.backend_for(job.scenario, component)
@@ -309,7 +309,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             # The catalog row of a failed step reads as a skip with an error, which published nothing.
-            reason = "step failed" if request is None else "instruction failed"
+            reason = "step failed" if request is None else "request failed"
             return {
                 "steps": steps + 1,
                 "harness": state.to_json(),

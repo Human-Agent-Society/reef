@@ -59,7 +59,11 @@ def scenario_double(
     state: dict | None = None,
 ) -> SimpleNamespace:
     """A scenario with one trainer; it carries what the status, the local workers and ``Dispatcher.close`` read."""
-    pipeline = SimpleNamespace(background_jobs_running=lambda: background_jobs_running, training_mode="auto")
+    pipeline = SimpleNamespace(
+        background_jobs_running=lambda: background_jobs_running,
+        training_mode="auto",
+        supported_training_modes=frozenset({"auto"}),
+    )
     trainer = SimpleNamespace(
         pipeline=pipeline,
         trains=True,

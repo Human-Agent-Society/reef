@@ -303,6 +303,24 @@ def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path
         assert (waiting.started_at, waiting.ended_at, waiting.metadata) == (None, None, {})
 
 
+def test_the_queued_training_requests_of_an_older_version_move_to_their_new_queue_and_kind(tmp_path):
+    directory = tmp_path / "coordination"
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        queue.add(NewWork("instructions", "ask-1", "my/agent", "train_instruction:my/agent", {"text": "t"}), now=0)
+        queue.add(job("other"), now=0)
+
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        moved = queue.get("training_requests", "ask-1")
+        assert (moved.kind, moved.payload, queue.get("instructions", "ask-1")) == (
+            "training_request:my/agent",
+            {"text": "t"},
+            None,
+        )
+        assert queue.get("jobs", "other").kind == job("other").kind
+
+
 @pytest.mark.unit
 def test_a_work_item_has_a_worker_exactly_while_it_is_held():
     with pytest.raises(ValueError, match="worker and a lease"):

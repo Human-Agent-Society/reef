@@ -81,7 +81,7 @@ def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: st
     """Create the record items of the next page of records of ``scenario`` after ``after_sequence``.
 
     The page is at most ``RECORD_PAGE_SIZE`` records of ``records`` with a sequence greater than
-    ``after_sequence``; its training instructions and its copies of other scenarios' record items get no item.
+    ``after_sequence``; its training requests and its copies of other scenarios' record items get no item.
     Return the sequence of the page's last record, or ``after_sequence`` for an empty page. A record item that
     ``owner`` stores already changes nothing, so a copy that runs twice is safe. Raise ``ItemConflict``, and
     create nothing, when ``owner`` stores one of the IDs with other content.

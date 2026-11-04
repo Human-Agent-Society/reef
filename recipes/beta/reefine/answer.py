@@ -6,7 +6,7 @@ user can provide, then writes the files; a second call reviews the files
 against the request. What only the user can provide is declared as a
 ``requires`` item with a prompt sentence, never asked for by the change at
 run time. A review that finds the answer short sends the request back, up to
-``REQUEST_ATTEMPTS`` answers in all. Without an instruction the step learns
+``REQUEST_ATTEMPTS`` answers in all. Without a request the step learns
 one skill from its failing traces. The prompts, their sections and the
 words they take for each kind of harness are in ``prompts/``; the functions
 here fill them in and build the short parts that depend on the request and

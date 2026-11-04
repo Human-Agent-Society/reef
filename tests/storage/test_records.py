@@ -459,7 +459,7 @@ def test_an_upgrade_links_the_stored_calls_and_keeps_the_earlier_fingerprints(tm
                 (sequence, call.agent_record_id, payload_json, call.created_at, len(payload_json.encode()) + 2),
             )
         earlier_bytes = connection.execute("SELECT SUM(body_bytes) FROM agent_record").fetchone()[0]
-        # An instruction of an earlier version is a record; the upgrade deletes it.
+        # A training request of an earlier version is a record; the upgrade deletes it.
         connection.execute(
             "INSERT INTO agent_record VALUES (99, 'ask-1', 'math', 'train', '{\"text\":\"x\"}', 1, '[]', NULL, 0)"
         )

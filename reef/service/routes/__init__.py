@@ -12,7 +12,7 @@ from reef.service.routes.data import register_data_routes
 from reef.service.routes.evaluations import register_evaluation_reads, register_evaluation_writes
 from reef.service.routes.harness import register_harness_routes
 from reef.service.routes.records import register_record_routes
-from reef.service.routes.samples import register_buffer_routes, register_sample_reads
+from reef.service.routes.samples import register_next_job_route, register_sample_reads
 from reef.service.routes.scenario_files import register_scenario_file_routes
 from reef.service.routes.scenarios import register_scenario_reads, register_scenario_writes
 from reef.service.routes.system import register_system_routes
@@ -40,7 +40,7 @@ def register_routes(
         register_scenario_file_routes(app, request_service=request_service)
     register_task_routes(app, request_service=request_service)
     register_sample_reads(app, request_service=request_service)
-    register_buffer_routes(app, request_service=request_service)
+    register_next_job_route(app, request_service=request_service)
     register_artifact_import_routes(app, request_service=request_service, imports=imports)
     register_evaluation_reads(app, evaluations=evaluations)
     register_evaluation_writes(app, evaluations=evaluations)

@@ -55,9 +55,9 @@ from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.work_queue import WorkItem
-from reef.train.instructions import InstructionQueue
 from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
 from reef.train.trainer import Trainer
+from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             lifecycle=self,
             activates_runtime=False,
             served_models=coordination.served_models,
-            instructions=InstructionQueue(self.queue),
+            training_requests=TrainingRequestQueue(self.queue),
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
@@ -638,23 +638,23 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 self.process_accepted_records(current)
             return stored
 
-    def accept_instruction(
+    def accept_request(
         self,
         scenario: str,
         payload: Mapping[str, Any],
         *,
         request_id: str | None = None,
     ) -> WorkItem:
-        """Queue a training instruction of ``scenario`` (``ingest.file_instruction``) and wake its workers.
+        """Queue a training request of ``scenario`` (``ingest.file_request``) and wake its workers.
 
-        The scenario must exist. ``request_id`` makes the request retry-safe; without it the instruction gets a new
-        ID. Return the instruction's queue item.
+        The scenario must exist. ``request_id`` makes the request retry-safe; without it the request gets a new
+        ID. Return the request's queue item.
         """
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            item = ingest.file_instruction(current, request_id or uuid.uuid4().hex, payload)
+            item = ingest.file_request(current, request_id or uuid.uuid4().hex, payload)
             self.local_workers.wake(current)
             return item
 
@@ -741,23 +741,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         elif result.added:
             self.local_workers.wake(current)
 
-    def sample_buffer(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
-        """The buffer of the trainer of ``component`` (the only one when None): its mode and its samples."""
+    def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
+        """The next automatic job of the trainer of ``component`` (the only one when None): its mode and samples."""
         with self.locked_scenario(scenario) as current:
-            return self.trainer_of(current, component).buffer_listing()
-
-    def change_buffer(
-        self, scenario: str, sample_ids: tuple[str, ...], *, insert: bool, component: str | None = None
-    ) -> Mapping[str, Any]:
-        """Insert ``sample_ids`` into the manual buffer of the trainer of ``component``, or remove them.
-
-        Raise ``ManualBufferRefused`` in automatic mode and ``ValueError`` for an ID that the trainer cannot take.
-        """
-        with self.locked_scenario(scenario) as current:
-            listing = self.trainer_of(current, component).change_buffer(sample_ids, insert=insert)
-            # A queued instruction may now have samples to train.
-            self.local_workers.wake(current)
-            return listing
+            return self.trainer_of(current, component).next_job_listing()
 
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""
@@ -820,7 +807,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
         after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
         a load does. ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
-        (``PipelineContext.job_parameters``), which an instruction's ``parameters`` merge into; a kind that the
+        (``PipelineContext.job_parameters``), which a request's ``parameters`` merge into; a kind that the
         recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
@@ -900,8 +887,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if current is not None:
             self.local_workers.wake(current)
 
-    def instructions_added(self, scenario: str) -> None:
-        """Another process queued a training instruction of ``scenario``: its local workers run it."""
+    def requests_added(self, scenario: str) -> None:
+        """Another process queued a training request of ``scenario``: its local workers run it."""
         self.samples_added(scenario)
 
     def request_samples(self, current: Scenario) -> None:
