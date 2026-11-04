@@ -227,13 +227,14 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
             scenario="s", request_type=RequestType.REPORT, payload={"score": 0, "references": ["other-session"]}
         )
     )
-    # Held samples start no job in manual, however many there are.
+    # Stored samples start no job in manual, however many there are, and the pipeline keeps none of them in memory.
     make_samples(trainer)
     assert trainer.run_once() is None
     assert not trainer.job_data_ready()
-    held = [source_record_id(sample) for _, sample in trainer.pipeline.held.values()]
+    assert not trainer.pipeline.held
+    held = [source_record_id(stored.sample) for stored in trainer.pipeline.store.page()]
     assert held == (["other-session", "turn-1", "turn-2"] if processor is records_pipeline else ["other-session"])
-    # The client chooses the newest held samples; the request trains each of them, whatever job_samples.
+    # The client chooses the newest stored samples; the request trains each of them, whatever job_samples.
     chosen = held[-2:]
     file(training_requests, "request-1", sample_ids_of(trainer.pipeline, *chosen))
     make_samples(trainer)
@@ -249,7 +250,7 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     assert prepared.metrics["training_request"]["text"] == "request-1"
     trainer.commit(prepared)
     commit_running_job(trainer)
-    assert len(trainer.pipeline.held) == len(held) - len(chosen)
+    assert not trainer.pipeline.held
     assert records.get("s", "turn-1") is not None
     make_samples(trainer)
     assert trainer.run_once() is None
@@ -431,7 +432,7 @@ def test_a_weight_stage_in_manual_trains_the_samples_that_a_request_names():
     assert batch.request.id == "two"
     assert [source_record_id(sample) for sample in batch.samples] == ["d"]
     pipeline.acknowledge(batch.data_id)
-    assert [source_record_id(sample) for _, sample in pipeline.held.values()] == ["c"]
+    assert not pipeline.held
     # A trained sample can train again.
     pipeline.queue_requests([request("three", sample_ids_of(pipeline, "a"))])
     assert [source_record_id(sample) for sample in pipeline.build_job_data(2).samples] == ["a"]
@@ -1313,7 +1314,7 @@ def test_every_mode_keeps_the_samples_beyond_the_next_job_for_later_jobs(caplog,
             processor.queue_requests([request("again", sample_ids_of(processor, "inf-1"))])
         following = processor.build_job_data(1)
         assert [source_record_id(sample) for sample in following.samples] == ["inf-1"]
-        assert len(processor.held) == 21
+        assert len(processor.held) == (0 if mode == "manual" else 21)
 
 
 def test_manual_collects_the_failures_each_request_step_carries(tmp_path, open_dispatcher):
