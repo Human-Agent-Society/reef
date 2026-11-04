@@ -103,6 +103,37 @@ Each checkpoint becomes an artifact: its ``path`` as ``state/`` and its
 ``release_path`` as ``release/``. Set Reef's ``base`` to ``base:`` to start new
 scenarios from the component's own default start.
 
+Run Slime on a Ray cluster
+--------------------------
+
+``reef.train.slime_backend.service:SlimeBackend`` runs each job in a new
+Slime run on a Ray cluster, in a new work directory, and closes the run when
+the job ends, so the GPUs go back to the cluster:
+
+.. code:: yaml
+
+   backend:
+     module: reef.train.slime_backend.service:SlimeBackend
+     config:
+       base_model: /models/Qwen3-8B
+       ray_address: ray://ray-head:10001
+       options: {global-batch-size: 64, loss-type: sft_loss}
+       work_dir: /scratch/reef-slime-jobs
+
+- ``release/`` of the job's artifact holds the Hugging Face weights that Slime
+  loads (``--hf-checkpoint``) and keeps as its reference model; ``base_model``
+  is the start of ``base:``.
+- ``state/`` holds the start of the checkpoint (``start.json``) and
+  ``megatron/``, the rollout's Megatron checkpoint with its optimizer state.
+  Slime loads it at its start (``--load``), so the job continues that
+  training. Without ``state/``, the job starts a new training.
+- Each checkpoint is the rollout's Hugging Face export as ``release/``, and its
+  start with ``megatron/`` as ``state/``.
+
+``options`` are the Slime options of every job. The backend sets
+``hf-checkpoint``, ``ref-load``, ``load``, ``save``, ``save-hf``,
+``save-interval`` and ``num-rollout`` itself.
+
 Run the server
 --------------
 

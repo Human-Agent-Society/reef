@@ -18,12 +18,12 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Self
 
 from reef.storage.job_data import JOB_FILE, JobDataRef
-from reef.train.component import TrainingComponent, TrainingJob, build_training_component
+from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob, build_training_component
 from reef.train.remote.contract import RELEASE_DIR, STATE_DIR, BackendInfo, RemoteJob
 from reef.train.remote.server import JobRun, TrainingBackend
 
@@ -73,34 +73,47 @@ class ComponentBackend(TrainingBackend):
         return self.component.import_start(release)
 
     def run(self, job: RemoteJob, artifact: Path | None, data: Path, run: JobRun) -> Mapping[str, Any]:
-        header = json.loads((data / JOB_FILE).read_text(encoding="utf-8"))
-        ref = JobDataRef(data.as_uri(), data, job.data["data_id"], header["sample_count"], header["kind"])
-        training_job = TrainingJob(
-            job.job_id,
-            self.component.name,
-            self.start(job, artifact),
-            ref,
-            job.parameters,
-            scenario=job.scenario,
+        return run_on_component(
+            self.component, self.start(job, artifact), job, data, run, poll_seconds=self.poll_seconds
         )
-        self.component.submit(training_job)
-        saved = 0
-        while True:
-            if run.cancelled.is_set():
-                self.component.cancel(job.job_id)
-            status = self.component.status(job.job_id)
-            for checkpoint in status.checkpoints[saved:]:
-                with tempfile.TemporaryDirectory() as staging:
-                    directory = Path(staging)
-                    shutil.copytree(checkpoint.release_path, directory / RELEASE_DIR)
-                    shutil.copytree(checkpoint.path, directory / STATE_DIR)
-                    run.save(checkpoint.step, directory, checkpoint.metrics)
-                saved += 1
-            if status.state == "failed":
-                raise RuntimeError(status.error)
-            if status.state == "finished":
-                return status.metrics
-            time.sleep(self.poll_seconds)
 
 
-__all__ = ["BASE_URI", "ComponentBackend"]
+def run_on_component(
+    component: TrainingComponent,
+    start: str,
+    job: RemoteJob,
+    data: Path,
+    run: JobRun,
+    *,
+    add_state: Callable[[SavedCheckpoint, Path], None] | None = None,
+    poll_seconds: float = POLL_SECONDS,
+) -> Mapping[str, Any]:
+    """Run ``job`` on ``component`` from ``start`` to its end, and save each of its checkpoints as an artifact:
+    the checkpoint's ``path`` as ``state/`` and its ``release_path`` as ``release/``. ``add_state``, when given,
+    adds more to ``state/`` of each checkpoint, such as a framework's own checkpoint. A cancel of ``run`` cancels the
+    component's job. Return the job's metrics; ``RuntimeError`` with its error when it failed."""
+    header = json.loads((data / JOB_FILE).read_text(encoding="utf-8"))
+    ref = JobDataRef(data.as_uri(), data, job.data["data_id"], header["sample_count"], header["kind"])
+    component.submit(TrainingJob(job.job_id, component.name, start, ref, job.parameters, scenario=job.scenario))
+    saved = 0
+    while True:
+        if run.cancelled.is_set():
+            component.cancel(job.job_id)
+        status = component.status(job.job_id)
+        for checkpoint in status.checkpoints[saved:]:
+            with tempfile.TemporaryDirectory() as staging:
+                directory = Path(staging)
+                shutil.copytree(checkpoint.release_path, directory / RELEASE_DIR)
+                shutil.copytree(checkpoint.path, directory / STATE_DIR)
+                if add_state is not None:
+                    add_state(checkpoint, directory / STATE_DIR)
+                run.save(checkpoint.step, directory, checkpoint.metrics)
+            saved += 1
+        if status.state == "failed":
+            raise RuntimeError(status.error)
+        if status.state == "finished":
+            return status.metrics
+        time.sleep(poll_seconds)
+
+
+__all__ = ["BASE_URI", "ComponentBackend", "run_on_component"]
