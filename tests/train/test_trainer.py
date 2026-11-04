@@ -381,7 +381,6 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert trainer.pipeline_status() == {
         "ready_samples": 0,
         "buffer_size": 1,
-        "buffered_requests": 0,
         "job_samples": 1,
     }
     assert len(trainer.pending_job_data.samples) == 1
@@ -479,7 +478,6 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
     assert trainer.pipeline_status() == {
         "ready_samples": 1,
         "buffer_size": 2,
-        "buffered_requests": 0,
         "job_samples": 2,
     }
 

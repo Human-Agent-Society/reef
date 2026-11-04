@@ -24,13 +24,13 @@ The two stages
   `Record sets and their units <#record-sets-and-their-units>`__). It turns
   each record set into samples. A sample is a ``Sample``: a
   ``TrajectorySample`` that trains directly, or a ``TaskSample`` (a Harbor
-  task) that an algorithm rolls out. The buffer, and so one job's data, holds
-  samples of one kind.
+  task) that an algorithm rolls out. One job's data holds samples of one
+  kind.
 - The **sample-to-job stage** (``Sample2Job``, ``reef.sample2job``)
-  shapes the samples of the buffer into one ``JobData``. Grouped
+  shapes the samples of the next job into one ``JobData``. Grouped
   recipes set ``group_id`` on each member. The stage also sets
-  ``job_samples``, the fewest samples of one job, and ``buffer_size``, the
-  most samples that one job takes from the buffer (see `Job size <#job-size>`__).
+  ``job_samples``, the fewest samples of one automatic job, and ``buffer_size``,
+  the most samples that one automatic job takes (see `Job size <#job-size>`__).
 
 .. list-table::
    :header-rows: 1
@@ -158,15 +158,16 @@ The trainer calls it on its own thread, under its lock; no call may block:
   thread-safe.
 - ``ready(sample_count)``: call ``advance()`` and check whether job data of
   ``sample_count`` samples is available. The trainer passes ``job_samples``.
-  With ``sample_count`` None, the buffer never makes the pipeline ready.
-- ``build_job_data(sample_count)``: give the samples of the buffer (see `The
-  buffer <#the-buffer>`__) to ``make_job_data``, in store order, and reserve
-  them. The trainer validates the job data against ``output_schema``. The
-  same job data stays reserved until it is acknowledged or released
-  (``release_job_data``). Released samples stay in the buffer.
+  With ``sample_count`` None, held samples never make the pipeline ready in
+  ``auto``.
+- ``build_job_data(sample_count)``: give the samples of the next job (see `The
+  next job <#the-next-job>`__) to ``make_job_data``, in store order, and
+  reserve them. The trainer validates the job data against ``output_schema``.
+  The same job data stays reserved until it is acknowledged or released
+  (``release_job_data``). A released sample can train in a later job.
 - ``acknowledge(data_id)``: the commit that submits the job consumed that job
   data. The pipeline returns ``sample:<sample id>`` for each sample of the
-  data, and the instruction's ID in ``manual``. The commit lists these IDs.
+  data, and the request's ID in ``manual``. The commit lists these IDs.
   In the same transaction, the sample store adds one to the train count of
   each listed sample for the commit's trainer. A job that later fails does
   not give its samples back: they never train again for that trainer.
@@ -180,7 +181,7 @@ nothing:
   ``<name>`` (``<component>:<name>`` for a trainer of a scenario of several),
   with no group and no consumed record. A sample that the store holds already
   changes nothing, so a stage may return a sample again after a restart. A
-  stored sample trains from the buffer like every other sample.
+  stored sample trains like every other sample.
 - ``job_ended(outcome)``: a training job ended, and the commit of its end is
   durable. ``outcome`` is a ``JobOutcome`` (``reef.core.job_data``): the job
   ID, the component name, ``event`` (``finished`` or ``failed``), the job's
@@ -230,8 +231,9 @@ job's data into optimizer batches by its own batch size: Slime's
   passes ``max_job_samples`` to ``Sample2Job.__init__``. The stage refuses a
   larger ``job_samples`` with ``PluginConfigError``.
 
-The pipeline is ready when the buffer holds at least ``job_samples`` samples.
-The buffer takes whole groups, so one job's data can hold more. Thus
+In ``auto``, the pipeline is ready when the next job holds at least
+``job_samples`` samples. The next job takes whole groups, so one job's data can
+hold more. Thus
 ``job_samples`` and the component's batch size can differ:
 
 - A unit packs several samples, for example a group of rollouts. The job's
@@ -246,37 +248,39 @@ same parameter, a step trains batch-size packs of tokens, not batch-size
 samples. ``job_samples`` still counts samples, so the job's packs seldom fill
 whole steps. Set ``job_samples`` to the samples of many steps.
 
-The buffer
-~~~~~~~~~~
+The next job
+~~~~~~~~~~~~
 
-The buffer is the samples that the next job takes. The pipeline computes it
-from the scenario's sample store, in the same way in every training mode:
+In ``auto``, the pipeline selects the samples of the next job from the
+scenario's sample store (``TrainingPipeline.auto_entries``):
 
 1. It takes the stored samples that the trainer reads and did not train yet:
    the samples that the trainer made from records, and the uploaded
    trajectories (see `Uploaded trajectories <#uploaded-trajectories>`__).
    They are in store order: units in the order they became ready, and
    uploads in upload order, interleaved by arrival. The samples of job data
-   that the pipeline handed out are not in the buffer. Imported ``train`` tasks
-   are in it when the sample-to-job stage sets ``accepts_imported_tasks``;
+   that the pipeline handed out are left out. Imported ``train`` tasks
+   are candidates when the sample-to-job stage sets ``accepts_imported_tasks``;
    imported ``eval`` tasks never are, since an evaluation runs them.
 2. It keeps the samples of one kind, trajectory or task: the kind of the first
-   sample. In ``auto`` a kind that the recipe gives no job parameters does not
-   count; such samples train only for an instruction that gives them.
+   sample. A kind that the recipe gives no job parameters does not count; such
+   samples train only for a request that gives them.
 3. It leaves out each stale sample that the trainer made from records (see
    `Staleness <#staleness>`__), and every other sample of its group. An
    uploaded trajectory is never stale.
 4. It takes the first ``buffer_size`` samples that remain, and the rest of
    each group that those samples touch.
 
-Thus ``buffer_size`` is the most samples that one job takes from the
-buffer, beside the rest of a group. The ``Sample2Job`` sets it, and refuses one
-smaller than ``job_samples``. Without a ``buffer_size`` setting, it is
-``job_samples``. The pipeline never releases or drops a sample: samples
-beyond the buffer wait in the store for later jobs, and a stale sample stays
-in the store untrained.
+Thus ``buffer_size`` is the most samples that one automatic job takes, beside
+the rest of a group. The ``Sample2Job`` sets it, and refuses one smaller than
+``job_samples``. Without a ``buffer_size`` setting, it is ``job_samples``. The
+pipeline never releases or drops a sample: the other samples wait in the store
+for later jobs, and a stale sample stays in the store untrained.
 
-``status()`` reports ``ready_samples`` (the samples of the buffer) and
+In ``manual``, the next job takes the samples that the oldest queued
+request names (see `Training modes <#training-modes>`__).
+
+``status()`` reports ``ready_samples`` (the samples of the next automatic job) and
 ``buffer_size``; the trainer adds
 ``job_samples``. A stage adds an entry only when a terminal outcome cannot become job data and an
 external runner must stop waiting (TTTD reports a complete mixed-artifact
@@ -329,8 +333,8 @@ is longer than its ``max_tokens``, is left out of the job.
 
 An uploaded trajectory is not a record, so the stage never forms a set of it.
 In the store, it is a sample like the samples that the trainer makes from
-records: it waits in the buffer in store order, and it counts as one sample toward ``job_samples`` and
-``buffer_size`` (see `The buffer <#the-buffer>`__). In a scenario
+records: it waits in store order, and it counts as one sample toward ``job_samples`` and
+``buffer_size`` (see `The next job <#the-next-job>`__). In a scenario
 of several components, each trainer that accepts uploaded trajectories trains
 on them. The commit lists
 each uploaded trajectory as ``sample:<trajectory_id>``, and the scenario's
@@ -388,10 +392,10 @@ The check has these steps:
    ``artifact_id`` of the artifact that serves it now
    (``observe_serving_artifact_id``). The stage keeps these artifacts, oldest
    first.
-3. Each time the pipeline computes the buffer, it asks the stage whether each
-   sample that the trainer made from records has data more than
+3. Each time the pipeline selects the next automatic job, it asks the stage
+   whether each sample that the trainer made from records has data more than
    ``max_staleness`` artifacts behind the current artifact
-   (``Record2Sample.is_stale``). The buffer leaves out a stale sample and
+   (``Record2Sample.is_stale``). The job leaves out a stale sample and
    every other sample of its group. The sample stays in the store untrained.
 
 The lag counts only the artifacts that this scenario served. A publication of
@@ -495,35 +499,32 @@ Training modes
 initial value through ``Trainer.build`` and ``PipelineContext``; it defaults
 to ``auto``. A ``Sample2Job`` declares the modes it supports in
 ``supported_training_modes``; the default is ``auto`` and ``manual``. Record push,
-sample storage and acknowledgement use the same methods and the same buffer
-in both modes. ``GET /reef/status`` reports ``pending_instructions`` as the
-pipeline's ``buffered_requests`` plus the instructions still unread in
-storage.
+sample storage and acknowledgement use the same methods in both modes.
+``GET /reef/status`` reports ``pending_requests``, the queued requests
+that no commit consumed yet.
 
-- ``auto`` makes job data when the buffer holds ``job_samples`` samples.
-- ``manual`` makes job data only for a queued TRAIN instruction. The
-  instruction's data is the trainer's manual buffer
-  (``TrainerSamples.manual_buffer``): the samples that a client chose with
-  ``TrainingPipeline.insert_into_buffer`` and ``remove_from_buffer`` (`Choose
-  the samples that train
-  <../reference/http-api.rst#choose-the-samples-that-train>`__), in store
-  order, whatever ``job_samples``. New samples never join it by themselves.
-  The pipeline waits until the manual buffer holds a sample. A ``Sample2Job``
-  that sets ``reads_instructions`` runs the instruction at once, also with an
-  empty buffer; harness evolution sets it, because its proposer reads the
-  instruction. The commit of the job removes the trained samples from the
-  manual buffer. A switch from ``auto`` to ``manual`` puts the automatic
-  buffer into the manual buffer.
+- ``auto`` makes job data when the next job holds ``job_samples`` samples.
+- ``manual`` makes job data only for a queued TRAIN request. The
+  request's data is the samples that it names (``TrainingRequest.samples``,
+  ``TrainingPipeline.request_entries``), in store order, whatever
+  ``job_samples``. A sample that trained before trains again, and staleness
+  does not apply. When Reef accepts the request, a trainer must take its
+  samples (``TrainingPipeline.check_request``): the store holds each one,
+  the trainer can train each one, they are of one kind, and they are at most
+  the stage's ``max_job_samples``. A sample that leaves the scenario before the
+  job is left out of it. A ``Sample2Job`` that sets ``reads_requests`` also
+  runs a request that names no sample; harness evolution sets it, because
+  its proposer reads the request.
 
-The pipeline runs the oldest instruction first, one per step. It gives the
-instruction's data the id ``<scenario>:instruction:<request id>`` and attaches
-the instruction to ``JobData.request``. Automatic job data gets the id
+The pipeline runs the oldest request first, one per step. It gives the
+request's data the id ``<scenario>:request:<request id>`` and attaches
+the request to ``JobData.request``. Automatic job data gets the id
 ``<scenario>:data:<number>``. Acknowledgement also consumes the
-instruction. ``make_job_data`` must not call models or perform training.
+request. ``make_job_data`` must not call models or perform training.
 
 When the pipeline supports ``manual``, the scenario gives it the queued
-training instructions before each step (``TrainingPipeline.queue_instructions``);
-instructions are not records. The pipeline keeps them FIFO regardless of the
+training requests before each step (``TrainingPipeline.queue_requests``);
+requests are not records. The pipeline keeps them FIFO regardless of the
 selected mode; ``auto`` leaves them for ``manual``. The pipeline stores the samples of records in both modes, so
 changing to auto can train on data already collected.
 
@@ -538,7 +539,7 @@ the existing pipeline. The trainer serializes selection with record push and
 reservation. Reserved job data stays unchanged and acknowledgement consumes
 its actual contents, independently of subsequent mode changes.
 
-Buffered data and queued instructions stay on the same instance. Reef stores
+Stored samples and queued requests stay on the same instance. Reef stores
 the selected mode in the scenario's settings, so a reload or a service restart
 applies it again.
 
@@ -579,7 +580,7 @@ A reported-feedback recipe writes:
   turns. Use ``context.require_score()`` when the method needs a reward. The
   stage attaches the source and report ids to the returned item.
 - ``make_job_data(samples, data_id)`` on a ``Sample2Job`` subclass: assemble
-  the flat tuple of the buffer's samples into job data with the ID ``data_id``.
+  the flat tuple of the next job's samples into job data with the ID ``data_id``.
   The job's commit consumes every sample of the tuple, including samples that
   the recipe removes from training.
 
@@ -607,7 +608,7 @@ The grouping runs on the trainer thread and reads only records:
 cannot train. The stage releases the report.
 
 The stage handles report-id deduplication, group-slot retries, consumption,
-and retention. Job data is ready in automatic mode after the buffer holds
+and retention. Job data is ready in automatic mode after the next job holds
 ``job_samples`` samples; a unit is one report or one complete group. A group
 is fixed when it is first ready: the pipeline stores its samples, and later
 reports for the same group key form a new group. A report whose trajectory
@@ -712,12 +713,12 @@ stage hands each train task of a complete generation to the pipeline
 (``made_samples``), which stores it in the scenario's sample store as
 ``generated-tasks/<task name>``.
 
-Stored tasks train from the buffer as task jobs, like every other sample.
+Stored tasks train as task jobs, like every other sample.
 Reef runs no rollout of them: the training component rolls each job's tasks
 out on its own sampler, at the job's start weights, and trains on their
 rollouts.
 
-1. ``GeneratedTaskJobData`` makes one job's data of the buffer's tasks: the
+1. ``GeneratedTaskJobData`` makes one job's data of the next job's tasks: the
    ``TaskSample`` values. A job takes at least ``job_samples`` tasks, 1 by
    default, and at most ``buffer_size``, 4 by default.
 2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
@@ -737,7 +738,7 @@ rollouts.
 
 A result that the task store fails to save is saved again by the next job. On
 a restart, the sample store still holds the train tasks that did not train,
-and the buffer takes them again. A job that runs across a restart saves its
+and a later job takes them again. A job that runs across a restart saves its
 tasks' results when it ends. A trainer that starts with no running job gives
 the stage the last job's outcome again, so a restart just after a job's end
 loses no result. In ``manual`` mode, a client chooses the stored tasks that
@@ -791,7 +792,7 @@ rollout result and the generations whose results the generator received. The
 sample store counts the tasks that trained.
 
 After a restart, the record-to-sample stage continues with the next generation number.
-The sample store still holds the train tasks that did not train, so the buffer takes them again. The stage sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
+The sample store still holds the train tasks that did not train, so a later job takes them again. The stage sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
 A replayed session that a complete generation already used makes no new generation.
 ``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the stored tasks that wait under ``ready_samples``.
 
@@ -812,18 +813,18 @@ A record's path to a job
 
    report -> record2sample: expand each reference to its trajectory, filter -> record set
        -> make_sample -> Sample -> group -> record set unit
-       -> sample store -> buffer -> sample2job: make_job_data -> job data -> acknowledge
+       -> sample store -> next job -> sample2job: make_job_data -> job data -> acknowledge
 
    inference -> record2sample: trajectory idle for trajectory_idle_seconds -> trajectory set
        -> trajectory_sample -> TrajectorySample -> record set unit
-       -> sample store -> buffer -> sample2job: make_job_data -> job data -> acknowledge
+       -> sample store -> next job -> sample2job: make_job_data -> job data -> acknowledge
 
    computed record -> record2sample: observe/track -> dispatch -> async judge -> judged set
        -> make_sample -> Sample -> record set unit
-       -> sample store -> buffer -> sample2job: make_job_data -> job data -> acknowledge
+       -> sample store -> next job -> sample2job: make_job_data -> job data -> acknowledge
 
    uploaded trajectory -> sample store -> record2sample: uploaded_sample -> TrajectorySample
-       -> buffer -> sample2job: make_job_data -> job data -> acknowledge
+       -> next job -> sample2job: make_job_data -> job data -> acknowledge
 
 Where the stages live
 ---------------------

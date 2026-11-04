@@ -155,14 +155,14 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``.
     - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else None.
     - ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's
-      samples, with the instruction's parameters merged in. They hold the training ``method`` and the
-      ``scheduling`` when the recipe or the instruction gives them.
+      samples, with the request's parameters merged in. They hold the training ``method`` and the
+      ``scheduling`` when the recipe or the request gives them.
     - ``sample_count``: the number of samples in the job's data, an integer from 0.
     - ``sample_kind``: ``"trajectory"`` or ``"task"``, the kind of the job's samples, which one job never mixes;
       None for data with no sample.
-    - ``instruction``: ``{id, text, parameters}`` of the training instruction (``POST /reef/train``) that the job
-      trains, where ``parameters`` is the JSON object that the instruction gave, ``{}`` when it gave none; None for
-      a job that the training mode ``auto`` made without an instruction.
+    - ``request``: ``{id, text, parameters}`` of the training request (``POST /reef/train``) that the job
+      trains, where ``parameters`` is the JSON object that the request gave, ``{}`` when it gave none; None for
+      a job that the training mode ``auto`` made without a request.
     - ``created_at``, ``started_at`` and ``ended_at``: ISO 8601 UTC times of the item, when control added the job,
       when a worker first took it, and when it finished or failed. ``started_at`` is None until a worker takes the
       job, and ``ended_at`` until the job ends.
@@ -180,13 +180,13 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
         raise ValueError(f"job {item.id} mixes the sample kinds {sorted(kinds)}")
     request_value = data.get("request")
     if request_value is None:
-        instruction: JsonValue = None
+        request: JsonValue = None
     else:
-        request = json_object(request_value, "a job's instruction")
-        instruction = {
-            "id": json_text(request.get("id"), "an instruction's id"),
-            "text": json_text(request.get("text"), "an instruction's text"),
-            "parameters": dict(json_object(request.get("parameters", {}), "an instruction's parameters")),
+        given = json_object(request_value, "a job's request")
+        request = {
+            "id": json_text(given.get("id"), "a request's id"),
+            "text": json_text(given.get("text"), "a request's text"),
+            "parameters": dict(json_object(given.get("parameters", {}), "a request's parameters")),
         }
     experiment = item.metadata.get(EXPERIMENT_METADATA_KEY)
     return {
@@ -199,7 +199,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
         "parameters": dict(json_object(payload.get("parameters"), "a job's parameters")),
         "sample_count": len(samples),
         "sample_kind": next(iter(kinds), None),
-        "instruction": instruction,
+        "request": request,
         "created_at": utc_time(item.created_at),
         "started_at": None if item.started_at is None else utc_time(item.started_at),
         "ended_at": None if item.ended_at is None else utc_time(item.ended_at),

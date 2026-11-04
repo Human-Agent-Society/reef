@@ -5,9 +5,8 @@ import asyncio
 from aiohttp import web
 
 from reef.service.request_service import RequestService
-from reef.service.routes.payload import read_object
 from reef.service.sample_processing import get_processing, list_processing
-from reef.service.samples import MAX_SAMPLES_PER_PAGE, change_buffer, list_samples, read_buffer
+from reef.service.samples import MAX_SAMPLES_PER_PAGE, list_samples, read_next_job
 
 
 def register_sample_reads(app: web.Application, *, request_service: RequestService) -> None:
@@ -54,31 +53,17 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
     app.router.add_get("/reef/scenarios/{scenario}/sample-processing/{task_id}", processing_detail)
 
 
-def register_buffer_routes(app: web.Application, *, request_service: RequestService) -> None:
-    """The read and the changes of a trainer's buffer, which is the trainer's state that control holds."""
+def register_next_job_route(app: web.Application, *, request_service: RequestService) -> None:
+    """The read of a trainer's next automatic job, which is the trainer's state that control holds."""
     dispatcher = request_service.dispatcher
 
-    async def buffer(request: web.Request) -> web.Response:
+    async def next_job(request: web.Request) -> web.Response:
         listing = await asyncio.to_thread(
-            read_buffer, dispatcher, request.match_info["scenario"], request.query.get("component") or None
+            read_next_job, dispatcher, request.match_info["scenario"], request.query.get("component") or None
         )
         return web.json_response(listing)
 
-    async def insert(request: web.Request) -> web.Response:
-        body = await read_object(request)
-        listing = await asyncio.to_thread(change_buffer, dispatcher, request.match_info["scenario"], body, insert=True)
-        return web.json_response(listing)
-
-    async def remove(request: web.Request) -> web.Response:
-        body = await read_object(request)
-        listing = await asyncio.to_thread(
-            change_buffer, dispatcher, request.match_info["scenario"], body, insert=False
-        )
-        return web.json_response(listing)
-
-    app.router.add_get("/reef/scenarios/{scenario}/buffer", buffer)
-    app.router.add_post("/reef/scenarios/{scenario}/buffer/insert", insert)
-    app.router.add_post("/reef/scenarios/{scenario}/buffer/remove", remove)
+    app.router.add_get("/reef/scenarios/{scenario}/next-job", next_job)
 
 
-__all__ = ["register_buffer_routes", "register_sample_reads"]
+__all__ = ["register_next_job_route", "register_sample_reads"]
