@@ -176,7 +176,7 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
         jobs = await (await client.get("/reef/scenarios/s/jobs", headers=AUTH)).json()
         assert [(job["id"], job["state"]) for job in jobs["jobs"]] == [("job-1", "queued")]
         (job,) = jobs["jobs"]
-        assert (job["parameters"], job["sample_count"], job["sample_kind"], job["instruction"]) == (
+        assert (job["parameters"], job["sample_count"], job["sample_kind"], job["request"]) == (
             {"lr": 1e-5},
             0,
             None,

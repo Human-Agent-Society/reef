@@ -1,4 +1,4 @@
-"""The generated-task stages: tasks generated and saved here, stored in the sample store, and trained from the buffer.
+"""The generated-task stages: tasks generated and saved here, stored in the sample store, and trained as task jobs.
 
 When a round is due, ``GeneratedTaskSamples`` makes a ``TaskGenerationRound`` and runs it as one generation job on
 a private worker, off the trainer's thread. A generation job:
@@ -9,8 +9,8 @@ a private worker, off the trainer's thread. A generation job:
 
 The stage hands each train task of a complete generation to the pipeline
 (``made_samples``), which stores it in the scenario's sample store as ``generated-tasks/<task name>``. The
-tasks then train from the buffer like any other sample: ``GeneratedTaskJobData`` makes one task job of the
-buffer's tasks, and the commit that submits the job counts them trained. The training component rolls the
+tasks then train like any other sample: ``GeneratedTaskJobData`` makes one task job of the next job's
+tasks, and the commit that submits the job counts them trained. The training component rolls the
 tasks out on its own sampler and trains on their rollouts; Reef runs no rollout of them. When the job's end
 commits, the stage saves the result of each task that trained and has none, from the job's metrics; when
 every train task of a generation has a result, the next job sends the generation's results to the generator.
@@ -19,7 +19,7 @@ A train task waits until a committed job trains it, and is unfinished until it h
 starts when the pipeline first looks for job data. The next round starts after ``jobs_per_round`` task jobs
 ended since the previous round started, and only while fewer than ``refill_tasks`` train tasks wait. A round
 that made no train task, a failed task job, and no unfinished task are followed at once. A restart continues from
-the task store and the sample store: the store holds the train tasks that did not train, and the buffer takes
+the task store and the sample store: the store holds the train tasks that did not train, and a later job takes
 them again.
 
 The stage trains on no report. It holds the reports that are source sessions for the rounds, and releases the
@@ -1051,9 +1051,9 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
 
 
 class GeneratedTaskJobData(Sample2Job):
-    """The tasks of the buffer as one task job's data: the ``TaskSample`` values themselves.
+    """The tasks of the next job as one task job's data: the ``TaskSample`` values themselves.
 
-    The generated tasks train from the buffer like any other sample. A job takes at least ``job_samples``
+    The generated tasks train like any other sample. A job takes at least ``job_samples``
     tasks, 1 by default, and at most ``buffer_size``, 4 by default or ``job_samples`` when that is more. The
     training component rolls the tasks out on its own sampler and trains on their rollouts (a task job; see the
     Tinker component's ``rollout`` job parameter). The commit that submits the job counts the tasks trained;

@@ -215,11 +215,11 @@ def test_a_queue_component_reports_whether_its_component_starts_from_releases(tm
 
 
 @pytest.mark.unit
-def test_a_listed_job_carries_its_parameters_instruction_data_and_times(tmp_path):
+def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     queue = memory_coordination(lease_seconds=300).work_queue
     request = TrainingRequest("prefer tests", "session-1", "release-1", id="r1", parameters={"learning_rate": 1e-5})
     sample = policy_trajectory("s-j1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
-    data = JobData("s:instruction:r1", (sample, sample), request=request)
+    data = JobData("s:request:r1", (sample, sample), request=request)
     parameters = {"method": {"objective": "sft"}, "learning_rate": 1e-5}
     instructed = TrainingJob("j1", "steps", "steps:base", data, parameters, scenario="s")
     queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(instructed), serial_key="s"), now=0)
@@ -227,7 +227,7 @@ def test_a_listed_job_carries_its_parameters_instruction_data_and_times(tmp_path
     queued = job_json(queue.get(JOBS_QUEUE, "j1"))
     assert queued["parameters"] == parameters
     assert (queued["sample_count"], queued["sample_kind"]) == (2, "trajectory")
-    assert queued["instruction"] == {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
+    assert queued["request"] == {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
     assert (queued["created_at"], queued["started_at"], queued["ended_at"]) == (
         "1970-01-01T00:00:00+00:00",
         None,
@@ -242,7 +242,7 @@ def test_a_listed_job_carries_its_parameters_instruction_data_and_times(tmp_path
     (ended,) = scenario_jobs(queue, "s")
     assert (ended["state"], ended["ended_at"]) == ("finished", "1970-01-01T00:01:30.500000+00:00")
 
-    # A job of the auto mode has no instruction; a task job names its kind, and an empty job has none.
+    # A job of the auto mode has no request; a task job names its kind, and an empty job has none.
     automatic = TrainingJob(
         "j2", "steps", "steps:base", JobData("s:data:1", (TaskSample(tmp_path),)), {}, scenario="s"
     )
@@ -250,7 +250,7 @@ def test_a_listed_job_carries_its_parameters_instruction_data_and_times(tmp_path
     for value in (automatic, empty):
         queue.add(NewWork(JOBS_QUEUE, value.job_id, "s", job_kind("steps"), job_payload(value), serial_key="s"))
     listed = {listed_job["id"]: listed_job for listed_job in scenario_jobs(queue, "s")}
-    assert (listed["j2"]["instruction"], listed["j2"]["sample_kind"], listed["j2"]["parameters"]) == (None, "task", {})
+    assert (listed["j2"]["request"], listed["j2"]["sample_kind"], listed["j2"]["parameters"]) == (None, "task", {})
     assert (listed["j3"]["sample_count"], listed["j3"]["sample_kind"]) == (0, None)
 
 

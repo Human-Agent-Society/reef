@@ -38,7 +38,7 @@ class SFTRecipe(WeightTrainingRecipe):
       example ``scheduling.packing_length`` to count steps in packs of tokens.
 
     The recipe gives parameters to trajectory jobs only. An imported train task
-    trains in ``manual`` mode, for an instruction whose ``parameters`` give its
+    trains in ``manual`` mode, for a request whose ``parameters`` give its
     job's method and rollout, such as an RL step after SFT.
 
     Configure the optimizer in ``training.options``.
@@ -62,7 +62,7 @@ class SFTRecipe(WeightTrainingRecipe):
         return PipelineSpec(record2sample=SFTSamples, sample2job=SFTJobData)
 
     def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
-        """SFT trains trajectories: a task job takes its parameters from its instruction."""
+        """SFT trains trajectories: a task job takes its parameters from its request."""
         return {"trajectory": super().parameters_by_kind()["trajectory"]}
 
     @classmethod
