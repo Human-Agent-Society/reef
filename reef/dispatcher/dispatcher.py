@@ -710,7 +710,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             settings = self.storage.read_settings(scenario)
             if settings.owner == owner:
                 return
-            samples = current.store.samples
+            samples = self.storage.sample_store(scenario, current.store)
             if settings.owner != scenario or (samples is not None and samples.page(limit=1)):
                 raise ValueError(f"scenario {scenario!r} has the owner {settings.owner!r}; it is set at creation")
             self.storage.write_settings(scenario, replace(settings, owner=owner))
@@ -758,7 +758,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""
         with self.locked_scenario(scenario) as current:
-            samples = current.store.samples
+            samples = self.storage.sample_store(scenario, current.store)
             return () if samples is None else samples.page(after_sequence=after_sequence, limit=limit)
 
     @staticmethod
@@ -841,7 +841,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
         """The scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.locked_scenario(scenario) as current:
-            samples = current.store.samples
+            samples = self.storage.sample_store(scenario, current.store)
             return () if samples is None else samples.imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:

@@ -52,7 +52,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore, TrainerSamples
+from reef.storage.samples import SampleStore
 from reef.storage.tasks import TaskStorage, TaskStore
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingComponent
@@ -370,7 +370,7 @@ class CompositeRecipe(Recipe):
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
                 releases=None if releases is None else ComponentArtifacts(releases, component),
-                samples=None if samples is None else TrainerSamples(samples, component),
+                samples=None if samples is None else samples.for_trainer(component),
                 root=None if root is None else component_root(root, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.

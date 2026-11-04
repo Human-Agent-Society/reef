@@ -48,7 +48,7 @@ from tests.support.harness_steps import (
     runtime,
     traced,
 )
-from tests.support.samples import data_storage
+from tests.support.samples import data_storage, sample_store
 
 from reef.artifact import Artifact
 from reef.core.activation import MadeArtifact
@@ -83,7 +83,7 @@ from reef.recipe.registry import recipe_class_for
 from reef.sample2job.traces import TrainTaskJobData
 from reef.service.app import create_app
 from reef.storage.data import NewItem
-from reef.storage.samples import StoredSample, TrainerSamples
+from reef.storage.samples import StoredSample
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentArtifacts
@@ -416,8 +416,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
     assert built.configured_tasks() == ()
     root = tmp_path / "tasks"
     with closing(data_storage()) as storage, closing(storage.open("s")) as session:
-        samples = session.samples
-        assert samples is not None
+        samples = sample_store(storage, "s", session)
 
         def import_task(name: str, split: str) -> StoredSample:
             metadata = {"kind": "task", "scenarios": {"s": split}}
@@ -432,7 +431,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
             built.harness_component,
             scenario="s",
             releases=releases_for(built),
-            eval_samples=TrainerSamples(samples),
+            eval_samples=samples.for_trainer(""),
             layout=get_adapter("pi").layout,
         )
 

@@ -12,7 +12,7 @@ import pytest
 import sqlalchemy.exc
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
-from tests.support.samples import data_storage
+from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
@@ -50,7 +50,7 @@ from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2JobSettings
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import TrainerSamples, consumed_sample_id, stage_item_id
+from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
@@ -338,14 +338,14 @@ class DeferredWorker(InlineWorker):
             self.outcomes.append(asyncio.run(self.generation.run(job)))
 
 
-def scenario_session(tmp_path: Path, scenario: str = "tasks") -> ScenarioStore:
-    """A scenario session in a SQLite storage under ``tmp_path``, with its samples in a data store."""
-    return data_storage(tmp_path / "records").open(scenario)
+def scenario_session(tmp_path: Path, scenario: str = "tasks") -> tuple[ScenarioStore, SampleStore]:
+    """A scenario session in a SQLite storage under ``tmp_path``, and its sample store in a data store."""
+    return open_sample_store(tmp_path / "records", scenario)
 
 
 def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
     """The task stores of a scenario session in a SQLite storage under ``tmp_path``."""
-    return scenario_session(tmp_path, scenario).tasks
+    return scenario_session(tmp_path, scenario)[0].tasks
 
 
 class CommittingPipeline(TrainingPipeline):
@@ -390,11 +390,11 @@ def rounds(
     """A generated-task pipeline; ``worker`` runs the generation and delivery jobs, inline by default."""
     service = service if service is not None else StandInGenerator(tmp_path / "tasks")
     worker = worker if worker is not None else InlineWorker()
-    session = scenario_session(tmp_path)
+    session, samples = scenario_session(tmp_path)
     context = PipelineContext(
         "tasks",
         task_storage=session.tasks,
-        samples=TrainerSamples(session.samples),
+        samples=samples.for_trainer(""),
         training_mode=str(config.pop("training_mode", "auto")),
     )
     sample_settings, batch_settings = stage_settings(
@@ -658,7 +658,7 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
     looked(first)
     first.close()
     # The first task trained, with its result, before the stop.
-    session = scenario_session(tmp_path)
+    session, _ = scenario_session(tmp_path)
     session.tasks.open("generated-tasks").write_document(
         key="rollout/harbor-00000-000", document=TaskRolloutResult("harbor-00000-000", (1.0, 0.0)).document()
     )
@@ -968,9 +968,9 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     recipe = training_recipe()
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
     built = recipe.build_pipeline(PipelineContext("one"))
-    assert (
-        isinstance(built.record2sample, GeneratedTaskSamples) and built.record2sample.worker is None
-    ), "no round runs"
+    assert isinstance(built.record2sample, GeneratedTaskSamples) and built.record2sample.worker is None, (
+        "no round runs"
+    )
     assert isinstance(built.sample2job, GeneratedTaskJobData)
     assert (built.sample2job.job_samples, built.buffer_size) == (1, 4), "a job takes one to four tasks"
     built.close()
@@ -1028,10 +1028,8 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
         },
     )
     ScriptedGenerator.built.clear()
-    session = scenario_session(tmp_path, "one")
-    built = recipe.build_pipeline(
-        PipelineContext("one", task_storage=session.tasks, samples=TrainerSamples(session.samples))
-    )
+    session, samples = scenario_session(tmp_path, "one")
+    built = recipe.build_pipeline(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
     assert isinstance(built.record2sample, GeneratedTaskSamples)
     assert isinstance(built.record2sample.task_generator, ScriptedGenerator)
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]

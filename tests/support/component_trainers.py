@@ -222,7 +222,7 @@ class _TwoTrainerRecipe(Recipe):
         alone = len(self.backends) + (self.training_component is not None) == 1
 
         def samples_for(component: str) -> TrainerSamples | None:
-            return None if samples is None else TrainerSamples(samples, "" if alone else component)
+            return None if samples is None else samples.for_trainer("" if alone else component)
 
         trainers = tuple(
             ComponentTrainer(
