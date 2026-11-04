@@ -11,8 +11,8 @@ its ``JobLoop``; a training worker runs it here, and control commits the selecte
 - ``component`` and ``previous_job_id``, the fields of every ``TrainingJob``: the scenario component that the step
   evolves, and the last job whose end the trainer committed, whose harness state the step continues.
 - ``parameters``, which the harness stage gives (``TraceJobData.job_parameters``): ``evaluation_tasks``, the eval
-  split of the scenario's imported tasks, which the step evaluates on when the recipe evaluates on imported tasks
-  (``HarnessSteps.evaluates_imported_tasks``); and ``request``, the training request that the step runs
+  split of the scenario's imported tasks, which the step evaluates on instead of its configured tasks, when the
+  stage names it; and ``request``, the training request that the step runs
   (``reef.core.training_request.request_parameter``), or ``None``. A job that an earlier Reef queued holds
   ``component`` and ``previous_job`` in its parameters instead.
 
@@ -71,9 +71,7 @@ class HarnessSteps(ABC):
     reads no releases (each job names its head). ``policy(backend)`` is the selection policy that measures through
     ``backend``.
     ``check_tree(tree)`` raises ``ValueError`` for a tree that fails validation for the recipe's adapter.
-    ``layout`` is the adapter's tree layout, which names the parts of a tree. ``evaluates_imported_tasks`` is whether a
-    step evaluates on the eval split of the scenario's imported tasks, which the job's ``evaluation_tasks`` name,
-    instead of the configured tasks.
+    ``layout`` is the adapter's tree layout, which names the parts of a tree.
 
     Purpose: ``HarnessEvolutionRecipe`` makes one for its ``HarnessTrainingComponent``.
     """
@@ -97,10 +95,6 @@ class HarnessSteps(ABC):
     @property
     @abstractmethod
     def layout(self) -> TreeLayout: ...
-
-    @property
-    @abstractmethod
-    def evaluates_imported_tasks(self) -> bool: ...
 
 
 def job_component(job: TrainingJob) -> str:
@@ -313,7 +307,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         tree = HarnessTree.read(Path(job.start))
         # The tree's checksum names the head: a step needs no artifact ID of its start.
         head = ArtifactTextFiles(tree.checksum(), dict(tree.files))
-        tasks = parameters.get("evaluation_tasks") if self.steps.evaluates_imported_tasks else None
+        tasks = parameters.get("evaluation_tasks")
         progress = self.steps.state_root(job.scenario, component) / PROGRESS_FILE
         try:
             with ProgressFile(backend, progress):

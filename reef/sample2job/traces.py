@@ -10,13 +10,30 @@ needs no traffic, so uploaded train tasks start a run.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Self
 
 from reef.core import RequestType
+from reef.core.config import config_option
 from reef.core.job_data import JobData, TaskSample
 from reef.core.training_request import request_parameter
 from reef.pipeline_context import PipelineContext
+from reef.record2sample import Record2Sample
+from reef.sample2job.base import Sample2JobSettings
 from reef.sample2job.distill import DistillJobData
+
+
+@dataclass(frozen=True)
+class TraceJobDataSettings(Sample2JobSettings):
+    """The config of a harness stage: ``Sample2JobSettings``, and whether each job names the eval split."""
+
+    evaluation_split: bool = config_option(
+        False,
+        help=(
+            "Whether each job names the task paths of the scenario's eval split, which a harness step evaluates on. "
+            "A harness recipe sets it from evolution.evaluation.imported_tasks."
+        ),
+    )
 
 
 class TraceJobData(DistillJobData):
@@ -29,8 +46,9 @@ class TraceJobData(DistillJobData):
     possibly none, so the method reads the request beside them.
 
     ``job_parameters(data)`` adds to the stage's parameters what a harness step reads beside its data:
-    ``request``, the job's training request (``request_parameter``), or None; and ``evaluation_tasks``, the task
-    paths of the eval split of the scenario's imported tasks in arrival order, or None without a scenario's samples.
+    ``request``, the job's training request (``request_parameter``), or None; and, with ``evaluation_split``,
+    ``evaluation_tasks``, the task paths of the eval split of the scenario's imported tasks in arrival order, which
+    the step evaluates on instead of its configured tasks.
     """
 
     reads_requests = True
@@ -43,27 +61,37 @@ class TraceJobData(DistillJobData):
         job_samples: int | None,
         *,
         max_job_samples: int | None = None,
+        evaluation_split: bool = False,
     ) -> None:
         super().__init__(
             context, buffer_size, 1 if job_samples is None else job_samples, max_job_samples=max_job_samples
         )
+        self.evaluation_split = evaluation_split
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2sample: Record2Sample,
+        environ: Mapping[str, str],
+    ) -> Self:
+        settings = TraceJobDataSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples, evaluation_split=settings.evaluation_split)
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:
-        samples = self.context.samples
-        tasks = (
-            None
-            if samples is None
-            else [
-                str(stored.sample.task_path)
-                for stored in samples.imported_tasks(split="eval")
-                if isinstance(stored.sample, TaskSample)
-            ]
-        )
-        return {
+        parameters = {
             **super().job_parameters(data),
-            "evaluation_tasks": tasks,
             "request": None if data.request is None else request_parameter(data.request),
         }
+        if self.evaluation_split:
+            samples = self.context.samples
+            stored = () if samples is None else samples.imported_tasks(split="eval")
+            parameters["evaluation_tasks"] = [
+                str(item.sample.task_path) for item in stored if isinstance(item.sample, TaskSample)
+            ]
+        return parameters
 
 
 class TrainTaskJobData(TraceJobData):
@@ -83,4 +111,4 @@ class TrainTaskJobData(TraceJobData):
     accepts_imported_tasks = True
 
 
-__all__ = ["TraceJobData", "TrainTaskJobData"]
+__all__ = ["TraceJobData", "TraceJobDataSettings", "TrainTaskJobData"]

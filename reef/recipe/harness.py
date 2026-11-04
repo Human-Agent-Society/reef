@@ -82,7 +82,7 @@ from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, Harness
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
 from reef.train.jobs import JobLoop
-from reef.train.pipeline import PipelineSpec
+from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.trainer import Trainer
 
 #: The directory of the harness training component's jobs and starts under ``evolution.state_dir``.
@@ -204,10 +204,6 @@ class RecipeSteps(HarnessSteps):
     @property
     def layout(self) -> TreeLayout:
         return get_adapter(self.recipe.evolution.adapter).layout
-
-    @property
-    def evaluates_imported_tasks(self) -> bool:
-        return self.recipe.evaluation.imported_tasks
 
 
 @dataclass(frozen=True)
@@ -358,6 +354,16 @@ class HarnessEvolutionRecipe(Recipe):
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=TraceSamples, sample2job=TraceJobData)
+
+    def stages(self) -> PipelineConfig:
+        """The pipeline's stages, whose harness stage names the eval split in each job when the steps evaluate on the
+        imported tasks (``evolution.evaluation.imported_tasks``)."""
+        stages = super().stages()
+        sample2job = stages.sample2job
+        if not self.evaluation.imported_tasks or not issubclass(sample2job.plugin_class, TraceJobData):
+            return stages
+        config = {**sample2job.config, "evaluation_split": True}
+        return replace(stages, sample2job=replace(sample2job, config=config))
 
     @property
     def harness_adapter(self) -> str | None:

@@ -414,6 +414,10 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         runtime=runtime(),
     )
     assert built.configured_tasks() == ()
+    # The recipe's harness stage names the eval split in each job; without imported tasks it names none.
+    assert built.stages().sample2job.config["evaluation_split"] is True
+    configured = from_config(evolution_config(binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "c")))
+    assert "evaluation_split" not in configured.stages().sample2job.config
     root = tmp_path / "tasks"
     with closing(data_storage()) as storage, closing(storage.open("s")) as session:
         samples = sample_store(storage, "s", session)
@@ -429,7 +433,10 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         # The harness stage names the eval split as the trainer reads it when it makes the job's parameters, and the
         # step evaluates on it.
         stage = TraceJobData(
-            PipelineContext("s", samples=samples.for_trainer(""), job_parameters={"trajectory": {}}), None, None
+            PipelineContext("s", samples=samples.for_trainer(""), job_parameters={"trajectory": {}}),
+            None,
+            None,
+            evaluation_split=True,
         )
 
         def evaluation_tasks() -> list[str]:
