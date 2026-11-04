@@ -495,11 +495,6 @@ class Trainer:
         with self._lock:
             self._pipeline.check_request(request)
 
-    def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
-        """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""
-        with self._lock:
-            self._pipeline.forget_samples(sample_ids)
-
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
         with self._lock:
@@ -680,7 +675,7 @@ class Trainer:
             return self.pending_step.data
         if serving_artifact_id is not None:
             self._pipeline.observe_serving_artifact_id(serving_artifact_id)
-        # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
+        # The samples service makes the samples (``produce_samples``); the cycle only reads the scenario's samples.
         if not self.pipeline_ready():
             return None
         data = self._build_validated_job_data()

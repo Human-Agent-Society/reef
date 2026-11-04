@@ -25,6 +25,7 @@ from tests.support.runtime_stubs import (
     job_sized_stages,
     runtime_bindings,
 )
+from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
@@ -591,8 +592,8 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     # Restore the job state and record progress as scenario recovery does;
     # retained records from the first rollout must not train again. The
     # samples service stores the samples of both rollouts before the first
-    # job, so the scenario's durable sample store carries the second one
-    # across the restart.
+    # job, as items of the scenario, so the second one survives the
+    # restart.
     component = _SAOComponent(tmp_path / "checkpoints")
 
     def _trainer(session, algorithm_state: Mapping[str, Any] | None = None) -> Trainer:
@@ -607,7 +608,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             samples=TrainerSamples(session.samples),
         )
 
-    first_storage = SQLiteScenarioStorage(tmp_path / "records")
+    first_storage = data_storage(tmp_path / "records")
     first_session = first_storage.open("math")
     for item in (
         _sao_inference("i1"),
@@ -644,7 +645,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     first_session.close()
     first_storage.close()
 
-    second_storage = SQLiteScenarioStorage(tmp_path / "records")
+    second_storage = data_storage(tmp_path / "records")
     second_session = second_storage.open("math")
     try:
         second = _trainer(second_session, prepared.algorithm_state)

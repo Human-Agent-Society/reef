@@ -194,7 +194,7 @@ has no commit and passes ``None``. A committed checkpoint ahead of the backend p
 repairs that pointer. An older checkpoint ahead of the commit history can
 be adopted into the history. Recovery replays retained records through the
 committed watermark while excluding every committed step's consumed IDs and
-the records of every sample that the trainer saved to the sample store, and
+the records that the trainer's stages consumed (its training state), and
 restores the read cursor. The watermark is a read position:
 retained records behind it can still belong to incomplete job data.
 

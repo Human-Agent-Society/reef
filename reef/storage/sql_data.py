@@ -84,7 +84,12 @@ from reef.storage.data import (
     prepared_items,
 )
 from reef.storage.item_kinds import task_partition
-from reef.storage.migrations import migrate_data_indexes, migrate_data_segments, migrate_data_trajectories
+from reef.storage.migrations import (
+    migrate_data_indexes,
+    migrate_data_segments,
+    migrate_data_trajectories,
+    migrate_data_uses,
+)
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.segments import SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
@@ -109,7 +114,9 @@ UNUSED_SEGMENT_SECONDS = 24 * 3600
 def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table]:
     """Define ``data_item``, ``data_item_scenario``, ``data_record_node`` and ``data_segment`` in ``metadata``.
 
-    ``sequence`` orders the items as they arrived. ``content_json`` is the canonical JSON of a trajectory's or a
+    ``sequence`` orders the items as they arrived. ``data_item_scenario`` has one row per use of an item by a
+    scenario, with its split; its own ``sequence`` orders the uses as they began, and a use whose split changes is a
+    new row (``DataStore.scenario_items``). ``content_json`` is the canonical JSON of a trajectory's or a
     record's content, and NULL for a task. ``message_field`` names the message list of a record payload that the
     item's trajectory node keeps (``call_shape``); the content then holds an empty payload. It is NULL for an
     item without one. ``metadata_json`` is the item's metadata. ``data_record_node`` is the node table of ``TrajectoryNodes``,
@@ -148,11 +155,18 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
     scenarios = Table(
         "data_item_scenario",
         metadata,
+        (
+            Column("sequence", Integer, primary_key=True)
+            if sqlite
+            else Column("sequence", BigInteger, Identity(), primary_key=True)
+        ),
         Column("owner", Text, nullable=False),
         Column("item_id", Text, nullable=False),
         Column("scenario", Text, nullable=False),
-        PrimaryKeyConstraint("owner", "item_id", "scenario"),
-        Index("data_item_scenario_by_scenario", "owner", "scenario"),
+        Column("split", String(8), nullable=False),
+        UniqueConstraint("owner", "item_id", "scenario"),
+        Index("data_item_scenario_by_scenario", "owner", "scenario", "sequence"),
+        sqlite_autoincrement=sqlite,
     )
     nodes = trajectory_node_table(metadata, "data_record_node", Column("owner", Text, primary_key=True), segments=True)
     segments = Table(
@@ -333,16 +347,23 @@ class SQLDataStore(DataStore):
         return {row["item_id"]: row for row in found}
 
     def write_scenarios(self, connection: Connection, owner: str, item_id: str, scenarios: Mapping[str, str]) -> None:
-        connection.execute(
-            delete(self.scenarios_table).where(
-                self.scenarios_table.c.owner == owner, self.scenarios_table.c.item_id == item_id
-            )
-        )
-        if scenarios:
-            connection.execute(
-                insert(self.scenarios_table),
-                [{"owner": owner, "item_id": item_id, "scenario": scenario} for scenario in scenarios],
-            )
+        """Make the uses of ``item_id`` match ``scenarios``: an unchanged use keeps its row and sequence, and a new
+        use or a new split gets a new row."""
+        uses = self.scenarios_table
+        mine = (uses.c.owner == owner, uses.c.item_id == item_id)
+        current = {
+            row.scenario: row.split for row in connection.execute(select(uses.c.scenario, uses.c.split).where(*mine))
+        }
+        ended = [scenario for scenario, split in current.items() if scenarios.get(scenario) != split]
+        if ended:
+            connection.execute(delete(uses).where(*mine, uses.c.scenario.in_(ended)))
+        begun = [
+            {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
+            for scenario, split in scenarios.items()
+            if current.get(scenario) != split
+        ]
+        if begun:
+            connection.execute(insert(uses), begun)
 
     def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
@@ -440,6 +461,23 @@ class SQLDataStore(DataStore):
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
+
+    def scenario_items(
+        self, owner: str, scenario: str, *, after: int = 0, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[tuple[int, StoredItem], ...]:
+        check_query(owner, None, scenario, after, limit)
+        items, uses = self.items_table, self.scenarios_table
+        statement = (
+            select(items, uses.c.sequence.label("use_sequence"))
+            .join(uses, (uses.c.owner == items.c.owner) & (uses.c.item_id == items.c.item_id))
+            .where(uses.c.owner == owner, uses.c.scenario == scenario, uses.c.sequence > after)
+            .order_by(uses.c.sequence)
+            .limit(limit)
+        )
+        with self.transaction(read_only=True) as connection:
+            found = connection.execute(statement).mappings().all()
+            stored = self.stored_items(connection, owner, found)
+        return tuple((int(row["use_sequence"]), item) for row, item in zip(found, stored, strict=True))
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)
@@ -677,6 +715,7 @@ class SQLiteDataStore(SQLDataStore):
             self.connection.exec_driver_sql("BEGIN IMMEDIATE")
             metadata.create_all(self.connection)
             migrate_data_segments(self.connection, self.items_table, self.nodes_table)
+            migrate_data_uses(self.connection, self.items_table, self.scenarios_table)
             migrate_data_indexes(self.connection, self.items_table)
             migrate_data_trajectories(self.connection, self.items_table, self.nodes_table)
 
@@ -772,6 +811,7 @@ class PostgresDataStore(SQLDataStore):
             connection.execute(CreateSchema(schema, if_not_exists=True))
             metadata.create_all(connection)
             migrate_data_segments(connection, self.items_table, self.nodes_table)
+            migrate_data_uses(connection, self.items_table, self.scenarios_table)
             migrate_data_indexes(connection, self.items_table)
             migrate_data_trajectories(connection, self.items_table, self.nodes_table)
 
