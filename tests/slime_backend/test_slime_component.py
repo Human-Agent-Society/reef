@@ -137,6 +137,20 @@ def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
         "loss_family": "sft",
         "loss_type": "sft_loss",
         "advantage_estimator": "grpo",
+        "rewards_normalization": True,
+        "n_samples_per_prompt": 2,
+        "rollout_batch_size": 1,
+        "over_sampling_batch_size": None,
+        "group_rm": False,
+        "reward_key": None,
+        "custom_generate_function_path": None,
+        "data_source_path": None,
+        "rollout_function_path": "slime.rollout.sglang_rollout.generate_rollout",
+        "partial_rollout": False,
+        "dynamic_sampling_filter_path": None,
+        "rollout_top_p": 1.0,
+        "use_rollout_routing_replay": False,
+        "use_score_centering": False,
         "compute_advantages_and_returns": False,
         "use_rollout_logprobs": False,
         "custom_rollout_data_keys": ("producing_artifact_ids",),
@@ -582,9 +596,9 @@ def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_pat
         ({**parameters("sft"), "save_interval": 0}, "save_interval must be a positive int"),
         ({**parameters("sft"), "save_interval": True}, "save_interval must be a positive int"),
         # A job of tasks, on a component without rollout engines.
-        ({**parameters("sft"), "harbor": {"rollouts_per_task": 2}}, "no rollout engines"),
+        ({**parameters("sft"), "harbor": {}}, "no rollout engines"),
         # A job of trajectories takes no harbor parameter.
-        ({**parameters("sft"), "harbor": {"rollouts_per_task": 2}}, "only to a job of tasks"),
+        ({**parameters("sft"), "harbor": {}}, "only to a job of tasks"),
         ({**parameters("sft"), "rollout": {"rollouts_per_task": 2}}, r"accept no parameters \['rollout'\]"),
     ],
 )
@@ -1345,6 +1359,10 @@ def test_the_workers_runtime_env_carries_the_cuda_defaults_and_this_processs_pyt
     # Cookbook loss families resolve inside the workers, which need the service's PYTHONPATH.
     assert startup.job_runtime_env({"PYTHONPATH": "/repo:/opt/sglang/python"}) == {
         "env_vars": {**defaults, "PYTHONPATH": "/repo:/opt/sglang/python"}
+    }
+    # A task job's Harbor rollouts run in Slime's rollout manager, an actor that does not inherit this process's values.
+    assert startup.job_runtime_env({"MODAL_TOKEN_ID": "id", "MODAL_TOKEN_SECRET": "secret", "E2B_API_KEY": ""}) == {
+        "env_vars": {**defaults, "MODAL_TOKEN_ID": "id", "MODAL_TOKEN_SECRET": "secret"}
     }
 
 
