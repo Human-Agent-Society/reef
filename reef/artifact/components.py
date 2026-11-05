@@ -229,20 +229,6 @@ class ScenarioComponents:
         for name, component in self.components.items():
             component.validator.validate(self.component_artifact(artifact, name))
 
-    def component_changed(self, artifact: Artifact, previous: Artifact, name: str) -> bool:
-        """Whether the snapshots select different artifacts for ``name``.
-
-        A flat snapshot names its artifact directly. A composed snapshot uses
-        its component manifest; a missing manifest counts as changed.
-        """
-        if self.single:
-            return artifact.artifact_id != previous.artifact_id
-        current = artifact.materialize().components
-        before = previous.materialize().components
-        if current is None or before is None or name not in current.entries or name not in before.entries:
-            return True
-        return current.artifact_id(name, artifact.ref.revision) != before.artifact_id(name, previous.ref.revision)
-
 
 __all__ = [
     "ENTRIES_FILE",
