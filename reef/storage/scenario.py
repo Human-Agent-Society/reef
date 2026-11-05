@@ -16,7 +16,7 @@ from typing import Any, Self
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.core.serving_config import ServingConfig
-from reef.storage.commits import CommitRecord
+from reef.storage.commits import CommitRecord, CommitSnapshots
 from reef.storage.data import check_owner
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
@@ -109,6 +109,11 @@ class ScenarioStore(ABC):
 
         The store closes with this session. Its evaluations survive a restart if ``durable`` is true.
         """
+
+    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
+        """Locate the snapshot of each record that ``history`` reads. A store that keeps its records in memory holds
+        their snapshots, so it does nothing."""
+        return
 
     @abstractmethod
     def history(self) -> tuple[CommitRecord, ...]:

@@ -9,12 +9,18 @@ failure closes the trainer and opened storage session owned by this attempt.
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactPublicationError
+from reef.artifact.artifact import (
+    Artifact,
+    ArtifactNotFound,
+    ArtifactPublicationError,
+    SnapshotRef,
+    artifact_components,
+)
 from reef.artifact.components import ScenarioComponents
 from reef.artifact.composite import compose_release
 from reef.artifact.repository import (
@@ -23,12 +29,13 @@ from reef.artifact.repository import (
     RepositoryBackend,
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
+    selection_digest,
 )
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
 from reef.core.errors import ReefError
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
@@ -37,7 +44,10 @@ from reef.scenario.release_files import ScenarioArtifactFiles
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
+    UNLOCATED_SNAPSHOT,
+    CommitHistoryError,
     CommitRecord,
+    CommitSnapshots,
     active_snapshot,
     parse_scenario_metadata,
     scenario_metadata_for,
@@ -48,6 +58,74 @@ from reef.storage.served_models import ServedModels
 from reef.train.component import ScenarioRoot
 from reef.train.trainer import ComponentTrainer
 from reef.train.training_requests import TrainingRequestQueue
+
+
+class RepositoryCommitSnapshots(CommitSnapshots):
+    """Finds each record's snapshot from its selection and the backend's bindings of artifact IDs.
+
+    Values: ``backend`` is the scenario's backend, and ``start`` is its root release. Bindings never change, so one
+    lookup per artifact ID is enough. The ``snapshot`` of a record without one is:
+
+    - a step or import that made an artifact: the binding of the artifact that this record names first;
+    - a training step that made none: the release that was active then;
+    - any other record of one component, or a new training start: the binding of its artifact;
+    - any other record of several components: the local view of its selection.
+    """
+
+    def __init__(self, backend: RepositoryBackend, start: SnapshotRef) -> None:
+        self.backend = backend
+        self.start = start
+        self.bindings: dict[str, SnapshotRef] = {}
+        self.start_ids: frozenset[str] | None = None
+
+    def binding(self, artifact_id: str) -> SnapshotRef:
+        if artifact_id not in self.bindings:
+            self.bindings[artifact_id] = self.backend.artifact_snapshot(artifact_id)
+        return self.bindings[artifact_id]
+
+    def made_artifact(self, record: CommitRecord, seen: set[str]) -> str:
+        """The artifact that ``record`` made. A lone trainer of several components names no component."""
+        artifact_ids = record.artifact_ids or {}
+        if record.component is not None:
+            return artifact_ids[record.component]
+        if len(artifact_ids) == 1:
+            return next(iter(artifact_ids.values()))
+        if self.start_ids is None:
+            self.start_ids = frozenset(artifact_components(self.backend.materialize(self.start)))
+        made = [id_ for id_ in artifact_ids.values() if id_ not in seen and id_ not in self.start_ids]
+        if not made:
+            raise CommitHistoryError(f"commit step {record.step} made an artifact, but names no new artifact ID")
+        return made[0]
+
+    def snapshot(self, record: CommitRecord, seen: set[str], active: SnapshotRef) -> SnapshotRef:
+        selection = record.selection
+        if selection is None:
+            raise CommitHistoryError(f"commit step {record.step} has no selection")
+        if record.checkpoint:
+            return self.binding(self.made_artifact(record, seen))
+        if record.operation == "training":
+            return active
+        if len(selection.artifact_ids) == 1:
+            return self.binding(next(iter(selection.artifact_ids.values())))
+        if record.operation == "train_from" and record.component is not None:
+            return self.binding(selection.artifact_ids[record.component])
+        return SnapshotRef(f"{SELECTION_VIEW_PREFIX}{selection_digest(selection)}", None)
+
+    def locate(self, records: Sequence[CommitRecord]) -> tuple[CommitRecord, ...]:
+        seen: set[str] = set()
+        active = self.start
+        located = []
+        for record in records:
+            if record.snapshot == UNLOCATED_SNAPSHOT:
+                try:
+                    record = replace(record, snapshot=self.snapshot(record, seen, active))
+                except ArtifactNotFound as exc:
+                    raise CommitHistoryError(f"commit step {record.step} names a missing artifact: {exc}") from exc
+            seen.update((record.artifact_ids or {}).values())
+            if record.activates:
+                active = record.snapshot
+            located.append(record)
+        return tuple(located)
 
 
 def committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
@@ -355,6 +433,7 @@ class ScenarioFactory:
         checkpoint_step = 0 if checkpoint is None else checkpoint.step
         runtime = self._recipe.runtime
         store = self._storage.open(name)
+        store.use_snapshots(RepositoryCommitSnapshots(backend, start_artifact))
         scenario: Scenario | None = None
         trainers: tuple[ComponentTrainer, ...] = ()
         try:

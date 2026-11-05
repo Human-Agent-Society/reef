@@ -1194,9 +1194,9 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     harness_release = scenario.current_snapshot().revision
     assert _commit_step(scenario, WEIGHTS) is not None
     assert scenario.current_snapshot().revision != harness_release
-    assert service.harness_manifest(headers)["release_id"] == harness_release
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_release, HARNESS)
     manifest = service.harness_manifest(headers)
-    assert manifest["release_id"] == harness_release
+    assert manifest["artifact_id"] == component_id(scenario, harness_release, HARNESS)
     assert manifest["files"] == {"harness.txt": "harness step 1"}
     catalog = service.harness_artifacts(headers)["artifacts"]
     assert [row["operation"] for row in catalog] == ["creation", "training"]
@@ -1248,26 +1248,25 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert _commit_step(scenario, HARNESS) is not None
     assert not any(record.made_artifact for record in scenario.store.history()[-2:])
     assert scenario.current_snapshot().revision == w1
-    assert service.harness_manifest(headers)["release_id"] == h1
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, h1, HARNESS)
     catalog = service.harness_artifacts(headers)["artifacts"]
     # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head;
     # like a flat scenario's rejected row, it lists the head's parent, not itself.
     assert listed_revisions(scenario) == [creation, h1, h1]
     assert catalog[-1]["metrics"]["selected"] is False
     assert "ran on" in service.harness_artifact_page(headers, 2).lower()
-    assert service.harness_manifest(headers, form="source")["release_id"] == h1
+    assert service.harness_manifest(headers, form="source")["artifact_id"] == component_id(scenario, h1, HARNESS)
 
     # The next harness release descends from h1 in the listed chain; the weights release it was published
     # on stays under another name, and the requires chain walks the listed rows.
     assert _commit_step(scenario, WEIGHTS) is not None
-    w2 = scenario.current_snapshot().revision
     _append_records(scenario, 3)
     assert _commit_step(scenario, HARNESS) is not None
     h2 = scenario.current_snapshot().revision
     catalog = service.harness_artifacts(headers)["artifacts"]
     assert listed_revisions(scenario) == [creation, h1, h1, h2]
     assert required_by(catalog, component_id(scenario, h2, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
-    assert service.harness_manifest(headers)["release_id"] == h2
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, h2, HARNESS)
     page = service.harness_artifact_page(headers, 3)
     assert component_id(scenario, h2, HARNESS) in page
     assert h2 not in page
@@ -1279,7 +1278,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert activated_view not in (h1, h2)
     catalog = service.harness_artifacts(headers)["artifacts"]
     assert listed_revisions(scenario) == [creation, h1, h1, h2]
-    assert service.harness_manifest(headers)["release_id"] == h1
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, h1, HARNESS)
     assert required_by(catalog, component_id(scenario, h1, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
     # Weights held for review are activated as weights: the served tree stays, so the head stays a listed
@@ -1294,15 +1293,10 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert _commit_step(scenario, HARNESS) is not None
     h3 = scenario.current_snapshot().revision
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
-    combined = scenario.current_snapshot().revision
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 3"
     catalog = service.harness_artifacts(headers)["artifacts"]
     assert listed_revisions(scenario) == [creation, h1, h1, h2, h3]
-    assert (
-        service.harness_manifest(headers, form="source")["release_id"]
-        == h3
-        not in (w1, w2, held, combined, activated_view)
-    )
+    assert service.harness_manifest(headers, form="source")["artifact_id"] == component_id(scenario, h3, HARNESS)
     assert required_by(catalog, component_id(scenario, h3, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
 
@@ -1407,7 +1401,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatc
     held = checkpoint.snapshot.revision
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
-    assert service.harness_manifest(headers)["release_id"] == creation
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, creation, HARNESS)
     assert listed_revisions(scenario) == [creation]
 
 
@@ -1430,13 +1424,12 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     # Back to the first weights under the same tree: nothing to pull.
     scenario.activate(component_id(scenario, first_weights, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
-    assert service.harness_manifest(headers)["release_id"] == harness_release
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_release, HARNESS)
     assert listed_revisions(scenario) == [base, harness_release]
 
     # Back to the root's harness: the seed tree is served again, named by the root release.
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, HARNESS), HARNESS)
-    assert service.harness_manifest(headers)["release_id"] == base
-    assert service.harness_manifest(headers)["release_id"] == base
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, base, HARNESS)
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
     assert listed_revisions(scenario) == [base, harness_release]
 
