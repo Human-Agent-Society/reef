@@ -1,6 +1,6 @@
 """The whole manifest of a Tinker checkpoint, which the Tinker training component writes and reads.
 
-The serving side reads only its sampler (``reef.tinker.checkpoint.TinkerRelease``).
+The serving side reads only its sampler (``reef.tinker.checkpoint.TinkerArtifact``).
 A manifest also records the learning-rate schedule its weights were trained
 under and the optimizer steps that schedule has completed, and the objective's
 state: the optimizer state lives in the remote checkpoint, and the schedule's
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.storage.durable_files import write_json
-from reef.tinker.checkpoint import MANIFEST, TinkerRelease
+from reef.tinker.checkpoint import MANIFEST, TinkerArtifact
 from reef.train.method import LearningRateScheduleState
 
 
@@ -32,7 +32,7 @@ class TinkerCheckpoint:
     the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
     writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole release, and reads them
-    back to start a job. The serving side reads the same manifest as a ``TinkerRelease``.
+    back to start a job. The serving side reads the same manifest as a ``TinkerArtifact``.
     ``check_compatible`` is how the component refuses a checkpoint of another model or service.
     """
 
@@ -69,7 +69,7 @@ class TinkerCheckpoint:
 
         A sampler serves a checkpoint of any rank; a trainer also checks its parameterization (``lora_rank``).
         """
-        TinkerRelease(self.base_model, self.sampler_path, self.service).check_compatible(base_model, service=service)
+        TinkerArtifact(self.base_model, self.sampler_path, self.service).check_compatible(base_model, service=service)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)

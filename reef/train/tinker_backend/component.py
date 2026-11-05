@@ -34,7 +34,7 @@ from reef.artifact.repository import BaseModelFiles, DefaultStart
 from reef.core.chat_rendering import needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import read_json, write_json
 from reef.storage.job_data import read_job_data
 from reef.tinker.checkpoint import MANIFEST
@@ -245,7 +245,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return str(imported)
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
+    def artifact_format(self) -> ArtifactFormat | None:
         """``None`` by default: a release holds only its manifest, and the weights stay on the service."""
         return None
 
@@ -524,7 +524,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
             inputs["service"] = self._config.base_url
         return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
 
-    def check_release(self, files: ArtifactFiles) -> None:
+    def check_artifact(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
         self.check_manifest(files)
 

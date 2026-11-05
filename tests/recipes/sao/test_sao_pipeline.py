@@ -388,7 +388,7 @@ class _SAOComponent(StubTrainingComponent):
         [checkpoint] = super().train(job)
         return (
             SavedCheckpoint(
-                0, checkpoint.path, checkpoint.release_path, {"sao/critic_updates": 2, "sao/actor_trained": 1}
+                0, checkpoint.path, checkpoint.artifact_path, {"sao/critic_updates": 2, "sao/actor_trained": 1}
             ),
         )
 

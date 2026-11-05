@@ -245,7 +245,7 @@ def test_a_job_saves_one_checkpoint_and_the_next_job_continues_from_it(component
     first = train(component, JobData("older", (item("old:0"),)), objective.name)
     assert first.state == "finished" and first.metrics["optimizer_steps"] == 1
     (checkpoint,) = first.checkpoints
-    assert checkpoint.step == 1 and checkpoint.path == checkpoint.release_path
+    assert checkpoint.step == 1 and checkpoint.path == checkpoint.artifact_path
     assert Path(checkpoint.path) == component.state_dir / "jobs" / first.job_id / "1"
     assert checkpoint.metrics["loss"] == -1.25
     manifest = TinkerCheckpoint.read(Path(checkpoint.path))
@@ -261,9 +261,9 @@ def test_a_job_saves_one_checkpoint_and_the_next_job_continues_from_it(component
 
 def test_a_release_holds_its_manifest_alone(component, objective):
     # The weights stay on the service: engines that serve a release download its adapter (TinkerSamplerWeights).
-    assert component.release_format is None
+    assert component.artifact_format is None
     status = train(component, batch(), objective.name)
-    release = Path(status.checkpoints[0].release_path)
+    release = Path(status.checkpoints[0].artifact_path)
     assert [path.name for path in release.iterdir()] == [MANIFEST]
 
 
@@ -438,7 +438,7 @@ def test_the_default_start_is_the_untrained_adapter_and_imports_as_any_release(c
     status = train(component, batch(), objective.name)
     release = tmp_path / "release"
     release.mkdir()
-    (release / MANIFEST).write_text((Path(status.checkpoints[0].release_path) / MANIFEST).read_text())
+    (release / MANIFEST).write_text((Path(status.checkpoints[0].artifact_path) / MANIFEST).read_text())
     start = component.import_start(release)
     assert Path(start).parent == component.state_dir / "imported"
     assert TinkerCheckpoint.read(Path(start)) == TinkerCheckpoint.read(release)
@@ -448,18 +448,18 @@ def test_the_default_start_is_the_untrained_adapter_and_imports_as_any_release(c
 def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(component, client, tmp_path):
     release = tmp_path / "release"
     with pytest.raises(ValueError, match=r"holds tinker-checkpoint\.json"):
-        component.check_release(DirectoryFiles(release))
+        component.check_artifact(DirectoryFiles(release))
     UNTRAINED.write(release)
-    component.check_release(DirectoryFiles(release))
+    component.check_artifact(DirectoryFiles(release))
     client.missing = {UNTRAINED.state_path}
     with pytest.raises(ValueError, match=f"{UNTRAINED.state_path} does not resolve"):
-        component.check_release(DirectoryFiles(release))
+        component.check_artifact(DirectoryFiles(release))
     TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(release)
     with pytest.raises(ValueError, match=r"no rank 32 LoRA of .*: its rank is 8"):
-        component.check_release(DirectoryFiles(release))
+        component.check_artifact(DirectoryFiles(release))
     (release / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
     with pytest.raises(ValueError, match="is no Tinker checkpoint manifest"):
-        component.check_release(DirectoryFiles(release))
+        component.check_artifact(DirectoryFiles(release))
 
 
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):
@@ -717,7 +717,7 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     base = empty_artifact(tmp_path)
     first = inference.activate_checkpoint(base)
     (checkpoint,) = train(component, batch(), objective.name).checkpoints
-    published = Artifact.local(Path(checkpoint.release_path))
+    published = Artifact.local(Path(checkpoint.artifact_path))
     selected = inference.activate_checkpoint(published)
     assert selected != first
     # The served row names the active sampler; a request under an older sampler's name keeps that sampler's load.

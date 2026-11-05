@@ -25,8 +25,8 @@ from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_t
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
 from reef.scenario.release_files import component_files
-from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
-from reef.service.release_page import before_artifact_id, build_release_page, build_running_step_page, result_of
+from reef.scenario.scenario import Scenario
+from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import (
     SCENARIO_HEADER,
@@ -437,45 +437,12 @@ class RequestService:
             manifest["components"] = components.artifact_ids(artifact.ref.revision)
         return manifest
 
-    @classmethod
-    def legacy_harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
-        """Serialize old release selectors only for the legacy harness catalog endpoint."""
-        rows = []
-        for row in scenario.harness_snapshot_rows():
-            snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
-            listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
-            listed["release_id"] = selected.revision
-            listed["parent_release_id"] = snapshot.parent_revision if parent is None else parent.revision
-            if selected.revision != snapshot.revision:
-                listed["composed_release_id"] = snapshot.revision
-            if parent is not None and parent.revision != snapshot.parent_revision:
-                listed["composed_parent_release_id"] = snapshot.parent_revision
-            rows.append(listed)
-        return rows
-
     def harness_artifacts(self, headers: Mapping[str, str]) -> dict[str, Any]:
-        """The harness artifacts, oldest first, addressed by artifact ID; operation history stays separate."""
+        """The harness artifacts, oldest first, addressed by artifact ID, with the metrics of the step that published
+        each one, so an update is a decision over numbers. A scenario with several components lists the artifacts of
+        its harness component. Same read-only rules as ``harness_manifest``."""
         scenario = self._file_scenario(headers)
-        component = scenario.components.files_component
-        rows = [row for row in reversed(scenario.artifacts()) if row["component"] == component]
-        return {"scenario": scenario.name, "artifacts": rows}
-
-    def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
-        """The scenario's release catalog with per-release evaluation metrics, newest last.
-
-        The list side of the update channel: every committed release stays
-        addressable through the manifest read's ``release_id``, and each
-        training row carries the metrics of the step that published it, so an
-        update is a decision over numbers rather than a blind pull. A scenario
-        with several components lists the releases that changed the pulled
-        tree (see ``Scenario.harness_rows``); the others stay addressable by id.
-        Same read-only rules as ``harness_manifest``.
-        """
-        scenario = self._file_scenario(headers)
-        return {
-            "scenario": scenario.name,
-            "releases": list(reversed(self.legacy_harness_rows(scenario))),
-        }
+        return {"scenario": scenario.name, "artifacts": list(reversed(scenario.harness_rows()))}
 
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
         """Raw retained files for a catalog row; presentation belongs to the caller."""
@@ -494,12 +461,12 @@ class RequestService:
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
-    def harness_release_page(
+    def harness_artifact_page(
         self, headers: Mapping[str, str], step: int, link_query: Mapping[str, str] | None = None
     ) -> str:
         """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
 
-        The rows are the ones ``harness_releases`` answers, so the step a
+        The rows are the ones ``harness_artifacts`` answers, so the step a
         client counts there is the step this page names. The release the
         step ran on (the parent of a win, the head a rejected or skipped
         step ran on) comes through the artifact snapshot when it is
@@ -529,7 +496,7 @@ class RequestService:
                 before_files = component_files(scenario.components, artifact, component)
             except ArtifactError:
                 before_files = None
-        return build_release_page(step, rows, before_files=before_files, link_query=link_query)
+        return build_artifact_page(step, rows, before_files=before_files, link_query=link_query)
 
     def running_request_id(self, scenario: Scenario) -> str | None:
         """The id of the request the scenario's step is running: the reserved job data's, else the step's progress."""

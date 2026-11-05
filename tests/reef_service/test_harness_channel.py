@@ -221,16 +221,16 @@ def test_a_published_step_reaches_the_served_files_and_the_catalog(tmp_path) -> 
             invalid = await client.get("/reef/harness", params={"form": "zip"}, headers=HEADERS)
             assert invalid.status == 400 and "form must be 'rendered', 'source' or 'client'" in await invalid.text()
 
-            response = await client.get("/reef/harness/releases", headers=HEADERS)
+            response = await client.get("/reef/harness/artifacts", headers=HEADERS)
             assert response.status == 200
             catalog = await response.json()
             assert catalog["scenario"] == "delivery"
-            rows = catalog["releases"]
+            rows = catalog["artifacts"]
             # Newest last: the creation release opens the catalog, the published head closes it with the
             # manifest's evaluation.
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
-            assert head["release_id"] == manifest["release_id"] and head["active"] is True
+            assert head["artifact_id"] == manifest["artifact_id"] and head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["selected"] is True and head["metrics"]["wins"] == 1
 
@@ -245,7 +245,7 @@ def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
             second = await evaluated_step(client)
             assert first["release_id"] != second["release_id"]
             response = await client.get("/reef/harness", params={"release_id": first["release_id"]}, headers=HEADERS)
-            assert response.status == 200 and response.headers["x-reef-release-id"] == first["release_id"]
+            assert response.status == 200 and "x-reef-release-id" not in response.headers
             manifest = await response.json()
             assert manifest["release_id"] == first["release_id"]
             assert manifest["files"] == render_tree(TREE_V1, PI)
@@ -312,24 +312,24 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 # A resident client keeps seeing the committed tree and its evaluation while the next candidate runs.
                 catalog, current, pinned = await asyncio.wait_for(
                     asyncio.gather(
-                        read_release("/reef/harness/releases"),
+                        read_release("/reef/harness/artifacts"),
                         read_release("/reef/harness"),
                         read_release("/reef/harness", first["release_id"]),
                     ),
                     timeout=1.0,
                 )
                 assert current == pinned == first
-                head = catalog["releases"][-1]
-                assert head["active"] is True and head["release_id"] == first["release_id"]
+                head = catalog["artifacts"][-1]
+                assert head["active"] is True and head["artifact_id"] == first["artifact_id"]
                 assert head["artifact_id"] == first["artifact_id"] and head["metrics"] == first["evaluation"]
 
                 finish_evaluation.set()
                 second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
-                updated = await read_release("/reef/harness/releases")
-                assert len(updated["releases"]) == len(catalog["releases"]) + 1
-                assert updated["releases"][-2]["active"] is False
-                head = updated["releases"][-1]
-                assert head["active"] is True and head["release_id"] == second["release_id"] != first["release_id"]
+                updated = await read_release("/reef/harness/artifacts")
+                assert len(updated["artifacts"]) == len(catalog["artifacts"]) + 1
+                assert updated["artifacts"][-2]["active"] is False
+                head = updated["artifacts"][-1]
+                assert head["active"] is True and head["artifact_id"] == second["artifact_id"] != first["artifact_id"]
                 assert head["artifact_id"] == second["artifact_id"] and head["metrics"] == second["evaluation"]
                 assert second["files"] == render_tree(TREE_V2, PI)
                 assert await read_release("/reef/harness", first["release_id"]) == first
