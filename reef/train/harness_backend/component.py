@@ -98,18 +98,16 @@ class HarnessSteps(ABC):
 
 
 def job_component(job: TrainingJob) -> str:
-    """The scenario component that ``job`` evolves: ``job.component``, or the ``component`` parameter of a job that an
-    earlier Reef queued; ``ValueError`` without one."""
-    component = job.component or job.parameters.get("component")
+    """The scenario component that ``job`` evolves; ``ValueError`` without one."""
+    component = job.component
     if not isinstance(component, str) or not component:
         raise ValueError("a harness job names the scenario component that it evolves")
     return component
 
 
 def previous_job(submitted: Mapping[str, Any]) -> str | None:
-    """The previous job of the job file ``submitted``: its ``previous_job_id``, or the ``previous_job`` parameter of
-    a job that an earlier Reef queued."""
-    return submitted.get("previous_job_id") or submitted["parameters"].get("previous_job")
+    """The previous job of the job file ``submitted``."""
+    return submitted.get("previous_job_id")
 
 
 def read_step_progress(path: Path) -> StepProgress | None:

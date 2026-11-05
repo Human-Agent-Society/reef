@@ -28,7 +28,6 @@ from tests.support.serving import wait_for_serving
 
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
@@ -119,43 +118,6 @@ def test_commit_record_detaches_nested_metrics() -> None:
     encoded["metrics"]["selection"]["selected"] = False
 
     assert record.metrics == {"selection": {"selected": True}}
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("legacy_version", ["reef-commit/5", "reef-commit/6", "reef-commit/7"])
-def test_new_records_read_legacy_history_and_keep_selection_ids(open_history, legacy_version) -> None:
-    legacy = sample_record().to_dict()
-    legacy["record"] = legacy_version
-    snapshot = legacy.pop("snapshot")
-    legacy["artifact_ref"] = {
-        "kind": "artifact",
-        "release_id": snapshot["revision"],
-        "parent_release_id": snapshot["parent_revision"],
-        "content_id": "unused-legacy-content",
-    }
-    assert CommitRecord.from_dict(legacy) == sample_record()
-    assert "content_id" not in CommitRecord.from_dict(legacy).to_dict()["snapshot"]
-    reference = SnapshotRef("stored-model", None)
-    selected = ArtifactSelection({"model": "stored-model"})
-    restored = CommitRecord(
-        scenario="math",
-        step=1,
-        snapshot=reference,
-        checkpoint=False,
-        algorithm_state=None,
-        high_water_sequence=0,
-        high_water_offset=0,
-        operation="restore",
-        components=selected.artifact_ids,
-        selection=selected,
-    )
-    open_history().append(restored)
-    assert open_history().records() == (restored,)
-    assert restored.to_dict()["record"] == "reef-commit/8"
-    encoded = restored.to_dict()
-    encoded["selection"]["model"] = "another-model"
-    with pytest.raises(CommitHistoryError, match="components must match"):
-        CommitRecord.from_dict(encoded)
 
 
 @pytest.mark.unit

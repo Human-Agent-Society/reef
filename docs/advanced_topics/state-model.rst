@@ -9,7 +9,7 @@ It includes a record id, a scenario, an inference payload (for inference
 exchange) or feedback (for report), and necessary metadata (e.g. request type
 or artifact identifier used for serving).
 
-``RecordStore`` defines record append, replay, audit, and consumption receipt
+``RecordStore`` defines record append, replay, and audit
 operations. It does not know about scenario lifecycle, commits, artifact
 publication, or training. ``SQLiteRecordStore`` and ``PostgresRecordStore``
 share SQL record operations while supplying their own database connections,
@@ -178,10 +178,9 @@ under it also ends without a commit.
 
 A commit retires no row, so the trainers share every stored row and each
 keeps its own consumption: a row one trainer consumed is still there for the
-others. Job data that a trainer drops as stale goes on a consumption receipt
-that names its component. On restart each trainer recovers its state and
-read cursor from its own commits and skips the rows its own commits and
-receipts name, which needs durable commit storage.
+others. On restart each trainer recovers its state and
+read cursor from its own commits and skips the rows that they name, which needs
+durable commit storage.
 
 Without a durable store, a saved snapshot advances the active selection and the
 chain tip before the in-memory commit settles. A conflicting chain tip
@@ -189,9 +188,9 @@ therefore rejects the step before its records are consumed. In-memory commit his
 only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
-under ``scenario_commit_record`` (format ``reef-scenario/6``): the root's
+under ``scenario_commit_record`` (format ``reef-scenario/7``): the root's
 ``source``, and after step zero the root snapshot as ``start_artifact``.
-Recovery also reads legacy ``reef-scenario/5`` metadata and refuses other formats. It decodes the metadata into a ``CommitRecord`` and
+Recovery refuses other formats. It decodes the metadata into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
 repairs that pointer. An older checkpoint ahead of the commit history can
