@@ -234,7 +234,7 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
     SlimeStart(None, None, {}, None).write(start)
     job_parameters = {
         **parameters("sft"),
-        **({"harbor": {"rollouts_per_task": 2}} if rollout else {}),
+        **({"harbor": {}} if rollout else {}),
     }
     # The job file that LocalJobComponent.submit writes: the job data reference with its local path.
     ref = job_data_ref(data)
