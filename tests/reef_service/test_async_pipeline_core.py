@@ -59,7 +59,7 @@ class DurableComponent(StubTrainingComponent):
         if self.block and not self.release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked training")
         (checkpoint,) = super().train(job)
-        return (SavedCheckpoint(checkpoint.step, checkpoint.path, checkpoint.release_path, self.complete_metrics),)
+        return (SavedCheckpoint(checkpoint.step, checkpoint.path, checkpoint.artifact_path, self.complete_metrics),)
 
 
 class BlockingLostAckBackend(InMemoryRepositoryBackend):

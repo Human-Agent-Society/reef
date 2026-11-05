@@ -140,7 +140,7 @@ def evaluation_token_for(tokens: str | Iterable[str] | None) -> str | None:
 
 
 #: The harness pages a person opens by a link: the only routes that read a credential from the query string.
-PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|releases/\d{1,9})/page$")
+PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|artifacts/\d{1,9})/page$")
 
 #: The routes a recipe's own evaluation calls reach, matched on the raw path so an escaped scenario name stays one
 #: segment: the only routes an evaluation token opens.
