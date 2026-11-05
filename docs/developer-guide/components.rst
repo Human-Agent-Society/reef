@@ -67,11 +67,11 @@ Fields and where Reef reads them
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``kind``                         | ``scenario/binding.py``,            | The ``ArtifactKind`` of the component. A ``model`` or                |
 |                                  | ``scenario/scenario.py``,           | ``model_adapter`` component loads into the inference runtime         |
-|                                  | ``service/artifact_evaluations.py`` | (``activate_release``). A kind also makes the component a side of an |
+|                                  | ``service/artifact_evaluations.py`` | (``activate_snapshot``). A kind also makes the component a side of an |
 |                                  |                                     | artifact evaluation. ``None`` declares no kind.                      |
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 
-``activate_release`` (``reef.scenario.binding``) calls the runtime's
+``activate_snapshot`` (``reef.scenario.binding``) calls the runtime's
 ``InferenceRuntime.activate_checkpoint`` for the loaded component. It runs at
 startup recovery, after a commit publishes a release that the activation rule
 activates, and at an activation, before the commit record makes the release
@@ -106,7 +106,7 @@ each record names the artifact that answered by its ``artifact_id`` (see
 `HTTP API <../reference/http-api.rst#artifact-of-a-recorded-response>`__).
 
 **Per-scenario adapters.** When the runtime serves one PEFT adapter per
-scenario (``InferenceRuntime.per_scenario_adapters``), ``activate_release``
+scenario (``InferenceRuntime.per_scenario_adapters``), ``activate_snapshot``
 passes the scenario name to ``activate_checkpoint``. The runtime serves the
 scenario's adapter revision under its own model name
 (``InferenceRuntime.served_model_name``), and control writes that name to the

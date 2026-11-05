@@ -25,7 +25,7 @@ from reef.artifact import (
     RepositoryBackend,
     RepositoryBackendContext,
 )
-from reef.artifact.composite import compose_release
+from reef.artifact.composite import compose_snapshot
 from reef.artifact.git_client import GitClient
 from reef.artifact.git_lfs import HUB_REFS, same_file, token_config
 from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
@@ -746,7 +746,7 @@ def test_configured_factory_reads_the_ref_layout_and_the_token(
 
 @pytest.mark.parametrize("storage", ["memory", "git"])
 def test_legacy_selection_rebuilds_missing_artifact_index(tmp_path: Path, fake_git_lfs: None, storage: str) -> None:
-    root = compose_release(
+    root = compose_snapshot(
         {
             "weights": root_tree(tmp_path / "weights", {"model.bin": "weights"}),
             "harness": root_tree(tmp_path / "harness", {"rules.md": "rules"}),

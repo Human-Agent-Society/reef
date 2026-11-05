@@ -62,7 +62,7 @@ class StepRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -143,7 +143,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
     dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
         before = trained(dispatcher, "math", 1)
-        releases = before.release_queries.snapshot_rows(before.scenario_step)
+        artifacts = before.snapshot_queries.snapshot_rows(before.scenario_step)
 
         # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
         wait_for(lambda: dispatcher.unload_if_idle("math"))
@@ -154,7 +154,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
         after = dispatcher.get_or_create_scenario("math")
         assert after is not None and after is not before
         assert after.scenario_step == 3
-        assert after.release_queries.snapshot_rows(after.scenario_step) == releases
+        assert after.snapshot_queries.snapshot_rows(after.scenario_step) == artifacts
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)

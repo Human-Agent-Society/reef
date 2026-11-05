@@ -924,9 +924,9 @@ that the backend supports:
        loads them when it starts.
    * - ``CachedRepositoryBackendFactory``
      - Both capabilities, and one cached backend for each scenario.
-   * - ``StagedReleaseRepositoryBackend``
+   * - ``StagedSnapshotRepositoryBackend``
      - The backend side: ``publish(advance_head=False)`` stores a release
-       without moving the head, and ``commit_release`` moves the head
+       without moving the head, and ``commit_snapshot`` moves the head
        after the scenario commit. A durable scenario store requires it.
 
 A backend whose storage can give clients a URL for each file, such as an
@@ -938,7 +938,7 @@ default returns None, and Reef then lists and serves the files of the
 materialized release itself. The artifact file list of the HTTP API gives
 these URLs to clients, so that a large artifact downloads from the storage.
 
-Such a backend also overrides ``release_uri(ref)``: the URI of the release's
+Such a backend also overrides ``snapshot_uri(ref)``: the URI of the release's
 directory, ending with ``/``, in a scheme that ``ArtifactSources`` reads. The
 `artifact items <http-api.rst#artifact-items>`__ of the data store carry it,
 so that a scenario, also in another deployment, imports the release from

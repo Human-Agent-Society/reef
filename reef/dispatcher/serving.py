@@ -19,7 +19,7 @@ from reef.core.values import require_text
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.base import Recipe
-from reef.scenario.binding import activate_release
+from reef.scenario.binding import activate_snapshot
 from reef.storage.coordination import Coordination
 from reef.storage.served_models import INFERENCE_OWNER_QUEUE, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
 from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
@@ -223,7 +223,7 @@ class ServingWorker(QueueWorker):
             logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
         else:
             started = time.monotonic()
-            activate_release(components, artifact, runtime, item.scenario)
+            activate_snapshot(components, artifact, runtime, item.scenario)
             self.activated[item.scenario] = artifact_id
             logger.info(
                 "scenario %s: activated artifact %s in %.1f s", item.scenario, artifact_id, time.monotonic() - started

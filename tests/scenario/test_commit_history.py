@@ -48,7 +48,7 @@ from reef.train.pipeline import TrainingPipeline
 def sample_record(
     *,
     step: int = 1,
-    release_label: str = "w1",
+    snapshot_label: str = "w1",
     checkpoint: bool = False,
     training_job_id: str | None = None,
     metrics: dict | None = None,
@@ -56,7 +56,7 @@ def sample_record(
     return CommitRecord(
         scenario="math",
         step=step,
-        snapshot=SnapshotRef(revision=f"release:{release_label}:{step}", parent_revision="base"),
+        snapshot=SnapshotRef(revision=f"release:{snapshot_label}:{step}", parent_revision="base"),
         checkpoint=checkpoint,
         algorithm_state={"steps": step},
         high_water_sequence=step * 2,
@@ -87,7 +87,7 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     log = open_history()
     log.append(sample_record(step=1))
     metrics = {"changed": "config/format.json", "wins": 3, "losses": 1, "ties": 0, "published": True}
-    log.append(sample_record(step=2, release_label="w2", metrics=metrics, training_job_id="job-1"))
+    log.append(sample_record(step=2, snapshot_label="w2", metrics=metrics, training_job_id="job-1"))
 
     records = log.records()
     assert [record.step for record in records] == [1, 2]
@@ -162,7 +162,7 @@ def test_new_records_read_legacy_history_and_keep_selection_ids(open_history, le
 def test_commit_history_tracks_the_current_training_run_position(open_history) -> None:
     log = open_history()
     log.append(sample_record(step=1))
-    log.append(sample_record(step=2, release_label="w2"))
+    log.append(sample_record(step=2, snapshot_label="w2"))
     assert log.training_run_position() == (0, 2)
 
     start = CommitRecord(
@@ -178,7 +178,7 @@ def test_commit_history_tracks_the_current_training_run_position(open_history) -
     log.append(start)
     assert log.training_run_position() == (3, 0)
 
-    log.append(sample_record(step=4, release_label="w4"))
+    log.append(sample_record(step=4, snapshot_label="w4"))
     assert log.training_run_position() == (3, 1)
     # An activation changes what serves, not the training run.
     log.append(
@@ -266,7 +266,7 @@ def test_each_operation_names_its_artifact_exactly() -> None:
 def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
     creation = SnapshotRef("base", None)
     made = replace(sample_record(step=1, checkpoint=True), activated=True)
-    held = sample_record(step=2, checkpoint=True, release_label="w2")
+    held = sample_record(step=2, checkpoint=True, snapshot_label="w2")
     nothing = replace(sample_record(step=3), snapshot=made.snapshot)
     assert active_snapshot((), creation) == creation
     assert active_snapshot((made,), creation) == made.snapshot
@@ -280,7 +280,7 @@ def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
     back = operation_record("activate", 6, "base", snapshot=creation)
     assert active_snapshot((made, held, nothing, start, activation, back), creation) == creation
     # A training step that makes and activates an artifact afterwards is the newest activation.
-    newest = replace(sample_record(step=7, checkpoint=True, release_label="w7"), activated=True)
+    newest = replace(sample_record(step=7, checkpoint=True, snapshot_label="w7"), activated=True)
     assert active_snapshot((made, held, activation, back, newest), creation) == newest.snapshot
 
 
@@ -292,13 +292,13 @@ def test_commit_history_retry_is_idempotent_but_conflicting_step_is_rejected(ope
 
     log.append(original)
     log.append(retry)
-    second = sample_record(step=2, release_label="w2")
+    second = sample_record(step=2, snapshot_label="w2")
     log.append(second)
     log.append(retry)
 
     assert log.records() == (original, second)
     with pytest.raises(CommitHistoryError, match="conflicts"):
-        log.append(sample_record(step=1, release_label="different"))
+        log.append(sample_record(step=1, snapshot_label="different"))
 
 
 @pytest.mark.unit
@@ -308,11 +308,11 @@ def test_commit_history_reads_the_appends_of_another_writer(open_history) -> Non
     first.append(sample_record(step=1))
     assert len(first.records()) == 1
 
-    second.append(sample_record(step=2, release_label="w2"))
+    second.append(sample_record(step=2, snapshot_label="w2"))
     # The first writer's cache stops at step 1, but the append still sees step 2.
     with pytest.raises(CommitHistoryError, match="conflicts"):
-        first.append(sample_record(step=2, release_label="other"))
-    first.append(sample_record(step=3, release_label="w3"))
+        first.append(sample_record(step=2, snapshot_label="other"))
+    first.append(sample_record(step=3, snapshot_label="w3"))
 
     assert [record.step for record in first.records()] == [1, 2, 3]
     assert second.records() == first.records()
@@ -499,7 +499,7 @@ class _SavedArtifactRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -614,7 +614,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -1120,7 +1120,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
     assert scenario.trainer.pending_job_data is pending
     assert scenario.store.durable
     [record] = scenario.store.history()
-    recorded_release = record.snapshot.revision
+    recorded_snapshot = record.snapshot.revision
     with pytest.raises(RuntimeError, match="does not match the pending step"):
         scenario.commit(replace(result, state={"steps": 999}))
 
@@ -1130,7 +1130,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
     assert scenario.trainer.state == result.state
     assert scenario.trainer.pending_job_data is None
     assert len(scenario.store.history()) == 1
-    assert scenario.repository.require_current_artifact().revision == recorded_release
+    assert scenario.repository.require_current_artifact().revision == recorded_snapshot
     assert backend.data_ids == [pending.data_id]
     dispatcher.close()
 

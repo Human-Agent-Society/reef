@@ -34,12 +34,12 @@ remain in this package.
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import ReleaseNotRestorable, Scenario
+from reef.scenario.scenario import Scenario, SnapshotNotRestorable
 
 __all__ = [
-    "ReleaseNotRestorable",
     "Scenario",
     "ScenarioBinding",
     "ScenarioCommitter",
     "ScenarioRegistry",
+    "SnapshotNotRestorable",
 ]

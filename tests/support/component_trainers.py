@@ -200,7 +200,7 @@ class _TwoTrainerRecipe(Recipe):
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):

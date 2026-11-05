@@ -419,37 +419,37 @@ class Server(ServeState, ArtifactUpdateListener):
             self._enforcer = BuiltinToolEnforcer(select_enforcer(os.environ))
         except ValueError as exc:
             raise ServeError(str(exc)) from exc
-        release_info = read_artifact_info(self.dest)
+        artifact_info = read_artifact_info(self.dest)
         legacy_manifest: Mapping[str, Any] | None = None
-        if not release_info.get("artifact_id") and release_info.get("release_id"):
+        if not artifact_info.get("artifact_id") and artifact_info.get("release_id"):
             try:
-                legacy_manifest = self.client.fetch_legacy(str(release_info["release_id"]))
+                legacy_manifest = self.client.fetch_legacy(str(artifact_info["release_id"]))
             except ArtifactClientError as exc:
                 raise ServeError(
-                    f"Reef answered no artifact for installed release {release_info['release_id']!r}: {exc}"
+                    f"Reef answered no artifact for installed release {artifact_info['release_id']!r}: {exc}"
                 ) from exc
-            release_info = dict(legacy_manifest)
-        release = str(release_info["artifact_id"]) if release_info.get("artifact_id") else None
-        parent = str(release_info["parent_artifact_id"]) if release_info.get("parent_artifact_id") else None
-        stored = read_source(self.dest) if release is not None else None
+            artifact_info = dict(legacy_manifest)
+        artifact_id = str(artifact_info["artifact_id"]) if artifact_info.get("artifact_id") else None
+        parent = str(artifact_info["parent_artifact_id"]) if artifact_info.get("parent_artifact_id") else None
+        stored = read_source(self.dest) if artifact_id is not None else None
         manifest = legacy_manifest
         if stored is None:
             # Nothing mounted here yet: the head's source tree, which the boot mount stores for the next start.
             try:
-                manifest = self.client.fetch(release)
+                manifest = self.client.fetch(artifact_id)
             except ArtifactClientError as exc:
                 raise ServeError(
                     f"no source tree under {self.dest / SOURCE_DIR} and Reef answered none: {exc}"
                 ) from exc
             stored = tree_of(manifest)
-            release = str(manifest["artifact_id"])
+            artifact_id = str(manifest["artifact_id"])
             parent = None if manifest.get("parent_artifact_id") is None else str(manifest["parent_artifact_id"])
-        self._watch = HeadWatch(self.client, self, self._log, self.poll_interval_s, mounted=release)
+        self._watch = HeadWatch(self.client, self, self._log, self.poll_interval_s, mounted=artifact_id)
         self._proxy = CaptureProxy(
             self.reef_url,
             self.scenario,
             self.token,
-            tags={"artifact_id": release} if release else {},
+            tags={"artifact_id": artifact_id} if artifact_id else {},
         )
         try:
             self._proxy.start()
@@ -460,10 +460,10 @@ class Server(ServeState, ArtifactUpdateListener):
         self.mounts.clear()
         if self.self_tools:
             self._builtin_tools = self_tools(self)
-        failure = self._mount(stored, release, parent, source="boot", manifest=manifest)
+        failure = self._mount(stored, artifact_id, parent, source="boot", manifest=manifest)
         if failure is not None:
             self.stop()
-            raise ServeError(f"artifact {release} does not mount: {failure['error']}")
+            raise ServeError(f"artifact {artifact_id} does not mount: {failure['error']}")
         self._watch.start()
         self._socket_server = _SocketServer(self.socket_path, self)
         threading.Thread(target=self._socket_server.serve_forever, name="reef-native-socket", daemon=True).start()

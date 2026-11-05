@@ -19,7 +19,7 @@ from reef.artifact.artifact import (
     content_metadata,
 )
 from reef.artifact.files import directory_checksum
-from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
+from reef.artifact.repository import CachedRepositoryBackendFactory, StagedSnapshotRepositoryBackend
 
 
 class _InMemoryStorage:
@@ -46,7 +46,7 @@ class _InMemoryStorage:
         return ref
 
 
-class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
+class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
     """One scenario's releases in process memory, with their files under ``directory`` (a new temporary
     directory when ``None``)."""
 
@@ -152,7 +152,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
                 self._metadata = artifact.storage_metadata
             return ref
 
-    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
+    def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._storage.lock:
             current = self.current()
             if self._storage.refs.get(ref.revision) != ref or ref.parent_revision != expected_parent.revision:

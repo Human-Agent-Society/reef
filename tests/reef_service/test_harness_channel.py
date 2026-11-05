@@ -303,7 +303,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 second_step = asyncio.create_task(evaluated_step(client))
                 assert await asyncio.to_thread(evaluation_started.wait, UPDATE_TIMEOUT_S)
 
-                async def read_release(path: str, artifact_id: str | None = None) -> dict:
+                async def read_artifact(path: str, artifact_id: str | None = None) -> dict:
                     params = {} if artifact_id is None else {"artifact_id": artifact_id}
                     response = await client.get(path, params=params, headers=HEADERS)
                     assert response.status == 200
@@ -312,9 +312,9 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 # A resident client keeps seeing the committed tree and its evaluation while the next candidate runs.
                 catalog, current, pinned = await asyncio.wait_for(
                     asyncio.gather(
-                        read_release("/reef/harness/artifacts"),
-                        read_release("/reef/harness"),
-                        read_release("/reef/harness", first["artifact_id"]),
+                        read_artifact("/reef/harness/artifacts"),
+                        read_artifact("/reef/harness"),
+                        read_artifact("/reef/harness", first["artifact_id"]),
                     ),
                     timeout=1.0,
                 )
@@ -325,14 +325,14 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
                 finish_evaluation.set()
                 second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
-                updated = await read_release("/reef/harness/artifacts")
+                updated = await read_artifact("/reef/harness/artifacts")
                 assert len(updated["artifacts"]) == len(catalog["artifacts"]) + 1
                 assert updated["artifacts"][-2]["active"] is False
                 head = updated["artifacts"][-1]
                 assert head["active"] is True and head["artifact_id"] == second["artifact_id"] != first["artifact_id"]
                 assert head["artifact_id"] == second["artifact_id"] and head["metrics"] == second["evaluation"]
                 assert second["files"] == render_tree(TREE_V2, PI)
-                assert await read_release("/reef/harness", first["artifact_id"]) == first
+                assert await read_artifact("/reef/harness", first["artifact_id"]) == first
             finally:
                 finish_evaluation.set()
                 if second_step is not None:

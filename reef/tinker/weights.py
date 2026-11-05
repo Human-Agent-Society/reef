@@ -87,13 +87,13 @@ class TinkerSamplerWeights(ArtifactWeights):
             timeout_s=settings.timeout_s,
         )
 
-    def weight_files(self, release: Path, layout: WeightLayout) -> WeightFiles:
+    def weight_files(self, artifact_dir: Path, layout: WeightLayout) -> WeightFiles:
         if layout != "adapter":
             raise ReefError(f"a Tinker release serves as an adapter, not as {layout} weights")
         try:
-            manifest = TinkerArtifact.read(release)
+            manifest = TinkerArtifact.read(artifact_dir)
         except (OSError, TypeError, ValueError) as exc:
-            raise ReefError(f"the release in {release} holds no Tinker checkpoint manifest: {exc}") from exc
+            raise ReefError(f"the release in {artifact_dir} holds no Tinker checkpoint manifest: {exc}") from exc
         if manifest.service != self.base_url:
             raise ReefError(
                 f"the release's weights are held by {manifest.service or 'hosted Tinker'}, "

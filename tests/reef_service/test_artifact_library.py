@@ -36,7 +36,7 @@ class UriBackend(InMemoryRepositoryBackend):
     """An in-memory repository that names each release's directory with a ``file`` URI, as an object store names it
     with an ``s3`` URI."""
 
-    def release_uri(self, ref: SnapshotRef) -> str:
+    def snapshot_uri(self, ref: SnapshotRef) -> str:
         return self.materialize(ref).local_path.as_uri() + "/"
 
 
@@ -217,7 +217,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
                 # The root is the only release: no default start was written first.
-                assert len(scenario.release_queries.snapshot_rows(scenario.scenario_step)) == 1
+                assert len(scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(

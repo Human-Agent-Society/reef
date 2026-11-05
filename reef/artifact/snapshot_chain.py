@@ -9,11 +9,11 @@ from reef.artifact.repository import Repository
 from reef.core.errors import ReefError
 
 
-class ReleaseNotRestorable(ReefError):
+class SnapshotNotRestorable(ReefError):
     """A release has identity but no durable bytes to restore."""
 
 
-class ArtifactReleaseChain:
+class ArtifactSnapshotChain:
     """Own artifact heads, parent links, staging, resolution, and publication.
 
     ``current`` is the active artifact, the one that serves. ``checkpoint``
@@ -89,4 +89,4 @@ class ArtifactReleaseChain:
         self._repository.discard(artifact)
 
 
-__all__ = ["ArtifactReleaseChain", "ReleaseNotRestorable"]
+__all__ = ["ArtifactSnapshotChain", "SnapshotNotRestorable"]

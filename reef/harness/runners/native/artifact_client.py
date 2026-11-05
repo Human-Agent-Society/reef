@@ -92,8 +92,8 @@ class ArtifactClient:
     def poll(self) -> str | None:
         """The active release: the ``artifact_id`` of the catalog row marked ``active``, or None while no row is
         active."""
-        release = next((row.get("artifact_id") for row in self.artifacts() if row.get("active")), None)
-        return str(release) if release else None
+        artifact_id = next((row.get("artifact_id") for row in self.artifacts() if row.get("active")), None)
+        return str(artifact_id) if artifact_id else None
 
     def fetch(self, artifact_id: str | None = None) -> dict[str, Any]:
         """Read the source manifest for one artifact, or the active harness when no ID is given."""

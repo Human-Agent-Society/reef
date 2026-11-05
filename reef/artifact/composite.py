@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from reef.artifact.artifact import LOCAL_SNAPSHOT_PREFIX, Artifact, ArtifactPublicationError, SnapshotRef
-from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents
 
 
 def link_or_copy(source: str, destination: str) -> None:
@@ -24,7 +24,7 @@ def link_or_copy(source: str, destination: str) -> None:
         shutil.copy2(source, destination)
 
 
-def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> Artifact:
+def compose_snapshot(components: Mapping[str, Artifact], *, directory: Path) -> Artifact:
     """Place each component's files under ``directory/<name>`` and describe them in a manifest.
 
     Released files are immutable, so a carried-forward component is
@@ -60,7 +60,7 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
             raise ArtifactPublicationError(
                 f"failed to compose component {name!r} from {source.local_path}: {exc}"
             ) from exc
-    manifest = ReleaseComponents(entries)
+    manifest = SnapshotComponents(entries)
     return Artifact(
         SnapshotRef(revision=f"{LOCAL_SNAPSHOT_PREFIX}{uuid.uuid4().hex}", parent_revision=None),
         None,
@@ -69,4 +69,4 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
     )
 
 
-__all__ = ["compose_release", "link_or_copy"]
+__all__ = ["compose_snapshot", "link_or_copy"]

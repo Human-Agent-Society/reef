@@ -12,7 +12,7 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher, seed_root
-from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
+from tests.support.harness_steps import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
 from tests.support.samples_service import make_samples
 
 from reef.core.plugins import PluginReference
@@ -466,7 +466,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
         trainer = recipe.build(
             "agents",
             records,
-            releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT),
+            artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT),
             root=seed_root(recipe),
         )
         try:

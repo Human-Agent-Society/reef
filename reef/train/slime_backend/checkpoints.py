@@ -151,15 +151,15 @@ def write_rollout_start(
     supplied schedule and the rollout's objective state before returning.
     """
     start_dir = starts_root / f"rollout_{rollout.rollout_id}"
-    release = hf_directory
+    artifact_dir = hf_directory
     if lora:
-        release = start_dir / "release"
-        shutil.rmtree(release, ignore_errors=True)
-        shutil.copytree(hf_directory, release / ADAPTER_DIR)
+        artifact_dir = start_dir / "release"
+        shutil.rmtree(artifact_dir, ignore_errors=True)
+        shutil.copytree(hf_directory, artifact_dir / ADAPTER_DIR)
     SlimeStart(
         rollout.rollout_id,
         rollout.objective,
         rollout.algorithm_state,
         schedule_state,
     ).write(start_dir)
-    return start_dir, release
+    return start_dir, artifact_dir

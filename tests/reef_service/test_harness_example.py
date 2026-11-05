@@ -22,7 +22,7 @@ import yaml
 from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 from tests.support.harness_service import backend_step, seed_root
-from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
+from tests.support.harness_steps import COMPONENT, TreeArtifacts, harness_backend
 
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.activation import AlwaysActivate
@@ -118,8 +118,8 @@ def pi_message(text: str) -> dict:
     return {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
 
 
-def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
-    return ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
+def artifacts_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
+    return ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
 
 
 # -- the grader: exact last-line answers ---------------------------------------------------------
@@ -286,7 +286,7 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
         "openai",
     )
     assert list(built.model_bindings()) == ["served"]
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
     assert isinstance(trainer, Trainer)
     # serve.yaml sets no job_samples, so each report is one step.
     assert trainer.job_samples == 1
@@ -362,7 +362,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     records = SQLiteRecordStore()
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
     trainer = replace(built, evolution=local).build(
-        "demo", records, releases=releases_for(built), root=seed_root(built)
+        "demo", records, artifacts=artifacts_for(built), root=seed_root(built)
     )
     assert trainer.pipeline.training_mode == "auto"
     # Each report is one job's data: the deployment sets no job_samples, and the default is 1.
@@ -653,9 +653,9 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         (0, "seed", "seed"),
         (1, "published", "r2"),
     ]
-    seed_release, published = data["releases"]
+    seed_snapshot, published = data["releases"]
     # The native run's seed is the native seed directory; a published release is it with the step's patch applied.
-    assert seed_release["files"] == dict(NATIVE_SEED.files) == data["seed_files"]
+    assert seed_snapshot["files"] == dict(NATIVE_SEED.files) == data["seed_files"]
     assert published["files"] == {**NATIVE_SEED.files, "rules.md": "one line\n"}
     assert published["diff"] == {"added": ["rules.md"], "updated": [], "removed": []}
     assert published["summary"] == "rewrote rules.md from 1 failing trace(s)"

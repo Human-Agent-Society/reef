@@ -52,7 +52,7 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
             if store.read(owner, f"{scenario}/{row['artifact_id']}") is not None:
                 continue
             _, artifact = current.resolve_artifact(row["artifact_id"], row["component"])
-            uri = current.repository.release_uri(artifact.ref)
+            uri = current.repository.snapshot_uri(artifact.ref)
             if uri is not None and not components.single:
                 # A release of several components keeps each one in a directory named after it.
                 uri = f"{uri}{row['component']}/"

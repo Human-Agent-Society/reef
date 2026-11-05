@@ -213,7 +213,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"the start {directory} holds no Tinker checkpoint manifest")
         return self.validated(TinkerCheckpoint.read(directory))
 
-    def complete_release(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+    def complete_artifact(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
         """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its release holds; by default nothing.
 
         The job loop calls it for each saved checkpoint before the checkpoint is recorded, so a job that a restart
@@ -232,11 +232,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
         self._client.check_remote(self.validated(checkpoint))
 
-    def import_manifest(self, release: Path) -> str:
+    def import_manifest(self, artifact_dir: Path) -> str:
         """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
-        if not (release / MANIFEST).exists():
+        if not (artifact_dir / MANIFEST).exists():
             raise ValueError(f"artifact is missing {MANIFEST}")
-        checkpoint = self.validated(TinkerCheckpoint.read(release))
+        checkpoint = self.validated(TinkerCheckpoint.read(artifact_dir))
         digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
         imported = self._root / "imported" / digest
         if not imported.exists():
@@ -444,7 +444,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             )
             target = directory / str(last)
             current.write(target)
-            self.complete_release(current, target)
+            self.complete_artifact(current, target)
             self.save_checkpoint(
                 directory,
                 SavedCheckpoint(
@@ -527,5 +527,5 @@ class TinkerTrainingComponent(TinkerJobComponent):
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
         self.check_manifest(files)
 
-    def import_start(self, release: Path) -> str:
-        return self.import_manifest(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return self.import_manifest(artifact_dir)

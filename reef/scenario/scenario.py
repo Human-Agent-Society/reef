@@ -10,8 +10,8 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, SnapshotRef
 from reef.artifact.components import ScenarioComponents
-from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
 from reef.core.artifact_selection import ArtifactSelection
@@ -27,7 +27,7 @@ from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
-from reef.scenario.releases import ServedBesideArtifact
+from reef.scenario.snapshots import ServedBesideArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -122,7 +122,7 @@ class Scenario:
         self._closed = False
         #: Every trainer of this scenario with the component it evolves, in recipe order.
         self.trainers = validate_component_trainers(trainers, binding.components)
-        self._artifact_chain = ArtifactReleaseChain(repository)
+        self._artifact_chain = ArtifactSnapshotChain(repository)
         self._committer = ScenarioCommitter(
             name=name,
             binding=binding,
@@ -135,7 +135,7 @@ class Scenario:
             experiment_observer=experiment_observer,
         )
         #: Read-only queries of committed releases and their content. They take only the publication lock.
-        self.release_queries = self._committer.release_queries
+        self.snapshot_queries = self._committer.snapshot_queries
 
     @property
     def name(self) -> str:
@@ -436,13 +436,13 @@ class Scenario:
 
     def artifact_rows(self) -> tuple[dict[str, Any], ...]:
         """Internal artifact catalog, including the storage locators needed to materialize each artifact."""
-        with self.release_queries.publication_lock:
-            return self.release_queries.artifacts(self._committer.step, self._committer.component_names())
+        with self.snapshot_queries.publication_lock:
+            return self.snapshot_queries.artifacts(self._committer.step, self._committer.component_names())
 
     def artifacts(self) -> tuple[dict[str, Any], ...]:
         """Public artifact catalog, with opaque artifact identities and component-specific parent links."""
-        with self.release_queries.publication_lock:
-            parents = self.release_queries.artifact_parents(self._committer.step, self._committer.component_names())
+        with self.snapshot_queries.publication_lock:
+            parents = self.snapshot_queries.artifact_parents(self._committer.step, self._committer.component_names())
             return tuple(
                 {
                     **{key: value for key, value in row.items() if key != "snapshot"},
@@ -465,12 +465,12 @@ class Scenario:
         components' publications and job-submission events do not add harness rows.
         The locators (``SNAPSHOT_ROW_KEYS``) serve the legacy HTTP catalog only, as ``artifact_rows`` does.
         """
-        with self.release_queries.publication_lock:
+        with self.snapshot_queries.publication_lock:
             component = self.components.files_component
             harness = [row for row in self.artifact_rows() if self.components.single or row["component"] == component]
             by_snapshot = {row["snapshot"].revision: row for row in harness}
             by_artifact = {row["artifact_id"]: row for row in harness}
-            manifests = self.release_queries.manifests(self._committer.step)
+            manifests = self.snapshot_queries.manifests(self._committer.step)
 
             def artifact_of(revision: str | None) -> dict[str, Any] | None:
                 if revision is None or revision in by_snapshot:
@@ -479,7 +479,7 @@ class Scenario:
 
             parents = {row["artifact_id"]: row["parent_artifact_id"] for row in self.artifacts()}
             kept: list[dict[str, Any]] = []
-            for row in self.release_queries.snapshot_rows(self._committer.step):
+            for row in self.snapshot_queries.snapshot_rows(self._committer.step):
                 metrics = row.get("metrics") or {}
                 job = metrics.get("training_job")
                 if isinstance(job, Mapping) and (
@@ -514,7 +514,7 @@ class Scenario:
 
     def artifact_selection(self, ref: SnapshotRef | None = None) -> ArtifactSelection:
         """Return the complete component-to-artifact-ID mapping for independent serving workers."""
-        with self.release_queries.publication_lock:
+        with self.snapshot_queries.publication_lock:
             return self.repository.selection(
                 self.current_snapshot() if ref is None else ref, self._committer.component_names()
             )
@@ -542,9 +542,9 @@ class Scenario:
 
     def served_beside(self) -> Mapping[str, ServedBesideArtifact]:
         """The artifacts that the scenario serves beside its active release, by ``artifact_id``; see
-        :meth:`ScenarioReleases.served_beside`."""
-        with self.release_queries.publication_lock:
-            return self.release_queries.served_beside(self._committer.step, self._committer.component_names())
+        :meth:`ScenarioSnapshots.served_beside`."""
+        with self.snapshot_queries.publication_lock:
+            return self.snapshot_queries.served_beside(self._committer.step, self._committer.component_names())
 
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
@@ -562,18 +562,18 @@ class Scenario:
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""
-        with self.release_queries.publication_lock:
+        with self.snapshot_queries.publication_lock:
             return self._committer.artifact_status()
 
     def artifact_snapshot(self, artifact_id: str, component: str | None = None) -> tuple[str, SnapshotRef]:
         """The component that ``artifact_id`` names and the ref of the release that minted it, without materializing
         the release; see :meth:`ScenarioCommitter.artifact_snapshot`."""
-        with self.release_queries.publication_lock:
+        with self.snapshot_queries.publication_lock:
             return self._committer.artifact_snapshot(artifact_id, component)
 
     def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
         """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
-        with self.release_queries.publication_lock:
+        with self.snapshot_queries.publication_lock:
             return self._committer.resolve_artifact(artifact_id, component)
 
     def sync_artifact(
@@ -633,8 +633,8 @@ def validate_component_trainers(
 
 __all__ = [
     "SCENARIO_METADATA_KEY",
-    "ReleaseNotRestorable",
     "Scenario",
     "ScenarioCapabilities",
+    "SnapshotNotRestorable",
     "validate_component_trainers",
 ]

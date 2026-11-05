@@ -12,7 +12,7 @@ from threading import RLock
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, SnapshotRef
-from reef.artifact.release_chain import ArtifactReleaseChain
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import legacy_artifact_id, validate_component_name
 from reef.core.snapshot import RootSource
@@ -41,14 +41,14 @@ class ServedBesideArtifact:
             raise ValueError("a served artifact must occur in its selection")
 
 
-class ScenarioReleases:
+class ScenarioSnapshots:
     """Query committed releases against one scenario's artifact chain."""
 
     def __init__(
         self,
         *,
         name: str,
-        artifacts: ArtifactReleaseChain,
+        artifacts: ArtifactSnapshotChain,
         store: ScenarioStore,
         publication_lock: RLock,
         root_source: RootSource,
@@ -391,7 +391,7 @@ class ScenarioReleases:
         The read-side counterpart of ``activate``: the same release lookup,
         but no head moves and no commit is written; the caller only wants the
         version's file tree. Every failure is ``ArtifactNotFound`` naming the
-        version (not ``ReleaseNotRestorable``, which answers a rejected
+        version (not ``SnapshotNotRestorable``, which answers a rejected
         write): to a reader, a version whose bytes are gone and a version
         that was recorded but not kept are the same absent content.
         """

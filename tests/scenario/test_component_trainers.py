@@ -44,7 +44,7 @@ from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
-from reef.artifact.release_chain import ArtifactReleaseChain
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
@@ -210,7 +210,7 @@ def _training_components(scenario: Scenario) -> list[str]:
     """The component of each training job that ended, newest first: one per step."""
     return [
         row["component"]
-        for row in scenario.release_queries.snapshot_rows(scenario.scenario_step)
+        for row in scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)
         if row["operation"] == "training"
         and (row.get("metrics") or {}).get("training_job", {}).get("event") in ("finished", "failed")
     ]
@@ -677,7 +677,7 @@ class _NamedComponentsRecipe(Recipe):
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -1068,7 +1068,7 @@ def test_an_activation_of_the_creation_after_a_rejected_first_step(dispatchers: 
     assert (
         next(
             row
-            for row in scenario.release_queries.snapshot_rows(scenario.scenario_step)
+            for row in scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)
             if row["operation"] == "creation"
         )["restorable"]
         is True
@@ -1191,12 +1191,12 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     service = RequestService(dispatcher)
     headers = {"x-reef-scenario": "agent"}
     assert _commit_step(scenario, HARNESS) is not None
-    harness_release = scenario.current_snapshot().revision
+    harness_snapshot = scenario.current_snapshot().revision
     assert _commit_step(scenario, WEIGHTS) is not None
-    assert scenario.current_snapshot().revision != harness_release
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_release, HARNESS)
+    assert scenario.current_snapshot().revision != harness_snapshot
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
     manifest = service.harness_manifest(headers)
-    assert manifest["artifact_id"] == component_id(scenario, harness_release, HARNESS)
+    assert manifest["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
     assert manifest["files"] == {"harness.txt": "harness step 1"}
     catalog = service.harness_artifacts(headers)["artifacts"]
     assert [row["operation"] for row in catalog] == ["creation", "training"]
@@ -1204,7 +1204,7 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     base = scenario.repository.start_artifact.revision
     assert [row["artifact_id"] for row in catalog] == [
         component_id(scenario, base, HARNESS),
-        component_id(scenario, harness_release, HARNESS),
+        component_id(scenario, harness_snapshot, HARNESS),
     ]
     assert [row["active"] for row in catalog] == [False, True]
 
@@ -1222,7 +1222,7 @@ def test_each_components_step_reaches_the_tracker_under_its_name(dispatchers: _D
     assert [event.context.component for event in tracker.events] == [HARNESS] * 3 + [WEIGHTS] * 3
     assert [event.context.backend for event in tracker.events] == [HARNESS] * 3 + [WEIGHTS] * 3
     assert [event.context.step for event in tracker.events] == [1, 2, 3, 4, 5, 6]
-    assert [row.get("component") for row in scenario.release_queries.snapshot_rows(scenario.scenario_step)] == [
+    assert [row.get("component") for row in scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)] == [
         WEIGHTS
     ] * 3 + [HARNESS] * 3 + [None]
 
@@ -1363,25 +1363,25 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
     """One failed read of the creation artifact must not hide the creation's manifest for the process lifetime."""
     dispatcher, _ = dispatchers.open()
     scenario = _scenario(dispatcher)
-    original = ArtifactReleaseChain.resolve
+    original = ArtifactSnapshotChain.resolve
     calls = {"failed": 0}
 
-    def fail_once(self: ArtifactReleaseChain, ref: SnapshotRef) -> Artifact:
+    def fail_once(self: ArtifactSnapshotChain, ref: SnapshotRef) -> Artifact:
         if calls["failed"] == 0:
             calls["failed"] += 1
             raise ArtifactNotFound("the remote is away")
         return original(self, ref)
 
-    monkeypatch.setattr(ArtifactReleaseChain, "resolve", fail_once)
-    assert scenario.release_queries.creation_components(0) is None
+    monkeypatch.setattr(ArtifactSnapshotChain, "resolve", fail_once)
+    assert scenario.snapshot_queries.creation_components(0) is None
     # Not asked again at the same step (a page polls every few seconds; a remote read is a fetch)...
-    assert scenario.release_queries.creation_components(0) is None
+    assert scenario.snapshot_queries.creation_components(0) is None
     assert calls["failed"] == 1
     # ...but asked again after the next commit.
-    components = scenario.release_queries.creation_components(1)
+    components = scenario.snapshot_queries.creation_components(1)
     assert components is not None and set(components) == {WEIGHTS, HARNESS}
     assert calls["failed"] == 1
-    assert scenario.release_queries.creation_components(0) is not None
+    assert scenario.snapshot_queries.creation_components(0) is not None
 
 
 @pytest.mark.unit
@@ -1415,7 +1415,7 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     base = scenario.current_snapshot().revision
     _append_records(scenario, 1)
     assert _commit_step(scenario, HARNESS) is not None
-    harness_release = scenario.current_snapshot().revision
+    harness_snapshot = scenario.current_snapshot().revision
     assert _commit_step(scenario, WEIGHTS) is not None
     first_weights = scenario.current_snapshot().revision
     _append_records(scenario, 2)
@@ -1424,14 +1424,14 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     # Back to the first weights under the same tree: nothing to pull.
     scenario.activate(component_id(scenario, first_weights, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_release, HARNESS)
-    assert listed_revisions(scenario) == [base, harness_release]
+    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
+    assert listed_revisions(scenario) == [base, harness_snapshot]
 
     # Back to the root's harness: the seed tree is served again, named by the root release.
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, HARNESS), HARNESS)
     assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, base, HARNESS)
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
-    assert listed_revisions(scenario) == [base, harness_release]
+    assert listed_revisions(scenario) == [base, harness_snapshot]
 
 
 @pytest.mark.unit

@@ -33,7 +33,7 @@ from reef.artifact.repository import (
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
     RepositoryBackendContext,
-    StagedReleaseRepositoryBackend,
+    StagedSnapshotRepositoryBackend,
 )
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
@@ -96,7 +96,7 @@ class RefLayout:
         """The ref of the scenario whose base64url name is ``encoded``: its registration and its head."""
         return f"{self.moving}scenarios/{encoded}"
 
-    def release(self, commit: str) -> str:
+    def snapshot(self, commit: str) -> str:
         return f"{self.fixed}releases/{commit}"
 
     def archived(self, encoded: str, stamp: str) -> str:
@@ -462,7 +462,7 @@ class _ArtifactManifest:
             raise ArtifactSourceError(f"invalid artifact manifest at {version}") from exc
 
 
-class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
+class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
     """The releases of one scenario in a Git LFS repository.
 
     The scenario's ref names its head. ``register`` pushes the scenario's root release, a commit with no parent, to
@@ -533,13 +533,13 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
 
     def resolve_snapshot(self, revision: str) -> SnapshotRef:
         selector = revision.removeprefix("git+lfs://")
-        resolved_release = self._workspace.ls_remote(self.refs.release(selector))
-        if resolved_release is None:
+        resolved_snapshot = self._workspace.ls_remote(self.refs.snapshot(selector))
+        if resolved_snapshot is None:
             try:
-                resolved_release = self._workspace.fetch_version(selector)
+                resolved_snapshot = self._workspace.fetch_version(selector)
             except ArtifactPublicationError as exc:
                 raise ArtifactNotFound(f"release does not exist: {revision}") from exc
-        return self._manifest.snapshot(resolved_release)
+        return self._manifest.snapshot(resolved_snapshot)
 
     def artifact_ref_name(self, artifact_id: str) -> str:
         """The Git ref that binds ``artifact_id`` to its snapshot commit in this scenario."""
@@ -641,7 +641,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 for path in self._workspace.git("ls-files", "-z").split("\0")
                 if path and path != _MANIFEST and path != ".gitattributes"
             )
-            self._cache_release(
+            self._cache_snapshot(
                 commit,
                 self._workspace.clone_dir,
                 paths,
@@ -733,9 +733,9 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             self.bind_artifact_ids(self.stored_snapshot(commit))
             if not advance_head:
                 # A pending release lives under the releases namespace; the scenario's ref and the head stay put.
-                self._workspace.push(f"+{commit}:{self.refs.release(commit)}")
+                self._workspace.push(f"+{commit}:{self.refs.snapshot(commit)}")
                 if not linked:
-                    self._cache_release(commit, artifact.local_path, paths, files)
+                    self._cache_snapshot(commit, artifact.local_path, paths, files)
                 return self._manifest.snapshot(commit)
             try:
                 self._workspace.force_push_with_lease(
@@ -748,10 +748,10 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                     raise ArtifactConflict(f"repository advanced from {expected_parent.revision}") from exc
                 raise
             if not linked:
-                self._cache_release(commit, artifact.local_path, paths, files)
+                self._cache_snapshot(commit, artifact.local_path, paths, files)
             return self._manifest.snapshot(commit)
 
-    def _cache_release(self, revision: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
+    def _cache_snapshot(self, revision: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
         """Fill a just-published release's cache entry from the staged tree it was committed from.
 
         The staged files hold the committed bytes, so the entry links them
@@ -776,7 +776,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
 
-    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
+    def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._workspace.lock:
             staged = self.resolve_snapshot(ref.revision)
             if staged != ref or ref.parent_revision != expected_parent.revision:

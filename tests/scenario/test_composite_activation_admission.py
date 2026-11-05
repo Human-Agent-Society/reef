@@ -408,7 +408,7 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         with pytest.raises(ReefError, match="answers only from the release it has loaded"):
             scenario.serve(artifact_id, HARNESS)
 
-        runtime.answers_each_release = True
+        runtime.answers_each_artifact = True
         served = scenario.serve(artifact_id, HARNESS)
         assert served.artifact_id == artifact_id
         selection = scenario.served_beside()[artifact_id].selection

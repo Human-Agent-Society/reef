@@ -104,18 +104,18 @@ class ArtifactWeightFiles(ArtifactWeights):
     revision's snapshot, which Hugging Face downloads once into its cache.
     """
 
-    def weight_files(self, release: Path, layout: WeightLayout) -> WeightFiles:
+    def weight_files(self, artifact_dir: Path, layout: WeightLayout) -> WeightFiles:
         try:
-            revision = read_reference(release)
+            revision = read_reference(artifact_dir)
         except ValueError as exc:
-            raise ReefError(f"the release in {release} holds no readable reference: {exc}") from exc
+            raise ReefError(f"the release in {artifact_dir} holds no readable reference: {exc}") from exc
         if revision is not None:
-            release = download_huggingface_snapshot(HuggingFaceSource(revision.repo, revision.commit)).local_path
+            artifact_dir = download_huggingface_snapshot(HuggingFaceSource(revision.repo, revision.commit)).local_path
         if layout == "full":
-            return WeightFiles(release, "full")
-        adapter = release / ADAPTER_DIR
+            return WeightFiles(artifact_dir, "full")
+        adapter = artifact_dir / ADAPTER_DIR
         if not (adapter / "adapter_config.json").is_file():
-            raise ReefError(f"the release in {release} holds no PEFT adapter in {ADAPTER_DIR}/")
+            raise ReefError(f"the release in {artifact_dir} holds no PEFT adapter in {ADAPTER_DIR}/")
         return WeightFiles(adapter, "adapter")
 
 

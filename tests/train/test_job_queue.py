@@ -235,7 +235,7 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     worker.stop()
 
 
-class ReleaseRefusingComponent(StepComponent):
+class ArtifactRefusingComponent(StepComponent):
     """A component that continues only from its own checkpoints, as Slime does."""
 
     @property
@@ -250,7 +250,7 @@ class ReleaseRefusingComponent(StepComponent):
 def test_a_queue_component_reports_whether_its_component_starts_from_releases(tmp_path):
     queue = memory_coordination().work_queue
     assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_artifacts is True
-    refusing = JobQueueComponent(ReleaseRefusingComponent(tmp_path / "b"), queue)
+    refusing = JobQueueComponent(ArtifactRefusingComponent(tmp_path / "b"), queue)
     assert refusing.starts_from_artifacts is False
 
 

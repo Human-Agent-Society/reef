@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
-from reef.core.components import COMPONENTS_METADATA_KEY, ReleaseComponents, legacy_artifact_id, release_components
+from reef.core.components import COMPONENTS_METADATA_KEY, SnapshotComponents, legacy_artifact_id, snapshot_components
 from reef.core.errors import ReefError
 
 # Re-export the pure identity types while keeping ``reef.core`` independent of
@@ -159,9 +159,9 @@ class Artifact:
         return next(iter(manifest.artifact_ids(self.ref.revision).values()))
 
     @property
-    def components(self) -> ReleaseComponents | None:
+    def components(self) -> SnapshotComponents | None:
         """The release's component manifest; ``None`` for a release published without one."""
-        return release_components(self._metadata)
+        return snapshot_components(self._metadata)
 
     def component(self, name: str) -> Artifact:
         """The named component of this release, materialized.
@@ -209,11 +209,11 @@ class Artifact:
         token = uuid.uuid4().hex
         stored_metadata = dict(metadata or {})
         stored_metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
-        manifest = release_components(stored_metadata)
+        manifest = snapshot_components(stored_metadata)
         if manifest is None:
             stored_metadata[ARTIFACT_ID_METADATA_KEY] = f"artifact:{token}"
         else:
-            manifest = ReleaseComponents(
+            manifest = SnapshotComponents(
                 {
                     name: replace(entry, artifact_id=entry.artifact_id or f"artifact:{uuid.uuid4().hex}")
                     for name, entry in manifest.entries.items()

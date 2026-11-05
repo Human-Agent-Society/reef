@@ -129,7 +129,7 @@ class SelfTools(ToolRunner):
 
     def results(self) -> dict[str, Any]:
         rows = list(reversed(self._state.client.artifacts()))[:RESULT_ROWS]
-        releases = [
+        artifacts = [
             {
                 "artifact_id": row.get("artifact_id"),
                 "parent_artifact_id": row.get("parent_artifact_id"),
@@ -148,7 +148,7 @@ class SelfTools(ToolRunner):
             manifest = self._state.client.fetch(head)
             evaluation_metrics = manifest.get("evaluation")
             rejected = evaluation_metrics.get("rejected") if isinstance(evaluation_metrics, Mapping) else None
-        return {"head": head, "artifacts": releases, "rejected": rejected}
+        return {"head": head, "artifacts": artifacts, "rejected": rejected}
 
     def try_(self, args: dict[str, Any], workdir: str) -> Any:
         patch = patch_argument(args.get("patch"))

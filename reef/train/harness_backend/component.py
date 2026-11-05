@@ -216,14 +216,14 @@ class HarnessTrainingComponent(LocalJobComponent):
         changes = HarnessTree.read(Path(start)).diff(HarnessTree.read(Path(checkpoint.artifact_path))).changes
         return frozenset(self.steps.layout.part_names(changes).values())
 
-    def import_start(self, release: Path) -> str:
+    def import_start(self, artifact_dir: Path) -> str:
         """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
         tree fails validation.
 
         The tree is the release's text files without the repository's own files (``TextFileTree``), as a client
         pulls it: a Git LFS release directory also holds ``.gitattributes``.
         """
-        tree = HarnessTree(dict(TextFileTree().read_files(Artifact.local(release)) or {}))
+        tree = HarnessTree(dict(TextFileTree().read_files(Artifact.local(artifact_dir)) or {}))
         self.steps.check_tree(tree)
         directory = self.starts_root / tree.checksum()
         if not directory.is_dir():

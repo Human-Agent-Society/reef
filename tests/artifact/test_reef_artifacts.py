@@ -7,7 +7,7 @@ import pytest
 from reef.artifact import (
     Artifact,
     ArtifactConflict,
-    ArtifactReleaseChain,
+    ArtifactSnapshotChain,
     CachedRepositoryBackendFactory,
     HuggingFaceSource,
     InMemoryRepositoryBackend,
@@ -59,7 +59,7 @@ def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> 
         checkpoint_artifact=root,
         local_dir=tmp_path / "local",
     )
-    chain = ArtifactReleaseChain(repository)
+    chain = ArtifactSnapshotChain(repository)
     assert chain.current == chain.checkpoint == chain.start == root
 
     candidate = tmp_path / "candidate"

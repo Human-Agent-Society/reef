@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeReleases, build_harness_backend, harness_recipe
+from tests.support.harness_steps import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe
 
 gepa = pytest.importorskip("gepa")
 
@@ -165,7 +165,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
         binary=str(binary),
     )
     recipe = dataclasses.replace(recipe, models={"reflection": Reflector("http://model.test", "reflection")})
-    releases = TreeReleases(recipe.seed)
+    releases = TreeArtifacts(recipe.seed)
     backend = build_harness_backend(recipe, "fidelity", releases)
     policy = ComparePolicy(backend, statistic="mean")
 

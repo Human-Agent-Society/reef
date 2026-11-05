@@ -65,9 +65,9 @@ def checkpoint_sampler_path(
         if revision is not None and revision.repo != base_model:
             raise ValueError(f"the artifact refers to {revision.uri}, not to the base model {base_model}")
         return None
-    release = TinkerArtifact.read(path)
-    release.check_compatible(base_model, service=service)
-    return release.sampler_path
+    tinker_artifact = TinkerArtifact.read(path)
+    tinker_artifact.check_compatible(base_model, service=service)
+    return tinker_artifact.sampler_path
 
 
 class TinkerInferenceRuntime(InferenceRuntime):

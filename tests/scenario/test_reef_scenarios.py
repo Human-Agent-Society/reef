@@ -539,7 +539,7 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
         dispatcher.close()
 
 
-class _NoReleaseStarts(_RootImportingComponent):
+class _NoArtifactStarts(_RootImportingComponent):
     """A component that, as Slime, starts only from its own default start."""
 
     def root_start(self, root: ScenarioRoot) -> str:
@@ -571,7 +571,7 @@ class ItemTreeRecipe(Recipe):
 def test_composite_item_roots_are_checked_before_registration(
     tmp_path: Path, component: str, accepts_item: bool
 ) -> None:
-    training = _RootImportingComponent("base-model") if accepts_item else _NoReleaseStarts("base-model")
+    training = _RootImportingComponent("base-model") if accepts_item else _NoArtifactStarts("base-model")
     weights = TestPolicyRecipe(**runtime_bindings(training, _SharedRuntime()))
     recipe = CompositeRecipe(components={"weights": weights, "harness": ItemTreeRecipe()})
     backend_factory = InMemoryRepositoryBackend.factory()
@@ -641,7 +641,7 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
     finally:
         dispatcher.close()
 
-    component = _NoReleaseStarts("base-model")
+    component = _NoArtifactStarts("base-model")
     pinned = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, _SharedRuntime())),
         InMemoryRepositoryBackend.factory(),

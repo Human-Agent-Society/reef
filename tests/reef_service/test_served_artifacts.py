@@ -25,7 +25,7 @@ from reef.train.trainer import Trainer
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
 
-class ReleaseEcho(InferenceHandler):
+class ArtifactEcho(InferenceHandler):
     """Answer each call with the release it was given, so a test sees which release answered."""
 
     def __init__(self) -> None:
@@ -67,15 +67,15 @@ def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, Repository
     return value, component, backend_factory
 
 
-def answering_each_release(runtime) -> None:
+def answering_each_artifact(runtime) -> None:
     """Make the stub runtime answer each call from the release that the call names, as Tinker does."""
-    runtime.inference.answers_each_release = True
+    runtime.inference.answers_each_artifact = True
 
 
 def two_artifacts(tmp_path):
     """A scenario that trained twice: the newest artifact is active, and ``older`` is the one before it."""
     value, runtime, backend_factory = serving_dispatcher(tmp_path)
-    answering_each_release(runtime)
+    answering_each_artifact(runtime)
     train(value, 1)
     train(value, 2)
     newest, older, _ = value.get_or_create_scenario("math").artifacts()
@@ -110,7 +110,7 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
             older["artifact_id"], "http://trainer", f"sampler:{older['artifact_id']}"
         )
         assert rows["active"].model_name == "stub-model"
-        handler = ReleaseEcho()
+        handler = ArtifactEcho()
         client = TestClient(TestServer(create_app(value, inference_handler=handler)))
         await client.start_server()
         try:
@@ -184,7 +184,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
     value.close()
 
     component = ImportingComponent(tmp_path / "restarted-export")
-    answering_each_release(component)
+    answering_each_artifact(component)
     restarted = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, component.inference)),
         backend_factory,

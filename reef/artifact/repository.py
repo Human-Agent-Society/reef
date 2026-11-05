@@ -24,7 +24,7 @@ from reef.artifact.artifact import (
     SnapshotRef,
     artifact_components,
 )
-from reef.artifact.composite import compose_release, link_or_copy
+from reef.artifact.composite import compose_snapshot, link_or_copy
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
@@ -132,7 +132,7 @@ class RepositoryBackend(ArtifactRepository):
         """
         return None
 
-    def release_uri(self, ref: SnapshotRef) -> str | None:
+    def snapshot_uri(self, ref: SnapshotRef) -> str | None:
         """The URI of the directory of the release ``ref``, as ``ArtifactSources`` reads it, ending with ``/``.
 
         Another scenario imports the release from this URI, also in another deployment that can read the backend's
@@ -177,16 +177,16 @@ class RepositoryBackend(ArtifactRepository):
     ) -> SnapshotRef: ...
 
 
-class StagedReleaseRepositoryBackend(RepositoryBackend):
+class StagedSnapshotRepositoryBackend(RepositoryBackend):
     """Optional storage contract for publication followed by head promotion.
 
     ``publish(advance_head=False)`` must store resolvable release bytes and
-    metadata without moving the head. ``commit_release`` then promotes that
+    metadata without moving the head. ``commit_snapshot`` then promotes that
     release without publishing its bytes again.
     """
 
     @abstractmethod
-    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
+    def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         """Advance a staged durable release after the scenario commits it.
 
         Implementations must accept an already-current release so recovery can
@@ -310,7 +310,7 @@ class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
     scenarios, also inherit ``RegistrationAwareRepositoryBackendFactory`` or
     ``EnumerableRepositoryBackendFactory``. ``CachedRepositoryBackendFactory``
     gives both. To work with a scenario commit history, the backends must
-    subclass ``StagedReleaseRepositoryBackend``.
+    subclass ``StagedSnapshotRepositoryBackend``.
     """
 
     @classmethod
@@ -461,14 +461,14 @@ class Repository(ArtifactRepository):
             return None
         return self.backend.file_downloads(ref, expires_in_seconds)
 
-    def release_uri(self, ref: SnapshotRef) -> str | None:
-        """The backend's ``release_uri`` of the durable release ``ref``; None for a release staged on this host.
+    def snapshot_uri(self, ref: SnapshotRef) -> str | None:
+        """The backend's ``snapshot_uri`` of the durable release ``ref``; None for a release staged on this host.
 
         Raise ``ValueError`` when the backend gives a URI that does not end with ``/``.
         """
         if ref.revision in self._local_artifacts:
             return None
-        uri = self.backend.release_uri(ref)
+        uri = self.backend.snapshot_uri(ref)
         if uri is not None and not uri.endswith("/"):
             raise ValueError(f"the repository backend gave release URI {uri!r}, which does not end with '/'")
         return uri
@@ -532,11 +532,11 @@ class Repository(ArtifactRepository):
         if checkpoint.parent_revision is None:
             raise ArtifactConflict("a committed checkpoint without a parent cannot repair a different head")
         parent = self.backend.resolve_snapshot(checkpoint.parent_revision)
-        self.require_staged_commit_support().commit_release(checkpoint, expected_parent=parent)
+        self.require_staged_commit_support().commit_snapshot(checkpoint, expected_parent=parent)
 
-    def require_staged_commit_support(self) -> StagedReleaseRepositoryBackend:
-        if not isinstance(self.backend, StagedReleaseRepositoryBackend):
-            raise ArtifactPublicationError("repository backend must implement StagedReleaseRepositoryBackend")
+    def require_staged_commit_support(self) -> StagedSnapshotRepositoryBackend:
+        if not isinstance(self.backend, StagedSnapshotRepositoryBackend):
+            raise ArtifactPublicationError("repository backend must implement StagedSnapshotRepositoryBackend")
         return self.backend
 
     def materialize(self, ref: SnapshotRef) -> Artifact:
@@ -588,7 +588,7 @@ class Repository(ArtifactRepository):
                 name: self.backend.resolve_artifact(artifact_id) for name, artifact_id in selection.components.items()
             }
             destination = self.local_root / self._process_id / digest
-            composed = compose_release(components, directory=destination)
+            composed = compose_snapshot(components, directory=destination)
             artifact = Artifact(
                 SnapshotRef(cache_key, None),
                 self,
@@ -636,7 +636,7 @@ class Repository(ArtifactRepository):
     ) -> Artifact:
         """Compose several components straight into a staged local release; one copy, not two."""
         destination = self.local_root / self._process_id / uuid.uuid4().hex
-        composed = compose_release(components, directory=destination)
+        composed = compose_snapshot(components, directory=destination)
         return self.register_staged(step, composed, destination, parent=parent)
 
     def register_staged(self, step: int, source: Artifact, destination: Path, *, parent: SnapshotRef) -> Artifact:

@@ -22,26 +22,26 @@ from reef.artifact.artifact import (
     artifact_components,
 )
 from reef.artifact.components import ScenarioComponents
-from reef.artifact.composite import compose_release
+from reef.artifact.composite import compose_snapshot
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
     RepositoryBackendFactory,
-    StagedReleaseRepositoryBackend,
+    StagedSnapshotRepositoryBackend,
     selection_digest,
 )
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
-from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
+from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
-from reef.scenario.binding import ScenarioBinding, activate_release
-from reef.scenario.release_files import ScenarioArtifactFiles
+from reef.scenario.binding import ScenarioBinding, activate_snapshot
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     UNLOCATED_SNAPSHOT,
@@ -273,9 +273,9 @@ class ScenarioFactory:
         default start when ``start`` is ``None``. An existing scenario ignores ``start``.
         """
         backend = self._backend_factory(scenario)
-        if self._storage.durable and not isinstance(backend, StagedReleaseRepositoryBackend):
+        if self._storage.durable and not isinstance(backend, StagedSnapshotRepositoryBackend):
             raise ArtifactPublicationError(
-                "scenarios with durable commit storage require a backend implementing StagedReleaseRepositoryBackend"
+                "scenarios with durable commit storage require a backend implementing StagedSnapshotRepositoryBackend"
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
@@ -293,7 +293,7 @@ class ScenarioFactory:
             backend,
             registration,
             components=components,
-            registered_components=release_components(metadata),
+            registered_components=snapshot_components(metadata),
         )
 
     def register(
@@ -312,7 +312,7 @@ class ScenarioFactory:
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
-            root, source = self.root_release(components, start, Path(work))
+            root, source = self.root_snapshot(components, start, Path(work))
             if start is not None:
                 self._recipe.check_root_start(ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
@@ -327,7 +327,7 @@ class ScenarioFactory:
                 registration_metadata[COMPONENTS_METADATA_KEY] = root.metadata[COMPONENTS_METADATA_KEY]
             backend.register(root, metadata=registration_metadata)
 
-    def root_release(
+    def root_snapshot(
         self, components: ScenarioComponents, start: ItemStart | None, work: Path
     ) -> tuple[Artifact, RootSource]:
         """The unpublished root release of a new scenario that ``components`` serves, under ``work``, and its source."""
@@ -365,9 +365,9 @@ class ScenarioFactory:
             )
         artifacts = {name: Artifact.local(tree / name) for name in components.names}
         if item is None:
-            return compose_release(artifacts, directory=work / "root"), source
+            return compose_snapshot(artifacts, directory=work / "root"), source
         artifacts[item[0]] = item[1]
-        root = compose_release(artifacts, directory=work / "root")
+        root = compose_snapshot(artifacts, directory=work / "root")
         components.validator.validate(root)
         return root, source
 
@@ -378,7 +378,7 @@ class ScenarioFactory:
         registration: object,
         *,
         components: ScenarioComponents,
-        registered_components: ReleaseComponents | None,
+        registered_components: SnapshotComponents | None,
     ) -> Scenario:
         if not isinstance(registration, Mapping):
             raise ValueError(f"invalid scenario metadata for {name!r}")
@@ -482,7 +482,7 @@ class ScenarioFactory:
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.
             if self._activates_runtime:
-                activate_release(components, Artifact(current_artifact, repository), runtime, name)
+                activate_snapshot(components, Artifact(current_artifact, repository), runtime, name)
 
             root_artifacts = repository.selection(start_artifact, components.names or (RECORDS_COMPONENT,))
             training_artifacts = root_artifacts
@@ -501,7 +501,7 @@ class ScenarioFactory:
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
-                releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
+                artifacts=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
                 samples=self._storage.sample_store(name, store),
                 root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )

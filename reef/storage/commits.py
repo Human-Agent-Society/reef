@@ -104,7 +104,7 @@ class CommitRecord:
     read from release metadata that names no operation. ``component`` is
     ``None`` or a non-empty name, and ``components`` is ``None`` or a
     mapping of non-empty component names to non-empty artifact ids
-    (``ReleaseComponents.artifact_ids``).
+    (``SnapshotComponents.artifact_ids``).
     ``selection`` is None for stored artifacts or an ``ArtifactSelection``
     mapping component names to the artifact IDs needed to rebuild a local view. When
     ``components`` is present, it equals the selection's artifact ids.

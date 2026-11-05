@@ -43,8 +43,8 @@ from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
-from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshots import ServedBesideArtifact
 from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
@@ -882,8 +882,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             runtime = current.runtime
             if runtime is None:
                 raise ReefError(f"scenario {scenario!r} has no runtime")
-            _, release = current.resolve_artifact(artifact_id, component)
-            return runtime, release.materialize()
+            _, snapshot = current.resolve_artifact(artifact_id, component)
+            return runtime, snapshot.materialize()
 
     def request_artifact_copy(self, scenario: str) -> None:
         """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""

@@ -349,7 +349,7 @@ class TrainingComponent(ABC):
         return frozenset()
 
     @abstractmethod
-    def import_start(self, release: Path) -> str:
+    def import_start(self, artifact_dir: Path) -> str:
         """Take the published release in ``release`` as the start of later jobs; return that start.
 
         Reef calls this when a trainer starts training from an artifact

@@ -541,13 +541,13 @@ class HarnessEvolutionRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
         """The scenario's trainer: it submits each step as a job of ``harness_component``, whose start is the
         component's head release in ``releases``."""
-        if releases is None:
+        if artifacts is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
         if self.evaluation.imported_tasks and samples is None:
             raise RecipeConfigError("evolution.evaluation.imported_tasks needs the samples of a scenario session")
@@ -560,7 +560,7 @@ class HarnessEvolutionRecipe(Recipe):
             job_loop=JobLoop(
                 self.harness_component,
                 scenario=scenario,
-                scenario_component=releases.component,
+                scenario_component=artifacts.component,
                 data_store=self.data_store,
             ),
             root=root,

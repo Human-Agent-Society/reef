@@ -237,7 +237,7 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 - Declare the components in the owning recipe's ``build_components``; do not
   make a component choose a method or evaluate a candidate.
 - Test component behavior in ``tests/artifact/test_scenario_components.py`` or
-  ``tests/artifact/test_release_components.py``. Test storage backends against
+  ``tests/artifact/test_snapshot_components.py``. Test storage backends against
   the contracts in ``tests/artifact/test_reef_artifacts.py``.
 - Add scenario commit, activation, train-from, and recovery tests whenever
   persistence or activation ordering changes. Persisted-format changes require an RFC and a

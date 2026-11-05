@@ -72,9 +72,9 @@ class SDPOGrouping(ReportGrouping):
             return GroupDecision.INCOMPLETE
         if not isinstance(key, int):
             raise TypeError("SDPO step must be an integer")
-        releases = {member.ends[0].artifact_id for member in members}
+        artifact_ids = {member.ends[0].artifact_id for member in members}
         reason = ""
-        if None in releases or len(releases) != 1:
+        if None in artifact_ids or len(artifact_ids) != 1:
             reason = "missing_or_mixed_artifact_ids"
         reports = [(member, parsed) for member in members if isinstance(parsed := member.parsed_report, SDPOReport)]
         for group in range(self.groups_per_step):

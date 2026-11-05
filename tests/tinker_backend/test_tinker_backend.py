@@ -874,7 +874,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         # As the inference service does: the request names the row's model, the sampler that serves now.
         response = asyncio.run(
             handler.inference(
-                scenario.release_queries.artifact_for_version(base),
+                scenario.snapshot_queries.artifact_for_version(base),
                 "/v1/chat/completions",
                 handler.address_model(
                     {"messages": [{"role": "user", "content": "hello"}]}, inference.served_model_name("math")
@@ -923,7 +923,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert scenario.scenario_step == step
         assert loop_state(scenario) == state
         # The creation is the scenario's root release: its artifact_id is the root's release ID.
-        base_artifact = scenario.release_queries.artifact_for_version(base).artifact_id
+        base_artifact = scenario.snapshot_queries.artifact_for_version(base).artifact_id
         assert base_artifact == scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
         assert scenario.repository.start_artifact.revision == base
         scenario.activate(base_artifact)

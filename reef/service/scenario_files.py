@@ -22,8 +22,8 @@ def artifact_directory(dispatcher: Dispatcher, scenario: str, artifact_id: str, 
     ``ArtifactNotFound`` for an artifact that the scenario does not list.
     """
     with dispatcher.locked_scenario(scenario) as current:
-        selected, release = current.resolve_artifact(artifact_id, component)
-        view = current.components.component_artifact(release.materialize(), selected.component).materialize()
+        selected, snapshot = current.resolve_artifact(artifact_id, component)
+        view = current.components.component_artifact(snapshot.materialize(), selected.component).materialize()
     if view.local_path is None:
         raise ValueError(f"artifact {artifact_id!r} of {scenario!r} has no local files")
     return view.local_path

@@ -102,7 +102,7 @@ class _FakeReef(ThreadingHTTPServer):
         self.replies: list[dict[str, Any]] = []
         self.head_move: _HeadMove | None = None
         self.requests: list[dict[str, Any]] = []
-        self.fail_releases = False
+        self.fail_artifacts = False
         self.delay_s = 0.0
         self.hang_manifest_s = 0.0  # the next manifest read sleeps this long once, as behind a step's lock
         self.polls = 0
@@ -146,7 +146,7 @@ class _Handler(BaseHTTPRequestHandler):
         split = urlsplit(self.path)
         if split.path == "/reef/harness/artifacts":
             reef.polls += 1
-            if reef.fail_releases:
+            if reef.fail_artifacts:
                 self._json(500, {"error": {"message": "catalog down"}})
                 return
             rows = [{k: v for k, v in reef.releases[rid].items() if k != "files"} for rid in reef.order]
@@ -440,7 +440,7 @@ def test_follow_pinned_announces_the_head_and_the_mount_control_applies_it(tmp_p
 def test_a_poll_failure_is_logged_with_backoff_and_the_process_keeps_serving(tmp_path: Path, reef: _FakeReef) -> None:
     reef.release("r1", _tool("one"))
     reef.replies = [_reply("served")]
-    reef.fail_releases = True
+    reef.fail_artifacts = True
     with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1) as server:
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: len(_typed(_events(log), "artifact/poll-failed")) >= 2)
@@ -448,7 +448,7 @@ def test_a_poll_failure_is_logged_with_backoff_and_the_process_keeps_serving(tmp
         assert "500" in failures[0]["error"] and [f["retry_in_s"] for f in failures[:2]] == [0.1, 0.2]
         result, _ = _turn(server, "go")
         assert result["text"] == "served"
-        reef.fail_releases = False
+        reef.fail_artifacts = False
         reef.release("r2", {**_tool("one"), **_tool("two")}, parent="r1")
         _wait(lambda: server.status()["artifact_id"] == "r2")
 
@@ -467,7 +467,7 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
                 raise outcome
             return str(outcome)
 
-    class _ReleaseListener(serve.ArtifactUpdateListener):
+    class _ArtifactListener(serve.ArtifactUpdateListener):
         def __init__(self) -> None:
             self.heads: list[tuple[str, str]] = []
 
@@ -482,11 +482,11 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
 
     busy = ArtifactClientError("GET /reef/harness/artifacts failed: TimeoutError: timed out", timed_out=True)
     down = ArtifactClientError("GET /reef/harness/artifacts failed: URLError: Connection refused")
-    release_listener = _ReleaseListener()
-    watch = HeadWatch(_Client([busy, busy, busy, down, down, "r2"]), release_listener, _Log(), 0.01, mounted="r1")  # type: ignore[arg-type]
+    artifact_listener = _ArtifactListener()
+    watch = HeadWatch(_Client([busy, busy, busy, down, down, "r2"]), artifact_listener, _Log(), 0.01, mounted="r1")  # type: ignore[arg-type]
     watch.start()
     try:
-        _wait(lambda: release_listener.heads == [("r2", "poll")])
+        _wait(lambda: artifact_listener.heads == [("r2", "poll")])
     finally:
         watch.stop()
     assert [event["type"] for event in events] == ["artifact/poll-failed"] * 5

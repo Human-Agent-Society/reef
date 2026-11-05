@@ -278,25 +278,25 @@ def native_main():
         )
         return
     manifest = head_manifest(client)
-    release = manifest["artifact_id"]
-    if release == seed:
+    artifact_id = manifest["artifact_id"]
+    if artifact_id == seed:
         # A result said published, but the head still serves the seed: nothing this run can mount.
         print(
             f"no change passed the evaluation within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh native for another attempt"
         )
         return
-    print(f"published: artifact {release} (parent {manifest['parent_artifact_id']})")
+    print(f"published: artifact {artifact_id} (parent {manifest['parent_artifact_id']})")
     print("evaluation metrics (the evolve step that published this release):")
     print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
 
     # The process follows the head: no reinstall, no restart, one harness/mount line in its log. Every step this
     # run triggered already has its result, so nothing holds the catalog or the manifest now.
     deadline = time.monotonic() + MOUNT_TIMEOUT_S
-    while not mount_events(release) and time.monotonic() < deadline:
+    while not mount_events(artifact_id) and time.monotonic() < deadline:
         time.sleep(1.0)
-    mounts = mount_events(release)
+    mounts = mount_events(artifact_id)
     if not mounts:
-        print(f"the serve process did not mount {release} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
+        print(f"the serve process did not mount {artifact_id} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
         return
     for path, data in mounts:
         print(f"{path}: harness/mount {json.dumps(data, sort_keys=True)}")

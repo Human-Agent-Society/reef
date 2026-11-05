@@ -37,7 +37,7 @@ class ScenarioBinding:
     served_models: ServedModels | None = None
 
 
-def activate_release(
+def activate_snapshot(
     components: ScenarioComponents,
     artifact: Artifact,
     runtime: InferenceRuntime | None,

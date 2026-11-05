@@ -219,10 +219,10 @@ class SlimeJobs(LocalJobComponent):
             return DefaultStart(model_files=ModelDirectory(Path(inputs["model"])), inputs=inputs)
         from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
 
-        release = self.base_start_dir / "release"
-        if not (release / ADAPTER_DIR).is_dir():
-            save_untrained_lora_adapter(self.args, release / ADAPTER_DIR)
-        return DefaultStart(model_files=ModelDirectory(release), inputs=inputs)
+        artifact_dir = self.base_start_dir / "release"
+        if not (artifact_dir / ADAPTER_DIR).is_dir():
+            save_untrained_lora_adapter(self.args, artifact_dir / ADAPTER_DIR)
+        return DefaultStart(model_files=ModelDirectory(artifact_dir), inputs=inputs)
 
     @property
     def base_start(self) -> str:
@@ -252,7 +252,7 @@ class SlimeJobs(LocalJobComponent):
             )
         return self.base_start
 
-    def import_start(self, release: Path) -> str:
+    def import_start(self, artifact_dir: Path) -> str:
         raise ValueError(
             "Slime continues training from its own latest checkpoint; it cannot load a published release "
             "into its workers"
@@ -735,9 +735,9 @@ class SlimeJobRunner(SlimeJobs):
         if hf.is_symlink() or not hf.is_dir():
             raise RuntimeError(f"checkpoint is missing or unsafe: {hf}")
         self.next_rollout_id = max(self.next_rollout_id, rollout.rollout_id + 1)
-        start_dir, release = write_rollout_start(self.starts_root, hf, rollout, schedule_state, lora=self.lora)
+        start_dir, artifact_dir = write_rollout_start(self.starts_root, hf, rollout, schedule_state, lora=self.lora)
         self.loaded_rollout_id = rollout.rollout_id
-        self.save_checkpoint(directory, SavedCheckpoint(rollout.step, str(start_dir), str(release), metrics))
+        self.save_checkpoint(directory, SavedCheckpoint(rollout.step, str(start_dir), str(artifact_dir), metrics))
 
     # -- Loss families and worker switches
 

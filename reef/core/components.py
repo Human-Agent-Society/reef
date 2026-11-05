@@ -73,7 +73,7 @@ class ComponentEntry:
 
 
 @dataclass(frozen=True)
-class ReleaseComponents:
+class SnapshotComponents:
     """The manifest of one release: which named components it binds, in declaration order.
 
     Values: ``entries`` is a non-empty mapping from valid component names to
@@ -112,10 +112,10 @@ class ReleaseComponents:
         """The artifact ID of each component in the snapshot ``revision`` (``artifact_id``), in declaration order."""
         return {name: self.artifact_id(name, revision) for name in self.entries}
 
-    def carried_from(self, revision: str) -> ReleaseComponents:
+    def carried_from(self, revision: str) -> SnapshotComponents:
         """This manifest as a later release carries it forward: every entry names its artifact explicitly."""
         identities = self.artifact_ids(revision)
-        return ReleaseComponents(
+        return SnapshotComponents(
             {name: replace(entry, artifact_id=identities[name]) for name, entry in self.entries.items()}
         )
 
@@ -140,7 +140,7 @@ class ReleaseComponents:
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> ReleaseComponents:
+    def from_dict(cls, value: object) -> SnapshotComponents:
         if not isinstance(value, Mapping) or not value:
             raise ValueError("components manifest must be a non-empty object")
         entries: dict[str, ComponentEntry] = {}
@@ -154,22 +154,22 @@ class ReleaseComponents:
         return cls(entries)
 
 
-def release_components(metadata: Mapping[str, object] | None) -> ReleaseComponents | None:
+def snapshot_components(metadata: Mapping[str, object] | None) -> SnapshotComponents | None:
     """The manifest carried by release metadata, or ``None`` for a release published without one."""
     if metadata is None:
         return None
     raw = metadata.get(COMPONENTS_METADATA_KEY)
     if raw is None:
         return None
-    return ReleaseComponents.from_dict(raw)
+    return SnapshotComponents.from_dict(raw)
 
 
 __all__ = [
     "COMPONENTS_METADATA_KEY",
     "RECORDS_COMPONENT",
     "ComponentEntry",
-    "ReleaseComponents",
+    "SnapshotComponents",
     "legacy_artifact_id",
-    "release_components",
+    "snapshot_components",
     "validate_component_name",
 ]

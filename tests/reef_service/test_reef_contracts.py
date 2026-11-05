@@ -218,7 +218,7 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
             algorithm_state=None,
             experiment_logger=None,
             task_storage=None,
-            releases=None,
+            artifacts=None,
             samples=None,
             root=None,
         ):
@@ -1114,7 +1114,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
     )
-    releases = [dispatcher.get_or_create_scenario("chat").serving_artifact_id()]
+    artifacts = [dispatcher.get_or_create_scenario("chat").serving_artifact_id()]
     for version in (1, 2):
         if isinstance(recipe, WeightRecipe):
             commit_saved_version(dispatcher, "chat", f"sglang-v{version}", tmp_path)
@@ -1125,13 +1125,13 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
             current = dispatcher.registry.get("chat")
             current.commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
             dispatcher.scenario_committed(current)
-        releases.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
-    assert len(set(releases)) == 3
+        artifacts.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
+    assert len(set(artifacts)) == 3
 
     async def run() -> list[str]:
         async with serving_client(dispatcher, backend) as client:
             await wait_for_inference(client, "chat")
-            for tag in (releases[1], releases[0], "no-such-release", None):
+            for tag in (artifacts[1], artifacts[0], "no-such-release", None):
                 headers = {"x-reef-scenario": "chat", **({"x-reef-tag-release": tag} if tag else {})}
                 response = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})
                 assert response.status == 200
@@ -1143,7 +1143,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
         return [(item.artifact_id, item.payload.get("metadata", {}).get("tags", {}).get("release")) for item in rows]
 
     recorded = asyncio.run(run())
-    first, middle, served = releases
+    first, middle, served = artifacts
     assert recorded == [(served, middle), (served, first), (served, "no-such-release"), (served, None)]
 
 

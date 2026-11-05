@@ -24,8 +24,8 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
-from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshot_files import component_files
 from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import (
@@ -384,7 +384,7 @@ class RequestService:
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"{name} must be a non-empty string")
         if isinstance(legacy_revision, str):
-            return scenario.release_queries.artifact_for_version(legacy_revision)
+            return scenario.snapshot_queries.artifact_for_version(legacy_revision)
         component = scenario.components.files_component
         if not isinstance(artifact_id, str):
             if component is None:

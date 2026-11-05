@@ -683,7 +683,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
             algorithm_state=None,
             experiment_logger=None,
             task_storage=None,
-            releases=None,
+            artifacts=None,
             samples=None,
             root=None,
         ):

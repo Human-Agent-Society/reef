@@ -75,7 +75,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         """Full weights: each release refers to a commit on the Hub that holds them."""
         return ArtifactFormat("full")
 
-    def complete_release(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+    def complete_artifact(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
         """Export the checkpoint's weights to the release repo, and refer to the commit beside the manifest."""
         revision = self._exporter.export(checkpoint.state_path, self._revision)
         (directory / REFERENCE_FILE).write_text(json.dumps(revision.to_dict()) + "\n", encoding="utf-8")
@@ -128,12 +128,12 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
                 "weights holds the base's files, or a manifest of a full-parameter checkpoint of it"
             )
 
-    def import_start(self, release: Path) -> str:
+    def import_start(self, artifact_dir: Path) -> str:
         """A manifest's start, else the base start: every artifact of this component without a manifest has the base's
         files, since its base holds them and ``check_artifact`` admits no other."""
-        if (release / MANIFEST).exists():
-            return self.import_manifest(release)
-        revision = read_reference(release)
+        if (artifact_dir / MANIFEST).exists():
+            return self.import_manifest(artifact_dir)
+        revision = read_reference(artifact_dir)
         if revision is not None and revision != self._revision:
             raise ValueError(f"the {self.name} training component starts only from its base {self._revision.uri}")
         return self.base_start

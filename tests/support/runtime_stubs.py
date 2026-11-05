@@ -157,7 +157,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     of the releases it served, at commits, activations and starts, in order;
     ``served`` is the last one, ``None`` before the first one.
 
-    With ``answers_each_release``, the runtime answers each call from the artifact it names, as Tinker does: each
+    With ``answers_each_artifact``, the runtime answers each call from the artifact it names, as Tinker does: each
     artifact has its own model name, ``sampler:<artifact_id>``.
     """
 
@@ -166,11 +166,11 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
         self.served: str | None = None
-        self.answers_each_release = False
+        self.answers_each_artifact = False
 
     @property
     def serves_artifacts_on_request(self) -> bool:
-        return self.answers_each_release
+        return self.answers_each_artifact
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", artifact.ref.revision)

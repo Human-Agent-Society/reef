@@ -36,7 +36,7 @@ from tests.support.harness_steps import (
     FixedScorer,
     IdleMethod,
     NoCollection,
-    TreeReleases,
+    TreeArtifacts,
     build_harness_backend,
     changed_rules,
     evolution_config,
@@ -112,8 +112,8 @@ def flat(scores: list[dict[str, object]]) -> list[object]:
     return [score for task in scores for score in task["scores"]]
 
 
-def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
-    return ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
+def artifacts_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
+    return ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
 
 
 def backend_of(recipe: HarnessEvolutionRecipe) -> HarnessBackend:
@@ -275,7 +275,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
         evaluation=evaluation, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
     )
     built = from_config(settings, runtime=runtime())
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
     try:
         backend = job_backend(trainer)
         selection = built.build_policy(backend)
@@ -298,7 +298,7 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
 
 def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committed_releases(tmp_path: Path) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
     # The trainer submits each step as a job of the recipe's harness component.
     assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is built.harness_component
     assert isinstance(built.harness_component, HarnessTrainingComponent)
@@ -324,7 +324,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     assert built.scenario_state_dirs("demo") == (state / "demo",)
     records = SQLiteRecordStore()
     for scenario in ("demo", "other"):
-        trainer = built.build(scenario, records, releases=releases_for(built), root=seed_root(built))
+        trainer = built.build(scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
         backend = job_backend(trainer)
         root = state / scenario / COMPONENT
         assert backend.history.root == root / "history" and backend.records.root == root / "steps"
@@ -455,7 +455,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         second = import_task("held-2", "eval")
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
         with pytest.raises(RecipeConfigError, match="needs the samples of a scenario session"):
-            built.build("s", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+            built.build("s", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
     retired = {"tasks": [], "task_store": "imported-tasks"}
     with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
         from_config(evolution_config(evaluation=retired), runtime=runtime())
@@ -493,7 +493,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         return built
 
     def trainer_of(recipe: HarnessEvolutionRecipe) -> Trainer:
-        return recipe.build("demo", SQLiteRecordStore(), releases=releases_for(recipe), root=seed_root(recipe))
+        return recipe.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(recipe), root=seed_root(recipe))
 
     records = trainer_of(
         from_config(
@@ -1272,7 +1272,9 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
         assert result.artifact is not None
         newest = last_made(scenario)
         assert newest.made_artifact and newest.snapshot.parent_revision == trained
-        files = scenario.components.read_files(scenario.release_queries.artifact_for_version(newest.snapshot.revision))
+        files = scenario.components.read_files(
+            scenario.snapshot_queries.artifact_for_version(newest.snapshot.revision)
+        )
         evolved = "".join(files.values())
         assert "marker person" in evolved and "marker r2" in evolved and "marker r1" not in evolved
     finally:
