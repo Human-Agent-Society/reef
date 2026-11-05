@@ -8,9 +8,10 @@ from typing import Any
 
 from recipes.sdft.processor import SDFTSamples
 from reef.core.reports import ReportBase, TeacherContextReport
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.sample2job import DistillJobData
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -43,10 +44,8 @@ class SDFTRecipe(WeightTrainingRecipe):
         return TeacherContextReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective="sdft",
-        )
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "sdft"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
