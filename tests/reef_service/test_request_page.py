@@ -83,7 +83,7 @@ def _row(metrics: dict, *, artifact_id: str = "rel-1", parent: str | None = "rel
 
 
 CREATION = _row({}, artifact_id="rel-0", parent=None, operation="creation")
-#: The creation while it serves: a newer release that passed the checks then waits for activation.
+#: The creation while it serves: a newer snapshot that passed the checks then waits for activation.
 SERVED_CREATION = {**CREATION, "active": True}
 
 
@@ -131,7 +131,7 @@ def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> 
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
     for href in re.findall(r'href="([^"]+)"', page):
         assert re.match(r"^/reef/harness/artifacts/\d+/page(\?|$)", href.replace("&amp;", "&")), href
-    # A catalog with no active release leaves the crumb as text rather than a broken link.
+    # A catalog with no active selection leaves the crumb as text rather than a broken link.
     inactive_only = [_row(_answered(selected=True), artifact_id="rel-0", parent=None, activated=False)]
     bare = request_page(_record(), inactive_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare

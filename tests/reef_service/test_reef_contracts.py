@@ -112,7 +112,7 @@ def serving_dispatcher(tmp_path) -> Dispatcher:
 @asynccontextmanager
 async def proxied_client(tmp_path, path: str, upstream) -> AsyncIterator[tuple[TestClient, Dispatcher]]:
     """A client of a Reef app whose HTTP inference handler forwards to the ``upstream`` route at ``path``; the
-    scenario "chat" serves the committed version ``v1``, so its records name that release."""
+    scenario "chat" serves the committed version ``v1``, so its records name that snapshot."""
     upstream_app = web.Application()
     upstream_app.router.add_post(path, upstream)
     async with TestServer(upstream_app) as upstream_server:
@@ -189,7 +189,7 @@ def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> Non
 @pytest.mark.unit
 def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_start(tmp_path) -> None:
     """A report creates its scenario from the recipe's default start; ``x-reef-release-id`` on a request names no
-    release to start from, so any value is accepted."""
+    snapshot to start from, so any value is accepted."""
     backend = InMemoryRepositoryBackend.factory()
     dispatcher = build_default_dispatcher(
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
@@ -218,7 +218,7 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
             algorithm_state=None,
             experiment_logger=None,
             task_storage=None,
-            releases=None,
+            artifacts=None,
             samples=None,
             root=None,
         ):
@@ -1085,7 +1085,7 @@ def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
 
 
 class HarnessRecipe(Recipe):
-    """A recipe whose clients pull a file tree: the served exchange is the same on every release. A stub runtime
+    """A recipe whose clients pull a file tree: the served exchange is the same on every snapshot. A stub runtime
     answers its model calls."""
 
     def build_components(self, scenario: str) -> ScenarioComponents:
@@ -1101,8 +1101,8 @@ class HarnessRecipe(Recipe):
     ids=["harness", "weights"],
 )
 def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
-    """The inference service records every call against the release that served it: it reads served_models only,
-    never the catalog. The release that a session says it runs stays in the record's tags."""
+    """The inference service records every call against the snapshot that served it: it reads served_models only,
+    never the catalog. The snapshot that a session says it runs stays in the record's tags."""
 
     async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
         return {"ok": True}
@@ -1114,7 +1114,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
     )
-    releases = [dispatcher.get_or_create_scenario("chat").serving_artifact_id()]
+    artifacts = [dispatcher.get_or_create_scenario("chat").serving_artifact_id()]
     for version in (1, 2):
         if isinstance(recipe, WeightRecipe):
             commit_saved_version(dispatcher, "chat", f"sglang-v{version}", tmp_path)
@@ -1125,13 +1125,13 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
             current = dispatcher.registry.get("chat")
             current.commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
             dispatcher.scenario_committed(current)
-        releases.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
-    assert len(set(releases)) == 3
+        artifacts.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
+    assert len(set(artifacts)) == 3
 
     async def run() -> list[str]:
         async with serving_client(dispatcher, backend) as client:
             await wait_for_inference(client, "chat")
-            for tag in (releases[1], releases[0], "no-such-release", None):
+            for tag in (artifacts[1], artifacts[0], "no-such-release", None):
                 headers = {"x-reef-scenario": "chat", **({"x-reef-tag-release": tag} if tag else {})}
                 response = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})
                 assert response.status == 200
@@ -1143,7 +1143,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
         return [(item.artifact_id, item.payload.get("metadata", {}).get("tags", {}).get("release")) for item in rows]
 
     recorded = asyncio.run(run())
-    first, middle, served = releases
+    first, middle, served = artifacts
     assert recorded == [(served, middle), (served, first), (served, "no-such-release"), (served, None)]
 
 

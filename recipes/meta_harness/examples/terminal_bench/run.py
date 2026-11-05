@@ -24,8 +24,8 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
-from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshot_files import component_files
 from reef.service.deploy.config_utils import load_config
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -82,7 +82,7 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutio
 def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher:
     """Use persistent artifacts and SQLite records so a new process can resume.
 
-    The recipe's seed is the root release of a new scenario, as the service makes it, so the search starts there.
+    The recipe's seed is the root snapshot of a new scenario, as the service makes it, so the search starts there.
 
     ``search`` prepares and commits every step itself, so the dispatcher runs no training cycle of its own: a
     cycle would commit the same step a second time.
@@ -135,7 +135,7 @@ def commit_job(scenario: Scenario) -> bool:
 
 
 def served_tree(scenario: Scenario) -> HarnessTree:
-    """The head release's source tree: the tree the next step builds on."""
+    """The head snapshot's source tree: the tree the next step builds on."""
     artifact = scenario.repository.resolve(scenario.repository.require_current_artifact())
     return HarnessTree(
         component_files(scenario.components, artifact, scenario.components.files_component or "harness")

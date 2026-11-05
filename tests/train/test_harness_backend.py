@@ -1,8 +1,8 @@
 """The harness backend's step: from the head tree and the method's workspace to a published, rejected or skipped step.
 
 Each step runs through the phases the trainer runs (``backend_step``) on an
-in-memory commit history whose root release is the pi seed; the test
-records a published tree as the next release, as the scenario committer
+in-memory commit history whose root snapshot is the pi seed; the test
+records a published tree as the next snapshot, as the scenario committer
 does. Tasks run the fake pi binary, whose score prefers rules that hold
 the marker.
 """
@@ -20,7 +20,7 @@ from tests.support.harness_steps import (
     MODEL,
     PI_SEED,
     UNCHANGED,
-    TreeReleases,
+    TreeArtifacts,
     build_harness_backend,
     changed_rules,
     harness_backend,
@@ -53,12 +53,12 @@ def data(step: int, *samples, request: TrainingRequest | None = None) -> JobData
     return JobData(f"demo:{step}", tuple(samples), request=request)
 
 
-def published(releases: TreeReleases, release_id: str, result: TrainStepResult) -> HarnessTree:
+def published(artifacts: TreeArtifacts, release_id: str, result: TrainStepResult) -> HarnessTree:
     """Record ``result``'s tree as release ``release_id``, as the committer's publish does."""
     if result.artifact is None or result.artifact.local_path is None:
         raise AssertionError(f"the step published nothing: {result.metrics.get('selection')}")
     tree = HarnessTree.read(result.artifact.local_path)
-    releases.publish(release_id, tree)
+    artifacts.publish(release_id, tree)
     return tree
 
 
@@ -103,10 +103,10 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
 
 def test_the_cache_reuses_the_head_scores_in_the_next_step(tmp_path: Path) -> None:
     patches = iter((MARKER, PLAIN))
-    backend, releases = harness_backend(tmp_path, lambda workspace, services: next(patches))
+    backend, artifacts = harness_backend(tmp_path, lambda workspace, services: next(patches))
     first = backend_step(backend, data(1), HarnessState().to_json())
     assert (first.metrics["runs_run"], first.metrics["runs_cached"]) == (2, 0)
-    published(releases, "r1", first)
+    published(artifacts, "r1", first)
     second = backend_step(backend, data(2), first.state)
     # The head is the candidate of step 1: its score comes from the history, only the new candidate runs.
     assert (second.metrics["runs_run"], second.metrics["runs_cached"]) == (1, 1)
