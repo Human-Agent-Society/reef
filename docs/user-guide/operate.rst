@@ -169,8 +169,6 @@ Whether a trainer can start from an artifact depends on the backend:
 - The ``slime`` backend refuses every artifact with HTTP 400, because its workers continue from their own latest checkpoint.
 - A harness trainer starts its next evolve step from the artifact's tree.
 
-To choose the start of one manual job and keep the running job, send ``train_from_artifact_id`` in the training request (`Manual training <../reference/http-api.rst#manual-training>`__).
-
 Reef cannot move the training of a Slime scenario back to an earlier checkpoint, although it can activate one of its artifacts. To train again from an earlier checkpoint, start a new deployment for a new scenario:
 
 - Give the deployment its own ``save`` and ``save-hf`` directories. The Slime component does not overwrite a rollout that it saved before.

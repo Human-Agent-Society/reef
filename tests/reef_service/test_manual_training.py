@@ -39,7 +39,6 @@ from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
-from reef.train.component import JobStatus
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
@@ -1088,8 +1087,11 @@ def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_pa
     assert job["experiment"] is None
 
 
-def accept_receipts(dispatcher, *receipts):
-    for receipt in receipts:
+def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatcher):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    for receipt in ("a", "b", "c"):
         dispatcher.accept_record(
             AgentRecord.create(
                 scenario="s",
@@ -1099,121 +1101,36 @@ def accept_receipts(dispatcher, *receipts):
             )
         )
         dispatcher.accept_record(report(receipt))
+    component_name = scenario.trainers[0].component
 
+    def start():
+        return scenario.artifact_status()[component_name]["training_start"]
 
-def request_from(dispatcher, receipt, samples, artifact_id):
-    """Queue the request ``receipt``, whose job starts from ``artifact_id``."""
-    body = {**train_body(receipt, samples), "train_from_artifact_id": artifact_id}
-    return dispatcher.accept_request("s", body, request_id=receipt)
+    creation = start()
 
+    def finished(count):
+        return _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == count)
 
-def train_from_records(scenario):
-    return [record.operation for record in scenario.release_queries.records()].count("train_from")
-
-
-class HeldFirstJob(StubTrainingComponent):
-    """The first job runs until ``release`` is set; ``cancelled`` lists the jobs that Reef cancelled."""
-
-    def __init__(self, checkpoint_root):
-        super().__init__(checkpoint_root)
-        self.release = Event()
-        self.cancelled = []
-
-    def status(self, job_id):
-        if job_id == self.submitted[0].job_id and not self.release.is_set():
-            return JobStatus(job_id, "running")
-        return super().status(job_id)
-
-    def cancel(self, job_id):
-        self.cancelled.append(job_id)
-        super().cancel(job_id)
-
-
-class RefusesStarts(StubTrainingComponent):
-    def import_start(self, release):
-        raise ValueError("these weights do not fit")
-
-
-def test_a_requests_job_starts_from_the_artifact_that_it_names_and_the_next_job_continues_from_its_checkpoint(
-    tmp_path, open_dispatcher
-):
-    component = StubTrainingComponent(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
-    scenario = dispatcher.get_or_create_scenario("s")
-    assert scenario.capabilities().request_train_from is True
-    accept_receipts(dispatcher, "a", "b", "c")
-    creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
     file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
-    assert _wait(
-        lambda: ("one", "submitted") in _job_events(dispatcher) and (None, "finished") in _job_events(dispatcher)
-    )
-    request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
+    assert finished(1)
+    checkpoint = start()
+    assert checkpoint != creation
+    scenario.train_from(creation, component_name)
+    file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
+    assert finished(2)
+    third_start = start()
     file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
-    assert _wait(lambda: len(component.submitted) == 3 and _job_events(dispatcher)[-1] == (None, "finished"))
+    assert finished(3)
 
-    first, second, third = component.submitted
-    assert first.train_from_artifact_id == creation
-    assert second.train_from_artifact_id == creation
-    assert second.start == str(component.imported[0])
-    assert third.train_from_artifact_id not in (None, creation)
-    assert third.start == str(tmp_path / "checkpoints" / "2")
-    assert train_from_records(scenario) == 1
+    # The first job starts at the creation artifact, the second where train-from set it, the third at the second's
+    # checkpoint.
+    assert [job.train_from_artifact_id for job in component.submitted] == [creation, creation, third_start]
 
     async def listing():
         async with TestClient(TestServer(create_app(dispatcher))) as client:
             return (await (await client.get("/reef/scenarios/s/jobs")).json())["jobs"]
 
-    assert [job["train_from_artifact_id"] for job in asyncio.run(listing())] == [
-        first.train_from_artifact_id,
-        second.train_from_artifact_id,
-        third.train_from_artifact_id,
-    ]
-
-
-def test_a_request_that_names_a_start_waits_for_the_running_job_and_does_not_cancel_it(tmp_path, open_dispatcher):
-    component = HeldFirstJob(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
-    scenario = dispatcher.get_or_create_scenario("s")
-    accept_receipts(dispatcher, "a", "b")
-    creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
-    file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
-    assert _wait(lambda: len(component.submitted) == 1 and scenario.trainer.job_running)
-    request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
-    time.sleep(0.3)
-    assert (len(component.submitted), component.cancelled, component.imported) == (1, [], [])
-
-    component.release.set()
-    assert _wait(lambda: len(component.submitted) == 2)
-    assert component.cancelled == []
-    assert component.submitted[1].train_from_artifact_id == creation
-    assert component.submitted[1].start == str(component.imported[0])
-
-
-def test_a_start_that_the_trainer_refuses_fails_only_its_request(tmp_path, open_dispatcher):
-    component = RefusesStarts(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
-    scenario = dispatcher.get_or_create_scenario("s")
-    accept_receipts(dispatcher, "a", "b", "c")
-    creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
-    file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
-    assert _wait(lambda: (None, "finished") in _job_events(dispatcher))
-    request_from(dispatcher, "two", stored_samples_of(dispatcher, "b"), creation)
-    file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
-    assert _wait(lambda: scenario.pending_requests() == 0 and len(component.submitted) == 2)
-    assert [job.request_id for job in component.submitted] == ["one", "three"]
-    assert train_from_records(scenario) == 0
-
-
-def test_a_request_is_refused_when_it_names_an_unknown_artifact_or_a_malformed_one(tmp_path, open_dispatcher):
-    component = StubTrainingComponent(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
-    accept_receipts(dispatcher, "a")
-    samples = stored_samples_of(dispatcher, "a")
-    with pytest.raises(ValueError, match="nope"):
-        request_from(dispatcher, "one", samples, "nope")
-    with pytest.raises(ValueError, match="train_from_artifact_id must be a non-empty string"):
-        request_from(dispatcher, "two", samples, "")
-    assert component.submitted == []
+    assert [job["train_from_artifact_id"] for job in asyncio.run(listing())] == [creation, creation, third_start]
 
 
 def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp_path, records, training_requests):

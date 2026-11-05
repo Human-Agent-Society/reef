@@ -416,16 +416,6 @@ class Trainer:
                 return False
             return self.pending_step is not None or self.pipeline_ready()
 
-    def next_request(self) -> TrainingRequest | None:
-        """The request of the next job (``TrainingPipeline.next_request``), or None."""
-        with self._lock:
-            return self._pipeline.next_request()
-
-    def fail_request(self, request_id: str, error: str) -> None:
-        """Mark the queued request as failed, so its next job data is a skip row."""
-        with self._lock:
-            self._pipeline.mark_request_failed(request_id, error)
-
     def needs_polling(self) -> bool:
         """Whether the trainer's worker polls at a fixed interval: a job runs, or the pipeline's own work runs.
 
