@@ -22,13 +22,13 @@ how maintainers can create equivalent test data instead of attaching it.
 Maintainers will acknowledge the report, assess its impact, and coordinate a
 fix and disclosure through the private advisory. Please do not impose or
 publish a disclosure deadline before maintainers have confirmed the issue and
-agreed on a release plan.
+agreed on a snapshot plan.
 
 ## Supported versions
 
 Security fixes target the latest released version and the `main` branch.
-Maintainers may provide a workaround instead of a patch for older releases.
-Users should upgrade to the latest release before reporting a vulnerability
+Maintainers may provide a workaround instead of a patch for older snapshots.
+Users should upgrade to the latest snapshot before reporting a vulnerability
 that may already have been fixed.
 
 ## Public security work

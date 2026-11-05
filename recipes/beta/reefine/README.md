@@ -91,7 +91,7 @@ measurement of which requests passed the checks.
    ```
 
    `session` and `artifact_id` say where the request came from: the
-   client's session and the release it runs, empty when it runs none yet.
+   client's session and the snapshot it runs, empty when it runs none yet.
    The answer carries the training record id and `page_path`, the
    request's page (`GET /reef/harness/requests/<id>/page`). The page
    reloads every five seconds and names the step's state until the result
@@ -130,11 +130,11 @@ measurement of which requests passed the checks.
    step that had no review to give.
 3. Result. The request page and the step's page
    (`GET /reef/harness/artifacts/<step>/page`) give the result: published
-   as a release, inactive because it changes an extension, rejected by the
+   as a snapshot, inactive because it changes an extension, rejected by the
    evaluation, or skipped with the reason, followed by the step's summary.
    The request page also gives the next action: the activate route for an
-   inactive release, `GET /reef/harness` for an active one.
-4. Activate. A release that touches an `extension` file is inactive: Reef
+   inactive artifact, `GET /reef/harness` for an active one.
+4. Activate. A snapshot that touches an `extension` file is inactive: Reef
    does not serve it, so it reaches no client on its own. Read its step page,
    which carries the step's summary (the design, how to use the change and
    the review) and the numbers, then activate it with the artifact id the
@@ -146,15 +146,15 @@ measurement of which requests passed the checks.
      http://127.0.0.1:8901/reef/scenarios/my-harness/activate
    ```
 
-5. Use. `GET /reef/harness` serves the active release rendered for the
+5. Use. `GET /reef/harness` serves the active selection rendered for the
    deployment's adapter, and `GET /reef/harness?form=source` serves its
    source tree.
    The served files carry no endpoint and no credential: a client binds its
    agent's model to this Reef itself, as
    [Use a published tree](../../../docs/user-guide/evolve-your-harness.rst#use-a-published-tree)
-   describes. The manifest's `requires` lists what the release needs over
+   describes. The manifest's `requires` lists what the snapshot needs over
    its whole chain, and the client checks each item before it runs the
-   release. The example's [`run.py`](examples/run.py) is a worked client for pi.
+   snapshot. The example's [`run.py`](examples/run.py) is a worked client for pi.
 
 ## Behavior and configuration
 
@@ -175,7 +175,7 @@ measurement of which requests passed the checks.
   state and an off command for modes. Headless trials cannot verify the dropdown;
   the agent records any unverified interactive checks in its design.
 * The default activation rule, `always` with `review_kinds: [extension]`,
-  leaves each release that changes an `extension` file inactive until a
+  leaves each snapshot that changes an `extension` file inactive until a
   person activates it. On an adapter whose tree has no `extension` part,
   the list is empty. A top-level `activation` section replaces the rule.
 * `evolution.evaluation.policy: floor` is the default: the evaluation runs the
@@ -202,7 +202,7 @@ measurement of which requests passed the checks.
 
 `evolution.adapter` runs the recipe on any bundled adapter. A request comes
 through `POST /reef/train` on every adapter, the pages are the same, and
-`GET /reef/harness` serves the release rendered for that adapter. Serve the
+`GET /reef/harness` serves the snapshot rendered for that adapter. Serve the
 upstream in the dialect the adapter's model binding speaks:
 
 | Adapter | Serve with |
@@ -246,10 +246,10 @@ only; a skill the person types, a file attached with `@` and a `!`
 command still run, and the review lists them under limits.
 
 On `codex` the `web_search` key turns the hosted search on in every
-session of the release, which How to use says. A `terminus` run has no
+session of the snapshot, which How to use says. A `terminus` run has no
 reply a person reads, so its design names the files the task leaves, the
 verifier's reward and the trajectory as the visible result, and what the
-release requires must hold in the Harbor task a run uses.
+snapshot requires must hold in the Harbor task a run uses.
 
 An answer whose form slipped is written again while attempts remain: JSON
 that does not parse (a list or an object that decodes inside a broken outer
@@ -273,7 +273,7 @@ again. On pi such a reply stays an answer with nothing to apply, its
 reason under `failure`.
 
 The step's summary carries the design with its How to use paragraph, so a
-person learns the form the release takes (`$chat` on codex) rather than
+person learns the form the snapshot takes (`$chat` on codex) rather than
 one taken from the request, and the review, which lists what the harness
 puts out of reach one point per line.
 
@@ -382,7 +382,7 @@ Isolation (`evolution.agent.sandbox`, or `REEF_AGENT_SANDBOX`):
   The tunnel retries interrupted response transfers without duplicating chunks.
   A response that cannot be completed remains a failed stream. Failed steps
   appear as `Failed` on the request and release pages, with the recorded
-  error, and publish no release. After resolving the error, submit the request again.
+  error, and publish no snapshot. After resolving the error, submit the request again.
 
   ```bash
   E2B_API_KEY=e2b_... reef serve -c recipes/beta/reefine/examples/configs/serve.yaml \
@@ -515,7 +515,7 @@ curl -sS http://127.0.0.1:8901/reef/train \
 The answer carries the request's `agent_record_id`. Open
 `GET /reef/harness/requests/<id>/page` for that scenario to inspect the step:
 accepting the request alone does not mean it passed evaluation. The
-health task should score 1; inspect the selection result and published release
+health task should score 1; inspect the selection result and published snapshot
 on the page before using the new tree.
 
 ### Docker context and published files

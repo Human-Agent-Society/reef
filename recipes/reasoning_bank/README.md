@@ -92,7 +92,7 @@ reef serve -c recipes/reasoning_bank/examples/serve.yaml
 ```
 
 Then connect pi clients to the scenario, as [Evolve your harness](../../docs/user-guide/evolve-your-harness.rst)
-describes. Each published release carries the bank as `skills/rb-*`.
+describes. Each published snapshot carries the bank as `skills/rb-*`.
 
 Other setups change one part of the example:
 

@@ -222,7 +222,7 @@ def inference_component(tmp_path):
 def control_plane(tmp_path, monkeypatch, url, repository):
     """Build Tinker's component, its serving runtime and a Dispatcher over them, as the HTTP service does, and close both after.
 
-    ``repository`` is the artifact backend factory; a restart passes the same one, which holds the releases.
+    ``repository`` is the artifact backend factory; a restart passes the same one, which holds the snapshots.
     """
     from recipes.tttd.recipe import TTTDRecipe
     from reef.dispatcher import Dispatcher
@@ -358,7 +358,7 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
     from reef.artifact import InMemoryRepositoryBackend
 
     pytest.importorskip("ray")  # the component process starts its own Ray session
-    # The default start is the component's untrained adapter release, which the component writes when it starts.
+    # The default start is the component's untrained adapter artifact, which the component writes when it starts.
     repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     for key in list(os.environ):
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":

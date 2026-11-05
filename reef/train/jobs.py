@@ -300,7 +300,7 @@ class JobLoop:
             self.component.cancel(state.job.job_id)
 
     def started_from(self, state: JobLoopState, start: str) -> JobLoopState:
-        """The state after the training start is set to ``start``, which the component imported of a release.
+        """The state after the training start is set to ``start``, which the component imported of a snapshot.
 
         The running job is cancelled, and the next job starts from ``start``.
         The jobs that ended stay counted.

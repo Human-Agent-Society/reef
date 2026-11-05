@@ -76,7 +76,7 @@ model's chat template.
 The task judge executes the generated program and computes its reward. The
 harness reports that reward with the inference receipt and the rollout's step,
 group, and position. The record-to-sample stage, ``TTTDSamples``, waits for
-every position in the grid. It rejects a grid that contains more than one release.
+every position in the grid. It rejects a grid that contains more than one snapshot.
 ``TTTDJobData`` removes the groups with one reward value across all siblings
 after the grid reaches the barrier. If every group is constant, ``TTTDJobData``
 keeps one group so that the training runtime receives zero-signal job data.
@@ -234,7 +234,7 @@ status endpoint reports the scenario step and the served artifact
      http://127.0.0.1:8900/reef/status
 
 The controller returns an error when the rollout count, scenario step, served
-release, or stored search identity does not match the current run. A successful
+artifact, or stored search identity does not match the current run. A successful
 exit confirms that Reef committed the requested number of training steps.
 
 Choose a problem

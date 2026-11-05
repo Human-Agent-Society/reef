@@ -69,7 +69,7 @@ training:
   # critic only. The value head starts from zero, so without the warmup the
   # first actor steps train on advantages built from an unfitted critic —
   # the cold-start problem the paper's value-training designs exist to avoid.
-  # Warmup steps still commit one training release per rollout; the actor's
+  # Warmup steps still commit one training snapshot per rollout; the actor's
   # weights first move on step 11.
   options:
     megatron-to-hf-mode: "bridge"

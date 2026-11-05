@@ -121,7 +121,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
     )
     assert record.kind == "record"
     assert record.metadata["origin"] == ORIGIN
-    # An imported record names no release and no artifact.
+    # An imported record names no snapshot and no artifact.
     unserved = {**ORIGIN, "artifact_id": None}
     (imported,) = store.create(
         "acme", [NewItem("coding/r2", record_content("r2"), {"kind": "record", "origin": unserved})]
