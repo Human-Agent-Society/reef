@@ -627,24 +627,28 @@ class GenerationRunner(BackgroundJobRunner):
 
         stopped = False
 
-        async def check(indices: list[int]) -> None:
+        async def check(index: int, earlier: asyncio.Task[None] | None) -> None:
             nonlocal stopped
-            for index in indices:
-                async with limit:
-                    # After a check that could not run, no further check starts. The flag is set before the slot frees.
-                    if stopped:
-                        return
-                    try:
-                        await checked(index)
-                    except BaseException:
-                        stopped = True
-                        raise
+            async with limit:
+                # A copy of an earlier candidate waits for that candidate's outcome, so a copy of a published candidate
+                # is refused without a check. The slots are taken in candidate order, so the earlier one runs or ended.
+                if earlier is not None and not earlier.done():
+                    await asyncio.wait([earlier])
+                # After a check that could not run, no further check starts. The flag is set before the slot frees.
+                if stopped:
+                    return
+                try:
+                    await checked(index)
+                except BaseException:
+                    stopped = True
+                    raise
 
-        # Candidates with the same files are checked in turn, so a copy of a published candidate is refused unchecked.
-        same_files: dict[str, list[int]] = {}
+        checks: list[asyncio.Task[None]] = []
+        latest: dict[str, asyncio.Task[None]] = {}
         for index in generation.pending_indices:
-            same_files.setdefault(candidates[index].files_digest, []).append(index)
-        checks = [asyncio.create_task(check(indices)) for indices in same_files.values()]
+            files_digest = candidates[index].files_digest
+            checks.append(asyncio.create_task(check(index, latest.get(files_digest))))
+            latest[files_digest] = checks[-1]
         try:
             if checks:
                 await asyncio.wait(checks)

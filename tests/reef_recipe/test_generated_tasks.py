@@ -1192,6 +1192,18 @@ def test_after_a_check_that_raises_no_further_check_starts(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("generator_type", [ScriptedGenerator, OverlapGenerator])
+def test_one_check_at_a_time_runs_in_candidate_order_with_copies_apart(
+    tmp_path: Path, generator_type: type[ScriptedGenerator]
+) -> None:
+    # The candidates are A, B, A, C; the first A is invalid, so its copy is checked again in its own turn.
+    task_generator = generator_type([generated(0, 0, 1, 0, 3)], invalid={"harbor-00000-000": "no tests"})
+    p, _ = rounds(tmp_path, task_generator, rounds=1)
+    looked(p)
+    assert task_generator.validated == ["harbor-00000-000", "harbor-00000-001", "harbor-00000-000", "harbor-00000-003"]
+
+
+@pytest.mark.unit
 def test_a_check_that_raises_ends_the_attempt_when_the_checks_that_run_with_it_end(tmp_path: Path) -> None:
     task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)], failing="harbor-00000-000")
     p, _ = rounds(tmp_path, task_generator, rounds=1, validation_concurrency=2, generation_attempts=1)
