@@ -462,7 +462,7 @@ class _ArtifactManifest:
     def snapshot(self, version: str, *, local: bool = False) -> SnapshotRef:
         manifest = self.read(version, local=local)
         try:
-            parent_revision = manifest.get("parent_revision", manifest.get("parent_release_id"))
+            parent_revision = manifest.get("parent_revision")
             if parent_revision is not None and not isinstance(parent_revision, str):
                 raise TypeError("parent_revision must be a string or null")
             return SnapshotRef(
@@ -601,12 +601,6 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         if existing != ref.revision:
             self._workspace.fetch_version(existing)
         return self._manifest.snapshot(existing, local=True)
-
-    def index_snapshot(self, ref: SnapshotRef) -> None:
-        """Add immutable ID bindings for a previously stored Git snapshot."""
-        with self._workspace.lock:
-            self._workspace.fetch_version(ref.revision)
-            self.bind_artifact_ids(self.stored_snapshot(ref.revision))
 
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._workspace.lock:

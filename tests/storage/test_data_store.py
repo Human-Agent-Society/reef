@@ -37,7 +37,7 @@ def record_content(record_id: str) -> dict:
         "payload": {},
         "created_at": 1.0,
         "references": [],
-        "artifact_ref": None,
+        "artifact_id": None,
     }
 
 
@@ -521,14 +521,6 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
     finally:
         for store in stores:
             store.close()
-
-
-def test_legacy_origin_is_read_at_admission_without_persisting_a_second_identity(store):
-    legacy = {**ORIGIN, "release_id": "revision-1"}
-    (stored,) = store.create(
-        "acme", [NewItem("coding/r1", record_content("r1"), {"kind": "record", "origin": legacy})]
-    )
-    assert stored.metadata["origin"] == ORIGIN
 
 
 def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable(store):

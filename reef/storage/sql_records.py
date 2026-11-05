@@ -49,14 +49,7 @@ from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
 from reef.core.serving_config import ServingConfig
 from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent, call_key, sha256_text, trajectory_calls
-from reef.storage.records import (
-    AppendResult,
-    ConsumptionReceipt,
-    RecordConflict,
-    RecordLoss,
-    RecordStore,
-    StoredRecord,
-)
+from reef.storage.records import AppendResult, RecordConflict, RecordLoss, RecordStore, StoredRecord
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.segments import SegmentLine, SegmentPartition
 
@@ -1169,36 +1162,3 @@ class SQLRecordStore(RecordStore):
             connection.execute(table.delete().where(self._tables.condition(table)))
             if rows:
                 connection.execute(table.insert(), rows)
-
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        """Read ordered consumption metadata for this scenario."""
-        with self._transaction(write=False) as connection:
-            rows = (
-                connection.execute(
-                    select(self._tables.consumption)
-                    .where(
-                        self._tables.condition(self._tables.consumption),
-                        self._tables.consumption.c.scenario == scenario,
-                    )
-                    .order_by(self._tables.consumption.c.recorded_at, self._tables.consumption.c.receipt_id)
-                )
-                .mappings()
-                .all()
-            )
-        receipts: list[ConsumptionReceipt] = []
-        for row in rows:
-            consumed_ids = json.loads(row["consumed_ids_json"])
-            metadata = json.loads(row["metadata_json"])
-            if not isinstance(metadata, dict):
-                raise ValueError("consumption receipt metadata must be an object")
-            if not isinstance(consumed_ids, list) or any(not isinstance(record_id, str) for record_id in consumed_ids):
-                raise ValueError("consumption receipt IDs must be a list of strings")
-            receipts.append(
-                {
-                    "receipt_id": row["receipt_id"],
-                    "consumed_ids": tuple(consumed_ids),
-                    "metadata": metadata,
-                    "recorded_at": float(row["recorded_at"]),
-                }
-            )
-        return tuple(receipts)

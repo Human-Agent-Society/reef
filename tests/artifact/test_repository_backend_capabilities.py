@@ -29,9 +29,6 @@ class BasicBackend(RepositoryBackend):
     def resolve_snapshot(self, revision: str) -> SnapshotRef:
         return self.delegate.resolve_snapshot(revision)
 
-    def index_snapshot(self, ref: SnapshotRef) -> None:
-        self.delegate.index_snapshot(ref)
-
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         return self.delegate.artifact_snapshot(artifact_id)
 
