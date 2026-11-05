@@ -11,21 +11,18 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.learning_rate import LEARNING_RATE_DECAY_STYLES, LearningRateSchedule
 from reef.train.slime_backend.dataset import DatasetSettings
 from reef.train.slime_backend.objectives import resolve_slime_objective
-from reef.train.task_rollouts import RolloutSettings
+from reef.train.task_rollouts import HarborSettings
 
 
-def harbor_settings(parameters: Mapping[str, Any]) -> RolloutSettings:
+def harbor_settings(parameters: Mapping[str, Any]) -> HarborSettings:
     """The ``harbor`` parameter of a task job. ``ValueError``: it is missing, malformed or has an unknown key."""
     value = parameters.get("harbor")
     if not isinstance(value, Mapping):
         raise ValueError("a task job needs the harbor parameter as an object")
-    unknown = set(value) - set(RolloutSettings.__dataclass_fields__)
+    unknown = set(value) - set(HarborSettings.__dataclass_fields__)
     if unknown:
         raise ValueError(f"the harbor parameter takes no {sorted(unknown)}")
-    try:
-        return RolloutSettings(**value)
-    except TypeError as exc:
-        raise ValueError(f"the harbor parameter is incomplete: {exc}") from exc
+    return HarborSettings(**value)
 
 
 @dataclass(frozen=True)
@@ -36,9 +33,9 @@ class SlimeJobParameters:
     ``learning_rate_schedule`` is the schedule that the job selects, or None to keep the active one. ``scheduling``
     is the cut of the job's data into optimizer steps, which the objective accepts. ``save_interval`` is a positive
     int: the optimizer steps between two saved checkpoints, in rollouts for a dataset job, or None for one checkpoint
-    when the job ends. ``dataset`` is the prompt dataset of a dataset job, or None. ``harbor`` is where a task job's
-    samples come from: Harbor rollouts of its tasks, or None. It reads nothing of ``objective``, which says only how
-    the samples train. Purpose: ``from_parameters`` makes it from a job's parameters; ``SlimeJobs.check_job`` and
+    when the job ends. ``dataset`` is the prompt dataset of a dataset job, or None. ``harbor`` says how to run the
+    Harbor rollouts of a task job's tasks, or is None. It reads nothing of ``objective``, which says only how the
+    samples train. Purpose: ``from_parameters`` makes it from a job's parameters; ``SlimeJobs.check_job`` and
     ``SlimeJobRunner.run`` read it.
     """
 
@@ -47,7 +44,7 @@ class SlimeJobParameters:
     scheduling: StepScheduling
     save_interval: int | None
     dataset: DatasetSettings | None
-    harbor: RolloutSettings | None
+    harbor: HarborSettings | None
 
     def __post_init__(self) -> None:
         interval = self.save_interval
@@ -118,11 +115,9 @@ DATASET_SCHEMA: dict[str, Any] = {
 }
 HARBOR_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Where a task job's samples come from: the Harbor rollouts of its tasks.",
+    "description": "How to run the Harbor rollouts of a task job's tasks.",
     "additionalProperties": False,
-    "required": ["rollouts_per_task"],
     "properties": {
-        "rollouts_per_task": {"type": "integer", "minimum": 2},
         "environment": {"type": "string", "minLength": 1},
         "concurrency": {"type": "integer", "minimum": 1},
         "agent": {"type": ["object", "null"]},

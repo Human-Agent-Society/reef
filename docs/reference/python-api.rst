@@ -2340,10 +2340,10 @@ A trainer that starts with no running job calls it again for the last job
 that ended, before it reads a record. The stage takes it as the
 end of the last job that may have trained its samples.
 A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
-task's rollout results from the outcome's ``metrics``: the Tinker component
-reports ``rollout_rewards``, the rewards of each task's rollouts, by task
-name. A component that cannot roll out tasks refuses such a job in
-``check_job``; Slime does.
+task's rollout results from the outcome's ``metrics``: the Tinker and Slime
+components report ``rollout_rewards``, the rewards of each task's rollouts, by
+task name. A component that cannot roll out tasks refuses such a job in
+``check_job``.
 
 For a ``train-from``, Reef first imports the snapshot with ``import_start``
 and cancels the running job. It then writes the ``train_from`` commit. The

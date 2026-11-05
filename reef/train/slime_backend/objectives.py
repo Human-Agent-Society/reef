@@ -155,7 +155,7 @@ class SftObjective(SlimeObjective):
 
 @register_slime_objective
 class SlimeDatasetObjective(SlimeObjective):
-    """Leave a dataset job's rollouts, rewards, advantages and loss to Slime (the ``slime`` loss family)."""
+    """Leave a dataset job's or a task job's advantages and loss to Slime (the ``slime`` loss family)."""
 
     name = "slime_dataset"
     loss_family = "slime"

@@ -77,9 +77,10 @@ log-probabilities, so the actor computes the old-policy log-probabilities of
 each row with the weights of the job's start. Objectives that need old-policy
 log-probabilities, such as TTTD and the distillation importance-sampling
 correction, read these values. They are exact when ``max_staleness`` is 0 and
-an approximation above it.``importance_sampling`` reads the rollout engines' own log-probabilities of
-its task rollouts (``rollout_log_probs``) as ``q`` instead, without the flag,
-and refuses a row without them.
+an approximation above it.``importance_sampling`` reads recorded rollout log-probabilities
+(``rollout_log_probs``) as ``q`` instead, without the flag, and refuses a row
+without them. No built-in job data records them on Slime, so a method that selects
+this family must provide such samples.
 
 The spec
 --------
@@ -176,8 +177,8 @@ A family that ships more than the five policy columns declares them on the spec.
 Bundled families worth reading: ``reef/train/slime_backend/sft.py`` (the
 built-in SFT family: Slime's ``sft_loss`` and no hooks),
 ``reef/train/slime_backend/native.py`` (the built-in ``slime`` family of dataset
-jobs, whose advantages and loss are Slime's; see `Dataset jobs on Slime
-<../reference/configuration.rst#dataset-jobs-on-slime>`__),
+jobs and task jobs, whose advantages and loss are Slime's; see `Dataset jobs on
+Slime <../reference/configuration.rst#dataset-jobs-on-slime>`__),
 ``recipes/tttd/slime/`` (two hooks, the default row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
@@ -365,8 +366,8 @@ the teacher signal and that loss's masks; other custom losses use a wrapper.
 
 The term reads the sampler's top-K, so every trained sample must carry the
 top-K that its sampler recorded. Serving records no tensors: a sample that
-serving recorded cannot train with score centering. Only the task rollouts of
-a training component record the sampler's top-K (see the requirements below).
+serving recorded cannot train with score centering. A training component's own
+task rollouts record the sampler's top-K (see the requirements below).
 
 To enable it, set the flags in ``training.options``:
 
@@ -427,17 +428,15 @@ Inputs and requirements:
 
 - Samples need the sampler's top-K, at least ``score-centering-top-k`` per
   trained position, in ``extra.reef.training`` (``topk_indices`` and
-  ``topk_log_probs``). Only the task rollouts of a training component record
-  them; a sample that serving recorded has none, and the component fails the
-  job. The Spindle full-parameter component's task rollouts record them
-  when its ``score_centering`` option is on, and the Slime component's
-  when ``--score-centering`` is on: its engines then return the top
-  ``score-centering-top-k`` log-probs of each response token. Such a
-  rollout's requests must sample at temperature 1 without top-p or top-k,
-  and a task job needs ``--rollout-temperature`` 1, ``--rollout-top-p`` 1 and
-  ``--rollout-top-k`` -1, so the trainer reads the same distribution; the
-  engines answer another request with 400. The recorded log-probs are the
-  same distribution as ``rollout_log_probs`` and the trainer's: after
+  ``topk_log_probs``). A sample that serving recorded has none, and the
+  component fails the job. The Spindle full-parameter component's task rollouts
+  record them when its ``score_centering`` option is on. A task job on Slime
+  trains the ``slime`` family, which refuses this term; it uses Slime's own
+  ``--use-score-centering`` instead (`Task jobs on Slime
+  <../reference/configuration.rst#task-jobs-on-slime>`__). So on Slime, this
+  term reads only the samples that a method provides with recorded heads. The
+  recorded log-probs are the same distribution as ``rollout_log_probs`` and the
+  trainer's: after
   temperature and before the top-k, top-p and min-p filters (see the
   configuration reference). With those filters on, the correction centers
   against the unfiltered distribution.
