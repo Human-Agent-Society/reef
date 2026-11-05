@@ -606,44 +606,61 @@ class GenerationRunner(BackgroundJobRunner):
         def is_published(files_digest: str) -> bool:
             return any(stored.files_digest == files_digest for stored in task_store.tasks())
 
-        async def check(index: int) -> None:
-            async with limit:
-                candidate = candidates[index]
-                refusal = f"task {candidate.name!r} is already published"
-                # The store would take the same files again as the earlier publication, which this generation
-                # does not own, so its results would never be complete.
-                if is_published(candidate.files_digest):
-                    task_store.reject_task(generation=job.generation, index=index, reason=refusal)
-                    return
-                task = read_harbor_task(task_store.path(candidate.files_digest))
-                validation = await task_generator.validate(task)
-                if not validation.is_valid:
-                    task_store.reject_task(generation=job.generation, index=index, reason="; ".join(validation.errors))
-                elif is_published(candidate.files_digest):
-                    # Another check of this generation published the same files while this one ran.
-                    task_store.reject_task(generation=job.generation, index=index, reason=refusal)
-                else:
-                    try:
-                        split = assigned_split(
-                            task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
-                        )
-                        task_store.publish_task(generation=job.generation, index=index, split=split)
-                    except (TaskConflict, TaskSplitConflict) as conflict:
-                        task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
+        async def checked(index: int) -> None:
+            candidate = candidates[index]
+            refusal = f"task {candidate.name!r} is already published"
+            # The store would take the same files again as the earlier publication, which this generation
+            # does not own, so its results would never be complete.
+            if is_published(candidate.files_digest):
+                task_store.reject_task(generation=job.generation, index=index, reason=refusal)
+                return
+            task = read_harbor_task(task_store.path(candidate.files_digest))
+            validation = await task_generator.validate(task)
+            if not validation.is_valid:
+                task_store.reject_task(generation=job.generation, index=index, reason="; ".join(validation.errors))
+            else:
+                try:
+                    split = assigned_split(task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction)
+                    task_store.publish_task(generation=job.generation, index=index, split=split)
+                except (TaskConflict, TaskSplitConflict) as conflict:
+                    task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
 
-        checks = [asyncio.create_task(check(index)) for index in generation.pending_indices]
+        stopped = False
+
+        async def check(indices: list[int]) -> None:
+            nonlocal stopped
+            for index in indices:
+                async with limit:
+                    # After a check that could not run, no further check starts. The flag is set before the slot frees.
+                    if stopped:
+                        return
+                    try:
+                        await checked(index)
+                    except BaseException:
+                        stopped = True
+                        raise
+
+        # Candidates with the same files are checked in turn, so a copy of a published candidate is refused unchecked.
+        same_files: dict[str, list[int]] = {}
+        for index in generation.pending_indices:
+            same_files.setdefault(candidates[index].files_digest, []).append(index)
+        checks = [asyncio.create_task(check(indices)) for indices in same_files.values()]
         try:
             if checks:
-                await asyncio.wait(checks, return_when=asyncio.FIRST_EXCEPTION)
-            for item in checks:
-                error = item.exception() if item.done() and not item.cancelled() else None
-                if error is not None:
-                    raise error
+                await asyncio.wait(checks)
         finally:
-            # A check that could not run, or the generation's deadline, ends the attempt, and the other checks stop.
+            # The generation's deadline ends the attempt, and the checks that run stop.
             for item in checks:
                 item.cancel()
             await asyncio.gather(*checks, return_exceptions=True)
+        failed = [item for item in checks if not item.cancelled() and item.exception() is not None]
+        for item in failed[1:]:
+            logger.error(
+                "generated-task generation %d: another check failed too: %s", job.generation, item.exception()
+            )
+        # The attempt raises the first error, after the checks that ran with it saved their outcomes.
+        for item in checks:
+            item.result()
         self.task_store.complete_generation(generation=job.generation)
 
     def save_result(self, result: TaskRolloutResult) -> None:

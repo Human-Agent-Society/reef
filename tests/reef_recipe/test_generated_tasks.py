@@ -1179,14 +1179,31 @@ def test_a_generation_past_its_deadline_stops_the_checks_that_run(tmp_path: Path
 
 
 @pytest.mark.unit
-def test_a_check_that_raises_ends_the_attempt_and_stops_the_other_checks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("generator_type", [ScriptedGenerator, OverlapGenerator])
+def test_after_a_check_that_raises_no_further_check_starts(
+    tmp_path: Path, generator_type: type[ScriptedGenerator]
+) -> None:
+    task_generator = generator_type([generated(0, 0, 1, 2)], failing="harbor-00000-000")
+    p, _ = rounds(tmp_path, task_generator, rounds=1, generation_attempts=1)
+    assert not looked(p)
+    assert "the checks could not run" in p.status()["task_generation"]["last_error"]
+    assert task_generator.validated == ["harbor-00000-000"]
+    assert p.record2sample.task_store.generation(0).pending_indices == (0, 1, 2)
+
+
+@pytest.mark.unit
+def test_a_check_that_raises_ends_the_attempt_when_the_checks_that_run_with_it_end(tmp_path: Path) -> None:
     task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)], failing="harbor-00000-000")
     p, _ = rounds(tmp_path, task_generator, rounds=1, validation_concurrency=2, generation_attempts=1)
     assert not looked(p), "a generation whose attempts ran out hands out none of its tasks"
     assert "the checks could not run" in p.status()["task_generation"]["last_error"]
-    assert {0, 2, 3} <= set(p.record2sample.task_store.generation(0).pending_indices)
-    assert set(task_generator.validated) <= {"harbor-00000-000", "harbor-00000-001"}, "the waiting checks never ran"
-    assert task_generator.in_flight == 0, "the running checks were stopped, not left running"
+    assert sorted(task_generator.validated) == ["harbor-00000-000", "harbor-00000-001"]
+    assert p.record2sample.task_store.generation(0).pending_indices == (
+        0,
+        2,
+        3,
+    ), "the check that ran saved its outcome"
+    assert task_generator.in_flight == 0
 
 
 def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedback(tmp_path: Path) -> None:
@@ -1289,6 +1306,7 @@ def test_an_identical_candidate_in_the_same_generation_is_rejected_as_a_duplicat
     state = p.record2sample.task_store.generation(0)
     assert state is not None and train_task_names(state) == ("harbor-00000-000",)
     assert state.candidates is not None and "is already published" in state.candidates[1].error
+    assert task_generator.validated == ["harbor-00000-000"], "the copy is refused without a check"
 
 
 def test_a_task_whose_submission_did_not_commit_is_handed_out_again_after_a_restart(tmp_path: Path) -> None:
