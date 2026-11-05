@@ -540,7 +540,13 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
     try:
         session = storage.open("s")
         step = {"algorithm_state": {}, "high_water_sequence": 0, "high_water_offset": 0, "scenario": "s"}
-        published = CommitRecord(step=1, snapshot=SnapshotRef("a1", None), checkpoint=True, **step)
+        published = CommitRecord(
+            step=1,
+            snapshot=SnapshotRef("a1", None),
+            checkpoint=True,
+            selection=ArtifactSelection({"model": "a1"}),
+            **step,
+        )
         kept = CommitRecord(step=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
         session.commit_step(expected_step=0, commit=published)
         session.commit_step(expected_step=1, commit=kept)

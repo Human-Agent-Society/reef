@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
-from reef.core.components import COMPONENTS_METADATA_KEY, SnapshotComponents, legacy_artifact_id, snapshot_components
+from reef.core.components import COMPONENTS_METADATA_KEY, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 
 # Re-export the pure identity types while keeping ``reef.core`` independent of
@@ -138,8 +138,7 @@ class Artifact:
         """The artifact that this value holds: the artifact of a component view, or the only component of a snapshot.
 
         New artifacts record an independent ID before publication. A component
-        view keeps that ID when another snapshot carries it. Legacy snapshots
-        without an explicit ID use their original revision-based identity.
+        view keeps that ID when another snapshot carries it.
         A snapshot containing several components has no single artifact ID;
         callers must select a component.
         """
@@ -151,7 +150,7 @@ class Artifact:
             return materialized._artifact_id
         manifest = materialized.components
         if manifest is None:
-            return legacy_artifact_id(self.ref.revision, None)
+            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} names no artifact ID")
         if not manifest.single:
             raise ArtifactNotFound(
                 f"snapshot {self.ref.revision!r} holds components {list(manifest.names)}; name one of them"

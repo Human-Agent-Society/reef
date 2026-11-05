@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from threading import Lock, Thread
 
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.components import legacy_artifact_id
 from reef.observability.base import (
     ExperimentTracker,
     TrainFromExperimentEvent,
@@ -101,30 +100,24 @@ class ExperimentReportQueue:
 def training_starts(source: ArtifactSelection, commit: CommitRecord) -> ArtifactSelection:
     """Apply one committed training-start change to a component-to-artifact mapping.
 
-    New records supply a selection. Older records supply component IDs, or
-    the historical snapshot identity for a flat scenario. Other operations
-    leave every training start unchanged.
+    The record supplies its component IDs. Other operations leave every training start unchanged.
     """
     if not commit.sets_training_start:
         return source
+    if commit.artifact_ids is None:
+        raise ValueError("a training-start change requires component artifact IDs")
     components = dict(source.components)
     if commit.component is not None:
         name = commit.component
     elif len(components) == 1:
         name = next(iter(components))
-    elif commit.artifact_ids is not None:
+    else:
         # A single trainer can train a complete multi-component snapshot.
         # Its records have no trainer component and replace the whole start.
         return ArtifactSelection(commit.artifact_ids)
-    else:
-        raise ValueError("a composite training-start change requires component artifact IDs")
     if name not in components:
         raise ValueError(f"unknown training component {name!r}")
-    components[name] = (
-        legacy_artifact_id(commit.snapshot.revision, None if len(components) == 1 else name)
-        if commit.artifact_ids is None
-        else commit.artifact_ids[name]
-    )
+    components[name] = commit.artifact_ids[name]
     return ArtifactSelection(components)
 
 

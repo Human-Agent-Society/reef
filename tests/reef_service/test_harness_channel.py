@@ -271,7 +271,7 @@ def test_an_unknown_version_is_a_404_naming_it_and_the_install_route_is_gone(tmp
 
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, ())) as client:
-            response = await client.get("/reef/harness", params={"release_id": "no-such-version"}, headers=HEADERS)
+            response = await client.get("/reef/harness", params={"artifact_id": "no-such-version"}, headers=HEADERS)
             assert response.status == 404 and "no-such-version" in await response.text()
             response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=HEADERS)
             assert response.status == 404

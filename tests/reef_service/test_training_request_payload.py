@@ -100,7 +100,7 @@ def test_a_request_carries_json_job_parameters_and_omits_empty_ones() -> None:
 
 
 def test_legacy_identity_is_normalized_to_artifact_id():
-    payload = {"text": "Train", "session": "s", "release_id": "legacy"}
+    payload = {"text": "Train", "session": "s", "artifact_id": "legacy"}
     assert TrainingRequest.from_dict(payload).to_dict() == {
         "text": "Train",
         "session": "s",
