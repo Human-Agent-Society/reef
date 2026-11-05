@@ -78,7 +78,7 @@ def _step(scenario, component: str, step: int) -> str:
     for record in _records(step, scenario.serving_artifact_id()):
         scenario.records.append(record)
     make_samples(scenario)
-    result = scenario.prepare_training_step(component)
+    result = scenario.next_commit(component)
     assert result is not None
     scenario.commit(result, component=component)
     finish_job(scenario, component)
@@ -88,7 +88,7 @@ def _step(scenario, component: str, step: int) -> str:
 def _job_step(scenario, component: str):
     """The next prepared step of ``component``'s job loop; the training worker runs each job on its own thread."""
     deadline = time.monotonic() + 10
-    while (result := scenario.prepare_training_step(component)) is None:
+    while (result := scenario.next_commit(component)) is None:
         assert time.monotonic() < deadline, "the training job did not move"
         time.sleep(0.01)
     return result
