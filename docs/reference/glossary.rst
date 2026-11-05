@@ -198,10 +198,10 @@ call to a model.
 Training objective
 ------------------
 
-The method-owned ``TrainingObjective`` declares its backend loss family and
-prepares a job's complete reserved data. Its ``prepare`` method returns advantages,
+A backend's objective (``SlimeObjective`` or ``TinkerObjective``) declares its
+loss family and prepares a job's complete reserved data. Its ``prepare`` method returns advantages,
 metrics, and proposed algorithm state in a ``TrainingSignal`` before optimizer or
-worker partitioning. It imports no training stack. A recipe selects it by
+worker partitioning. A recipe selects it through the job parameter ``objective``, by
 registered name or dotted class/instance path. The training component cuts
 each job's data into optimizer steps. The objective declares the rows that one step
 keeps together (``rollout_unit``) and rejects a job's step schedule that its
@@ -210,8 +210,7 @@ loss cannot train.
 Loss family
 -----------
 
-The backend implementation selected by ``TrainingObjective.loss_family`` and
-exposed through ``WeightTrainingSpec.loss_family``. It computes model-dependent
+The backend implementation that an objective's ``loss_family`` selects. It computes model-dependent
 terms and the tensor loss. Shipped method families include ``sao``, ``tttd``,
 and ``openclawrl``.
 
@@ -390,7 +389,7 @@ Rollout
 
 One run of one task by the policy model in weight training or in a checkpoint
 evaluation. It gives one trajectory and one score, as a harness run does. A
-Tinker task job runs each task ``rollouts_per_task`` times on the job's start
+task job runs each task ``rollouts_per_task`` times on the job's start
 weights.
 
 Patch

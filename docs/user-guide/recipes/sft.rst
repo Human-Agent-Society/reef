@@ -67,7 +67,7 @@ The training component renders each sample with the model's chat template
 a sample that cannot render or that is longer than ``max_tokens``, and counts
 it in the job metric ``unrenderable_samples``.
 
-The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
+The ``sft`` objective, built in on Slime and on Tinker, sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
 ``sft_loss``. On Tinker, the built-in ``sft`` family trains Tinker's
 ``cross_entropy`` on the target tokens (``training.backend: tinker``). Both
@@ -287,15 +287,17 @@ SFT, then RL on uploaded tasks
 
 The recipe gives parameters to trajectory jobs only. An uploaded train task
 (a task item in the ``train`` split, ``POST /reef/namespaces/{owner}/data/tasks``) trains in ``manual``
-mode, for a request whose ``parameters`` give its job's method and
-rollout. Thus one scenario runs SFT first and then RL:
+mode, for a request whose ``parameters`` give its job's objective and
+rollouts. The recipe gives task jobs no objective, so a request without one is
+refused. Thus one scenario runs SFT first and then RL:
 
 1. Set the scenario to ``manual``, and create the trajectories and the tasks as items that it uses.
 2. Send a request that names the trajectories in ``samples``. The job
    trains them with SFT.
 3. Send a request that names the tasks in ``samples``, with
-   ``{"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}``
-   in ``parameters``. The job rolls the tasks out and trains on the rollouts.
+   ``{"objective": "my_methods.objectives:MyObjective", "rollout": {"rollouts_per_task": 4}}``
+   in ``parameters`` (``harbor`` instead of ``rollout`` on Slime), with a method that
+   the deployment provides. The job rolls the tasks out and trains on the rollouts.
 
 The training component must run task jobs: Tinker does, and Slime does with
 its own rollout engines (`Task jobs on Slime
@@ -308,8 +310,8 @@ Train SFT for some jobs of another recipe
 -----------------------------------------
 
 A recipe can train some jobs with SFT, for example its trajectory jobs, and its
-task jobs with a policy objective. Its ``parameters_by_kind()``
-puts ``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
+task jobs with a policy objective. Its ``default_parameters()``
+puts ``"sft"`` in the ``objective``
 parameter of the jobs of that kind (`Train each kind of sample with its own
 method
 <../../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).

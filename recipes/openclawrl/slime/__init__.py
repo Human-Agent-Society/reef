@@ -12,8 +12,12 @@ from typing import Any
 
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
 from reef.train.slime_backend.data_builder import build_policy_rollout_data
+from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.types import JobData, trajectories
 
 _HINT_SELECTIONS = ("shortest", "token_optimal", "sequence_optimal")
 _SUBSET_MODES = ("student", "overlap", "teacher")
@@ -241,4 +245,32 @@ class OpenclawrlAlgorithm(SlimeAlgorithm):
         return openclawrl_sample_row(sample)
 
 
-__all__ = ["OpenclawrlAlgorithm", "OpenclawrlSettings", "build_openclawrl_rollout_data", "openclawrl_sample_row"]
+@register_slime_objective
+class OpenClawRLObjective(SlimeObjective):
+    name = "openclawrl"
+    loss_family = "openclawrl"
+    # The OPD branch takes its old-policy log-probs from the same actor forward
+    # that produces the current ones, so a second pass would train against the
+    # wrong policy; the Slime spec refuses --num-steps-per-rollout>1 for the same reason.
+    supports_multiple_epochs = False
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
+        # The upstream top-K loss consumes raw rewards without normalization.
+        advantages = tuple(trajectory_reward(sample) for sample in samples)
+        steps = next_steps(state)
+        return TrainingSignal(
+            "train",
+            {"steps": steps},
+            {"advantages": advantages, "steps": steps},
+            advantages,
+        )
+
+
+__all__ = [
+    "OpenClawRLObjective",
+    "OpenclawrlAlgorithm",
+    "OpenclawrlSettings",
+    "build_openclawrl_rollout_data",
+    "openclawrl_sample_row",
+]
