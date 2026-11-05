@@ -926,9 +926,14 @@ answers.
 
 #. Stop every Reef process that writes to the deployment.
 #. Back up the deployment (see `Back up a deployment`_).
-#. Upgrade Reef, and upgrade ``reef-client`` on each machine with an install.
-   An older ``reef-client`` fails on the new harness answers. A new one reads
-   an existing install, and updates the install at its next sync.
+#. Upgrade Reef, and do not start it yet. Upgrade ``reef-client`` on each machine
+   with an install. An older ``reef-client`` fails on the new harness answers. A
+   new one reads an existing install, and updates the install at its next sync.
+#. Run ``reef check-artifacts -c <config>``. It reads each scenario's commit
+   history and fetches each stored release that the history names, so it can
+   need as much disk space as all the releases. It prints each problem, and it
+   exits with status 1 when it finds one. Fix each problem before you continue.
+   You can run it again at any time.
 #. Start Reef. It binds the artifact IDs of older records when it opens each
    scenario. This step can run again after a stop.
 
