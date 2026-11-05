@@ -91,7 +91,7 @@ def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
         # The tree's checksum names the head that the step ran on.
         assert checkpoint.metrics["head_checksum"] == PI_SEED.checksum()
         assert "head_release_id" not in checkpoint.metrics
-        assert checkpoint.path == checkpoint.release_path
+        assert checkpoint.path == checkpoint.artifact_path
         assert HarnessTree.read(Path(checkpoint.path)) == PI_SEED.apply(MARKER)
         # The next job starts from the checkpoint and continues the state after this job.
         component.submit(job(component, "two", start=checkpoint.path, previous="one"))
@@ -173,13 +173,13 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
 @pytest.mark.unit
 def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
-    assert component.release_format is None and component.shares_scenarios
+    assert component.artifact_format is None and component.shares_scenarios
     assert component.default_start().files == dict(PI_SEED.files)
     # An imported start is a copy of the release's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
     # An import's directory holds the tree alone.
-    component.check_release(DirectoryFiles(release))
+    component.check_artifact(DirectoryFiles(release))
     (release / ".gitattributes").write_text("* filter=lfs\n")
     (release / "reef-artifact.json").write_text("{}\n")
     start = component.import_start(release)

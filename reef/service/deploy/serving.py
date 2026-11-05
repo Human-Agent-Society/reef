@@ -4,7 +4,7 @@ The serving runtime is chosen and configured here, not by the training
 backend. ``serving_mode`` reads ``inference.serving`` (or its default), and
 ``serving_runtime_config`` writes the runtime config that the HTTP service
 builds once the training component exists, because the engines need the
-component's ``ReleaseFormat``. The training backend contributes only its
+component's ``ArtifactFormat``. The training backend contributes only its
 default mode and, for ``trainer`` serving, the config of its own serving
 runtime.
 """
@@ -18,7 +18,7 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.execution.executor.config import role_executor_settings
 from reef.inference.interfaces import InferenceHandler
@@ -156,15 +156,15 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> N
 
 
 def serving_runtime_config(
-    settings: ServiceConfig, backend: TrainingDeployment, release_format: ReleaseFormat | None
+    settings: ServiceConfig, backend: TrainingDeployment, artifact_format: ArtifactFormat | None
 ) -> dict[str, Any]:
-    """The runtime config of the deployment's serving, for releases of ``release_format``.
+    """The runtime config of the deployment's serving, for releases of ``artifact_format``.
 
     ``engines`` gives a ``remote_serving`` config over the resolved engine
     settings, the inference component of ``inference.remote`` and the
     ``rollout`` role's executor. ``trainer`` gives the backend's own config,
     and ``none`` the null runtime. A ``module:Factory`` gets
-    ``inference.serving-config`` and the release format as ``release_format``
+    ``inference.serving-config`` and the release format as ``artifact_format``
     (``None`` when the releases hold no weight files). Raise
     ``DeployConfigError`` when Reef's engines would serve releases without
     weight files.
@@ -181,17 +181,17 @@ def serving_runtime_config(
         return {
             **dict(settings.inference_serving_config),
             "type": mode,
-            "release_format": None if release_format is None else release_format.to_dict(),
+            "artifact_format": None if artifact_format is None else artifact_format.to_dict(),
         }
     weights: str | Mapping[str, Any] | None = None
-    if release_format is None:
+    if artifact_format is None:
         engine_weights = backend.engine_weights(asdict(settings))
         if engine_weights is None:
             raise DeployConfigError(
                 "the training backend's releases hold no weight files that engines load, and it names no way to "
                 "fetch them; set inference.serving: trainer"
             )
-        release_format, weights = engine_weights.release_format, engine_weights.weights
+        artifact_format, weights = engine_weights.artifact_format, engine_weights.weights
     if (
         settings.inference_backend is None
         or settings.inference_num_gpus is None
@@ -204,7 +204,7 @@ def serving_runtime_config(
     config: dict[str, Any] = {
         "type": "remote_serving",
         "remote": dict(settings.inference_remote),
-        "release_format": release_format.to_dict(),
+        "artifact_format": artifact_format.to_dict(),
         "engine": settings.inference_backend,
         "num_gpus": settings.inference_num_gpus,
         "tensor_parallel_size": settings.tensor_parallel_size,

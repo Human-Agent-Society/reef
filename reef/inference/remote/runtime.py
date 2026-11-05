@@ -5,7 +5,7 @@ control plane controls the component itself and serves published releases
 (kind ``remote_serving``): each scenario's adapter
 (``reef.inference.serving.AdapterServingRuntime``) or one scenario's full
 weights (``reef.inference.serving.FullWeightServingRuntime``), as the training
-component's ``ReleaseFormat`` says. The runtime builds the engines' input from
+component's ``ArtifactFormat`` says. The runtime builds the engines' input from
 the deployment's ``inference`` settings and that format; no training backend
 takes part.
 """
@@ -18,7 +18,7 @@ from typing import Any
 
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import RuntimeConfigError
-from reef.core.weight_layout import ReleaseFormat, ReleaseWeights
+from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
 from reef.inference.http import ProviderRequestHeaders
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory
@@ -42,7 +42,7 @@ def serving_engine_config(
     num_gpus: int,
     tensor_parallel_size: int,
     options: Mapping[str, Any],
-    release_format: ReleaseFormat,
+    artifact_format: ArtifactFormat,
     adapter_capacity: int,
     prefix_sharing: bool,
     executor: str,
@@ -76,7 +76,7 @@ def serving_engine_config(
     }
     if engine == "vllm":
         # The serving assembly already refused more than one vLLM engine (``prepare_engine_serving``).
-        if release_format.layout != "full":
+        if artifact_format.layout != "full":
             raise ValueError("inference.backend: vllm serves full weights only, not PEFT adapter releases")
         values.setdefault("trust_remote_code", True)
         return {**placement, "options": values, "env_vars": {}}
@@ -94,13 +94,13 @@ def serving_engine_config(
         enable_metrics=True,
         incremental_streaming_output=True,
     )
-    if release_format.layout == "adapter":
+    if artifact_format.layout == "adapter":
         values.update(
             enable_lora=True,
-            max_lora_rank=release_format.adapter_rank,
+            max_lora_rank=artifact_format.adapter_rank,
             max_loaded_loras=adapter_capacity,
             max_loras_per_batch=adapter_capacity,
-            lora_target_modules=list(release_format.adapter_target_modules),
+            lora_target_modules=list(artifact_format.adapter_target_modules),
             tokenizer_worker_num=1,
         )
     # SGLang reads its own variables on the component's host.
@@ -113,8 +113,8 @@ class RemoteServingRuntimeConfig:
     """Options of the inference service's runtime for published weights that engines on an inference component serve.
 
     Values: ``remote`` is an ``inference.remote`` section that
-    ``RemoteInferenceSettings.from_mapping`` accepts. ``release_format`` is a
-    ``ReleaseFormat`` as ``to_dict`` writes it. ``engine`` is the non-empty
+    ``RemoteInferenceSettings.from_mapping`` accepts. ``artifact_format`` is a
+    ``ArtifactFormat`` as ``to_dict`` writes it. ``engine`` is the non-empty
     engine backend the component starts. ``num_gpus``,
     ``tensor_parallel_size``, ``adapter_capacity`` and ``inference_timeout_s``
     are positive, and ``num_gpus`` is a multiple of ``tensor_parallel_size``.
@@ -122,15 +122,15 @@ class RemoteServingRuntimeConfig:
     ``inference_handler_config`` the request handler's own options.
     ``executor`` and ``executor_options`` select the engines' executor (the
     ``rollout`` role). ``weights`` is ``None``, which reads each release's own
-    files (``ReleaseFiles``), or a ``ReleaseWeights`` plugin reference.
+    files (``ArtifactWeightFiles``), or a ``ArtifactWeights`` plugin reference.
     Purpose: the serving assembly writes the value from the deployment's
     ``inference`` settings and the training backend's engine weights;
     ``RemoteServingRuntimeFactory`` reads it.
     """
 
     remote: Mapping[str, Any] = field(metadata=config_metadata("The inference.remote section."))
-    release_format: Mapping[str, Any] = field(
-        metadata=config_metadata("The format of the weights the engines load, as ReleaseFormat.to_dict writes it.")
+    artifact_format: Mapping[str, Any] = field(
+        metadata=config_metadata("The format of the weights the engines load, as ArtifactFormat.to_dict writes it.")
     )
     engine: str = config_option("sglang", help="Engine backend that the component starts.")
     num_gpus: int = config_option(1, help="GPUs the component's engines use.")
@@ -147,14 +147,14 @@ class RemoteServingRuntimeConfig:
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
     weights: str | Mapping[str, Any] | None = config_option(
-        None, help="A ReleaseWeights plugin that gives each release's weight files; unset reads the release's own."
+        None, help="A ArtifactWeights plugin that gives each release's weight files; unset reads the release's own."
     )
 
     def __post_init__(self) -> None:
         RemoteInferenceSettings.from_mapping(self.remote)
-        ReleaseFormat.from_dict(self.release_format)
+        ArtifactFormat.from_dict(self.artifact_format)
         if self.weights is not None:
-            ReleaseWeights.reference(self.weights, setting="runtime.weights")
+            ArtifactWeights.reference(self.weights, setting="runtime.weights")
         if not isinstance(self.engine, str) or not self.engine.strip():
             raise ValueError("runtime.engine must be a non-empty string")
         for name, options in (
@@ -242,11 +242,11 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
             inference_token = remote.token(remote.inference_token_env, environ)
         except ValueError as exc:
             raise RuntimeConfigError(str(exc)) from exc
-        release_format = ReleaseFormat.from_dict(config["release_format"])
+        artifact_format = ArtifactFormat.from_dict(config["artifact_format"])
         weights = (
             None
             if config.get("weights") is None
-            else ReleaseWeights.from_setting(config["weights"], setting="runtime.weights")
+            else ArtifactWeights.from_setting(config["weights"], setting="runtime.weights")
         )
         try:
             engine_config = serving_engine_config(
@@ -255,7 +255,7 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
                 num_gpus=config["num_gpus"],
                 tensor_parallel_size=config["tensor_parallel_size"],
                 options=config["options"],
-                release_format=release_format,
+                artifact_format=artifact_format,
                 adapter_capacity=config["adapter_capacity"],
                 prefix_sharing=config["prefix_sharing"],
                 executor=config["executor"],
@@ -280,7 +280,7 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
         )
         # Building the runtime touches no engine: only the inference owner opens it, in every layout.
         engines = ComponentEngines(service)
-        if release_format.layout == "adapter":
+        if artifact_format.layout == "adapter":
             return AdapterServingRuntime(
                 engines,
                 handler,
