@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import itertools
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from threading import RLock
 
@@ -78,17 +78,6 @@ class CommitHistory(ABC):
     @abstractmethod
     def locked(self) -> AbstractContextManager[None]:
         """Serialize a read-check-append sequence with other sessions and processes."""
-
-    @abstractmethod
-    def stored_commits(self) -> Mapping[int, str]:
-        """The stored JSON text of each commit, by step."""
-
-    @abstractmethod
-    def rewrite(self, records: Sequence[CommitRecord]) -> None:
-        """Store each of ``records`` over the commit of its step, in one transaction, for ``reef migrate-commits``.
-
-        Train counts do not change. Raise ``CommitHistoryError``, and change nothing, when a step has no commit.
-        """
 
     def training_run_position(self) -> tuple[int, int]:
         """Return the step of the latest new training start and the number of training steps after it."""

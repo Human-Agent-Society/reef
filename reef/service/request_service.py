@@ -174,7 +174,6 @@ class RequestService:
     def harness_manifest(
         self,
         headers: Mapping[str, str],
-        release_id: str | None = None,
         form: str = "rendered",
         service_url: str | None = None,
         root: str | None = None,
@@ -183,10 +182,9 @@ class RequestService:
     ) -> dict[str, Any]:
         """The served tree plus its parent snapshot and evaluation metrics.
 
-        ``artifact_id`` addresses a harness artifact. ``release_id`` remains a legacy selector for older clients.
-        It addresses one catalog release instead of the
+        ``artifact_id`` addresses one harness artifact instead of the
         active selection, so a consumer can pin or go back by pulling an older
-        tree; an unknown or unrestorable release raises ArtifactNotFound
+        tree; an unknown or unrestorable artifact raises ArtifactNotFound
         naming it. ``form`` chooses the ``files``: ``rendered`` (the default)
         is the snapshot rendered for the scenario's adapter, ``source`` is
         its source tree, the paths a patch names, and ``client`` is the
@@ -209,7 +207,7 @@ class RequestService:
                 "the client installs the files in"
             )
         scenario = self._file_scenario(headers)
-        selected = self.harness_artifact(scenario, artifact_id, release_id)
+        selected = self.harness_artifact(scenario, artifact_id)
         manifest = self.harness_manifest_for_artifact(scenario, selected, source=form != "rendered")
         if form == "client" and service_url is not None and root is not None:
             descriptor = self.harness_descriptor(scenario)
@@ -240,8 +238,7 @@ class RequestService:
         """Commit a sync of a person's harness files: ``POST /reef/harness/import``.
 
         ``payload["files"]`` maps each file's path under the adapter's render
-        roots to its text. ``payload["base_artifact_id"]`` identifies the installed artifact. Older clients may
-        send ``base_release_id`` instead. The files become the tree that
+        roots to its text. ``payload["base_artifact_id"]`` identifies the installed artifact. The files become the tree that
         ``reef.harness.sync.import_files`` reads against the base, and
         ``merge_trees`` puts the client's changes on the tree of the active
         artifact, not on the training start: a kept
@@ -266,11 +263,9 @@ class RequestService:
         component = scenario.components.files_component
         if component is None:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
-        if payload.get("base_artifact_id") is None and payload.get("base_release_id") is None:
+        if payload.get("base_artifact_id") is None:
             raise ValueError("base_artifact_id must be the artifact the client installed")
-        base_artifact = self.harness_artifact(
-            scenario, payload.get("base_artifact_id"), payload.get("base_release_id")
-        )
+        base_artifact = self.harness_artifact(scenario, payload.get("base_artifact_id"))
         base_artifact_id = scenario.components.component_artifact(base_artifact, component).artifact_id
         descriptor = self.harness_descriptor(scenario)
         expected_selection = scenario.artifact_selection()
@@ -370,21 +365,12 @@ class RequestService:
         return scenario.trainer_for(scenario.components.files_component)
 
     @staticmethod
-    def harness_artifact(scenario: Scenario, artifact_id: object, legacy_revision: object) -> Artifact:
-        """The snapshot that holds the harness a client names.
-
-        A client names it by ``artifact_id``, or by ``legacy_revision``, the
-        release ID of an older client. When both are None, it is the active
-        harness. Raise ``ValueError`` when both are given or one is not a
-        non-empty string.
+    def harness_artifact(scenario: Scenario, artifact_id: object) -> Artifact:
+        """The snapshot that holds the harness that a client names by ``artifact_id``; the active harness when it is
+        None. Raise ``ValueError`` when it is not a non-empty string.
         """
-        if artifact_id is not None and legacy_revision is not None:
-            raise ValueError("give artifact_id or the legacy release_id, not both")
-        for name, value in (("artifact_id", artifact_id), ("release_id", legacy_revision)):
-            if value is not None and (not isinstance(value, str) or not value):
-                raise ValueError(f"{name} must be a non-empty string")
-        if isinstance(legacy_revision, str):
-            return scenario.snapshot_queries.artifact_for_version(legacy_revision)
+        if artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id):
+            raise ValueError("artifact_id must be a non-empty string")
         component = scenario.components.files_component
         if not isinstance(artifact_id, str):
             if component is None:

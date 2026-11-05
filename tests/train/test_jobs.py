@@ -445,7 +445,7 @@ def train_record(record_id: str, parameters: dict, sample_id: str) -> TrainingRe
     payload = {
         "text": "train",
         "session": "s-1",
-        "release_id": "r-1",
+        "artifact_id": "r-1",
         "parameters": parameters,
         "samples": [sample_id],
     }

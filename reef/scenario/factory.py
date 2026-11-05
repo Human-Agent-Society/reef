@@ -32,7 +32,7 @@ from reef.artifact.repository import (
     selection_digest,
 )
 from reef.artifact.sources import SourceFiles
-from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
@@ -174,9 +174,9 @@ class ItemStart:
 
 @dataclass(frozen=True)
 class RecoveredTrainerState:
-    """What one component's trainer recovers from its own commits and drops: state, cursor, and consumed rows.
+    """What one component's trainer recovers from its own commits: state, cursor, and consumed rows.
 
-    ``committed_ids`` holds the IDs that its commits and drops named. ``consumed_ids`` holds those and the records that
+    ``committed_ids`` holds the IDs that its commits named. ``consumed_ids`` holds those and the records that
     its stored samples consumed.
     """
 
@@ -189,32 +189,25 @@ class RecoveredTrainerState:
 def recovered_trainer_states(
     store: ScenarioStore, scenario: str, head_record: CommitRecord | None, components: ScenarioComponents
 ) -> dict[str, RecoveredTrainerState]:
-    """What each component's trainer recovers from its own commits and its own stale drops.
+    """What each component's trainer recovers from its own commits.
 
     The only trainer of a one-component (or record-only) scenario owns every
-    training commit and consumption receipt, which name no component.
+    training commit, which names no component.
     Activations and new training starts carry no trainer state, so no
     trainer recovers from them. The records that a trainer's stored samples
     consumed (``TrainingState.consumed_record_ids``) count as consumed too, so a
-    replay never makes their samples again. A drop is a step without
-    a commit that an earlier Reef version recorded as a consumption receipt:
-    its rows count as consumed, and the state and the cursor stay the last
-    commit's.
+    replay never makes their samples again.
 
     Rehydration must skip consumed rows: retention may keep a consumed row
     stored (audit-only retention is contract-legal), and pushing one again would
     train it twice. Consumption is permanent, so the union over the whole log
-    and every receipt is the exclusion set; with several trainers each keeps
-    its own share, the rows of its own commits and of its own stale drops.
+    is the exclusion set; with several trainers each keeps its own share, the rows
+    of its own commits.
     """
     records = committed_records(store, head_record)
     consumed_by_component: dict[str | None, set[str]] = {}
     for record in records:
         consumed_by_component.setdefault(record.component, set()).update(record.consumed_ids)
-    for receipt in store.records.consumption_receipts(scenario):
-        named = receipt["metadata"].get("component")
-        owner = named if isinstance(named, str) else None
-        consumed_by_component.setdefault(owner, set()).update(receipt["consumed_ids"])
     names = components.names or (RECORDS_COMPONENT,)
     alone = len(names) == 1
     states: dict[str, RecoveredTrainerState] = {}
@@ -430,9 +423,7 @@ class ScenarioFactory:
             registration,
             checkpoint_head=checkpoint_head,
             components=(
-                None
-                if components.single or registered_components is None
-                else registered_components.artifact_ids(checkpoint_head.revision)
+                None if registered_components is None else registered_components.artifact_ids(checkpoint_head.revision)
             ),
         )
         if registered_name != name:
@@ -440,8 +431,6 @@ class ScenarioFactory:
         # What served after the artifact head's commit; the commit history's activations come after it.
         served_at_head = served_snapshot(registration, checkpoint_head=checkpoint_head)
         start_artifact = backend.resolve_snapshot(start_artifact.revision)
-        # A root registered before artifact IDs existed has no bindings yet; indexing a bound root changes nothing.
-        backend.index_snapshot(start_artifact)
         checkpoint_step = 0 if checkpoint is None else checkpoint.step
         runtime = self._recipe.runtime
         store = self._storage.open(name)
@@ -475,21 +464,11 @@ class ScenarioFactory:
             )
             active_selection = registration.get("active_selection")
             records = committed_records(store, head_record)
-            # Older selections name the storage snapshots of their artifacts; index them, so the IDs resolve.
-            legacy_locators = {
-                *(() if active_selection is None else legacy_selection_locators(active_selection).values()),
-                *(locator for record in records for locator in record.legacy_locators.values()),
-            }
-            for locator in legacy_locators:
-                backend.index_snapshot(locator)
             if active_selection is not None:
                 repository.remember_selection(served_at_head, ArtifactSelection.from_dict(active_selection))
             for record in records:
                 if record.selection is not None:
                     repository.remember_selection(record.snapshot, record.selection)
-                elif record.snapshot.durable:
-                    # Only an older record has no selection: current records bind their IDs when they publish.
-                    backend.index_snapshot(record.snapshot)
             repository.synchronize_checkpoint()
 
             root_artifacts = repository.selection(start_artifact, components.names or (RECORDS_COMPONENT,))
