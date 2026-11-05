@@ -57,15 +57,6 @@
      }
     }
    ],
-   "released": [
-    "a",
-    "b",
-    "bad-d",
-    "c",
-    "closer",
-    "e",
-    "f"
-   ],
    "request": null
   }
  ],
@@ -126,15 +117,6 @@
       ]
      }
     }
-   ],
-   "released": [
-    "a",
-    "b",
-    "bad-d",
-    "c",
-    "closer",
-    "e",
-    "f"
    ],
    "request": null
   }
@@ -202,18 +184,6 @@
      }
     }
    ],
-   "released": [
-    "i1",
-    "i1-retry",
-    "i2",
-    "i3",
-    "i4",
-    "r1",
-    "r1-retry",
-    "r2",
-    "r3",
-    "r4"
-   ],
    "request": null
   },
   {
@@ -268,7 +238,6 @@
      }
     }
    ],
-   "released": [],
    "request": null
   }
  ],
@@ -303,21 +272,6 @@
      "training": {}
     }
    ],
-   "released": [
-    "i-c-0",
-    "i-c-1",
-    "i-c-2",
-    "i-c-3",
-    "i-c-4",
-    "i-c-5",
-    "r-c-0",
-    "r-c-1",
-    "r-c-2",
-    "r-c-3",
-    "r-c-4",
-    "r-c-5",
-    "train-1"
-   ],
    "request": "train-1"
   },
   {
@@ -339,11 +293,6 @@
      ],
      "training": {}
     }
-   ],
-   "released": [
-    "i-c-6",
-    "r-c-6",
-    "train-2"
    ],
    "request": "train-2"
   }
@@ -391,14 +340,6 @@
      "training": {}
     }
    ],
-   "released": [
-    "i0",
-    "i1",
-    "i2",
-    "r0",
-    "r1",
-    "r2"
-   ],
    "request": null
   },
   {
@@ -437,7 +378,6 @@
      "training": {}
     }
    ],
-   "released": [],
    "request": null
   },
   {
@@ -476,7 +416,6 @@
      "training": {}
     }
    ],
-   "released": [],
    "request": null
   }
  ],
@@ -525,14 +464,6 @@
      ],
      "training": {}
     }
-   ],
-   "released": [
-    "i-a-0",
-    "i-single-0",
-    "i-z-0",
-    "r-a-0",
-    "r-single-0",
-    "r-z-0"
    ],
    "request": null
   }
@@ -666,20 +597,6 @@
      }
     }
    ],
-   "released": [
-    "report-s0r0",
-    "report-s0r1",
-    "report-s1r0",
-    "report-s1r1",
-    "report-s2r0",
-    "report-s2r1",
-    "s0r0",
-    "s0r1",
-    "s1r0",
-    "s1r1",
-    "s2r0",
-    "s2r1"
-   ],
    "request": null
   },
   {
@@ -798,7 +715,6 @@
      }
     }
    ],
-   "released": [],
    "request": null
   }
  ],
@@ -843,20 +759,6 @@
      "training": {}
     }
    ],
-   "released": [
-    "i-g1-0",
-    "i-g1-1",
-    "i-g1-retry",
-    "i-g2-0",
-    "i-g2-1",
-    "i-g2-2",
-    "r-g1-0",
-    "r-g1-1",
-    "r-g1-retry",
-    "r-g2-0",
-    "r-g2-1",
-    "r-g2-2"
-   ],
    "request": null
   },
   {
@@ -890,12 +792,6 @@
      ],
      "training": {}
     }
-   ],
-   "released": [
-    "i-g1-2",
-    "i-g1-3",
-    "r-g1-2",
-    "r-g1-3"
    ],
    "request": null
   }
@@ -1003,24 +899,6 @@
      }
     }
    ],
-   "released": [
-    "i-0-0-0",
-    "i-0-0-1",
-    "i-0-1-0",
-    "i-0-1-1",
-    "i-1-0-0",
-    "i-1-0-1",
-    "i-1-1-0",
-    "i-1-1-1",
-    "r-0-0-0",
-    "r-0-0-1",
-    "r-0-1-0",
-    "r-0-1-1",
-    "r-1-0-0",
-    "r-1-0-1",
-    "r-1-1-0",
-    "r-1-1-1"
-   ],
    "request": null
   }
  ],
@@ -1056,12 +934,6 @@
      ],
      "training": {}
     }
-   ],
-   "released": [
-    "i-a-0",
-    "i-a-1",
-    "r-a-0",
-    "r-a-1"
    ],
    "request": null
   },
@@ -1099,14 +971,6 @@
      "training": {}
     }
    ],
-   "released": [
-    "i-a-2",
-    "i-a-3",
-    "i-a-4",
-    "r-a-2",
-    "r-a-3",
-    "r-a-4"
-   ],
    "request": null
   }
  ],
@@ -1143,12 +1007,6 @@
      "training": {}
     }
    ],
-   "released": [
-    "i-a-0",
-    "i-a-1",
-    "r-a-0",
-    "r-a-1"
-   ],
    "request": null
   },
   {
@@ -1184,14 +1042,6 @@
      ],
      "training": {}
     }
-   ],
-   "released": [
-    "i-a-2",
-    "i-a-3",
-    "i-a-4",
-    "r-a-2",
-    "r-a-3",
-    "r-a-4"
    ],
    "request": null
   }

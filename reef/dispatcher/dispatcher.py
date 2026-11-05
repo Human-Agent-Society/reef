@@ -376,7 +376,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             # Another process runs control: this one loaded the scenario only to make its samples.
             return
         self.scenario_committed(instance)
-        self.request_samples(instance)
         self.local_workers.resume(instance)
         self.request_record_copy(instance.name)
         if any(component_trainer.trainer.holds_untrained_records() for component_trainer in instance.trainers):
@@ -384,12 +383,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
     def scenario_committed(self, instance: Scenario) -> None:
         """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it, ask
-        the data service to copy the scenario's artifacts to artifact items, and ask the samples service for a
-        selection.
+        the data service to copy the scenario's artifacts to artifact items, ask the samples service to read the
+        commit, and finish the items of the requests that the commit consumed.
 
         The commit is durable already, so a failed write does not undo it: the publisher's next round writes the rows
-        again, and the next commit asks again. A commit can end a job, and the job's end can make a stage's background
-        work due, such as the next round of generated tasks; no record asks the samples service for it.
+        again, and the next commit asks again. The samples service reads job ends and train counts from the commits,
+        and a stage can act on them without a new record, such as the next round of generated tasks.
         """
         try:
             if self.publisher is not None:
@@ -401,9 +400,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             )
         try:
             self.request_samples(instance)
+            instance.refresh_requests()
         except Exception:
             logger.exception(
-                "scenario %r: the commit is durable, but the samples service was not asked", instance.name
+                "scenario %r: the commit is durable, but the samples service was not asked, or the requests of the "
+                "commit were not finished",
+                instance.name,
             )
 
     def follow_commits(self, current: Scenario) -> Scenario:
