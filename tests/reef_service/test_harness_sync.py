@@ -201,7 +201,7 @@ def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeyp
         deadline = time.monotonic() + 10
         while "sent" not in log.read_text() and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert "sent plugin/skills/learned/SKILL.md as release" in log.read_text()
+        assert "sent plugin/skills/learned/SKILL.md as artifact" in log.read_text()
         assert install.head()["files"]["plugin/skills/learned/SKILL.md"] == learned
         # The person's own rules stay; pi's own command recorded the package beside them.
         assert (home / ".pi" / "agent" / "AGENTS.md").read_text() == "My own rules.\n"
@@ -219,17 +219,17 @@ def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeyp
         _, headers = client.post("/v1/chat/completions", "delivery", {"messages": [{"role": "user", "content": "hi"}]})
         client.report("delivery", {"score": 0.0}, references=[headers["x-reef-agent-record-id"]])
         deadline = time.monotonic() + 10
-        while install.head()["release_id"] == install.record["release_id"] and time.monotonic() < deadline:
+        while install.head()["artifact_id"] == install.record["artifact_id"] and time.monotonic() < deadline:
             time.sleep(0.05)
         with pytest.raises(HarnessSyncError, match=r"both changed plugin/rules\.md"):
             install.sync()
         assert agents.read_text() == "Answer briefly, always.\n"
         # Back to the base text, the rules take the step's, and the new skill merges onto its release.
         agents.write_text("Answer briefly.\n")
-        assert "merged onto release" in install.sync()
+        assert "merged onto artifact" in install.sync()
         assert agents.read_text() == "marker rules\n" and other.exists() and install.changed() == []
         agents.write_text("Dropped.\n")
-        assert "installed release" in install.sync(discard=True)
+        assert "installed artifact" in install.sync(discard=True)
         assert agents.read_text() == "marker rules\n"
         assert "pi runs on its own again" in install.disconnect() and not install_dir.exists()
         assert json.loads((home / ".pi" / "agent" / "settings.json").read_text())["packages"] == []
