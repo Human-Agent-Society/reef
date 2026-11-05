@@ -8,9 +8,10 @@ trainer submits each job's data to a training component through
 training component (``reef.train.harness_backend.component``).
 The GPU stack is reached by full path so importing ``reef.train`` itself stays light.
 
-``algos/`` turns a job's data into a ``TrainingSignal``, the same computation
-whichever training component runs it; how the component cuts the data into
-optimizer steps is the job's ``StepScheduling`` (``reef.train.algos.schedule``).
+``algos/`` holds the mechanics that training components share: what an
+objective computes (``TrainingSignal``) and how a component cuts the data into
+optimizer steps (``reef.train.algos.schedule``). Each component owns its job
+parameters and its objectives, in its own package.
 A harness step runs the recipe's candidate evaluation (``reef.evaluation``)
 inside its job, between prepare and settle.
 

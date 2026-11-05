@@ -16,8 +16,8 @@ packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``gepa``,
 ``meta_harness``, ``ace``, ``reasoning_bank``). Beta methods
 live under ``recipes/beta/`` (``coral``, ``spade``, ``autoenvscaling``,
 ``reefine``) until they publish reproducible results. A weight method holds
-its recipe, processor and training objective, with the ``slime/`` subpackage
-only the training plane imports. A harness method holds its ``Method``, its
+its recipe and processor, with the ``slime/`` subpackage, which holds its
+objective and loss family, that only the training plane imports. A harness method holds its ``Method``, its
 prompts, and a scorer when it needs its own; it adds a recipe subclass only
 when it changes more than the tree, such as the files a client pulls. Nothing
 under ``reef/`` imports a method package.
@@ -210,8 +210,9 @@ Training and inference meet only through contracts that neither side owns.
   ``EngineHealthMonitor``, and ``residency.py`` holds the
   ``AdapterResidencyManager``. These modules import no concrete integration.
 - ``train/component.py`` defines bounded training jobs, the
-  ``TrainingComponent`` interface, and its factories. ``train/method.py``
-  holds ``TrainingMethod`` and its learning-rate schedule.
+  ``TrainingComponent`` interface, and its factories. Each backend package owns
+  its job parameters and objectives. ``train/learning_rate.py`` holds the
+  learning-rate schedule arithmetic that the backends share.
 
 The values that both sides read are in ``core/weight_layout.py``:
 ``ArtifactFormat``, ``WeightFiles`` and ``ArtifactWeights``. In ``tinker/``,

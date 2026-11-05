@@ -192,15 +192,15 @@ def loss_family_job_args(args: SlimeArguments, spec: SlimeAlgorithm) -> SlimeArg
     if spec.requires_driver_options:
         raise RuntimeError(
             f"{source} requires driver options, which only the startup family parses; "
-            "make it the recipe's training_spec() objective"
+            "make its objective the recipe's default objective"
         )
     if (
         type(spec).configure_critic_args is not SlimeAlgorithm.configure_critic_args
         or spec.critic_value_head_zero_init
     ):
         raise RuntimeError(
-            f"{source} configures the critic, which starts with the workers; make it the recipe's "
-            "training_spec() objective"
+            f"{source} configures the critic, which starts with the workers; make its objective the recipe's "
+            "default objective"
         )
     job_args = copy.copy(args)
     job_args.loss_family_ref = loss_family_refs().get(spec.loss_family)

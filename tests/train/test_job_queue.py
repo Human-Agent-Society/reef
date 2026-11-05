@@ -255,12 +255,23 @@ def test_a_queue_component_reports_whether_its_component_starts_from_releases(tm
 
 
 @pytest.mark.unit
+def test_a_queue_component_serves_the_parameters_schema_of_its_component(tmp_path):
+    class Declaring(StepComponent):
+        def parameters_schema(self, kind):
+            return {"title": kind}
+
+    queue = memory_coordination().work_queue
+    assert JobQueueComponent(Declaring(tmp_path / "a"), queue).parameters_schema("task") == {"title": "task"}
+    assert JobQueueComponent(StepComponent(tmp_path / "b"), queue).parameters_schema("task") is None
+
+
+@pytest.mark.unit
 def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     queue = memory_coordination(lease_seconds=300).work_queue
     request = TrainingRequest("prefer tests", "session-1", "release-1", id="r1", parameters={"learning_rate": 1e-5})
     sample = policy_trajectory("s-j1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     data = JobData("s:request:r1", (sample, sample), request=request)
-    parameters = {"method": {"objective": "sft"}, "learning_rate": 1e-5}
+    parameters = {"objective": "sft", "learning_rate": 1e-5}
     instructed = TrainingJob("j1", "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
     summary = {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
     queue.add(

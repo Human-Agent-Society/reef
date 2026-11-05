@@ -52,7 +52,9 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime, inference = connect_training_component(settings, model_path=settings.model_path, loss_family="sao")
+        runtime, inference = connect_training_component(
+            settings, model_path=settings.model_path, default_parameters={}
+        )
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
@@ -112,7 +114,7 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
-            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", loss_family="sao"
+            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
         )
 
 

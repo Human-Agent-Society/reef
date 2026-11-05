@@ -84,7 +84,7 @@ def component():
 
 
 #: The parameters that the tests submit with each job, as a recipe's stage gives them.
-PARAMETERS = {"method": "sft"}
+PARAMETERS = {"objective": "sft"}
 
 
 def loop_with(component, *, scenario="math"):
@@ -124,7 +124,7 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     submitted = loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS)
     result = submitted.result
     [job] = component.jobs
-    assert (job.backend, job.start, job.parameters) == ("fake", "fake:base", {"method": "sft"})
+    assert (job.backend, job.start, job.parameters) == ("fake", "fake:base", {"objective": "sft"})
     assert submitted.ended is None
     assert result.artifact is None and result.training_job_id == job.job_id
     assert result.metrics["training_job"] == {"job_id": job.job_id, "backend": "fake", "event": "submitted"}
@@ -471,7 +471,7 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         training_mode="manual",
         samples=samples.for_trainer(""),
         # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
-        job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
+        job_parameters={"trajectory": {"objective": "sft", "learning_rate": 1e-5}},
         root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
@@ -484,8 +484,8 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         return dict(job.parameters)
 
-    assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"method": "sft", "learning_rate": 2e-5}
-    rl = {"method": "task_group", "rollout": {"rollouts_per_task": 4}}
+    assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"objective": "sft", "learning_rate": 2e-5}
+    rl = {"objective": "provided:Objective", "rollout": {"rollouts_per_task": 4}}
     assert train(train_record("rl", rl, "task-a")) == rl
     assert [type(sample).__name__ for job in component.jobs for sample in read_job_data(job.data_dir).samples] == [
         "TrajectorySample",

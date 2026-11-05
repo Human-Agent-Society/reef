@@ -35,11 +35,9 @@ from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
-from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingArtifactLayout, TrainingComponent
 from reef.train.jobs import JobLoop
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
@@ -426,28 +424,6 @@ class Recipe:
         return None
 
 
-@dataclass(frozen=True)
-class WeightTrainingSpec:
-    """Static machinery a weight-training recipe binds to its configuration.
-
-    Keeping the binding behind one explicit hook leaves the recipe dataclass
-    to describe instance configuration only. The service can still inspect a
-    recipe class without constructing it.
-
-    ``objective`` is the recipe's objective: a registered name or a dotted
-    ``package.module:Objective`` reference. Every job trains with it unless
-    the recipe overrides :meth:`WeightTrainingRecipe.parameters_by_kind`. How a job's
-    data is cut into optimizer steps belongs to the training component.
-    """
-
-    objective: str
-
-    @property
-    def loss_family(self) -> str:
-        """The selected objective owns backend loss selection."""
-        return resolve_objective(self.objective).loss_family
-
-
 #: The component of a weight-training recipe's weights.
 WEIGHTS_COMPONENT = "weights"
 
@@ -460,12 +436,13 @@ class WeightTrainingRecipe(Recipe):
     ``training_component`` (the first positional argument of every training
     recipe), which runs the recipe's training jobs.
 
-    :meth:`training_spec` binds the training objective, which declares its
-    backend loss family. Keeping that static machinery in one structured
-    return value means the dataclass fields remain the recipe's instance
-    configuration. The service reads the selected class from the same
-    deployment config and obtains its loss family from this hook; deployments
-    do not repeat that binding in an environment variable.
+    A job's ``parameters`` belong to its training component, and Reef reads
+    none of them. :meth:`default_parameters` gives the recipe's own default
+    parameters by sample kind, normally the method as ``objective``. The class
+    method keeps the dataclass fields as the recipe's instance configuration.
+    :meth:`configured_parameters` adds the ``job_parameters`` config; the service
+    passes it to the backend when it connects the training component, so a backend
+    that starts with one method reads it there.
 
     ``pipeline_stages`` is framework-owned configuration derived from an
     optional top-level ``pipeline`` section: each stage's class, the recipe's
@@ -483,40 +460,43 @@ class WeightTrainingRecipe(Recipe):
     job_parameters: Mapping[str, Any] | None = config_field(
         None,
         help=(
-            "Job parameters that the recipe sends with every job, beside method; the training component "
-            "refuses a parameter it does not take."
+            "Job parameters that the recipe sends with every job, over its default parameters; the training "
+            "component refuses a parameter it does not take."
         ),
     )
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        """Return the objective binding for this recipe.
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """The recipe's own parameters of a training job, by the kind of the job's samples; empty by default.
 
-        Concrete weight recipes override this hook to name their objective.
+        Each value belongs to the training component, and Reef passes it unread. A recipe normally names its method
+        here, as the ``objective`` that the backends register. A kind can have its own method, and the training
+        component switches the objective from one job to the next.
         """
-        return WeightTrainingSpec(objective="")
+        return {}
+
+    @classmethod
+    def configured_parameters(cls, job_parameters: Mapping[str, Any] | None) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """The parameters of each training job, by the kind of the job's samples, for the ``job_parameters`` config.
+
+        The default is :meth:`default_parameters` with ``job_parameters`` over it, key by key, for every kind. A kind
+        that a result leaves out trains only for a request that gives its parameters. The service reads this hook
+        before it constructs the recipe, and passes the result to the backend when it connects the training component.
+        """
+        defaults = cls.default_parameters()
+        return {kind: {**defaults.get(kind, {}), **(job_parameters or {})} for kind in SAMPLE_KINDS}
 
     def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
-        """The parameters of each training job, by the kind of the job's samples.
+        """This recipe's ``configured_parameters``.
 
-        The pipeline's sample-to-job stage gives a job the parameters of its
-        samples' kind (``Sample2Job.job_parameters``). The default gives every
-        job ``training_spec()``'s objective (the parameter ``method``) and the
-        ``job_parameters`` config, such as a ``scheduling`` or a
-        ``save_interval``. The component's own defaults fill the rest, such as
-        its learning rate. A recipe that trains each kind with its own method,
-        such as SFT on trajectories and a policy objective on tasks, overrides
-        it; the training component switches the objective from one job to the
-        next. The result must be the same at every call: it is part of each
-        job's identity.
+        The pipeline's sample-to-job stage gives a job the parameters of its samples' kind, with its request's
+        parameters merged in (``Sample2Job.job_parameters``). The component's own defaults fill the rest, such as its
+        learning rate. The result must be the same at every call: it is part of each job's identity.
         """
-        method = TrainingMethod(type(self).training_spec().objective).to_dict()
-        return {kind: {**(self.job_parameters or {}), "method": method} for kind in SAMPLE_KINDS}
+        return type(self).configured_parameters(self.job_parameters)
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.job_parameters is not None and "method" in self.job_parameters:
-            raise RecipeConfigError("job_parameters cannot set method: the recipe's objective is the job's method")
         self.resolve_training_component(self.training_component)
         if not isinstance(self.runtime, InferenceRuntime):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
@@ -611,7 +591,7 @@ class WeightTrainingRecipe(Recipe):
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
-        """Build a trainer from this recipe's pipeline, objective, and report contract.
+        """Build a trainer from this recipe's pipeline, job parameters, and report contract.
 
         Override with ``Trainer.build`` for bespoke wiring such as a local
         training backend, and pass :attr:`report_type` and ``task_storage``
@@ -641,20 +621,11 @@ class WeightTrainingRecipe(Recipe):
         root: ScenarioRoot | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
-        spec = type(self).training_spec()
         if type(self).pipeline_spec().sample2job is NoJobData:
             raise TypeError(
                 f"{type(self).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
                 f"from pipeline_spec() or override build() for bespoke trainer wiring"
             )
-        if not spec.objective:
-            raise TypeError(
-                f"{type(self).__name__} declares no objective: return a registered objective name "
-                f"(see reef.train.algos) or a dotted 'module:Objective' path from training_spec(), "
-                f"or override build()"
-            )
-        # Resolve the objective before starting workers, so an unknown reference fails the build.
-        resolve_objective(spec.objective)
         # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
         try:
             return Trainer.build(

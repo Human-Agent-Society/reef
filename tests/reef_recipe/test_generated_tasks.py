@@ -10,14 +10,13 @@ from typing import Any, Self
 
 import pytest
 import sqlalchemy.exc
-from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
+from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, write_harbor_task
@@ -27,7 +26,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecipe, TaskGroupObjective
+from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecipe
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -53,7 +52,6 @@ from reef.storage.commits import CommitRecord
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.tasks import TaskStorage
-from reef.train.algos.registry import resolve_objective
 from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 
@@ -142,32 +140,6 @@ def handed_out_names(p: TrainingPipeline) -> list[str]:
         request = next(iter(p.training_requests.values()), None)
         entries = () if request is None else p.request_entries(request)
     return [sample.metadata["task"]["name"] for _, sample in entries]
-
-
-def sample(task: str, index: int, reward: float) -> TrajectorySample:
-    """One rollout's sample in the task group ``task``, as the training component's rollout makes it."""
-    trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, artifact_id="r1")
-    return dataclasses.replace(trajectory, group_id=task)
-
-
-def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> None:
-    first, second = "harbor-00000-000", "harbor-00000-001"
-    data = JobData("d", (sample(first, 0, 1.0), sample(first, 1, 0.0), sample(second, 0, 0.5), sample(second, 1, 0.5)))
-    objective = resolve_objective("task_group")
-    assert isinstance(objective, TaskGroupObjective) and objective.loss_family == "importance_sampling"
-    signal = objective.prepare(data, {})
-    assert signal.action == "train"
-    assert signal.advantages == (1.0, -1.0, 0.0, 0.0)
-    assert signal.metrics["constant_groups"] == 1
-
-
-def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_count() -> None:
-    tasks = ("harbor-00000-000", "harbor-00000-001")
-    data = JobData("d", tuple(sample(task, index, 1.0) for task in tasks for index in range(2)))
-    signal = resolve_objective("task_group").prepare(data, {"steps": 3})
-    assert signal.action == "skip" and signal.advantages is None
-    assert signal.next_algorithm_state == {"steps": 3}
-    assert signal.metrics == {"constant_groups": 2, "skipped": "every group is constant"}
 
 
 # ------------------------------------------------------------------------------------------------- the rounds
@@ -960,10 +932,8 @@ def training_recipe(**fields: Any) -> GeneratedTaskRecipe:
 
 
 def test_the_recipe_binds_the_objective_and_its_stages() -> None:
-    spec = GeneratedTaskRecipe.training_spec()
-    assert GeneratedTaskRecipe.pipeline_spec().sample2job is GeneratedTaskJobData and spec.objective == "task_group"
-    assert spec.loss_family == "importance_sampling"
-    assert TaskGroupObjective.rollout_unit == "sample"
+    assert GeneratedTaskRecipe.pipeline_spec().sample2job is GeneratedTaskJobData
+    assert GeneratedTaskRecipe.default_parameters() == {}, "the deployment names the objective"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     recipe = training_recipe()
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"

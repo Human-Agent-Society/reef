@@ -84,7 +84,7 @@ def test_client_command_report_is_bounded() -> None:
 
 def test_a_request_carries_json_job_parameters_and_omits_empty_ones() -> None:
     base = {"text": "train", "session": "s", "artifact_id": "r"}
-    parameters = {"method": {"objective": "task_group"}, "learning_rate": 1e-5}
+    parameters = {"objective": "provided:Objective", "learning_rate": 1e-5}
     request = TrainingRequest.from_dict({**base, "parameters": parameters}, request_id="train-1")
     assert request.parameters == parameters
     assert TrainingRequest.from_dict(request.to_dict()) == replace(request, id="")

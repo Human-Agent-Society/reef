@@ -297,11 +297,20 @@ class TrainingComponent(ABC):
         """
         return
 
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
+        """The JSON Schema of the complete parameters of a job of ``kind`` samples, or None when it declares none.
+
+        A job's parameters are the recipe's parameters of that kind with the request's merged in. The default
+        declares none. The scenario contract serves the schema, so a client can validate parameters against it.
+        ``check_job`` still checks each job.
+        """
+        return None
+
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 
         A recipe whose jobs train tasks calls it when it is built, so a deployment that cannot run them fails before
-        any job. ``parameters`` are the recipe's job parameters without the method. The default refuses: the
+        any job. ``parameters`` are the recipe's parameters of a task job. The default refuses: the
         component trains trajectories only. ``check_job`` still checks each job.
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")

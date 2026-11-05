@@ -11,6 +11,7 @@ from typing import Any, Literal, get_args
 from reef.core.errors import DeployConfigError, RuntimeConfigError
 from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
 from reef.execution.executor.arguments import normalize_native_options
+from reef.storage.job_data import JobDataKind
 from reef.train.component import training_component_factory_for
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
@@ -68,13 +69,15 @@ class TrainingDeployment(ABC):
         """
 
     @abstractmethod
-    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(
+        self, settings: Mapping[str, Any], *, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+    ) -> dict[str, Any]:
         """Describe the training component for ``build_training_component``, without constructing it.
 
         The config's ``type`` is the dotted reference of the component's ``TrainingComponentFactory``.
 
-        ``loss_family`` is the recipe's startup loss family, which a backend
-        that starts its workers with one loss family reads.
+        ``default_parameters`` is the recipe's ``configured_parameters``, opaque to Reef: a backend that starts its
+        workers with one method reads its own parameters there. It is empty when no recipe is selected yet.
         """
 
     def http_environment(self, settings: Mapping[str, Any]) -> Mapping[str, str]:
@@ -117,12 +120,14 @@ class InProcessTrainingDeployment(TrainingDeployment):
         try:
             factory = training_component_factory_for(self.component_type)
             # Use the component's schema for both CLI and YAML options, without a model.
-            factory.parse_config(self.component_config(settings, loss_family=""), os.environ)
+            factory.parse_config(self.component_config(settings, default_parameters={}), os.environ)
         except RuntimeConfigError as exc:
             raise DeployConfigError(str(exc)) from exc
         return ()
 
-    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(
+        self, settings: Mapping[str, Any], *, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+    ) -> dict[str, Any]:
         options = {
             key.replace("-", "_"): value
             for key, value in normalize_native_options(settings["training_backend_options"]).items()

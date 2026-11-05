@@ -25,27 +25,29 @@ from reef.core.errors import RuntimeConfigError, UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.inference.tinker import TinkerInferenceRuntime
-from reef.recipe.sft import SftObjective
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.storage.sql_coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos import TrainingSignal
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.algos.schedule import StepScheduling
+from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob, job_id_for
 from reef.train.jobs import JobLoopState
+from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
 from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
-from reef.train.method import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, component_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
+from reef.train.tinker_backend.objectives import (
+    TinkerObjective,
+    register_tinker_objective,
+    unregister_tinker_objective,
+)
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 
 MODEL = "Qwen/Qwen3-8B"
@@ -102,7 +104,7 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.closed = True
 
 
-class SampleObjective(TrainingObjective):
+class SampleObjective(TinkerObjective):
     loss_family = "importance_sampling"
     name = "tinker-test-objective"
 
@@ -135,17 +137,17 @@ POLICY = LearningRateSchedule("policy", 1e-5, warmup_steps=2)
 @pytest.fixture
 def objective():
     value = SampleObjective()
-    register_objective(value)
+    register_tinker_objective(value)
     yield value
-    unregister_objective(value.name)
+    unregister_tinker_objective(value.name)
 
 
 @pytest.fixture
 def second_objective():
     value = TttdLossObjective()
-    register_objective(value)
+    register_tinker_objective(value)
     yield value
-    unregister_objective(value.name)
+    unregister_tinker_objective(value.name)
 
 
 @pytest.fixture
@@ -211,7 +213,8 @@ def wait(component, job_id):
 def submit(component, data, objective_name, *, start=None, schedule=None, **parameters):
     """Submit one job as a job loop does and return its ID."""
     parameters = {
-        "method": TrainingMethod(objective_name, schedule).to_dict(),
+        "objective": objective_name,
+        "learning_rate_schedule": None if schedule is None else schedule.to_dict(),
         **parameters,
     }
     start = component.base_start if start is None else start
@@ -316,10 +319,10 @@ def test_the_jobs_kl_coefficient_and_the_adapter_export_reach_training(component
 def test_job_parameters_fill_the_configured_defaults_and_jobs_of_several_scenarios_share_the_component(
     component, config, objective
 ):
-    method = {"method": TrainingMethod(objective.name).to_dict()}
+    method = {"objective": objective.name}
     parameters = component.job_parameters({**method, "kl_coef": 0.2})
     assert parameters == TinkerJobParameters(
-        TrainingMethod(objective.name), StepScheduling(), config.batch_size, config.learning_rate, 0.2, None, None
+        objective.name, None, StepScheduling(), config.batch_size, config.learning_rate, 0.2, None, None
     )
     assert component.shares_scenarios is True
 
@@ -328,7 +331,11 @@ def test_job_parameters_fill_the_configured_defaults_and_jobs_of_several_scenari
     ("overrides", "message"),
     [
         ({"lora_rank": 8}, r"accept no parameters \['lora_rank'\]"),
-        ({"method": "sft"}, "'method' parameter as an object"),
+        ({"method": "sft"}, r"accept no parameters \['method'\]"),
+        ({"harbor": {"rollouts_per_task": 2}}, r"accept no parameters \['harbor'\]"),
+        ({"objective": ""}, "needs the objective parameter"),
+        ({"objective": "slime_dataset"}, "unknown Tinker objective"),
+        ({"learning_rate_schedule": {"name": "s"}}, "unknown or missing fields"),
         ({"scheduling": None}, "scheduling parameter must be an object"),
         ({"scheduling": {"epochs": 2}}, "does not support 2 epochs per job"),
         ({"save_interval": 0}, "save_interval must be a positive int"),
@@ -343,7 +350,7 @@ def test_job_parameters_fill_the_configured_defaults_and_jobs_of_several_scenari
 def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothing(
     component, client, objective, overrides, message
 ):
-    parameters = {"method": TrainingMethod(objective.name).to_dict(), **overrides}
+    parameters = {"objective": objective.name, **overrides}
     with pytest.raises(ValueError, match=message):
         component.submit(
             TrainingJob(
@@ -494,9 +501,9 @@ def test_skip_and_unsupported_loss_do_not_mutate_remote(component, client, objec
     assert not client.calls
 
 
-def test_a_method_without_a_tinker_loss_is_refused_before_training(component, client):
-    status = train(component, batch(), "sdpo")
-    assert status.state == "failed" and "unsupported Tinker loss family 'sdpo'" in status.error
+def test_a_method_without_a_tinker_objective_is_refused_before_training(component, client):
+    with pytest.raises(ValueError, match="unknown Tinker objective 'sdpo'"):
+        train(component, batch(), "sdpo")
     assert client.calls == []
 
 
@@ -581,9 +588,7 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     objective.rollout_unit = "comparison_set"
     scheduling = StepScheduling(epochs=2, remainder="partial")
     data = JobData("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_job(
-        data, TrainingMethod(objective.name), {}, scheduling, batch_size=2, kl_coef=0.0, score_centering=None
-    )
+    step = prepare_tinker_job(data, objective.name, {}, scheduling, batch_size=2, kl_coef=0.0, score_centering=None)
     assert [len(rows) for rows in step.steps] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -593,7 +598,7 @@ def test_a_packed_tinker_step_trains_batch_size_packs(objective):
     # Each sample has 4 tokens, so packs of 8 tokens hold two samples, and one step trains one pack.
     scheduling = StepScheduling(packing_length=8)
     step = prepare_tinker_job(
-        batch(3), TrainingMethod(objective.name), {}, scheduling, batch_size=1, kl_coef=0.0, score_centering=None
+        batch(3), objective.name, {}, scheduling, batch_size=1, kl_coef=0.0, score_centering=None
     )
     assert [len(rows) for rows in step.steps] == [2, 1]
 
@@ -602,7 +607,7 @@ def test_step_size_respects_error_remainder(objective):
     with pytest.raises(ValueError, match="do not form complete optimizer steps of 2"):
         prepare_tinker_job(
             JobData("batch", (item("v"),)),
-            TrainingMethod(objective.name),
+            objective.name,
             {},
             StepScheduling(remainder="error"),
             batch_size=2,
@@ -832,15 +837,15 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     from reef.artifact import InMemoryRepositoryBackend
     from reef.core import AgentRecord, RequestType
     from reef.dispatcher import Dispatcher
-    from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+    from reef.recipe.base import WeightTrainingRecipe
     from reef.storage.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineSpec
 
     @dataclass(frozen=True)
     class PolicyRecipe(WeightTrainingRecipe):
         @classmethod
-        def training_spec(cls):
-            return WeightTrainingSpec(objective.name)
+        def default_parameters(cls):
+            return {kind: {"objective": objective.name} for kind in ("trajectory", "task")}
 
         @classmethod
         def pipeline_spec(cls):
@@ -1012,9 +1017,7 @@ def sft_item(name: str) -> TrajectorySample:
 
 def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_log_probs():
     data = JobData("sft", (sft_item("a"), sft_item("b")))
-    step = prepare_tinker_job(
-        data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None
-    )
+    step = prepare_tinker_job(data, "sft", {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None)
 
     loss = resolve_tinker_loss("sft")
     (rows,) = step.steps
@@ -1027,7 +1030,7 @@ def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_lo
     with pytest.raises(ValueError, match="sft trains no KL penalty"):
         prepare_tinker_job(
             data,
-            TrainingMethod(SftObjective.name),
+            "sft",
             {},
             StepScheduling(),
             batch_size=2,
@@ -1037,7 +1040,7 @@ def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_lo
 
 
 def test_an_sft_job_trains_cross_entropy_on_the_component_and_saves_its_checkpoint(component, client):
-    status = train(component, JobData("sft", (sft_item("a"), sft_item("b"))), SftObjective.name)
+    status = train(component, JobData("sft", (sft_item("a"), sft_item("b"))), "sft")
     assert status.state == "finished" and len(status.checkpoints) == 1, status.error
     ((_, batches, loss),) = client.calls
     assert loss.loss_fn == "cross_entropy" and sum(len(rows) for rows in batches) == 2

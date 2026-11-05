@@ -1,7 +1,7 @@
-"""The training method of a job: its objective and its learning-rate schedule.
+"""Learning-rate schedule arithmetic that training components share.
 
-A recipe sets the method in each job's parameters, and every training component reads it.
-The Tinker training component also keeps the schedule's progress in its checkpoint manifests.
+Each training component parses a job's schedule from its own parameters, and keeps the schedule's progress with its
+training state. This module holds only the curve and its progress.
 """
 
 from __future__ import annotations
@@ -116,45 +116,10 @@ class LearningRateSchedule:
     def from_dict(cls, value: Mapping[str, Any]) -> LearningRateSchedule:
         if not isinstance(value, Mapping):
             raise ValueError("a learning-rate schedule must be an object")
-        return cls(**dict(value))
-
-
-@dataclass(frozen=True)
-class TrainingMethod:
-    """The objective one training job trains with, and the learning-rate schedule it selects.
-
-    A recipe selects one for every job, by the kind of the job's samples
-    (``WeightTrainingRecipe.parameters_by_kind``); the
-    job carries it to the training component beside the job data, and the job's payload
-    records it, so it is part of the job's identity and stays fixed across the
-    job's retries. ``objective`` is a registered objective name or a dotted
-    ``package.module:Objective`` reference; the backend resolves it in its own
-    process, so a name another package registers is only known where that
-    package was imported. ``learning_rate_schedule`` ``None`` keeps the active
-    schedule.
-    """
-
-    objective: str
-    learning_rate_schedule: LearningRateSchedule | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.objective, str) or not self.objective.strip():
-            raise ValueError("TrainingMethod.objective must be a non-empty objective reference")
-        if self.learning_rate_schedule is not None and not isinstance(
-            self.learning_rate_schedule, LearningRateSchedule
-        ):
-            raise TypeError("TrainingMethod.learning_rate_schedule must be a LearningRateSchedule or None")
-
-    def to_dict(self) -> dict[str, Any]:
-        """The job payload's record of this method; it is part of the job's identity."""
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> TrainingMethod:
-        if not isinstance(value, Mapping):
-            raise ValueError("a training method must be an object")
-        schedule = value.get("learning_rate_schedule")
-        return cls(value["objective"], None if schedule is None else LearningRateSchedule.from_dict(schedule))
+        try:
+            return cls(**dict(value))
+        except TypeError as exc:
+            raise ValueError(f"a learning-rate schedule has unknown or missing fields: {exc}") from exc
 
 
 @dataclass(frozen=True)

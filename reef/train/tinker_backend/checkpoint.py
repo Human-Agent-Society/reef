@@ -18,7 +18,7 @@ from typing import Any
 
 from reef.storage.durable_files import write_json
 from reef.tinker.checkpoint import MANIFEST, TinkerArtifact
-from reef.train.method import LearningRateScheduleState
+from reef.train.learning_rate import LearningRateScheduleState
 
 
 @dataclass(frozen=True)

@@ -40,7 +40,7 @@ def prepare_slime_arguments(
     """Return the workers' Slime arguments, the startup loss family's driver config and the checkpoint retention.
 
     ``arguments`` are the native Slime arguments with Reef's retention
-    options. ``loss_family`` is the recipe's startup loss family, by name or
+    options. ``loss_family`` is the startup loss family, by name or
     dotted reference; ``recipe`` names the recipe in error messages.
     ``execution`` holds the deployment's ``execution`` and ``executors``
     sections. Raise ``RuntimeError`` for an unknown loss family, before Slime

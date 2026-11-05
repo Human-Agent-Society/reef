@@ -15,7 +15,7 @@ from typing import Any
 
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.storage.durable_files import read_json, write_json
-from reef.train.method import LearningRateScheduleState
+from reef.train.learning_rate import LearningRateScheduleState
 
 #: A start directory's description of the weights a later job continues from.
 START_STATE = "start.json"

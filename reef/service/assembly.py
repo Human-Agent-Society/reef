@@ -50,6 +50,7 @@ from reef.service.request_service import RequestService
 from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
+from reef.storage.job_data import JobDataKind
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -98,9 +99,9 @@ def _require_non_empty(value: str | None, setting: str) -> str:
 
 
 def connect_training_component(
-    settings: ServiceConfig, *, model_path: str, loss_family: str
+    settings: ServiceConfig, *, model_path: str, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
 ) -> tuple[TrainingComponent, InferenceRuntime]:
-    """Build the selected training component for the recipe's ``loss_family``, then the serving of its releases.
+    """Build the selected training component for the recipe's ``default_parameters``, then its releases' serving.
 
     The training backend builds only the component. The serving runtime comes
     from the deployment's ``inference`` settings and the component's
@@ -110,7 +111,7 @@ def connect_training_component(
     """
     backend = training_deployment_for(settings.training_backend)
     component = build_training_component(
-        backend.component_config(asdict(settings), loss_family=loss_family), model_path=model_path
+        backend.component_config(asdict(settings), default_parameters=default_parameters), model_path=model_path
     )
     try:
         serving = RuntimeRegistry().build(
@@ -153,7 +154,9 @@ def _training_recipe(
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
     training_component, runtime = connect_training_component(
-        settings, model_path=model_path, loss_family=recipe_type.training_spec().loss_family
+        settings,
+        model_path=model_path,
+        default_parameters=recipe_type.configured_parameters(resolved_recipe_data.get("job_parameters")),
     )
     try:
         return recipe_type.from_resolved_config(
@@ -173,6 +176,7 @@ def composed_training_recipe(
     recipe_type: type[Recipe],
     config: dict[str, Any],
     weight_type: type[WeightTrainingRecipe],
+    weight_config: Mapping[str, Any],
     settings: ServiceConfig,
     env: Mapping[str, str],
 ) -> Recipe:
@@ -194,7 +198,9 @@ def composed_training_recipe(
             "components.<name>.config"
         )
     training_component, runtime = connect_training_component(
-        settings, model_path=model_path, loss_family=weight_type.training_spec().loss_family
+        settings,
+        model_path=model_path,
+        default_parameters=weight_type.configured_parameters(weight_config.get("job_parameters")),
     )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
     if settings.pipeline_settings is not None:
@@ -250,7 +256,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         recipe_type = recipe_class_for(selected)
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
-            return composed_training_recipe(selected, recipe_type, config, weight_training[0], settings, env)
+            return composed_training_recipe(selected, recipe_type, config, *weight_training, settings, env)
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
         if settings.activation_settings is not None:
