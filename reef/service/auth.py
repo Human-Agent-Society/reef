@@ -180,7 +180,7 @@ def create_authentication_middleware(
     ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
     only, on POST. The service hands one to the recipe for its evaluation
     rollouts and method, which run candidate code: that code can sample the
-    served release, and nothing else of the service. With no ``tokens``,
+    served artifact, and nothing else of the service. With no ``tokens``,
     authentication is off and these tokens change nothing.
     """
 

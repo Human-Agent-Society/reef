@@ -17,7 +17,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactNotFound, ArtifactSourceError
-from reef.artifact.release_chain import ReleaseNotRestorable
+from reef.artifact.snapshot_chain import SnapshotNotRestorable
 from reef.core.errors import (
     CommitPending,
     InferenceUnavailable,
@@ -41,9 +41,9 @@ from reef.storage.records import RecordConflict
         (ArtifactConflict("artifact moved under you"), 409),
         (ArtifactSourceError("source unreachable"), 503),
         (UnknownScenario("no such scenario"), 404),
-        (ReleaseNotRestorable("release has no durable bytes"), 400),
+        (SnapshotNotRestorable("release has no durable bytes"), 400),
         (CommitPending("a training result waits for its commit"), 409),
-        (TrainingStartRefused("the trainer cannot start from this release"), 400),
+        (TrainingStartRefused("the trainer cannot start from this snapshot"), 400),
         (RecordConflict("record id already used"), 409),
         (InferenceUnavailable("this deployment serves no inference requests"), 503),
         (ReefError("generic reef failure"), 400),

@@ -118,7 +118,7 @@ def main():
     # The step's patch maps each tree path it changed to the new text, or to null for a removed file.
     evaluation = dict(manifest["evaluation"])
     patch = evaluation.pop("patch", {})
-    print("evaluation metrics (the evolve step that published this release):")
+    print("evaluation metrics (the evolve step that published this snapshot):")
     print(json.dumps(evaluation, indent=2, sort_keys=True))
     print("changed files:")
     for path, text in sorted(patch.items()):
@@ -205,10 +205,10 @@ def head_manifest(client):
 def pull():
     """Name the scenario and write the model binding the serve process runs with under work/tree.
 
-    The serve process pulls the served source tree itself and writes the release file beside it.
+    The serve process pulls the served source tree itself and writes the snapshot file beside it.
     """
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
-    # Create the scenario if it does not exist yet: its base release is the seed tree.
+    # Create the scenario if it does not exist yet: its base snapshot is the seed tree.
     create_scenario(client)
     manifest = head_manifest(client)
     shutil.rmtree(TREE_DIR, ignore_errors=True)
@@ -283,7 +283,7 @@ def native_main():
         "each triggers one evolve step (runs take minutes)"
     )
 
-    # Only a win moves the head off the seed release, and a step that is rejected or skipped never does: wait for
+    # Only a win moves the head off the seed snapshot, and a step that is rejected or skipped never does: wait for
     # every result this run triggered, so an all-passing run that publishes nothing ends here instead of sitting
     # out the whole publication deadline, then read the head a win left behind.
     deadline = time.monotonic() + PULL_TIMEOUT_S
@@ -296,25 +296,25 @@ def native_main():
         )
         return
     manifest = head_manifest(client)
-    release = manifest["artifact_id"]
-    if release == seed:
+    artifact_id = manifest["artifact_id"]
+    if artifact_id == seed:
         # A result said published, but the head still serves the seed: nothing this run can mount.
         print(
             f"no change passed the evaluation within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh native for another attempt"
         )
         return
-    print(f"published: artifact {release} (parent {manifest['parent_artifact_id']})")
-    print("evaluation metrics (the evolve step that published this release):")
+    print(f"published: artifact {artifact_id} (parent {manifest['parent_artifact_id']})")
+    print("evaluation metrics (the evolve step that published this snapshot):")
     print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
 
     # The process follows the head: no reinstall, no restart, one harness/mount line in its log. Every step this
     # run triggered already has its result, so nothing holds the catalog or the manifest now.
     deadline = time.monotonic() + MOUNT_TIMEOUT_S
-    while not mount_events(release) and time.monotonic() < deadline:
+    while not mount_events(artifact_id) and time.monotonic() < deadline:
         time.sleep(1.0)
-    mounts = mount_events(release)
+    mounts = mount_events(artifact_id)
     if not mounts:
-        print(f"the serve process did not mount {release} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
+        print(f"the serve process did not mount {artifact_id} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
         return
     for path, data in mounts:
         print(f"{path}: harness/mount {json.dumps(data, sort_keys=True)}")

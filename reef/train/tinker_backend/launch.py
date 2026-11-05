@@ -4,12 +4,12 @@ Tinker trains in the HTTP service's process: ``TinkerTrainingComponent`` runs
 each job. Serving is the deployment's ``inference`` section
 (``reef.service.deploy.serving``). By default Tinker samples too
 (``inference.serving: trainer``, ``reef.inference.tinker``). Reef's engines can
-serve the checkpoints instead: they load each release's adapter, which
+serve the checkpoints instead: they load each snapshot's adapter, which
 ``reef.tinker.weights.TinkerSamplerWeights`` downloads from the manifest's
 sampler path.
 
 ``spindle_full`` trains all the parameters on a Spindle deployment the same way
-(``SpindleFullTrainingComponent``, RFC #996). Each release refers to its
+(``SpindleFullTrainingComponent``, RFC #996). Each snapshot refers to its
 weights, which a Modal function exports to a Hugging Face repo, so Spindle's
 sampler serves it by default and Reef's engines can load it too.
 """
@@ -60,7 +60,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
         return super().prepare(config, settings)
 
     def trainer_serving_config(self, settings: Mapping[str, Any]) -> dict[str, Any]:
-        """Tinker's sampler, which serves each release's manifest with the training settings' key and project."""
+        """Tinker's sampler, which serves each snapshot's manifest with the training settings' key and project."""
         tinker = tinker_settings(settings["training_backend_options"])
         return {
             "type": "tinker",
@@ -71,7 +71,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
         }
 
     def engine_weights(self, settings: Mapping[str, Any]) -> EngineWeights:
-        """Each release's adapter at its sampler path, downloaded into ``state_dir/sampler-weights``."""
+        """Each snapshot's adapter at its sampler path, downloaded into ``state_dir/sampler-weights``."""
         tinker = tinker_settings(settings["training_backend_options"])
         return EngineWeights(
             ArtifactFormat("adapter", tinker.lora_rank, ("all",)),

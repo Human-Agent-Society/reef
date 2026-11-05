@@ -333,8 +333,8 @@ class JobQueueComponent(TrainingComponent):
     def check_artifact(self, files: ArtifactFiles) -> None:
         self.component.check_artifact(files)
 
-    def import_start(self, release: Path) -> str:
-        return self.component.import_start(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return self.component.import_start(artifact_dir)
 
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         return self.component.changed_parts(start, checkpoint)

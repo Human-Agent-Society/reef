@@ -36,7 +36,7 @@ from tests.support.harness_steps import (
     FixedScorer,
     IdleMethod,
     NoCollection,
-    TreeReleases,
+    TreeArtifacts,
     build_harness_backend,
     changed_rules,
     evolution_config,
@@ -112,8 +112,8 @@ def flat(scores: list[dict[str, object]]) -> list[object]:
     return [score for task in scores for score in task["scores"]]
 
 
-def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
-    return ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
+def artifacts_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
+    return ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
 
 
 def backend_of(recipe: HarnessEvolutionRecipe) -> HarnessBackend:
@@ -275,7 +275,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
         evaluation=evaluation, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
     )
     built = from_config(settings, runtime=runtime())
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
     try:
         backend = job_backend(trainer)
         selection = built.build_policy(backend)
@@ -298,14 +298,14 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
 
 def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committed_releases(tmp_path: Path) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
     # The trainer submits each step as a job of the recipe's harness component.
     assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is built.harness_component
     assert isinstance(built.harness_component, HarnessTrainingComponent)
     assert built.job_components() == (built.harness_component,)
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
     trainer.close()
-    with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed releases"):
+    with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed snapshots"):
         built.build("demo", SQLiteRecordStore(), root=seed_root(built))
 
 
@@ -324,7 +324,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     assert built.scenario_state_dirs("demo") == (state / "demo",)
     records = SQLiteRecordStore()
     for scenario in ("demo", "other"):
-        trainer = built.build(scenario, records, releases=releases_for(built), root=seed_root(built))
+        trainer = built.build(scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
         backend = job_backend(trainer)
         root = state / scenario / COMPONENT
         assert backend.history.root == root / "history" and backend.records.root == root / "steps"
@@ -364,7 +364,7 @@ def test_the_seed_is_a_directory_whose_tree_is_the_root_release(tmp_path: Path) 
 def test_a_seed_that_fails_validation_refuses_boot_naming_the_problem(
     tmp_path: Path, files: dict, problem: str
 ) -> None:
-    """A tree persists into every release, so a seed the checks refuse never boots; a credential's refusal
+    """A tree persists into every snapshot, so a seed the checks refuse never boots; a credential's refusal
     names the channels a key goes through instead."""
     with pytest.raises(RecipeConfigError, match=rf"evolution\.seed fails validation: .*{problem}"):
         harness_recipe(tmp_path, lambda workspace, services: None, seed=HarnessTree(files))
@@ -455,7 +455,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         second = import_task("held-2", "eval")
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
         with pytest.raises(RecipeConfigError, match="needs the samples of a scenario session"):
-            built.build("s", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+            built.build("s", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
     retired = {"tasks": [], "task_store": "imported-tasks"}
     with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
         from_config(evolution_config(evaluation=retired), runtime=runtime())
@@ -493,7 +493,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         return built
 
     def trainer_of(recipe: HarnessEvolutionRecipe) -> Trainer:
-        return recipe.build("demo", SQLiteRecordStore(), releases=releases_for(recipe), root=seed_root(recipe))
+        return recipe.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(recipe), root=seed_root(recipe))
 
     records = trainer_of(
         from_config(
@@ -593,7 +593,7 @@ def test_a_winning_step_binds_only_its_runs_records_its_context_and_names_its_ki
     tmp_path: Path, monkeypatch
 ) -> None:
     """One winning step. The deployment's endpoint renders into each evaluation run through the adapter's
-    model_binding template; the published release is the source tree, which carries no provider. The settle records
+    model_binding template; the published snapshot is the source tree, which carries no provider. The settle records
     the context the evaluation ran in. A kept tree names the kinds it changes; the always rule holds it only when one
     of them is reviewed."""
     seen: list[dict[str, str]] = []
@@ -649,7 +649,7 @@ def test_the_method_receives_the_served_model_binding(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
-    """Told where Reef answers inference, runs sample the release the scenario serves through it."""
+    """Told where Reef answers inference, runs sample the snapshot the scenario serves through it."""
     config = {"model": {"path": "qwen3-8b"}, **evolution_config()}
     recipe = HarnessEvolutionRecipe.from_environment({"REEF_UPSTREAM_URL": "http://upstream.test"}, config=config)
     assert recipe.model_binding().base_url == "http://upstream.test"
@@ -1065,7 +1065,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
 
 def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path: Path) -> None:
     """Under the never rule a kept tree is minted into the catalog but not served; an activation over HTTP serves
-    that release itself, and an unknown artifact is a 404."""
+    that snapshot itself, and an unknown artifact is a 404."""
     patches = iter((MARKER,))
     dispatcher = harness_dispatcher(
         tmp_path,
@@ -1186,7 +1186,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         scenario = restarted.get_or_create_scenario("start")
         assert scenario is not None
         assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
-        # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
+        # The next step evolves the first snapshot's tree: r3 joins r1, and r2 is not there. It publishes on the
         # chain tip, the second release.
         result = run_step(scenario, "3")
         assert result.artifact is not None
@@ -1202,7 +1202,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
 
 
 def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_path: Path) -> None:
-    """A sync commits a person's tree as a release that serves at once and that the next step evolves; a restart
+    """A sync commits a person's tree as a snapshot that serves at once and that the next step evolves; a restart
     reads both from the sync record."""
 
     def markers(task: str, result: TaskResult) -> float:
@@ -1267,12 +1267,14 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
         assert scenario.artifact_selection().components[COMPONENT] == synced.artifact_id
         assert scenario.artifact_status()[COMPONENT]["training_start"] == synced.artifact_id
         # The next step evolves the synced tree: r2 joins the person's line, and r1 is not there. A sync is
-        # published beside the chain, so the step publishes on the chain tip, the trained release.
+        # published beside the chain, so the step publishes on the chain tip, the trained snapshot.
         result = run_step(scenario, "2")
         assert result.artifact is not None
         newest = last_made(scenario)
         assert newest.made_artifact and newest.snapshot.parent_revision == trained
-        files = scenario.components.read_files(scenario.release_queries.artifact_for_version(newest.snapshot.revision))
+        files = scenario.components.read_files(
+            scenario.snapshot_queries.artifact_for_version(newest.snapshot.revision)
+        )
         evolved = "".join(files.values())
         assert "marker person" in evolved and "marker r2" in evolved and "marker r1" not in evolved
     finally:

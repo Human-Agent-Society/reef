@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import TreeReleases, build_harness_backend, harness_recipe
+from tests.support.harness_steps import TreeArtifacts, build_harness_backend, harness_recipe
 
 from recipes.gepa import GEPA, GEPASettings, ScoreFeedback, components, reflection
 from recipes.gepa.archive import Archive, Candidate
@@ -88,14 +88,14 @@ class FakeChat(ModelBinding):
 
 def gepa_backend(
     tmp_path: Path, settings: GEPASettings, *, reflector: ModelBinding | None = None
-) -> tuple[HarnessBackend, TreeReleases]:
+) -> tuple[HarnessBackend, TreeArtifacts]:
     """The backend of a pi scenario that GEPA evolves from ``TREE``, its reflection model ``reflector``."""
     binary = tmp_path / "gepa-pi"
     binary.write_text(PI_FAKE)
     binary.chmod(0o755)
     recipe = harness_recipe(tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary))
     recipe = dataclasses.replace(recipe, models={"reflection": FakeChat() if reflector is None else reflector})
-    releases = TreeReleases(recipe.seed)
+    releases = TreeArtifacts(recipe.seed)
     return build_harness_backend(recipe, "demo", releases), releases
 
 
