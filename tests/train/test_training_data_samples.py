@@ -22,7 +22,6 @@ from reef.core.trajectories import (
 from reef.inference.interfaces import InferenceStream
 from reef.service.streaming import stream_record
 from reef.train.algos.schedule import StepScheduling
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
 
@@ -78,9 +77,9 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     loaded = JobData(
         "batch", tuple(replace(item, trajectory=json.loads(json.dumps(item.trajectory))) for item in items)
     )
-    assert prepare_slime_job(
-        loaded, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE
-    ) == prepare_slime_job(original, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
+    assert prepare_slime_job(loaded, algorithm, {}, SCHEDULING, step_size=STEP_SIZE) == prepare_slime_job(
+        original, algorithm, {}, SCHEDULING, step_size=STEP_SIZE
+    )
     assert loaded.samples[0].training["artifact_id"] == "weights-1"
 
 
@@ -166,14 +165,14 @@ def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(al
     batch = JobData("mixed", (replace(captured_trajectory(), group_id="a"), TaskSample(Path("tasks/example"))))
     state = {"steps": 3}
     with pytest.raises(TypeError, match="unsupported sample 1"):
-        prepare_slime_job(batch, TrainingMethod(algorithm), state, SCHEDULING, step_size=STEP_SIZE)
+        prepare_slime_job(batch, algorithm, state, SCHEDULING, step_size=STEP_SIZE)
     assert state == {"steps": 3}
     assert isinstance(batch.samples[1], TaskSample)
 
 
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
     item = atif_item()
-    prepared = prepare_slime_job(JobData("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING, step_size=STEP_SIZE)
+    prepared = prepare_slime_job(JobData("plain", (item,)), "sao", {}, SCHEDULING, step_size=STEP_SIZE)
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     with pytest.raises(ValueError, match="training tensors"):
@@ -189,13 +188,14 @@ def test_groups_preserve_row_and_advantage_order():
     batch = JobData("groups", items)
     assert trajectories(batch) == items
     assert trajectory_groups(batch) == (items[:2], items[2:])
-    from recipes.tttd.objective import TttdObjective
+    from recipes.tttd.objective import adaptive_entropic_advantages
+    from recipes.tttd.slime import TttdObjective
 
     objective = TttdObjective()
     expected = tuple(
         value
         for group in (items[:2], items[2:])
-        for value in objective.adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
+        for value in adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
     )
     assert objective.prepare(batch, {}).advantages == expected
 
@@ -284,7 +284,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl"])
 def test_independent_algorithms_ignore_group_metadata(algorithm):
     batch = JobData("grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2)))
-    result = prepare_slime_job(batch, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
+    result = prepare_slime_job(batch, algorithm, {}, SCHEDULING, step_size=STEP_SIZE)
     assert result.payload["rollout_ids"] == [0, 1]
     assert result.payload["producing_artifact_ids"] == ["weights-1", "weights-1"]
 
