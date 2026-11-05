@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -62,7 +63,10 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
     )
 
 
-RECORD_KIND = "reef-commit/7"
+RECORD_KIND = "reef-commit/8"
+#: The ``snapshot`` of a record read from storage until ``CommitSnapshots`` locates it: a record with a
+#: ``selection`` stores no storage location.
+UNLOCATED_SNAPSHOT = SnapshotRef("unlocated:", None)
 
 
 class CommitHistoryError(ReefError):
@@ -92,6 +96,9 @@ class CommitRecord:
     or a change of the artifacts served beside the active release.
 
     Values: ``scenario`` is a non-empty name and ``step`` a positive int.
+    ``snapshot`` is where the record's release is stored, for use in this process. ``to_dict`` stores it only for a
+    record without a ``selection``. A record that ``from_dict`` reads without one holds ``UNLOCATED_SNAPSHOT`` until
+    ``CommitSnapshots`` locates it.
     ``recorded_at`` is the time of the commit in seconds. ``operation`` is a
     ``CommitOperation``. ``operation_verified`` is false only for a commit
     read from release metadata that names no operation. ``component`` is
@@ -345,7 +352,6 @@ class CommitRecord:
             "record": RECORD_KIND,
             "scenario": self.scenario,
             "step": self.step,
-            "snapshot": encode_snapshot_ref(self.snapshot),
             "checkpoint": self.checkpoint,
             "algorithm_state": self.algorithm_state,
             "record_progress": record_progress,
@@ -367,11 +373,13 @@ class CommitRecord:
             value["components"] = dict(self.components)
         if self.selection is not None:
             value["selection"] = self.selection.to_dict()
+        else:
+            value["snapshot"] = encode_snapshot_ref(self.snapshot)
         return value
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CommitRecord:
-        if value.get("record") not in ("reef-commit/5", "reef-commit/6", RECORD_KIND):
+        if value.get("record") not in ("reef-commit/5", "reef-commit/6", "reef-commit/7", RECORD_KIND):
             raise CommitHistoryError(f"unknown commit record kind: {value.get('record')!r}")
         scenario = value.get("scenario")
         if not isinstance(scenario, str) or not scenario:
@@ -380,8 +388,8 @@ class CommitRecord:
         if not isinstance(step, int):
             raise CommitHistoryError("commit record step must be an integer")
         raw_ref = value.get("snapshot", value.get("artifact_ref"))
-        if not isinstance(raw_ref, Mapping):
-            raise CommitHistoryError("commit record requires snapshot")
+        if not isinstance(raw_ref, Mapping) and (raw_ref is not None or value.get("selection") is None):
+            raise CommitHistoryError("commit record requires snapshot or selection")
         checkpoint = value.get("checkpoint")
         if not isinstance(checkpoint, bool):
             raise CommitHistoryError("commit record checkpoint must be a boolean")
@@ -392,7 +400,7 @@ class CommitRecord:
         if not isinstance(raw_progress, Mapping):
             raise CommitHistoryError("commit record requires record_progress")
         try:
-            snapshot = decode_snapshot_ref(raw_ref)
+            snapshot = UNLOCATED_SNAPSHOT if raw_ref is None else decode_snapshot_ref(raw_ref)
             selection = None if value.get("selection") is None else ArtifactSelection.from_dict(value["selection"])
             legacy_locators = {} if value.get("selection") is None else legacy_selection_locators(value["selection"])
         except ValueError as exc:
@@ -434,6 +442,19 @@ class CommitRecord:
 
     def __repr__(self) -> str:
         return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, release={self.snapshot.revision!r})"
+
+
+class CommitSnapshots(ABC):
+    """Finds the storage snapshot of each record read from a commit history.
+
+    Purpose: storage holds no storage location, so the scenario factory gives a store this interface.
+    ``locate(records)`` takes a commit history in step order. It returns the same records in the same order, each
+    with its ``snapshot``, and leaves a record that holds a snapshot as it is. It raises ``CommitHistoryError`` when
+    a record's artifact IDs do not name a snapshot.
+    """
+
+    @abstractmethod
+    def locate(self, records: Sequence[CommitRecord]) -> tuple[CommitRecord, ...]: ...
 
 
 def active_record(records: Sequence[CommitRecord]) -> CommitRecord | None:
@@ -618,9 +639,11 @@ __all__ = [
     "RECORD_KIND",
     "SCENARIO_METADATA_KEY",
     "SCENARIO_METADATA_KIND",
+    "UNLOCATED_SNAPSHOT",
     "CommitHistoryError",
     "CommitOperation",
     "CommitRecord",
+    "CommitSnapshots",
     "RecordProgress",
     "active_record",
     "active_snapshot",

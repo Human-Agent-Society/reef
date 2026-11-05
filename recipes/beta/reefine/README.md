@@ -86,11 +86,11 @@ measurement of which requests passed the checks.
    curl -sS -H "Content-Type: application/json" \
      -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
    curl -sS -H "x-reef-scenario: my-harness" -H "Content-Type: application/json" \
-     -d '{"text": "when I ask you to fix a bug, reproduce it with a failing test first", "session": "me", "release_id": ""}' \
+     -d '{"text": "when I ask you to fix a bug, reproduce it with a failing test first", "session": "me", "artifact_id": ""}' \
      http://127.0.0.1:8901/reef/train
    ```
 
-   `session` and `release_id` say where the request came from: the
+   `session` and `artifact_id` say where the request came from: the
    client's session and the release it runs, empty when it runs none yet.
    The answer carries the training record id and `page_path`, the
    request's page (`GET /reef/harness/requests/<id>/page`). The page
@@ -496,9 +496,9 @@ reef serve -c recipes/beta/reefine/examples/configs/serve.yaml \
   --recipe.config.evolution.adapter terminus
 ```
 
-In another terminal, create a scenario, read its `release_id` from
+In another terminal, create a scenario, read its `artifact_id` from
 `GET /reef/harness`, and send a request to `POST /reef/train`. Replace
-`<release_id>` and `<what it should do>` with those values. If the service
+`<artifact_id>` and `<what it should do>` with those values. If the service
 requires authentication, set `REEF_TOKEN` to its token in this terminal:
 
 ```bash
@@ -509,7 +509,7 @@ curl -sS http://127.0.0.1:8901/reef/harness \
 curl -sS http://127.0.0.1:8901/reef/train \
   -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: terminus-demo" \
   -H "Content-Type: application/json" \
-  -d '{"text": "<what it should do>", "session": "terminal-1", "release_id": "<release_id>"}'
+  -d '{"text": "<what it should do>", "session": "terminal-1", "artifact_id": "<artifact_id>"}'
 ```
 
 The answer carries the request's `agent_record_id`. Open
