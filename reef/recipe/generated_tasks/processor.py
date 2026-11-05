@@ -389,7 +389,7 @@ class GeneratedTaskSettings(Record2SampleSettings):
     Values:
 
     * ``rounds`` is a non-negative int; above 0 it needs a ``description``.
-    * ``jobs_per_round`` and ``refill_tasks`` are positive ints.
+    * ``jobs_per_round``, ``refill_tasks`` and ``validation_concurrency`` are positive ints.
     * ``source_records_per_round`` is a non-negative int; above 0 it needs a ``source_tag`` of the form
       ``name=value``.
     * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
@@ -426,6 +426,7 @@ class GeneratedTaskSettings(Record2SampleSettings):
     generation_deadline_seconds: float = config_option(
         DEFAULT_GENERATION_DEADLINE_SECONDS, help="The seconds that all attempts of one generation may take."
     )
+    validation_concurrency: int = config_option(1, help="The candidates that one generation checks at once.")
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -433,6 +434,8 @@ class GeneratedTaskSettings(Record2SampleSettings):
             raise ValueError("jobs_per_round must be positive")
         if self.refill_tasks < 1:
             raise ValueError("refill_tasks must be positive")
+        if self.validation_concurrency < 1:
+            raise ValueError("validation_concurrency must be positive")
         if self.source_records_per_round < 0:
             raise ValueError("source_records_per_round must be non-negative")
         if self.source_records_per_round > 0 and not self.source_tag:
@@ -461,6 +464,7 @@ class GenerationRunner(BackgroundJobRunner):
     exhausts its attempts and returns an incomplete outcome. Result saving requires the store alone.
     ``generation_attempts`` is a positive int.
     ``generation_deadline_seconds`` is a positive number, including infinity for no time limit.
+    ``validation_concurrency`` is a positive int: the candidates that one generation checks at once.
     ``eval_fraction`` is a number in [0, 1], and
     ``split_seed`` is a non-bool int. ``unsaved_results`` is a FIFO queue of TaskRolloutResult values whose saves
     failed; it may be empty and contain repeated task names, since the store keeps only each task's first result.
@@ -484,6 +488,7 @@ class GenerationRunner(BackgroundJobRunner):
         generation_deadline_seconds: float,
         eval_fraction: float,
         split_seed: int,
+        validation_concurrency: int = 1,
     ) -> None:
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be non-empty text")
@@ -505,6 +510,10 @@ class GenerationRunner(BackgroundJobRunner):
             raise ValueError("eval_fraction must be between 0 and 1")
         if isinstance(split_seed, bool) or not isinstance(split_seed, int):
             raise ValueError("split_seed must be an integer")
+        if isinstance(validation_concurrency, bool) or not isinstance(validation_concurrency, int):
+            raise ValueError("validation_concurrency must be a positive integer")
+        if validation_concurrency < 1:
+            raise ValueError("validation_concurrency must be a positive integer")
         self.scenario = scenario
         self.task_store = task_store
         self.task_generator = task_generator
@@ -513,6 +522,7 @@ class GenerationRunner(BackgroundJobRunner):
         self.generation_deadline_seconds = generation_deadline_seconds
         self.eval_fraction = eval_fraction
         self.split_seed = split_seed
+        self.validation_concurrency = validation_concurrency
         self.unsaved_results: queue.SimpleQueue[TaskRolloutResult] = queue.SimpleQueue()
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
@@ -588,28 +598,52 @@ class GenerationRunner(BackgroundJobRunner):
                 )
                 generation = self.task_store.save_candidates(generation=job.generation, directories=directories)
         candidates = generation.candidates or ()
-        for index in generation.pending_indices:
-            candidate = candidates[index]
-            # The store would take the same files again as the earlier publication, which this generation
-            # does not own, so its results would never be complete.
-            if any(stored.files_digest == candidate.files_digest for stored in self.task_store.tasks()):
+        task_generator, task_store = self.task_generator, self.task_store
+        # Up to validation_concurrency candidates are checked at once. Each outcome is saved when its checks end, so
+        # a restart checks only the pending candidates.
+        limit = asyncio.Semaphore(self.validation_concurrency)
+
+        def is_published(files_digest: str) -> bool:
+            return any(stored.files_digest == files_digest for stored in task_store.tasks())
+
+        async def check(index: int) -> None:
+            async with limit:
+                candidate = candidates[index]
                 refusal = f"task {candidate.name!r} is already published"
-                self.task_store.reject_task(generation=job.generation, index=index, reason=refusal)
-                continue
-            task = read_harbor_task(self.task_store.path(candidate.files_digest))
-            validation = await self.task_generator.validate(task)
-            if validation.is_valid:
-                try:
-                    split = assigned_split(
-                        self.task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
-                    )
-                    self.task_store.publish_task(generation=job.generation, index=index, split=split)
-                except (TaskConflict, TaskSplitConflict) as conflict:
-                    self.task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
-            else:
-                self.task_store.reject_task(
-                    generation=job.generation, index=index, reason="; ".join(validation.errors)
-                )
+                # The store would take the same files again as the earlier publication, which this generation
+                # does not own, so its results would never be complete.
+                if is_published(candidate.files_digest):
+                    task_store.reject_task(generation=job.generation, index=index, reason=refusal)
+                    return
+                task = read_harbor_task(task_store.path(candidate.files_digest))
+                validation = await task_generator.validate(task)
+                if not validation.is_valid:
+                    task_store.reject_task(generation=job.generation, index=index, reason="; ".join(validation.errors))
+                elif is_published(candidate.files_digest):
+                    # Another check of this generation published the same files while this one ran.
+                    task_store.reject_task(generation=job.generation, index=index, reason=refusal)
+                else:
+                    try:
+                        split = assigned_split(
+                            task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
+                        )
+                        task_store.publish_task(generation=job.generation, index=index, split=split)
+                    except (TaskConflict, TaskSplitConflict) as conflict:
+                        task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
+
+        checks = [asyncio.create_task(check(index)) for index in generation.pending_indices]
+        try:
+            if checks:
+                await asyncio.wait(checks, return_when=asyncio.FIRST_EXCEPTION)
+            for item in checks:
+                error = item.exception() if item.done() and not item.cancelled() else None
+                if error is not None:
+                    raise error
+        finally:
+            # A check that could not run, or the generation's deadline, ends the attempt, and the other checks stop.
+            for item in checks:
+                item.cancel()
+            await asyncio.gather(*checks, return_exceptions=True)
         self.task_store.complete_generation(generation=job.generation)
 
     def save_result(self, result: TaskRolloutResult) -> None:
@@ -756,6 +790,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             generation_deadline_seconds=settings.generation_deadline_seconds,
             eval_fraction=settings.eval_fraction,
             split_seed=settings.split_seed,
+            validation_concurrency=settings.validation_concurrency,
         )
         if self.worker is None and self.rounds > 0:
             self.worker = BackgroundJobWorker(

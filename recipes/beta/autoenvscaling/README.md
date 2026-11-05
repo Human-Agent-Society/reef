@@ -199,7 +199,7 @@ When fewer than 2 rollouts scored, the task's difficulty is unknown, and the cal
 
 The recipe gives a task its train/eval split after `validate`, so eval tasks are calibrated too. Eval tasks run no training rollouts.
 
-Cost: each candidate runs up to `calibration_max_rollouts` full rollouts that score, and one more for each rollout that could not run, `generator.concurrency` (2 by default) at a time. A repository task gives the solver up to an hour per rollout. `validate` checks one candidate at a time, so a generation of 8 candidates can take hours more. All attempts of one generation must finish within `pipeline.record2sample.config.generation_deadline_seconds` (1800 by default), so raise it when the calibration is on. A restart calibrates a pending candidate again from the start.
+Cost: each candidate runs up to `calibration_max_rollouts` full rollouts that score, and one more for each rollout that could not run, `generator.concurrency` (2 by default) at a time. A repository task gives the solver up to an hour per rollout. The stage checks `pipeline.record2sample.config.validation_concurrency` candidates at once (1 by default), so a generation of 8 candidates can take hours more. To check them together, raise it and `generator.concurrency` together. All attempts of one generation must finish within `pipeline.record2sample.config.generation_deadline_seconds` (1800 by default), so raise it when the calibration is on. A restart calibrates a pending candidate again from the start.
 
 No results with the calibration are published yet.
 

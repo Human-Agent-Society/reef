@@ -1736,6 +1736,9 @@ which are not records.
    ``pipeline.record2sample.config.generation_deadline_seconds`` : 1800
        seconds that all attempts of one generation may take
 
+   ``pipeline.record2sample.config.validation_concurrency`` : 1
+       candidates that one generation checks at once. A check that fails to run stops the others, and the attempt fails.
+
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
 The task files go in the task file store; see `Choose the task file store

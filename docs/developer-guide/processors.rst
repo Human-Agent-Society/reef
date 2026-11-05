@@ -756,7 +756,7 @@ A generation job runs no rollouts. It:
 1. Asks the generator for tasks with the configured ``description`` and the
    round's source sessions.
 2. Saves the candidates in the scenario's task store, then validates each
-   task with the generator.
+   task with the generator, ``validation_concurrency`` tasks at once.
 3. Publishes each valid task with its train/eval split. It runs no eval
    tasks.
 
