@@ -1029,13 +1029,13 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     scenario.records.append(sft_report("r1", "i1"))
     make_samples(scenario)
     # The job's submission consumes the batch; its checkpoint is the commit that publishes the artifact.
-    submitted = scenario.prepare_training_step()
+    submitted = scenario.next_commit()
     assert submitted is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
     scenario.commit(submitted)
     submitted_state = dict(scenario.trainer.state)
-    result = scenario.prepare_training_step()
+    result = scenario.next_commit()
     assert result is not None and result.artifact is not None
     committer = scenario._committer
 
@@ -1090,7 +1090,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
     make_samples(scenario)
-    result = scenario.prepare_training_step()
+    result = scenario.next_commit()
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
@@ -1150,7 +1150,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     scenario.records.append(sft_report("r1", "i1"))
     make_samples(scenario)
     # The job's submission is the step that consumes the batch.
-    result = scenario.prepare_training_step()
+    result = scenario.next_commit()
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None

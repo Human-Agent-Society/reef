@@ -237,7 +237,7 @@ def _report(record_id: str, reference: str, metadata: dict[str, Any] | None = No
 def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
     # The samples service makes the samples of the rows appended since the last step, as its worker would.
     make_samples(scenario)
-    result = scenario.prepare_training_step(component)
+    result = scenario.next_commit(component)
     if result is None:
         return None
     batch = scenario.trainer_for(component).pending_job_data

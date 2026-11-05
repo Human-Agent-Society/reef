@@ -148,7 +148,7 @@ A recipe returns a ``ScenarioComponents`` from ``build_components``:
            return ScenarioComponents({"prompt": prompt})
 
 A recipe whose scenario serves two components declares both. A step then
-publishes one of them, naming it in ``TrainStepResult.component``, and the
+publishes one of them, naming it in ``TrainingCommit.component``, and the
 committer carries the other forward from the previous checkpoint:
 
 .. code:: python
