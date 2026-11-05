@@ -39,7 +39,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.core.training_request import request_from_parameters
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
 from reef.storage.durable_files import read_json, write_json
@@ -164,7 +164,7 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     Values: ``steps`` is the recipe's view (``HarnessSteps``). ``root`` holds ``jobs/``, one directory per job
     (``LocalJobComponent``), and ``starts/``, the trees that ``import_start`` took. A job's weights never exist:
-    its releases are trees, so ``release_format`` is ``None``. A job depends only on its start, data and
+    its releases are trees, so ``artifact_format`` is ``None``. A job depends only on its start, data and
     parameters, and on the state of its scenario component, which this component keeps per scenario; so scenarios
     share it. ``status`` of a job whose step raised carries the step's metrics and error.
 
@@ -184,7 +184,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         return HARNESS_COMPONENT
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
+    def artifact_format(self) -> ArtifactFormat | None:
         return None
 
     @property
@@ -200,7 +200,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         """Accept: an offline step runs the head tree on its train tasks."""
         return
 
-    def check_release(self, files: ArtifactFiles) -> None:
+    def check_artifact(self, files: ArtifactFiles) -> None:
         self.steps.check_tree(HarnessTree({path: files.read_bytes(path).decode("utf-8") for path in files.paths()}))
 
     def check_job(self, job: TrainingJob) -> None:
@@ -213,7 +213,7 @@ class HarnessTrainingComponent(LocalJobComponent):
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         """The parts of the tree that the step changed: the parts of the paths of the diff from the start's tree to
         the checkpoint's."""
-        changes = HarnessTree.read(Path(start)).diff(HarnessTree.read(Path(checkpoint.release_path))).changes
+        changes = HarnessTree.read(Path(start)).diff(HarnessTree.read(Path(checkpoint.artifact_path))).changes
         return frozenset(self.steps.layout.part_names(changes).values())
 
     def import_start(self, release: Path) -> str:

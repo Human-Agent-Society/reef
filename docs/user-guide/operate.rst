@@ -49,7 +49,7 @@ Training, imports and harness syncs make artifacts. The list is newest first, wi
 
 A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations, train-from operations and serves. ``GET /reef/scenarios/{scenario}/operations`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
-For harness scenarios, ``GET /reef/harness/artifacts`` lists the harness artifacts. Pull a listed tree with ``GET /reef/harness?artifact_id=<id>``. An artifact waiting for activation has ``active: false`` and ``activated: false``. The older ``/reef/harness/releases`` route remains for clients that need its step pages.
+For harness scenarios, ``GET /reef/harness/artifacts`` lists the harness artifacts. Pull a listed tree with ``GET /reef/harness?artifact_id=<id>``. An artifact waiting for activation has ``active: false`` and ``activated: false``. The older ``/reef/harness/artifacts`` route remains for clients that need its step pages.
 
 Starting artifacts
 ------------------
@@ -393,7 +393,7 @@ directory, as they reach the artifact backend.
 
 .. _Harness clients:
 
-**Harness clients.** Send ``GET /reef/harness``, ``GET /reef/harness/releases``,
+**Harness clients.** Send ``GET /reef/harness``, ``GET /reef/harness/artifacts``,
 ``POST /reef/harness/import`` and ``GET /reef/harness/adapters`` to the harness
 service. It reads the commit history and the artifact backend, and loads a
 scenario without activating it. It writes no release: an import goes to control
@@ -457,7 +457,7 @@ deployment's provider key (``inference.upstream-api-key``), when one is set.
 No artifact changes the request on its way to the engine. The service
 appends the record to the scenario's record store and returns the record ID in
 ``x-reef-agent-record-id``, and the ID of the artifact that answered in
-``x-reef-release-id``. ``x-reef-tag-*`` headers go into the record. The
+``x-reef-artifact-id``. ``x-reef-tag-*`` headers go into the record. The
 inference service never creates a scenario: create it first with
 ``POST /reef/scenarios`` or a harness install. The inference service answers:
 
