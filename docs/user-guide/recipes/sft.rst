@@ -296,12 +296,13 @@ refused. Thus one scenario runs SFT first and then RL:
    trains them with SFT.
 3. Send a request that names the tasks in ``samples``, with
    ``{"objective": "my_methods.objectives:MyObjective", "rollout": {"rollouts_per_task": 4}}``
-   in ``parameters`` (``harbor`` instead of ``rollout`` on Slime), with a method that
-   the deployment provides. The job rolls the tasks out and trains on the rollouts.
+   in ``parameters``, with a method that the deployment provides. The job rolls the
+   tasks out and trains on the rollouts.
 
-The training component must run task jobs: Tinker does, and Slime does with
-its own rollout engines (`Task jobs on Slime
-<../../reference/configuration.rst#task-jobs-on-slime>`__). See
+The training component must run both kinds of job, as Tinker does. On Slime, a
+task job needs a deployment of the ``slime`` loss family, which refuses jobs of
+trajectories, so this sequence does not run on one Slime deployment (`Task jobs on
+Slime <../../reference/configuration.rst#task-jobs-on-slime>`__). See
 `Manual training <../../reference/http-api.rst#manual-training>`__ for the
 request and `Choose the samples that train
 <../../reference/http-api.rst#choose-the-samples-that-train>`__ for ``samples``.

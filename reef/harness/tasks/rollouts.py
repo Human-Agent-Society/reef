@@ -406,20 +406,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             if not (Path(request.task) / "task.toml").is_file():
                 raise TaskRolloutError(f"{request.task} is not a Harbor task directory: no task.toml")
         task_paths = [Path(request.task) for request in requests]
-
-        async def build(task_path: Path) -> str:
-            error = ""
-            for _ in range(2):
-                async with slots:
-                    error = await self.lab.build_environment(
-                        task_path, overrides={"environment": {"type": self.environment}}
-                    )
-                if not error:
-                    break
-            return error
-
         builds = {
-            task_path: asyncio.ensure_future(build(task_path))
+            task_path: asyncio.ensure_future(self.build_task_environment(task_path, slots))
             for task_path, count in Counter(task_paths).items()
             if count > 1 and self.environment in REMOTE_TASK_ENVIRONMENTS
         }
@@ -443,6 +431,18 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
                 return await self.run_async(task_path)
 
         return list(await asyncio.gather(*(run_one(task_path) for task_path in task_paths)))
+
+    async def build_task_environment(self, task_path: Path, slots: asyncio.Semaphore) -> str:
+        """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try."""
+        error = ""
+        for _ in range(2):
+            async with slots:
+                error = await self.lab.build_environment(
+                    task_path, overrides={"environment": {"type": self.environment}}
+                )
+            if not error:
+                break
+        return error
 
     def rollout_score(self, rollout: TaskRollout) -> RolloutScore:
         """Failed when the environment could not run the rollout, else its reward, 0 when it ran without one."""
