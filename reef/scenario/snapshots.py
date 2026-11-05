@@ -14,7 +14,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, SnapshotRef
 from reef.artifact.snapshot_chain import ArtifactSnapshotChain
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.components import legacy_artifact_id, validate_component_name
+from reef.core.components import validate_component_name
 from reef.core.snapshot import RootSource
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
@@ -270,15 +270,12 @@ class ScenarioSnapshots:
         """The ``artifact_id`` of each of ``components`` that the snapshot ``revision`` binds, as the records name it.
 
         ``components`` are all the components of the scenario. A snapshot with a known manifest gives its entries;
-        a component that the manifest does not name is left out. A flat legacy snapshot of a one-component scenario
-        has no manifest; its artifact ID is ``legacy_artifact_id``. Otherwise, the result is empty.
+        a component that the manifest does not name is left out. Otherwise, the result is empty.
         """
         manifest = self.manifests(scenario_step).get(revision)
-        if manifest is not None:
-            return {name: manifest[name] for name in components if name in manifest}
-        if len(components) == 1:
-            return {components[0]: legacy_artifact_id(revision, None)}
-        return {}
+        if manifest is None:
+            return {}
+        return {name: manifest[name] for name in components if name in manifest}
 
     def served_history(self, scenario_step: int, component: str, components: tuple[str, ...]) -> tuple[str, ...]:
         """The artifacts of ``component`` that the active releases of the scenario bound, oldest first, with no two

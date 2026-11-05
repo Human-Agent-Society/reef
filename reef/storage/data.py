@@ -89,20 +89,16 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
 
 
 def check_origin(value: object) -> dict[str, str | None]:
-    """Return ``{scenario, artifact_id}``, accepting the former ``release_id`` field on older input.
+    """Return ``{scenario, artifact_id}``.
 
     ``scenario`` is a valid scenario name. ``artifact_id`` is a non-empty string, or null when a record names no
-    artifact. A legacy release ID is validated and discarded. Raise ``ValueError`` for other shapes.
+    artifact. Raise ``ValueError`` for other shapes.
     """
-    if not isinstance(value, Mapping) or set(value) not in (
-        {"scenario", "artifact_id"},
-        {"scenario", "release_id", "artifact_id"},
-    ):
+    if not isinstance(value, Mapping) or set(value) != {"scenario", "artifact_id"}:
         raise ValueError("metadata.origin must be {scenario, artifact_id}")
     check_owner(value["scenario"])
-    for key in ("release_id", "artifact_id"):
-        if value.get(key) is not None and not (isinstance(value[key], str) and value[key]):
-            raise ValueError(f"metadata.origin.{key} must be a non-empty string or null")
+    if value["artifact_id"] is not None and not (isinstance(value["artifact_id"], str) and value["artifact_id"]):
+        raise ValueError("metadata.origin.artifact_id must be a non-empty string or null")
     return {key: value[key] for key in ("scenario", "artifact_id")}
 
 
