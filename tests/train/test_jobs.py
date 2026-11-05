@@ -20,7 +20,7 @@ from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.data import NewItem
@@ -47,8 +47,8 @@ class FakeComponent(TrainingComponent):
         return "fake"
 
     @property
-    def release_format(self) -> ReleaseFormat:
-        return ReleaseFormat("full")
+    def artifact_format(self) -> ArtifactFormat:
+        return ArtifactFormat("full")
 
     def default_start(self) -> DefaultStart:
         return DefaultStart()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import plugin as sglang_plugin
 from reef.inference.sglang.config import SGLangConfig
@@ -340,7 +340,7 @@ def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
         num_gpus=1,
         tensor_parallel_size=1,
         options={},
-        release_format=ReleaseFormat("adapter", 8, ("q_proj",)),
+        artifact_format=ArtifactFormat("adapter", 8, ("q_proj",)),
         adapter_capacity=1,
         prefix_sharing=False,
         executor="auto",

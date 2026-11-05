@@ -37,7 +37,7 @@ from reef.inference.interfaces import (
     new_runtime_load_id_incarnation,
 )
 from reef.inference.registry import RuntimeFactory, config_secret
-from reef.tinker.checkpoint import MANIFEST, TinkerRelease
+from reef.tinker.checkpoint import MANIFEST, TinkerArtifact
 from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 
 #: The hosted Tinker service, which ``service=None`` names.
@@ -65,7 +65,7 @@ def checkpoint_sampler_path(
         if revision is not None and revision.repo != base_model:
             raise ValueError(f"the artifact refers to {revision.uri}, not to the base model {base_model}")
         return None
-    release = TinkerRelease.read(path)
+    release = TinkerArtifact.read(path)
     release.check_compatible(base_model, service=service)
     return release.sampler_path
 

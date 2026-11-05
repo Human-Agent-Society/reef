@@ -8,7 +8,7 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.core.errors import DeployConfigError, RuntimeConfigError
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
@@ -81,7 +81,7 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
         "teacher_timeout",
     }
     assert not {"serving", "inference_timeout_s"} & runtime.keys()
-    serving = serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), ReleaseFormat("full"))
+    serving = serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), ArtifactFormat("full"))
     assert serving["remote"] == config["reef"]["inference_remote"]
     assert (serving["type"], serving["engine"], serving["num_gpus"]) == ("remote_serving", "sglang", 2)
 

@@ -19,9 +19,9 @@ from typing import Any
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import Format
 from reef.harness.runners.native import ToolModule, ToolRunner
+from reef.harness.runners.native.artifact_client import ArtifactClient
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import SEED_GRAPH
-from reef.harness.runners.native.release_client import ArtifactClient
 from reef.harness.tree import HarnessTree, TreePatch
 
 #: How many catalog rows ``harness_inspect("results")`` returns, newest first.

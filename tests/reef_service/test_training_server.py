@@ -419,7 +419,7 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(stub_reposito
 
 @pytest.mark.unit
 def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured_inference_handler() -> None:
-    from reef.core.weight_layout import ReleaseFormat
+    from reef.core.weight_layout import ArtifactFormat
     from reef.inference.sglang.chat import SGLangInferenceHandler
     from reef.service.deploy.serving import serving_runtime_config
     from reef.service.deploy.training import training_deployment_for
@@ -438,7 +438,7 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
     config = backend.component_config(dataclasses.asdict(settings), loss_family="policy")
     assert (config["ray_address"], config["namespace"]) == ("ray-head:6379", "reef")
     assert config["settings"]["model_path"] == "/models/demo"
-    serving = serving_runtime_config(settings, backend, ReleaseFormat("full"))
+    serving = serving_runtime_config(settings, backend, ArtifactFormat("full"))
     assert serving["inference_handler_factory"] is SGLangInferenceHandler
     assert serving["inference_handler_config"] == {"tool_call_parser": "qwen25"}
 
