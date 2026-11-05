@@ -1701,7 +1701,7 @@ which are not records.
 .. container:: config
 
    ``pipeline.record2sample.config.jobs_per_round`` : 1
-       trained jobs after which the next round starts
+       trained jobs after which the next round starts; 0 starts it when the previous round ends, so generation runs ahead of training until ``refill_tasks`` tasks wait
 
    ``pipeline.record2sample.config.source_records_per_round`` : 0
        recorded sessions that each round gives the generator, at most; 0 generates from the description only

@@ -1124,6 +1124,21 @@ def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_
     assert handed_out_names(p) == ["harbor-00001-002", "harbor-00001-003"]
 
 
+def test_with_no_jobs_per_round_the_next_round_follows_the_last_while_few_tasks_wait(tmp_path: Path) -> None:
+    # Generation runs ahead of training: each round starts when the last one ends, while fewer than refill_tasks
+    # saved tasks wait to train, and no job end has to come first.
+    task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 2, 3), generated(2, 4, 5)])
+    p, _ = rounds(tmp_path, task_generator, rounds=3, jobs_per_round=0, refill_tasks=4)
+    looked(p)
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 2, "the second round followed the first with no job"
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 2, "four saved tasks wait, so the third round waits"
+    train_job(p)
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 3
+
+
 def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedback(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     p, _ = rounds(tmp_path, task_generator, rounds=1)

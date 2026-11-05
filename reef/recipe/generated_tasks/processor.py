@@ -17,7 +17,8 @@ every train task of a generation has a result, the next job sends the generation
 
 A train task waits until a committed job trains it, and is unfinished until it has a result. The first round
 starts when the pipeline first looks for job data. The next round starts after ``jobs_per_round`` task jobs
-ended since the previous round started, and only while fewer than ``refill_tasks`` train tasks wait. A round
+ended since the previous round started, and only while fewer than ``refill_tasks`` train tasks wait; with
+``jobs_per_round`` 0 it starts when the previous round ends, so generation runs ahead of training. A round
 that made no train task, a failed task job, and no unfinished task are followed at once. A restart continues from
 the task store and the scenario's items: the scenario still uses the train tasks that did not train, and a later job takes
 them again.
@@ -389,7 +390,7 @@ class GeneratedTaskSettings(Record2SampleSettings):
     Values:
 
     * ``rounds`` is a non-negative int; above 0 it needs a ``description``.
-    * ``jobs_per_round`` and ``refill_tasks`` are positive ints.
+    * ``jobs_per_round`` is a non-negative int, and ``refill_tasks`` a positive int.
     * ``source_records_per_round`` is a non-negative int; above 0 it needs a ``source_tag`` of the form
       ``name=value``.
     * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
@@ -403,7 +404,8 @@ class GeneratedTaskSettings(Record2SampleSettings):
 
     rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
     jobs_per_round: int = config_option(
-        DEFAULT_JOBS_PER_ROUND, help="The finished task jobs after which the next round starts."
+        DEFAULT_JOBS_PER_ROUND,
+        help="The finished task jobs after which the next round starts; 0 starts it when the last round ends.",
     )
     source_records_per_round: int = config_option(0, help="The source sessions that each round takes, at most.")
     source_tag: str = config_option("", help="The name=value tag that marks a source session.")
@@ -429,8 +431,8 @@ class GeneratedTaskSettings(Record2SampleSettings):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.jobs_per_round < 1:
-            raise ValueError("jobs_per_round must be positive")
+        if self.jobs_per_round < 0:
+            raise ValueError("jobs_per_round must be a non-negative int")
         if self.refill_tasks < 1:
             raise ValueError("refill_tasks must be positive")
         if self.source_records_per_round < 0:
@@ -678,7 +680,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
 
     * it is the first round after a start;
     * the last round made no train task, or the last task job failed, so no job data comes;
-    * ``jobs_per_round`` task jobs finished since the last round started;
+    * ``jobs_per_round`` task jobs finished since the last round started (always, with ``jobs_per_round`` 0);
     * no train task is unfinished (``unfinished_task_count``), so no job end can come.
 
     At the limit, the stage stops the rounds and holds no more source sessions.
