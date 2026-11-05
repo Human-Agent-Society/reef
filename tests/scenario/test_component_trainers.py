@@ -229,7 +229,7 @@ def _commit_step(
     ``make`` False trains the samples that are stored already."""
     if make:
         make_samples(scenario)
-    result = scenario.prepare_training_step(component)
+    result = scenario.next_commit(component)
     if result is None:
         return None
     batch = scenario.trainer_for(component).pending_job_data
@@ -257,7 +257,7 @@ def _settle_weights_job(scenario: Scenario) -> None:
     worker reported them in the jobs queue."""
     while scenario.trainer_for(WEIGHTS).job_running:
         deadline = time.monotonic() + 10
-        while (result := scenario.prepare_training_step(WEIGHTS)) is None:
+        while (result := scenario.next_commit(WEIGHTS)) is None:
             assert time.monotonic() < deadline, "the training worker did not report the running job"
             time.sleep(0.02)
         scenario.commit(result, component=WEIGHTS)
@@ -299,7 +299,7 @@ def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispat
     assert reloaded.scenario_step == 6
     _append_records(reloaded, 2)
     make_samples(reloaded)
-    assert reloaded.prepare_training_step(HARNESS) is not None
+    assert reloaded.next_commit(HARNESS) is not None
 
 
 def _submission(scenario: Scenario, component: str) -> CommitRecord:
@@ -340,10 +340,10 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
     assert _commit_step(scenario, HARNESS) == [("i1", "r1")]
     for _ in range(2):
         wait_for_serving(dispatcher, "agent")
-        result = scenario.prepare_training_step(WEIGHTS)
+        result = scenario.next_commit(WEIGHTS)
         assert result is not None
         scenario.commit(result, component=WEIGHTS)
-    assert scenario.prepare_training_step(WEIGHTS) is None
+    assert scenario.next_commit(WEIGHTS) is None
     assert component_files(scenario, scenario.current_snapshot()) == {
         WEIGHTS: "weights job 1",
         HARNESS: "harness step 1",
@@ -758,10 +758,10 @@ def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(
     # The job trains r1a alone; r1b references the same source and makes no new sample.
     assert _commit_step(scenario, HARNESS, make=False) is not None
     assert scenario.records.count("agent") == 3
-    assert scenario.prepare_training_step(HARNESS) is None
+    assert scenario.next_commit(HARNESS) is None
     rebuilt = _reload(dispatcher)
     make_samples(rebuilt)
-    assert rebuilt.prepare_training_step(HARNESS) is None
+    assert rebuilt.next_commit(HARNESS) is None
     # Selection before the commit can persist the skipped report as consumed.
     harness = rebuilt.trainer_for(HARNESS)
     assert "r1b" in harness.skipped_record_ids | harness.consumed_record_ids
@@ -775,11 +775,11 @@ def test_a_report_settled_between_two_commits_stays_settled_after_a_restart(disp
     scenario = _loaded(dispatcher, 1)
     assert _commit_step(scenario, HARNESS) is not None
     scenario.records.append(_report("r1b", "i1"))
-    assert scenario.prepare_training_step(HARNESS) is None
+    assert scenario.next_commit(HARNESS) is None
     _append_records(scenario, 2)
     assert _commit_step(scenario, HARNESS) is not None
     rebuilt = _reload(dispatcher)
-    assert rebuilt.prepare_training_step(HARNESS) is None
+    assert rebuilt.next_commit(HARNESS) is None
     # Settled, not live: commit B names it as consumed, so the rebuilt harness skips it.
     assert "r1b" in rebuilt.trainer_for(HARNESS).consumed_record_ids
 
@@ -793,24 +793,24 @@ def test_a_report_on_an_inference_the_weights_job_trained_is_skipped_not_raised(
     restart."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
-    submitted = scenario.prepare_training_step(WEIGHTS)
+    submitted = scenario.next_commit(WEIGHTS)
     assert submitted is not None
     assert _commit_step(scenario, HARNESS) is not None
     scenario.records.append(_report("r1b", "i1"))
-    assert scenario.prepare_training_step(HARNESS) is None
+    assert scenario.next_commit(HARNESS) is None
     scenario.commit(submitted, component=WEIGHTS)
     _settle_weights_job(scenario)
     wait_for_serving(dispatcher, "agent")
     make_samples(scenario)
     assert scenario.records.get("agent", "i1") is not None
-    assert scenario.prepare_training_step(WEIGHTS) is None
+    assert scenario.next_commit(WEIGHTS) is None
     weights = scenario.trainer_for(WEIGHTS)
     # The samples worker can skip the report before the job's final commit consumes the skipped ID.
     assert "r1b" in weights.skipped_record_ids | weights.consumed_record_ids
     _append_records(scenario, 2)
     assert _commit_step(scenario, HARNESS) is not None
     rebuilt = _reload(dispatcher)
-    assert rebuilt.prepare_training_step(HARNESS) is None
+    assert rebuilt.next_commit(HARNESS) is None
     assert _commit_step(rebuilt, WEIGHTS) == [("i2", "r2")]
 
 
@@ -866,7 +866,7 @@ def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(
     rebuilt.records.append(_records(4, rebuilt.serving_artifact_id())[0])
     rebuilt.records.append(_slotted_report("r4", "i4", "G", 2))
     # Live, slot 0 was never r1dup's: G holds r4 alone and waits.
-    assert rebuilt.prepare_training_step(HARNESS) is None
+    assert rebuilt.next_commit(HARNESS) is None
     assert "r1dup" in _submission(rebuilt, HARNESS).consumed_ids
 
 
@@ -1039,7 +1039,7 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     scenario.records.append(_records(2, scenario.serving_artifact_id())[0])
-    submitted = scenario.prepare_training_step(WEIGHTS)
+    submitted = scenario.next_commit(WEIGHTS)
     assert submitted is not None
     assert _commit_step(scenario, HARNESS) is not None
     scenario.records.append(_report("run", "i1", "i2"))
@@ -1047,8 +1047,8 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
     _settle_weights_job(scenario)
     wait_for_serving(dispatcher, "agent")
     make_samples(scenario)
-    assert scenario.prepare_training_step(HARNESS) is None
-    assert scenario.prepare_training_step(WEIGHTS) is None
+    assert scenario.next_commit(HARNESS) is None
+    assert scenario.next_commit(WEIGHTS) is None
     for component in (WEIGHTS, HARNESS):
         trainer = scenario.trainer_for(component)
         assert "run" in trainer.skipped_record_ids | trainer.consumed_record_ids, component
@@ -1086,7 +1086,7 @@ def test_a_job_submitted_on_an_instance_reloaded_under_it_is_the_same_job_on_the
     training = WeightsJobComponent(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     old = _loaded(dispatcher, 1)
-    assert old.prepare_training_step(WEIGHTS) is not None
+    assert old.next_commit(WEIGHTS) is not None
     [job] = _submitted(training, 1)
     new = _reload(dispatcher)
     assert new is not old
@@ -1206,7 +1206,7 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
     assert _commit_step(scenario, HARNESS) is not None
 
     reloaded = _reload(dispatcher)
-    assert reloaded.prepare_training_step(HARNESS) is None
+    assert reloaded.next_commit(HARNESS) is None
     assert _commit_step(reloaded, WEIGHTS) is not None
     # The weights trainer's stage ended the rows and saved its sample of them before the restart: the store keeps
     # both, so the commit names them.
@@ -1648,7 +1648,7 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
     scenario = _loaded(dispatcher)
     # Both trainers must observe the base weights before a job can replace them, so their samples stay trainable.
     for component in (WEIGHTS, HARNESS):
-        assert scenario.prepare_training_step(component) is None
+        assert scenario.next_commit(component) is None
     served = scenario.serving_artifact_id()
     for step in (1, 2):
         for record in _records(step, served):
@@ -1683,7 +1683,7 @@ def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     _append_records(scenario, 1)
     make_samples(scenario)
     # The samples service stores the step's sample, but without a training request nothing trains.
-    assert scenario.prepare_training_step(WEIGHTS) is None
+    assert scenario.next_commit(WEIGHTS) is None
     trainer = scenario.trainer_for(WEIGHTS)
     held = tuple(stored.sample_id for stored in trainer.pipeline.store.page())
     # In a scenario of several components, a sample's name names its component first.
@@ -1715,7 +1715,7 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     scenario = _loaded(dispatcher, 1, 2)
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     [job] = _submitted(training, 1)
-    assert scenario.prepare_training_step(WEIGHTS) is None
+    assert scenario.next_commit(WEIGHTS) is None
     assert _commit_step(scenario, HARNESS) == [("i1", "r1")]
     assert _commit_step(scenario, HARNESS) == [("i2", "r2")]
     dispatcher.close()

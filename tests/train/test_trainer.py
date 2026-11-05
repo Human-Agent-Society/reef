@@ -47,7 +47,7 @@ from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.trainer import PendingTrainingResult
-from reef.train.types import JobData, PreparedCommit, TrainStepResult
+from reef.train.types import JobData, PreparedCommit, TrainingCommit
 
 NUM_GPUS = 0
 
@@ -74,9 +74,9 @@ def preparing_trainer(records: SQLiteRecordStore, **options) -> Trainer:
 def finish(trainer: Trainer) -> None:
     """Commit the end of ``trainer``'s running job, when one runs: its job ended in ``submit``."""
     while trainer.job_running:
-        ended = trainer.run_once()
+        ended = trainer.advance_job()
         assert ended is not None
-        trainer.commit(trainer.prepare_commit(ended))
+        trainer.settle_commit(trainer.prepare_commit(ended))
 
 
 def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> None:
@@ -370,7 +370,7 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     trainer = preparing_trainer(one_pair_records())
     make_samples(trainer)
 
-    result = trainer.run_once()
+    result = trainer.advance_job()
 
     assert result is not None
     assert trainer.pending_job_data is not None
@@ -385,7 +385,7 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert result.artifact is None
     assert trainer.state == JobLoopState("recording:base").to_dict()
     prepared = trainer.prepare_commit(result)
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     assert trainer.job_running
     finish(trainer)
     assert JobLoopState.from_dict(trainer.state).finished_jobs == 1
@@ -399,7 +399,7 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 def test_prepared_snapshot_must_match_its_training_result(
     prepared_state: dict[str, int], prepared_job_id: str | None
 ) -> None:
-    result = TrainStepResult({"steps": 1}, training_job_id="job-1")
+    result = TrainingCommit({"steps": 1}, training_job_id="job-1")
     prepared = PreparedCommit(prepared_state, 0, 0, training_job_id=prepared_job_id)
     with pytest.raises(ValueError, match=r"prepared.*match.*result"):
         PendingTrainingResult(data=None, result=result, prepared_commit=prepared)
@@ -410,7 +410,7 @@ def test_prepared_training_result_requires_a_state_mapping() -> None:
     with pytest.raises(TypeError, match=r"state.*mapping"):
         PendingTrainingResult(
             data=None,
-            result=TrainStepResult(None),
+            result=TrainingCommit(None),
             prepared_commit=PreparedCommit({}, 0, 0),
         )
 
@@ -419,12 +419,12 @@ def test_prepared_training_result_requires_a_state_mapping() -> None:
 def test_a_retried_preparation_returns_the_cached_commit() -> None:
     with one_pair_records() as records, closing(preparing_trainer(records)) as trainer:
         make_samples(trainer)
-        result = trainer.run_once()
+        result = trainer.advance_job()
         assert result is not None
         prepared = trainer.prepare_commit(result, {"provider_request_id": "request-1"})
         assert prepared.metrics is not None and prepared.metrics["provider_request_id"] == "request-1"
         assert trainer.prepare_commit(result, {"provider_request_id": "request-2"}) is prepared
-        trainer.commit(prepared)
+        trainer.settle_commit(prepared)
         assert trainer.algorithm_state_dict() == result.state
         finish(trainer)
 
@@ -434,7 +434,7 @@ def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made
     trainer = preparing_trainer(one_pair_records())
 
     # The trainer's own cycle reads the sample store only: no record became a sample yet.
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert trainer.pipeline_status()["ready_samples"] == 0
 
     # The samples service makes the samples; the next cycle builds the job from them.
@@ -444,7 +444,7 @@ def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made
     assert trainer.produce_samples() == ProducedSamples(
         changed=False, background=False, records_read=0, samples_created=0
     )
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None and len(trainer.pending_job_data.samples) == 1
 
 
@@ -457,7 +457,7 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
     trainer = preparing_trainer(records, pipeline_factory=partial(threshold_pipeline, job_samples=2))
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 2)
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     data = trainer.pending_job_data
     assert data is not None and len(data.samples) == 2
     # The samples service read every record; the third sample waits in the buffer for the next job.
@@ -562,11 +562,11 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     first = preparing_trainer(records, pipeline_factory=pipeline, samples=samples)
     make_samples(first)
 
-    first_result = first.run_once()
+    first_result = first.advance_job()
     assert first_result is not None
     assert source_record_id(first.pending_job_data.samples[0]) == "i1"
     prepared = first.prepare_commit(first_result)
-    first.commit(prepared)
+    first.settle_commit(prepared)
     record_commit(session, 1, prepared)
     finish(first)
     assert JobLoopState.from_dict(first.state).finished_jobs == 1
@@ -581,13 +581,13 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
     assert second.state == recovered_state
     make_samples(second)
-    second_result = second.run_once()
+    second_result = second.advance_job()
     assert second_result is not None
     assert source_record_id(second.pending_job_data.samples[0]) == "i2"
     prepared = second.prepare_commit(second_result)
-    second.commit(prepared)
+    second.settle_commit(prepared)
     finish(second)
-    assert second.run_once() is None
+    assert second.advance_job() is None
     session.close()
 
 
@@ -605,10 +605,10 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
             first_store.append(item)
         first = preparing_trainer(first_store, samples=sample_store(storage, "math", first_session).for_trainer(""))
         make_samples(first)
-        first_result = first.run_once()
+        first_result = first.advance_job()
         assert first_result is not None
         prepared = first.prepare_commit(first_result)
-        first.commit(prepared)
+        first.settle_commit(prepared)
         record_commit(first_session, 1, prepared)
         finish(first)
         first_state = first.algorithm_state_dict()
@@ -635,16 +635,16 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == first_state
         make_samples(second)
-        second_result = second.run_once()
+        second_result = second.advance_job()
         assert second_result is not None
         assert source_record_id(second.pending_job_data.samples[0]) == second_inference.agent_record_id
         prepared = second.prepare_commit(second_result)
-        second.commit(prepared)
+        second.settle_commit(prepared)
         finish(second)
         assert second_store.count("math") == 4
         archived = second_store.audit_page("math")
         assert [entry.item for entry in archived] == [first_inference, first_report, second_inference, second_report]
-        assert second.run_once() is None
+        assert second.advance_job() is None
     storage.close()
 
 
@@ -777,22 +777,22 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         trainer = preparing_trainer(records)
         assert trainer.pipeline_status()["record_data_incomplete"] is True
         make_samples(trainer)
-        result = trainer.run_once()
+        result = trainer.advance_job()
         assert result is not None
         assert source_record_id(trainer.pending_job_data.samples[0]) == "i3"
         prepared = trainer.prepare_commit(result)
         assert "r2" in prepared.consumed_ids
         assert prepared.metrics["records/data_incomplete"] == 1
-        trainer.commit(prepared)
+        trainer.settle_commit(prepared)
         finish(trainer)
         ended_state = trainer.algorithm_state_dict()
-        assert trainer.run_once() is None
+        assert trainer.advance_job() is None
         assert "Skipping report r2" in caplog.text
     with SQLiteRecordStore(database) as records:
         resumed = preparing_trainer(records, algorithm_state=ended_state)
         resumed.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         resumed.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         make_samples(resumed)
-        assert resumed.run_once() is None
+        assert resumed.advance_job() is None
         assert resumed.pipeline_status()["evicted_record_count"] == 1
         assert records.get("math", "i3") is not None

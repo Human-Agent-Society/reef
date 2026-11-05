@@ -24,7 +24,7 @@ from reef.core.job_data import JobData, JobOutcome
 from reef.storage.data import DataStore, MemoryDataStore
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
-from reef.train.types import TrainStepResult
+from reef.train.types import TrainingCommit
 
 #: The key of a checkpoint commit's metrics that the job loop writes itself.
 TRAINING_JOB_KEY = "training_job"
@@ -117,11 +117,11 @@ class JobLoopState:
 class JobCommit:
     """One commit that a job loop gives its trainer.
 
-    Values: ``result`` is the ``TrainStepResult`` whose ``state`` is the next ``JobLoopState`` as a dict.
+    Values: ``result`` is the ``TrainingCommit`` whose ``state`` is the next ``JobLoopState`` as a dict.
     Purpose: ``JobLoop.submit``, ``poll``, ``publish`` and ``end`` make it; the trainer commits ``result``.
     """
 
-    result: TrainStepResult
+    result: TrainingCommit
 
 
 class JobLoop:
@@ -208,7 +208,7 @@ class JobLoop:
         submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
         return JobCommit(
-            TrainStepResult(state=submitted.to_dict(), metrics={"training_job": event}, training_job_id=job_id)
+            TrainingCommit(state=submitted.to_dict(), metrics={"training_job": event}, training_job_id=job_id)
         )
 
     def job_status(self, job_id: str) -> JobStatus:
@@ -262,7 +262,7 @@ class JobLoop:
             },
         }
         return JobCommit(
-            TrainStepResult(
+            TrainingCommit(
                 state=handled.to_dict(),
                 metrics=metrics,
                 artifact=Artifact.local(Path(checkpoint.artifact_path)),
@@ -287,7 +287,7 @@ class JobLoop:
         ended = JobLoopState(state.start, None, state.finished_jobs + 1, outcome)
         event = {key: value for key, value in outcome.to_dict().items() if key != "metrics"}
         return JobCommit(
-            TrainStepResult(
+            TrainingCommit(
                 state=ended.to_dict(),
                 metrics={**status.metrics, "training_job": event},
                 training_job_id=job.job_id,

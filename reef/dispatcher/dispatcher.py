@@ -875,7 +875,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.local_workers.wake(current)
         for component_trainer in current.trainers:
             if not component_trainer.trainer.trains:
-                current.prepare_training_step(component_trainer.component)
+                component_trainer.trainer.read_new_records()
 
     def control_lease_lost(self) -> None:
         """Another control instance took the lease: no local cycle of this instance runs or commits any more, and
