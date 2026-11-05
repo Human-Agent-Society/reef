@@ -17,7 +17,7 @@ from reef.train.component import TrainingComponent
 class ScenarioBinding:
     """Runtime-facing capabilities selected by a recipe at construction."""
 
-    #: The components every release binds, with each one's admission check, run before that component is
+    #: The components every snapshot binds, with each one's admission check, run before that component is
     #: published or restored.
     components: ScenarioComponents
     runtime: InferenceRuntime | None
@@ -35,13 +35,13 @@ class ScenarioBinding:
     served_models: ServedModels | None = None
 
 
-def activate_release(
+def activate_snapshot(
     components: ScenarioComponents,
     artifact: Artifact,
     runtime: InferenceRuntime | None,
     scenario: str,
 ) -> None:
-    """Load the release ``artifact`` of ``scenario`` into ``runtime`` before traffic routes to it.
+    """Load the snapshot ``artifact`` of ``scenario`` into ``runtime`` before traffic routes to it.
 
     Only the loaded component (``ScenarioComponents.loaded_component``) loads. Nothing loads without a runtime or
     such a component. The inference worker calls it.

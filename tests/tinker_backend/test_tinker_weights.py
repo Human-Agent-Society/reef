@@ -1,4 +1,4 @@
-"""The weight files of a Tinker release for Reef's engines: the adapter at its sampler path, downloaded once."""
+"""The weight files of a Tinker artifact for Reef's engines: the adapter at its sampler path, downloaded once."""
 
 from __future__ import annotations
 

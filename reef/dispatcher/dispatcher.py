@@ -43,8 +43,8 @@ from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
-from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshots import ServedBesideArtifact
 from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
@@ -302,7 +302,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def create_scenario(self, scenario: str, start: ItemStart | None = None) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it.
 
-        A new scenario's root release holds the artifact item ``start``, or the recipe's default start when
+        A new scenario's root snapshot holds the artifact item ``start``, or the recipe's default start when
         ``start`` is ``None`` (``ScenarioFactory.load_or_create``); an existing scenario ignores ``start``. The check
         and the creation hold the scenario's lock, so of several calls for one new name only one gets True. Raise as
         ``get_or_create_scenario`` does when the creation is refused, and ``ValueError`` when the item's layout or
@@ -563,7 +563,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return changed
 
     def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
-        """Serve ``artifact_id`` of ``component`` beside the active release of ``scenario``; that release stays."""
+        """Serve ``artifact_id`` of ``component`` beside the active selection of ``scenario``; that snapshot stays."""
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
             changed = current.serve(artifact_id, component)
@@ -581,7 +581,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return selection
 
     def stop_serving(self, scenario: str, artifact_id: str) -> ServedBesideArtifact:
-        """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
+        """Stop serving ``artifact_id`` beside the active selection of ``scenario``; the active selection stays."""
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
             changed = current.stop_serving(artifact_id)
@@ -633,7 +633,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         expected_selection: ArtifactSelection,
         metrics: Mapping[str, Any],
     ) -> ComponentArtifact:
-        """Make a person's merged ``component`` tree ``scenario``'s active release and training start, under the
+        """Make a person's merged ``component`` tree ``scenario``'s active selection and training start, under the
         scenario's lock, and write what the scenario serves now; see :meth:`ScenarioCommitter.sync_artifact`."""
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
@@ -883,8 +883,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             runtime = current.runtime
             if runtime is None:
                 raise ReefError(f"scenario {scenario!r} has no runtime")
-            _, release = current.resolve_artifact(artifact_id, component)
-            return runtime, release.materialize()
+            _, snapshot = current.resolve_artifact(artifact_id, component)
+            return runtime, snapshot.materialize()
 
     def request_artifact_copy(self, scenario: str) -> None:
         """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""

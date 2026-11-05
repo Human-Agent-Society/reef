@@ -1,4 +1,4 @@
-"""Shared setup for the tests of a scenario with one trainer per release component."""
+"""Shared setup for the tests of a scenario with one trainer per snapshot component."""
 
 from __future__ import annotations
 
@@ -36,13 +36,13 @@ from reef.execution.workers import SERVICE_COMPONENTS
 
 
 class ComponentJobs(StubTrainingComponent):
-    """The training component of one release component: its jobs run in ``submit``, on the trainer's own thread.
+    """The training component of one snapshot component: its jobs run in ``submit``, on the trainer's own thread.
 
     Each job runs ``step``, which saves one checkpoint holding ``<component>.txt`` = ``<component> step <n>`` for the
     ``n``-th job, with the metrics ``{prepared}``. ``prepared`` counts the steps that started, a step that raised
     included; a step that raises records no job, so ``submit`` raises as a refused job does and the trainer's cycle
     fails. ``reject_next`` ends the next job without a checkpoint, with ``selected: False``. ``hold_next`` adds the
-    next checkpoint's release path to ``held_paths``: such a checkpoint changes the ``HELD`` part
+    next checkpoint's snapshot path to ``held_paths``: such a checkpoint changes the ``HELD`` part
     (``changed_parts``), which the test recipe's activation rule does not activate. ``started``
     is the text of the last start that ``import_start`` took. A subclass blocks or fails a step in ``step``.
     """
@@ -166,7 +166,7 @@ class _TwoTrainerRecipe(Recipe):
 
     backends: Mapping[str, ComponentJobs]
     auto_only_components: frozenset[str] = frozenset()
-    #: The content of a new scenario's root release.
+    #: The content of a new scenario's root snapshot.
     start: DefaultStart = field(default_factory=lambda: seeded_start((WEIGHTS, HARNESS)))
 
     def activation_rule(self) -> ActivationRule:
@@ -200,7 +200,7 @@ class _TwoTrainerRecipe(Recipe):
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -334,7 +334,7 @@ def _repository(tmp_path: Path):
 
 
 def component_files(scenario: Scenario, ref: SnapshotRef) -> dict[str, str]:
-    """The text of each component's ``<component>.txt`` in the release ``ref``."""
+    """The text of each component's ``<component>.txt`` in the snapshot ``ref``."""
     head = scenario.repository.materialize(ref)
     return {
         component: (TextFileTree().read_files(head.component(component)) or {})[f"{component}.txt"]

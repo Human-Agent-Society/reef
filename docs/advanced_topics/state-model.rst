@@ -26,8 +26,8 @@ With a database path configured, the SQLite store uses WAL journalling and
 synchronous = FULL. The default in-memory database is for tests and does not
 survive a restart.
 
-The release chain
------------------
+The snapshot chain
+------------------
 
 The repository retains a publication chain internally. The public state
 model has three parts: immutable artifacts, scenario selections and an
@@ -97,7 +97,7 @@ Commit ordering
 its task stores. It validates step progression and settles record
 consumption with each commit.
 Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` writes a
-new scenario's root release, opens a storage session, and returns the
+new scenario's root snapshot, opens a storage session, and returns the
 complete ``Scenario``. The scenario owns that session and
 coordinates trainer and artifact operations. Both built-in storages
 assemble their record store with ``CommitHistoryScenarioStore`` and keep
@@ -125,7 +125,7 @@ durable store, the order is:
    * - Commit kind
      - Order after trainer preparation
    * - Activated artifact
-     - Stage the bytes, publish the durable release,
+     - Stage the bytes, publish the durable snapshot,
        commit the store with ``activated: true``, install the committed heads,
        synchronize the backend pointer, apply trainer state.
    * - Activation
@@ -150,7 +150,7 @@ durable store, the order is:
        artifact that the activation rule does not activate commits this way.
        A later activation is its own record.
 
-Every trainer is bound to a release component (``records`` when the recipe
+Every trainer is bound to a snapshot component (``records`` when the recipe
 serves none). With several trainers, every commit record names the
 ``component`` that made it. In a scenario of one trainer, commit records,
 checkpoint metadata and drop receipts name no component.
@@ -168,7 +168,7 @@ trainers:
   waits for its commit.
 
 Thus the chain tip does not move under a step, and every step commits on the
-release that it was prepared against.
+snapshot that it was prepared against.
 
 When a commit fails, the worker rebuilds the scenario from durable state at
 once. A cycle that still runs on the old instance keeps that instance open
@@ -183,14 +183,14 @@ that names its component. On restart each trainer recovers its state and
 read cursor from its own commits and skips the rows its own commits and
 receipts name, which needs durable commit storage.
 
-Without a durable store, a saved release advances the active selection and the
+Without a durable store, a saved snapshot advances the active selection and the
 chain tip before the in-memory commit settles. A conflicting chain tip
 therefore rejects the step before its records are consumed. In-memory commit history supports retries
 only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
 under ``scenario_commit_record`` (format ``reef-scenario/6``): the root's
-``source``, and after step zero the root release as ``start_artifact``.
+``source``, and after step zero the root snapshot as ``start_artifact``.
 Recovery also reads legacy ``reef-scenario/5`` metadata and refuses other formats. It decodes the metadata into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer

@@ -1,6 +1,6 @@
 """Create and restore scenarios from durable registration and committed state.
 
-A new scenario owns its root release: the recipe's default start, or an artifact item of its owner. Storage repair
+A new scenario owns its root snapshot: the recipe's default start, or an artifact item of its owner. Storage repair
 precedes checkpoint synchronization and activation. The trainer
 is then built from committed state and retained records are replayed. Any
 failure closes the trainer and opened storage session owned by this attempt.
@@ -22,26 +22,26 @@ from reef.artifact.artifact import (
     artifact_components,
 )
 from reef.artifact.components import ScenarioComponents
-from reef.artifact.composite import compose_release
+from reef.artifact.composite import compose_snapshot
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
     RepositoryBackendFactory,
-    StagedReleaseRepositoryBackend,
+    StagedSnapshotRepositoryBackend,
     selection_digest,
 )
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
-from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
+from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.release_files import ScenarioArtifactFiles
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     UNLOCATED_SNAPSHOT,
@@ -63,11 +63,11 @@ from reef.train.training_requests import TrainingRequestQueue
 class RepositoryCommitSnapshots(CommitSnapshots):
     """Finds each record's snapshot from its selection and the backend's bindings of artifact IDs.
 
-    Values: ``backend`` is the scenario's backend, and ``start`` is its root release. Bindings never change, so one
+    Values: ``backend`` is the scenario's backend, and ``start`` is its root snapshot. Bindings never change, so one
     lookup per artifact ID is enough. The ``snapshot`` of a record without one is:
 
     - a step or import that made an artifact: the binding of the artifact that this record names first;
-    - a training step that made none: the release that was active then;
+    - a training step that made none: the snapshot that was active then;
     - any other record of one component, or a new training start: the binding of its artifact;
     - any other record of several components: the local view of its selection.
     """
@@ -139,14 +139,14 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
 
 @dataclass(frozen=True)
 class ItemStart:
-    """The artifact item that a new scenario's root release holds.
+    """The artifact item that a new scenario's root snapshot holds.
 
     Values: ``item_id`` is the item's non-empty ID, and ``uri`` its non-empty ``source_uri``. ``files`` is the
     ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
     ``None`` for the scenario's one component.
 
     Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
-    ``ScenarioFactory.register`` checks it and writes it as the root release.
+    ``ScenarioFactory.register`` checks it and writes it as the root snapshot.
     """
 
     item_id: str
@@ -272,13 +272,13 @@ class ScenarioFactory:
     def load_or_create(self, scenario: str, start: ItemStart | None = None) -> Scenario:
         """Recover the scenario ``scenario``, or create it when the backend has no registration of it.
 
-        A new scenario gets its own root release (``register``): the artifact item ``start``, or the recipe's
+        A new scenario gets its own root snapshot (``register``): the artifact item ``start``, or the recipe's
         default start when ``start`` is ``None``. An existing scenario ignores ``start``.
         """
         backend = self._backend_factory(scenario)
-        if self._storage.durable and not isinstance(backend, StagedReleaseRepositoryBackend):
+        if self._storage.durable and not isinstance(backend, StagedSnapshotRepositoryBackend):
             raise ArtifactPublicationError(
-                "scenarios with durable commit storage require a backend implementing StagedReleaseRepositoryBackend"
+                "scenarios with durable commit storage require a backend implementing StagedSnapshotRepositoryBackend"
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
@@ -296,13 +296,13 @@ class ScenarioFactory:
             backend,
             registration,
             components=components,
-            registered_components=release_components(metadata),
+            registered_components=snapshot_components(metadata),
         )
 
     def register(
         self, scenario: str, backend: RepositoryBackend, components: ScenarioComponents, start: ItemStart | None
     ) -> None:
-        """Write the root release of the new scenario ``scenario`` and register it with ``backend``.
+        """Write the root snapshot of the new scenario ``scenario`` and register it with ``backend``.
 
         The root holds the artifact item ``start`` in its component, or the recipe's default start
         (``Recipe.default_start``) when ``start`` is ``None``. A root of several components holds each other
@@ -315,7 +315,7 @@ class ScenarioFactory:
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
-            root, source = self.root_release(components, start, Path(work))
+            root, source = self.root_snapshot(components, start, Path(work))
             if start is not None:
                 self._recipe.check_root_start(ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
@@ -330,10 +330,10 @@ class ScenarioFactory:
                 registration_metadata[COMPONENTS_METADATA_KEY] = root.metadata[COMPONENTS_METADATA_KEY]
             backend.register(root, metadata=registration_metadata)
 
-    def root_release(
+    def root_snapshot(
         self, components: ScenarioComponents, start: ItemStart | None, work: Path
     ) -> tuple[Artifact, RootSource]:
-        """The unpublished root release of a new scenario that ``components`` serves, under ``work``, and its source."""
+        """The unpublished root snapshot of a new scenario that ``components`` serves, under ``work``, and its source."""
         item: tuple[str, Artifact] | None = None
         if start is None:
             default = self._recipe.default_start()
@@ -344,8 +344,8 @@ class ScenarioFactory:
             directory.mkdir()
             stored = layout.stored(start.files, directory)
             source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
-            # The admission checks of an import: the release's own with one component, else the component's here and
-            # the release's on the composed root.
+            # The admission checks of an import: the snapshot's own with one component, else the component's here and
+            # the snapshot's on the composed root.
             if components.single:
                 components.validate(stored)
                 return stored, source
@@ -363,14 +363,14 @@ class ScenarioFactory:
         )
         if stray:
             raise ReefError(
-                f"the default start keeps {stray} outside its components {list(components.names)}: a release serving "
+                f"the default start keeps {stray} outside its components {list(components.names)}: a snapshot serving "
                 "several components keeps one directory per component"
             )
         artifacts = {name: Artifact.local(tree / name) for name in components.names}
         if item is None:
-            return compose_release(artifacts, directory=work / "root"), source
+            return compose_snapshot(artifacts, directory=work / "root"), source
         artifacts[item[0]] = item[1]
-        root = compose_release(artifacts, directory=work / "root")
+        root = compose_snapshot(artifacts, directory=work / "root")
         components.validator.validate(root)
         return root, source
 
@@ -381,12 +381,12 @@ class ScenarioFactory:
         registration: object,
         *,
         components: ScenarioComponents,
-        registered_components: ReleaseComponents | None,
+        registered_components: SnapshotComponents | None,
     ) -> Scenario:
         if not isinstance(registration, Mapping):
             raise ValueError(f"invalid scenario metadata for {name!r}")
         if not components.single:
-            # A registration names the components its releases bind. One made by a
+            # A registration names the components its snapshots bind. One made by a
             # recipe serving a single component, or none, has releases with no
             # component directories to carry forward; refuse rather than compose
             # the whole flat tree into every component.
@@ -404,7 +404,7 @@ class ScenarioFactory:
             unserved = [component for component in registered_components.names if component not in components.names]
             if unserved:
                 # A step carries forward the components the recipe serves: one it does not serve would leave
-                # every later release, and the head would then refuse the recipe that registered them.
+                # every later snapshot, and the head would then refuse the recipe that registered them.
                 raise ReefError(
                     f"scenario {name!r} was registered with components {list(registered_components.names)}; "
                     f"the recipe does not serve {unserved}"
@@ -500,7 +500,7 @@ class ScenarioFactory:
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
-                releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
+                artifacts=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
                 samples=self._storage.sample_store(name, store),
                 root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )

@@ -19,17 +19,17 @@ from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, SnapshotRef
 from reef.artifact.components import ArtifactLayout
-from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, validate_component_name
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents, validate_component_name
 from reef.core.errors import CommitPending, ReefError
 from reef.core.snapshot import RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.releases import ScenarioReleases, ServedBesideArtifact
+from reef.scenario.snapshots import ScenarioSnapshots, ServedBesideArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitOperation,
@@ -96,7 +96,7 @@ class ScenarioCommitter:
         *,
         name: str,
         binding: ScenarioBinding,
-        artifacts: ArtifactReleaseChain,
+        artifacts: ArtifactSnapshotChain,
         trainers: tuple[ComponentTrainer, ...],
         root_source: RootSource,
         scenario_step: int = 0,
@@ -115,7 +115,7 @@ class ScenarioCommitter:
         #: Decides whether a training step's artifact serves. It starts as the binding's rule.
         self.activation_rule = binding.activation_rule
         self._artifacts = artifacts
-        #: Where the scenario's root release came from; every release that a training step makes records it.
+        #: Where the scenario's root snapshot came from; every snapshot that a training step makes records it.
         self.root_source = root_source
         self.trainers = trainers
         self._step = scenario_step
@@ -130,7 +130,7 @@ class ScenarioCommitter:
         # Writers must acquire the operation lock first; readers never take it.
         self._publication_lock = RLock()
         #: Read-only release queries. They share the publication lock with commit and activation.
-        self.release_queries = ScenarioReleases(
+        self.snapshot_queries = ScenarioSnapshots(
             name=name,
             artifacts=artifacts,
             store=store,
@@ -229,7 +229,7 @@ class ScenarioCommitter:
         """Each component's active artifact and training start, by ``artifact_id``; ``None`` where none is known.
 
         The active artifact is the component's artifact in the active
-        release. A trainer's training start is the artifact of its newest
+        selection. A trainer's training start is the artifact of its newest
         record that sets it (``starts_trainer``): a ``"train_from"`` or
         ``"sync"`` record, or the newest artifact it made, and the creation's
         artifact before any of them. A component whose
@@ -237,16 +237,16 @@ class ScenarioCommitter:
         ``None``.
         """
         names = self.component_names()
-        queries = self.release_queries
+        queries = self.snapshot_queries
         records = queries.records()
         creation = queries.creation_artifact.revision
 
         def bound(revision: str, name: str) -> str | None:
-            """The ``artifact_id`` of ``name`` in the release ``revision``, as the records name it."""
+            """The ``artifact_id`` of ``name`` in the snapshot ``revision``, as the records name it."""
             return queries.bound_artifact_ids(revision, names, self._step).get(name)
 
         active = active_record(records)
-        active_release = creation if active is None else active.snapshot.revision
+        active_revision = creation if active is None else active.snapshot.revision
         recovered_active: Mapping[str, str] = {}
         if active is None and self._artifacts.current != queries.creation_artifact:
             repository = self._artifacts.repository
@@ -258,7 +258,10 @@ class ScenarioCommitter:
             if name in trainers:
                 latest = next((record for record in reversed(records) if self.starts_trainer(record, name)), None)
                 start = bound(creation if latest is None else latest.snapshot.revision, name)
-            status[name] = {"active": recovered_active.get(name, bound(active_release, name)), "training_start": start}
+            status[name] = {
+                "active": recovered_active.get(name, bound(active_revision, name)),
+                "training_start": start,
+            }
         return status
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
@@ -267,8 +270,8 @@ class ScenarioCommitter:
         name = self.component_on_record(self.component_trainer(component).component)
         return next((record for record in reversed(records) if self.own_record(record, name)), None)
 
-    def release_manifest(self, artifact: Artifact) -> ReleaseComponents:
-        """The manifest a release carries: its own, or the one-component manifest a flat release implies."""
+    def snapshot_manifest(self, artifact: Artifact) -> SnapshotComponents:
+        """The manifest a snapshot carries: its own, or the one-component manifest a flat snapshot implies."""
         manifest = artifact.components
         if manifest is not None:
             return manifest
@@ -279,20 +282,20 @@ class ScenarioCommitter:
                 f"{artifact.ref.revision!r} carries no component manifest"
             )
         name = components.names[0] if components.names else self.trainers[0].component
-        return ReleaseComponents({name: ComponentEntry(artifact.artifact_id)})
+        return SnapshotComponents({name: ComponentEntry(artifact.artifact_id)})
 
     def require_components(self, artifact: Artifact) -> None:
-        """Refuse a release that does not bind every component this scenario serves.
+        """Refuse a snapshot that does not bind every component this scenario serves.
 
-        Reading such a release as composed would hand the whole tree, or
-        nothing, to each component; every release a composed scenario
+        Reading such a snapshot as composed would hand the whole tree, or
+        nothing, to each component; every snapshot a composed scenario
         registers or publishes carries a full manifest, so this is a
         misdirected repository, not a supported input.
         """
         components = self._binding.components
         if components.single:
             return
-        manifest = self.release_manifest(artifact)
+        manifest = self.snapshot_manifest(artifact)
         missing = [name for name in components.names if name not in manifest.entries]
         if missing:
             raise ReefError(
@@ -304,7 +307,7 @@ class ScenarioCommitter:
         """The ``artifact_id`` of each component that ``artifact``, published as ``revision``, binds; ``None`` for a scenario of one component."""
         if self._binding.components.single:
             return None
-        return self.release_manifest(artifact).artifact_ids(revision)
+        return self.snapshot_manifest(artifact).artifact_ids(revision)
 
     def import_target(self, component: str | None) -> tuple[str, ArtifactLayout]:
         """The component an import into ``component`` lands in, and the layout that checks its directory
@@ -321,10 +324,10 @@ class ScenarioCommitter:
             raise CommitPending(f"cannot {action} while a training result waits for its commit")
 
     def artifact_snapshot(self, artifact_id: str, component: str | None) -> tuple[str, SnapshotRef]:
-        """The component that ``artifact_id`` names, and the ref of the durable release that minted it.
+        """The component that ``artifact_id`` names, and the ref of the durable snapshot that minted it.
 
-        It reads the commit history alone and does not materialize the release. ``component`` and ``artifact_id``
-        are as for :meth:`resolve_artifact`, which raises the same errors, except for the check of the release's
+        It reads the commit history alone and does not materialize the snapshot. ``component`` and ``artifact_id``
+        are as for :meth:`resolve_artifact`, which raises the same errors, except for the check of the snapshot's
         components.
         """
         names = self.component_names()
@@ -334,15 +337,15 @@ class ScenarioCommitter:
             component = names[0]
         if component not in names:
             raise ValueError(f"scenario {self._name!r} has no component {component!r}")
-        listed = self.release_queries.artifacts(self._step, names)
+        listed = self.snapshot_queries.artifacts(self._step, names)
         row = next((row for row in listed if (row["artifact_id"], row["component"]) == (artifact_id, component)), None)
         if row is None:
             raise ArtifactNotFound(
                 f"scenario {self._name!r} has no artifact {artifact_id!r} of component {component!r}"
             )
-        found = self.release_queries.find_snapshot(row["snapshot"].revision)
+        found = self.snapshot_queries.find_snapshot(row["snapshot"].revision)
         if found is None or not found[1]:
-            raise ReleaseNotRestorable(f"scenario {self._name!r} artifact {artifact_id!r} has no durable bytes")
+            raise SnapshotNotRestorable(f"scenario {self._name!r} artifact {artifact_id!r} has no durable bytes")
         return component, found[0]
 
     def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
@@ -350,40 +353,40 @@ class ScenarioCommitter:
 
         With one component, ``component`` may be ``None``. With several,
         ``component`` is required. ``artifact_id`` is an opaque identity from
-        ``ScenarioReleases.artifacts``, independent of its storage revision. Raise
+        ``ScenarioSnapshots.artifacts``, independent of its storage revision. Raise
         ``ValueError`` for a missing or unknown component,
         ``ArtifactNotFound`` for an ``artifact_id`` the scenario does not
-        list, and ``ReleaseNotRestorable`` for a release without durable
+        list, and ``SnapshotNotRestorable`` for a snapshot without durable
         bytes or without every component the scenario serves.
         """
         component, ref = self.artifact_snapshot(artifact_id, component)
-        release = self._artifacts.resolve(ref)
+        snapshot = self._artifacts.resolve(ref)
         try:
-            self.require_components(release)
+            self.require_components(snapshot)
         except ReefError as exc:
-            raise ReleaseNotRestorable(str(exc)) from exc
-        return ComponentArtifact(component, artifact_id), release
+            raise SnapshotNotRestorable(str(exc)) from exc
+        return ComponentArtifact(component, artifact_id), snapshot
 
     def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Make ``artifact_id`` the active artifact of ``component``; return its component and ID.
 
         The selected artifact replaces only its component in the scenario's
         active selection. No artifact is published. The checkpoint and every
-        training start stay. Inference loads the release after the commit.
-        The ``"activate"`` record lands at the next step, then the active release moves.
-        A crash before the record leaves the active release that the log names. Activating the active artifact
+        training start stay. Inference loads the snapshot after the commit.
+        The ``"activate"`` record lands at the next step, then the active selection moves.
+        A crash before the record leaves the active selection that the log names. Activating the active artifact
         changes nothing. Raise as :meth:`resolve_artifact` does, and
         ``CommitPending`` while a training result waits for its commit.
         """
         with self._lock, self._publication_lock:
-            selected, release = self.resolve_artifact(artifact_id, component)
+            selected, snapshot = self.resolve_artifact(artifact_id, component)
             components = self._binding.components
             current_ref = self._artifacts.current
             served = Artifact(current_ref, self._artifacts.repository)
             if components.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
                 return selected
             self.require_no_pending_commit("activate an artifact")
-            target = self.release_with(served, selected, release)
+            target = self.snapshot_with(served, selected, snapshot)
             record = self.append_operation_record(
                 "activate",
                 target.ref,
@@ -394,12 +397,12 @@ class ScenarioCommitter:
             self.advance_to(record.step)
             return selected
 
-    def release_with(self, active: Artifact, selected: ComponentArtifact, release: Artifact) -> Artifact:
+    def snapshot_with(self, active: Artifact, selected: ComponentArtifact, snapshot: Artifact) -> Artifact:
         """A validated local view of ``active`` with one existing artifact replaced; publish nothing."""
         components = self._binding.components
         if components.single:
-            components.validate(release)
-            return release
+            components.validate(snapshot)
+            return snapshot
         repository = self._artifacts.repository
         artifact_ids = dict(repository.selection(active.ref, self.component_names()).components)
         artifact_ids[selected.component] = selected.artifact_id
@@ -423,7 +426,7 @@ class ScenarioCommitter:
         with self._lock, self._publication_lock:
             if not isinstance(step, int) or isinstance(step, bool) or step < 0:
                 raise ValueError("restore step must be a non-negative integer")
-            records = self.release_queries.records()
+            records = self.snapshot_queries.records()
             if step and not any(record.step == step for record in records):
                 raise ValueError(f"scenario {self._name!r} has no operation at step {step}")
             self.require_no_pending_commit("restore a selection")
@@ -431,7 +434,7 @@ class ScenarioCommitter:
             previous = active_record(preceding)
             if step and previous is None and preceding[0].step > 1:
                 raise ValueError(f"cannot restore step {step}: earlier operation history is unavailable")
-            ref = self.release_queries.creation_artifact if previous is None else previous.snapshot
+            ref = self.snapshot_queries.creation_artifact if previous is None else previous.snapshot
             repository = self._artifacts.repository
             selection = (
                 previous.selection
@@ -461,28 +464,28 @@ class ScenarioCommitter:
             return selection.artifact_ids
 
     def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
-        """Serve ``artifact_id`` as ``component`` beside the active release; return it with the release that serves it.
+        """Serve ``artifact_id`` as ``component`` beside the active selection; return it with the snapshot that serves it.
 
-        The release that serves it is the active release with the artifact in
-        its component (:meth:`release_with`).
+        The snapshot that serves it is the active selection with the artifact in
+        its component (:meth:`snapshot_with`).
         Then the ``"serve"`` record lands at the next step. The active
-        release, the chain tip and every training start stay. Serving a
-        served artifact changes nothing. An artifact of the active release can
+        selection, the chain tip and every training start stay. Serving a
+        served artifact changes nothing. An artifact of the active selection can
         be served too, so that it keeps serving after another activation.
 
         Raise as :meth:`resolve_artifact` does, and ``CommitPending`` while a
         training result waits for its commit. Raise ``ReefError`` when the
         scenario keeps no durable commit history. Raise it also when the
-        runtime answers only from the release that it has loaded
+        runtime answers only from the snapshot that it has loaded
         (``InferenceRuntime.serves_artifacts_on_request`` is False).
         """
         with self._lock, self._publication_lock:
             if not self._store.durable:
                 raise ReefError(
-                    f"scenario {self._name!r} keeps no durable commit history, so it serves its active release alone"
+                    f"scenario {self._name!r} keeps no durable commit history, so it serves its active selection alone"
                 )
-            selected, release = self.resolve_artifact(artifact_id, component)
-            served = self.release_queries.served_beside(self._step, self.component_names()).get(selected.artifact_id)
+            selected, snapshot = self.resolve_artifact(artifact_id, component)
+            served = self.snapshot_queries.served_beside(self._step, self.component_names()).get(selected.artifact_id)
             if served is not None:
                 return selected
             self.require_no_pending_commit("serve an artifact")
@@ -490,14 +493,14 @@ class ScenarioCommitter:
             current = Artifact(self._artifacts.current, self._artifacts.repository)
             loaded = components.loaded_component
             runtime = self._binding.runtime
-            # The calls use the artifact's own weights, or the active release's weights for an artifact of another
-            # component. The runtime must answer each call from the release that the call names.
+            # The calls use the artifact's own weights, or the active selection's weights for an artifact of another
+            # component. The runtime must answer each call from the snapshot that the call names.
             if loaded is not None and runtime is not None and not runtime.serves_artifacts_on_request:
                 raise ReefError(
-                    f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
-                    f"cannot serve artifact {selected.artifact_id!r} beside the active release"
+                    f"scenario {self._name!r}'s runtime answers only from the snapshot it has loaded, so it "
+                    f"cannot serve artifact {selected.artifact_id!r} beside the active selection"
                 )
-            target = self.release_with(current, selected, release)
+            target = self.snapshot_with(current, selected, snapshot)
             record = self.append_operation_record(
                 "serve",
                 target.ref,
@@ -508,20 +511,20 @@ class ScenarioCommitter:
             return selected
 
     def stop_serving(self, artifact_id: str) -> ServedBesideArtifact:
-        """Stop serving ``artifact_id`` beside the active release; return it with the release that served it.
+        """Stop serving ``artifact_id`` beside the active selection; return it with the snapshot that served it.
 
-        The ``"stop_serving"`` record names the release, the component and the
-        manifest of the ``"serve"`` record that it ends. The active release
+        The ``"stop_serving"`` record names the snapshot, the component and the
+        manifest of the ``"serve"`` record that it ends. The active selection
         stays, so an artifact that it binds still answers. Raise
         ``ArtifactNotFound`` when the scenario does not serve ``artifact_id``
-        beside its active release. Raise ``CommitPending`` while a training
+        beside its active selection. Raise ``CommitPending`` while a training
         result waits for its commit.
         """
         with self._lock, self._publication_lock:
-            served = self.release_queries.served_beside(self._step, self.component_names()).get(artifact_id)
+            served = self.snapshot_queries.served_beside(self._step, self.component_names()).get(artifact_id)
             if served is None:
                 raise ArtifactNotFound(
-                    f"scenario {self._name!r} does not serve artifact {artifact_id!r} beside its active release"
+                    f"scenario {self._name!r} does not serve artifact {artifact_id!r} beside its active selection"
                 )
             self.require_no_pending_commit("stop serving an artifact")
             if self._binding.components.single:
@@ -544,7 +547,7 @@ class ScenarioCommitter:
         """Set ``component``'s training start to ``artifact_id``; return the artifact.
 
         The trainer's running job is cancelled, and its next job or step
-        starts from the artifact. The active release does not change.
+        starts from the artifact. The active selection does not change.
         ``component`` may be left out when the scenario has one component.
         The trainer takes the start first, then the ``"train_from"`` record
         lands at the next step; a restart before the trainer's next training
@@ -553,15 +556,15 @@ class ScenarioCommitter:
         trainer cannot start from the artifact, and ``CommitPending`` while
         a training result waits for its commit.
         """
-        # The start can import weights for minutes: readers of the releases wait only for the record.
+        # The start can import weights for minutes: readers of the snapshots wait only for the record.
         with self._lock:
-            selected, release = self.resolve_artifact(artifact_id, component)
+            selected, snapshot = self.resolve_artifact(artifact_id, component)
             component_trainer = self.component_trainer(selected.component)
             self.require_no_pending_commit("set the training start")
-            self.start_trainer(component_trainer, release)
+            self.start_trainer(component_trainer, snapshot)
             with self._publication_lock:
                 record = self.append_operation_record(
-                    "train_from", release.ref, component=self.component_on_record(component_trainer.component)
+                    "train_from", snapshot.ref, component=self.component_on_record(component_trainer.component)
                 )
                 self.advance_to(record.step)
             return selected
@@ -574,14 +577,14 @@ class ScenarioCommitter:
         ``component`` may be left out when the scenario has one component.
         The component's layout (``ComponentSpec.layout``) checks ``files``
         and stores them in the empty ``directory``, outside the locks, since
-        the check can ask a remote service (``ArtifactLayout.stored``). The release's
+        the check can ask a remote service (``ArtifactLayout.stored``). The snapshot's
         own admission check runs on what is stored, as at a training
         publication. The imported artifact receives an independent ID,
-        including when its bytes match an existing artifact. The release binds the artifact as ``component`` and every other
-        component as the active release binds it; its parent is the chain tip,
+        including when its bytes match an existing artifact. The snapshot binds the artifact as ``component`` and every other
+        component as the active selection binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
         the next step with ``source``, the ``{"uri", "version"}`` that the
-        files were read from (and the ``item`` of an artifact item's import), as its metrics. The active release, the chain
+        files were read from (and the ``item`` of an artifact item's import), as its metrics. The active selection, the chain
         tip, every training start and the activation rule are left alone.
         Raise ``ValueError`` for an unknown component, a component that takes
         no import, or files that the layout or the admission check refuses;
@@ -604,8 +607,8 @@ class ScenarioCommitter:
                 active = self._artifacts.resolve(self._artifacts.current)
                 self.require_components(active)
                 staged = self.stage_combination(next_step, active, component, imported)
-                metadata = {**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict()}
-            # Published beside the chain: the chain tip, the backend head and the active release stay.
+                metadata = {**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.snapshot_manifest(staged).to_dict()}
+            # Published beside the chain: the chain tip, the backend head and the active selection stay.
             published_ref = self._artifacts.publish(
                 staged, expected_parent=self._artifacts.checkpoint, metadata=metadata, advance_heads=False
             )
@@ -626,15 +629,15 @@ class ScenarioCommitter:
     def sync_artifact(
         self, artifact: Artifact, *, component: str, expected_selection: ArtifactSelection, metrics: Mapping[str, Any]
     ) -> ComponentArtifact:
-        """Publish ``artifact``, a person's merged tree of ``component``, as the active release and its training start.
+        """Publish ``artifact``, a person's merged tree of ``component``, as the active selection and its training start.
 
-        The release binds ``artifact`` as ``component`` and every other
-        component as the active release binds it. Its parent is the chain
+        The snapshot binds ``artifact`` as ``component`` and every other
+        component as the active selection binds it. Its parent is the chain
         tip, and it is published beside the chain, as an import is. The
-        release's admission check runs on the staged release first. The
-        component's trainer then takes the release as its training start (``Trainer.start_from``).
-        The ``"sync"`` record lands with ``metrics``, and inference loads the release after it. The active release
-        moves to it last; a crash before the record leaves the active release
+        snapshot's admission check runs on the staged snapshot first. The
+        component's trainer then takes the snapshot as its training start (``Trainer.start_from``).
+        The ``"sync"`` record lands with ``metrics``, and inference loads the snapshot after it. The active selection
+        moves to it last; a crash before the record leaves the active selection
         that the log names. The chain tip and the activation rule stay.
 
         ``expected_selection`` names every active component artifact used for the merge. Raise ``ArtifactConflict``, and change nothing, while
@@ -667,7 +670,7 @@ class ScenarioCommitter:
                     expected_parent=checkpoint,
                     metadata={
                         **dict(staged.metadata),
-                        COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict(),
+                        COMPONENTS_METADATA_KEY: self.snapshot_manifest(staged).to_dict(),
                     },
                     advance_heads=False,
                 )
@@ -714,16 +717,16 @@ class ScenarioCommitter:
             if start is not None:
                 self.start_trainer(component_trainer, self._artifacts.resolve(start.snapshot))
 
-    def start_trainer(self, component_trainer: ComponentTrainer, release: Artifact) -> None:
+    def start_trainer(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> None:
         """Start ``component_trainer`` from its component of ``release``."""
-        artifact = self._binding.components.component_artifact(release, component_trainer.component).materialize()
+        artifact = self._binding.components.component_artifact(snapshot, component_trainer.component).materialize()
         component_trainer.trainer.start_from(artifact)
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending training result as one atomic version record.
 
         The trainers of one scenario run one step at a time, so no other
-        trainer's commit lands while this step runs. The head is the release
+        trainer's commit lands while this step runs. The head is the snapshot
         that the step was prepared against.
         """
         with self._lock:
@@ -826,13 +829,13 @@ class ScenarioCommitter:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # The durable release must exist before inference can take the committed selection.
+            # The durable snapshot must exist before inference can take the committed selection.
             published_ref = self.published_attempt(publication, checkpoint) if durable else None
             if published_ref is None:
                 published_ref = artifacts.publish(
                     local_artifact,
                     expected_parent=checkpoint,
-                    metadata=self.release_metadata(
+                    metadata=self.snapshot_metadata(
                         local_artifact,
                         prepared,
                         next_step,
@@ -863,10 +866,10 @@ class ScenarioCommitter:
         self.finish_committed_step(prepared, record, trainer, expected=head, expected_checkpoint=checkpoint)
 
     def published_attempt(self, publication: SavedArtifactPublication, checkpoint: SnapshotRef) -> SnapshotRef | None:
-        """The release that an earlier attempt of ``publication`` stored, or None when no attempt stored one.
+        """The snapshot that an earlier attempt of ``publication`` stored, or None when no attempt stored one.
 
         A retry after a failed commit names the same artifact, so it publishes nothing new, and the artifact ID
-        names exactly one release. Raise ``ArtifactConflict`` when that release has another parent: then it is
+        names exactly one snapshot. Raise ``ArtifactConflict`` when that snapshot has another parent: then it is
         no attempt of this publication.
         """
         artifact_id = publication.artifact.artifact_id
@@ -878,7 +881,7 @@ class ScenarioCommitter:
             raise ArtifactConflict(f"artifact {artifact_id!r} is already in release {stored.revision!r}")
         return stored
 
-    def release_metadata(
+    def snapshot_metadata(
         self,
         artifact: Artifact,
         prepared: PreparedCommit,
@@ -887,10 +890,10 @@ class ScenarioCommitter:
         component: str | None = None,
         active_artifact: SnapshotRef | None = None,
     ) -> dict[str, Any]:
-        """The metadata a committed release carries.
+        """The metadata a committed snapshot carries.
 
-        It is the staged release's own metadata (the publication's own for a
-        flat release), the manifest naming its components, and the scenario
+        It is the staged snapshot's own metadata (the publication's own for a
+        flat snapshot), the manifest naming its components, and the scenario
         metadata of the commit ``prepared`` describes.
         """
         scenario_metadata = scenario_metadata_for(
@@ -916,7 +919,7 @@ class ScenarioCommitter:
         )
         return {
             **dict(artifact.metadata),
-            COMPONENTS_METADATA_KEY: self.release_manifest(artifact).to_dict(),
+            COMPONENTS_METADATA_KEY: self.snapshot_manifest(artifact).to_dict(),
             SCENARIO_METADATA_KEY: scenario_metadata,
         }
 
@@ -953,11 +956,11 @@ class ScenarioCommitter:
     def stage_publication(
         self, next_step: int, publication: SavedArtifactPublication, checkpoint: SnapshotRef
     ) -> Artifact:
-        """Admit the published component and stage the release it belongs to, with ``checkpoint`` as its parent.
+        """Admit the published component and stage the snapshot it belongs to, with ``checkpoint`` as its parent.
 
         A flat scenario stages the artifact as published. A multi-component
         scenario binds the named component to the publication and carries
-        every other component from the active release
+        every other component from the active selection
         (:meth:`stage_combination`), so a step changes one component and
         never brings back what an activation replaced.
         """
@@ -976,9 +979,9 @@ class ScenarioCommitter:
         return self.stage_combination(next_step, active, component, publication.artifact)
 
     def stage_combination(self, next_step: int, carried: Artifact, component: str, content: Artifact) -> Artifact:
-        """Stage the release ``carried`` with ``component`` bound to ``content``, on the chain tip as its parent.
+        """Stage the snapshot ``carried`` with ``component`` bound to ``content``, on the chain tip as its parent.
 
-        The release's own check runs on the staged release; the carried
+        The snapshot's own check runs on the staged snapshot; the carried
         components were admitted when they were published. A refused release
         is discarded.
         """
@@ -1015,7 +1018,7 @@ class ScenarioCommitter:
                 if self._store.durable:
                     self._refresh_committed_checkpoint()
                 elif record.activated:
-                    # Publication moved the chain tip alone; the release serves now that its record landed.
+                    # Publication moved the chain tip alone; the snapshot serves now that its record landed.
                     self._artifacts.activate(record.snapshot, expected=expected)
             else:
                 self._install_committed_checkpoint(
@@ -1034,7 +1037,7 @@ class ScenarioCommitter:
     def finish_recorded_retry(self, record: CommitRecord, prepared: PreparedCommit, trainer: Trainer) -> CommitRecord:
         """Retry storage settlement, then complete the exact release already on record."""
         record = self._store.commit_step(expected_step=self._step, commit=record)
-        previous = active_snapshot(self._store.history()[:-1], self.release_queries.creation_artifact)
+        previous = active_snapshot(self._store.history()[:-1], self.snapshot_queries.creation_artifact)
         self.finish_committed_step(
             prepared, record, trainer, expected=previous, expected_checkpoint=self._artifacts.checkpoint
         )
@@ -1093,7 +1096,7 @@ class ScenarioCommitter:
         """Append a record that carries no trainer state at the next step: an ``"activate"``, ``"train_from"``,
         ``"import"``, ``"sync"``, ``"serve"`` or ``"stop_serving"`` record.
 
-        ``components`` is the manifest of a release that an activation, an import, a sync or a serve published.
+        ``components`` is the manifest of a snapshot that an activation, an import, a sync or a serve published.
         ``component`` then names the component that it activated, imported, synced or served. ``metrics`` is an
         import's source or a sync's own metrics.
         """

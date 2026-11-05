@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 from tests.support.harness_service import job_backend, seed_root
-from tests.support.harness_steps import TreeReleases
+from tests.support.harness_steps import TreeArtifacts
 from tests.support.serving import wait_for_serving
 
 from reef.core.evaluation import PolicyHarness, RolloutRequest
@@ -63,9 +63,9 @@ def load(monkeypatch, tmp_path):
     purge_example_modules()
 
 
-def releases_of(recipe) -> ComponentArtifacts:
-    """A commit history whose head is the recipe's seed, as a new scenario's root release is."""
-    return ComponentArtifacts(TreeReleases(recipe.seed), "harness")
+def artifacts_of(recipe) -> ComponentArtifacts:
+    """A commit history whose head is the recipe's seed, as a new scenario's root snapshot is."""
+    return ComponentArtifacts(TreeArtifacts(recipe.seed), "harness")
 
 
 @pytest.fixture
@@ -145,7 +145,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     monkeypatch.setattr("reef.evaluation.harness.runner.run_task", lambda *args, **kwargs: pi_run("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     with SQLiteRecordStore() as records:
-        trainer = recipe.build("test", records, releases=releases_of(recipe), root=seed_root(recipe))
+        trainer = recipe.build("test", records, artifacts=artifacts_of(recipe), root=seed_root(recipe))
         try:
             evaluator = job_backend(trainer).evaluator
             assert evaluator.worker_pool.selection.settings.backend == "uni"
@@ -198,7 +198,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     assert recipe.model_binding().base_url == driver.aime.OPENAI_BASE_URL
     driver.aime.ANSWERS.clear()
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
-        trainer = recipe.build("isolated", records, releases=releases_of(recipe), root=seed_root(recipe))
+        trainer = recipe.build("isolated", records, artifacts=artifacts_of(recipe), root=seed_root(recipe))
         try:
             evaluator = job_backend(trainer).evaluator
             assert evaluator.worker_pool.selection.settings.backend == ("mp" if executor == "auto" else executor)

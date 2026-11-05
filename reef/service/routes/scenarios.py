@@ -128,7 +128,7 @@ def register_scenario_writes(
         # An existing scenario keeps its root: creation is idempotent.
         item_id = artifact_id.strip() if isinstance(artifact_id, str) and not dispatcher.has_scenario(name) else None
         if item_id is not None:
-            # The root release holds the item, read from the owner whose data items the scenario uses (RFC #1028).
+            # The root snapshot holds the item, read from the owner whose data items the scenario uses (RFC #1028).
             scenario, created = await asyncio.to_thread(
                 imports.create_from_item, dispatcher, name, owner or name, target, item_id
             )

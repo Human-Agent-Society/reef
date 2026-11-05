@@ -114,7 +114,7 @@ import a concrete integration.
 |                         | heads, and the components a recipe declares              |                                            |
 |                         | (``components.py``)                                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the release chain           |
+| ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the snapshot chain          |
 |                         | descriptor), the source tree (patches, validation,       |                                            |
 |                         | rendering), task runs, runners, trajectories, and the    |                                            |
 |                         | loopback gateway an agent process reaches its model      |                                            |
@@ -215,7 +215,7 @@ Training and inference meet only through contracts that neither side owns.
 
 The values that both sides read are in ``core/weight_layout.py``:
 ``ArtifactFormat``, ``WeightFiles`` and ``ArtifactWeights``. In ``tinker/``,
-the serving side reads a release's manifest only as a ``TinkerArtifact``; the
+the serving side reads a snapshot's manifest only as a ``TinkerArtifact``; the
 whole manifest, with the training state, is in
 ``train/tinker_backend/checkpoint.py``. ``execution/executor/`` owns worker launch and control RPC
 for both sides. ``storage/durable_files.py`` writes JSON files and directories
@@ -227,7 +227,7 @@ In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
 definitions; and ``backend.py`` holds ``PreparedStep`` and the committed
-releases that a harness step reads its head from. ``train/slime_backend/component.py`` and
+snapshots that a harness step reads its head from. ``train/slime_backend/component.py`` and
 ``train/tinker_backend/component.py`` supply the Slime and Tinker training
 components, and each ``launch.py`` supplies its deployment definition and
 runtime factory. Both components render each sample that has no tokens with
@@ -235,7 +235,7 @@ runtime factory. Both components render each sample that has no tokens with
 requests into token IDs with the model's chat template. It is in
 ``reef/core/`` because ``train/`` must not import ``inference/``. No training backend builds serving:
 ``service/deploy/serving.py`` selects and configures it from the
-``inference`` section and the component's release format.
+``inference`` section and the component's snapshot format.
 
 HTTP provider handling lives in ``inference/http.py``.
 ``inference/provider_protocol.py`` holds the provider wire format that the proxy,
@@ -326,7 +326,7 @@ The extension points those packages expose are in `Python API
   upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
-- Does it persist or materialize versioned bytes, or declare a release
+- Does it persist or materialize versioned bytes, or declare a snapshot
   component? Put it in ``reef/artifact/``. If it loads those bytes into an
   engine, put that behavior in ``reef/inference/`` instead.
 - Does it define a model-service contract? Put an inference contract in a
@@ -363,13 +363,13 @@ The extension points those packages expose are in `Python API
     running tasks, with the history as the score cache, and ``policy.py``
     decides.
   - Release: the harness backend turns a selected tree into the step's
-    release, and the harness component names the parts that it changes from
+    snapshot, and the harness component names the parts that it changes from
     the job's start (``TrainingComponent.changed_parts``, which the job loop
     puts in ``changed_kinds``). The scenario
     committer publishes it, and the scenario's activation rule
     (``reef/evaluation/activation.py``) decides whether it serves.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's
-    machine, in both directions: the release as a layer over the person's
+    machine, in both directions: the snapshot as a layer over the person's
     own configuration (``run.layer`` of the adapter's ``adapter.yaml``),
     and the person's changes merged back (the ``merge`` of each part in its
     ``parts``). The client half is ``reef_client.harness``.
