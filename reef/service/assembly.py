@@ -100,7 +100,7 @@ def _require_non_empty(value: str | None, setting: str) -> str:
 def connect_training_component(
     settings: ServiceConfig, *, model_path: str, loss_family: str
 ) -> tuple[TrainingComponent, InferenceRuntime]:
-    """Build the selected training component for the recipe's ``loss_family``, then the serving of its releases.
+    """Build the selected training component for the recipe's ``loss_family``, then the serving of its snapshots.
 
     The training backend builds only the component. The serving runtime comes
     from the deployment's ``inference`` settings and the component's
@@ -433,7 +433,7 @@ def build_dispatcher(
     evaluates each new artifact with its scenario's settings.
 
     A composite recipe's evaluation calls come back to this service, so a
-    candidate of one component is evaluated against the release the others
+    candidate of one component is evaluated against the snapshot the others
     serve; ``evaluation_token`` is the token they present, one the app accepts
     on the evaluation routes alone, since those calls run candidate code, and
     ``hold_local_cycles`` holds its local cycles until the service answers. A
@@ -453,7 +453,7 @@ def build_dispatcher(
         raise
     calls_service = isinstance(recipe, CompositeRecipe)
     if calls_service:
-        # A composite's evaluation calls come back to this Reef, so they sample the release it serves.
+        # A composite's evaluation calls come back to this Reef, so they sample the snapshot it serves.
         served_url = settings.served_url or default_served_url(settings.host, settings.port)
         recipe = recipe.with_served_endpoint(ServedEndpoint(url=served_url, token=evaluation_token))
     experiment_tracker = None

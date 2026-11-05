@@ -1,7 +1,7 @@
 """Shared pieces of the harness service and backend tests: a seeded dispatcher, one step, a stub model.
 
 ``harness_dispatcher`` is a dispatcher over an in-memory repository, so a
-new scenario's root release is the recipe's seed tree (``default_start``).
+new scenario's root snapshot is the recipe's seed tree (``default_start``).
 ``seed_root`` is that root for a trainer that a test builds outside a
 scenario.
 ``run_step`` drives one step of a scenario, which is one job of its harness
@@ -43,12 +43,12 @@ from reef.train.types import JobData, TrainStepResult
 
 
 def harness_repository(tmp_path: Path) -> CachedRepositoryBackendFactory:
-    """An in-memory repository under ``tmp_path``; a new scenario's root release holds the recipe's seed tree."""
+    """An in-memory repository under ``tmp_path``; a new scenario's root snapshot holds the recipe's seed tree."""
     return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
 
 def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
-    """The root release of a scenario created from ``recipe``'s default start, as a local tree under the recipe's
+    """The root snapshot of a scenario created from ``recipe``'s default start, as a local tree under the recipe's
     ``evolution.state_dir``."""
     directory = Path(recipe.evolution.state_dir).expanduser() / ".seed-root"
     if not directory.is_dir():

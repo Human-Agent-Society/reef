@@ -1,7 +1,7 @@
 """The harness source tree and the patches that change it.
 
 A harness is one directory of text files. ``HarnessTree`` is that directory as
-a value: a release stores one, the harness backend reads the head tree from
+a value: a snapshot stores one, the harness backend reads the head tree from
 git, and ``render_tree`` turns one into the files an adapter's binary reads.
 ``TreePatch`` is a change to a tree: a method or a trial builds one, and
 ``HarnessTree.apply`` applies it.
@@ -88,7 +88,7 @@ class HarnessTree:
     encodes as UTF-8. No key is a directory of another key, so ``a`` and
     ``a/b`` never occur together. The mapping is read-only, and its order has
     no meaning. The empty tree is a value.
-    Purpose: the one representation of a harness. A release stores one; the
+    Purpose: the one representation of a harness. A snapshot stores one; the
     harness backend reads the head tree from git and evaluates
     ``head.apply(patch)``; ``render_tree`` writes a tree out for an adapter.
     """
@@ -162,7 +162,7 @@ class HarnessTree:
     def checksum(self) -> str:
         """A SHA-256 hex digest of the paths and texts, length-prefixed so no two trees encode alike.
 
-        Equal trees have equal checksums; a commit record keeps it so recovery can tell whether the release it
+        Equal trees have equal checksums; a commit record keeps it so recovery can tell whether the snapshot it
         reads is the tree the step committed.
         """
         digest = hashlib.sha256()

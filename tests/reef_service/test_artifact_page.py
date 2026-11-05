@@ -1,6 +1,6 @@
 """The page per catalog step: why a version exists, what it changed, the evaluation's result, its setup and its chain.
 
-``GET /reef/harness/artifacts/{step}/page`` renders it from the releases row,
+``GET /reef/harness/artifacts/{step}/page`` renders it from the snapshots row,
 the step being the row's position oldest first with the creation row as 0. The
 chain driven here runs in ``training_mode: manual``: one published win and one
 rejected candidate answering requests posted to ``POST /reef/train``, one
@@ -132,7 +132,7 @@ def _chain(tmp_path: Path) -> Dispatcher:
 
 @pytest.fixture(scope="module")
 def chain_dispatcher(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Dispatcher]:
-    """Build the shared read-only release chain once; mutation tests build their own."""
+    """Build the shared read-only snapshot chain once; mutation tests build their own."""
     dispatcher = _chain(tmp_path_factory.mktemp("release-pages"))
     try:
         yield dispatcher
@@ -205,7 +205,7 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     assert FIRST in _section(page, "Why") and "3f1c2a9d0b7e" in _section(page, "Why")
     changed = _section(page, "What changed")
-    # The patch file by file, each updated file diffed against the release the step ran on.
+    # The patch file by file, each updated file diffed against the snapshot the step ran on.
     assert '<span class="tag operation-update">update</span><span class="node-id">rules.md</span>' in changed
     assert (
         '<span class="del">-Answer briefly.</span>' in changed and '<span class="add">+marker rules</span>' in changed
@@ -221,7 +221,7 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
     assert "nothing to set up" in _section(page, "Setup")
     chain = _section(page, "Chain")
     assert rows[0]["artifact_id"] in chain and rows[1]["artifact_id"] in chain
-    # The inactive extension update was evaluated against this head, so it is this release's child.
+    # The inactive extension update was evaluated against this head, so it is this snapshot's child.
     assert f">v4</a><span class=\"id\">{rows[4]['artifact_id']}</span>" in chain
     data = _data(page)
     assert data["artifact_id"] == rows[1]["artifact_id"] and data["metrics"]["training_request"]["text"] == FIRST
@@ -230,7 +230,7 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
     page = _page(dispatcher, 0)
     assert "<title>Harness v0</title>" in page
     assert "no step made it" in _section(page, "Why")
-    assert "this release is the seed tree" in _section(page, "What changed")
+    assert "this snapshot is the seed tree" in _section(page, "What changed")
     assert '<span class="creation">Starting point</span>' in _section(page, "Result")
     chain = _section(page, "Chain")
     # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
@@ -260,12 +260,12 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
     # Ten digits and more never match the route: no catalog is that long, and int() would balk past 4300.
     assert long[0] == 404 and longer[0] == 404
 
-    # The newest row made an inactive release, so it is not active.
+    # The newest row made an inactive artifact, so it is not active.
     assert rows[4]["active"] is False and rows[1]["active"] is True
     assert served_step(rows) == 1
-    assert '<span class="chip">Active release</span>' in _sub(_page(dispatcher, 1))
+    assert '<span class="chip">Active selection</span>' in _sub(_page(dispatcher, 1))
     for step in (0, 2, 3, 4):
-        assert "Active release" not in _sub(_page(dispatcher, step))
+        assert "Active selection" not in _sub(_page(dispatcher, step))
 
 
 def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head(chain_dispatcher: Dispatcher) -> None:
@@ -276,7 +276,7 @@ def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head
     assert FOURTH.replace("<", "&lt;") in _section(page, "Why")
     changed = _section(page, "What changed")
     assert f'<span class="tag operation-update">update</span><span class="node-id">{EXTENSION_PATH}</span>' in changed
-    # A unified diff of the source file against the copy in the release it ran on, the added line marked.
+    # A unified diff of the source file against the copy in the snapshot it ran on, the added line marked.
     assert f"--- {EXTENSION_PATH} ({rows[1]['artifact_id'].removeprefix('artifact:')[:8]})" in changed
     assert f"+++ {EXTENSION_PATH} ({rows[4]['artifact_id'].removeprefix('artifact:')[:8]})" in changed
     assert '<span class="add">+  pi.on(&quot;session_start&quot;, () =&gt; {});</span>' in changed
@@ -304,11 +304,11 @@ def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate
     assert '<span class="add">+Answer briefly, with care.</span>' in changed
     selection_result = _section(page, "Result")
     assert '<span class="rejected">Not selected</span>' in selection_result
-    assert "Did not pass the checks" in selection_result and "The active release did not change" in selection_result
+    assert "Did not pass the checks" in selection_result and "The active selection did not change" in selection_result
     assert "<dt>Wins</dt><dd>0</dd>" in selection_result and "<dt>Losses</dt><dd>1</dd>" in selection_result
     chain = _section(page, "Chain")
     assert rows[2]["artifact_id"] == rows[1]["artifact_id"]
-    assert f'{rows[1]["artifact_id"]} (the active release at this step; the candidate published nothing)' in chain
+    assert f'{rows[1]["artifact_id"]} (the active selection at this step; the candidate published nothing)' in chain
     assert before_artifact_id(rows[2]) == rows[1]["artifact_id"]
 
 
@@ -359,7 +359,7 @@ def test_the_page_carries_the_shared_layout_and_links_the_other_steps_with_the_q
 
 
 def test_the_top_bar_and_the_step_walk_lead_to_the_pages_a_browser_can_open() -> None:
-    """Everything that looks clickable is: the logo and the crumb go to the active release, the arrows to the
+    """Everything that looks clickable is: the logo and the crumb go to the active selection, the arrows to the
     neighbours.
 
     Only the two ``/page`` routes take the token from the query, so those are
@@ -375,7 +375,7 @@ def test_the_top_bar_and_the_step_walk_lead_to_the_pages_a_browser_can_open() ->
     assert served_step(rows) == 1
 
     middle = build_artifact_page(2, rows, link_query=query)
-    # The logo and the Harness crumb lead to the active release.
+    # The logo and the Harness crumb lead to the active selection.
     assert f'<a class="brand" href="{html.escape(head)}" aria-label="Harness home">' in middle
     assert f'<a href="{html.escape(head)}">Harness</a>' in middle
     walk = middle.partition('<nav class="steps"')[2].partition("</nav>")[0]
@@ -385,7 +385,7 @@ def test_the_top_bar_and_the_step_walk_lead_to_the_pages_a_browser_can_open() ->
     first = build_artifact_page(0, rows, link_query=query).partition('<nav class="steps"')[2].partition("</nav>")[0]
     assert 'rel="prev"' not in first and "<span>&#8592;</span>" in first
     assert f'href="/reef/harness/artifacts/1/page?{html.escape(urlencode(query))}" rel="next"' in first
-    # On the page of the active release the crumb has nowhere to go, so it stays text.
+    # On the page of the active selection the crumb has nowhere to go, so it stays text.
     served = build_artifact_page(1, rows, link_query=query)
     assert '<div class="brand">' in served and "<span>Harness</span>" in served
     assert 'aria-label="Harness home"' not in served
@@ -546,7 +546,7 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
         "operation": "training",
         "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "text me", "requires": [twilio]}},
     }
-    # The rejected candidate's row carries the active release's id; its own item never installed anywhere.
+    # The rejected candidate's row carries the active selection's id; its own item never installed anywhere.
     rejected = {
         "artifact_id": "rel-1",
         "parent_artifact_id": "rel-0",
@@ -600,7 +600,7 @@ def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> N
         assert head in page, (operation, path)
         return page.partition(f"{head}</div>")[2].partition('<div class="change">')[0]
 
-    # The release the step ran on is not restorable: a written file shows its new text, an update or a creation.
+    # The snapshot the step ran on is not restorable: a written file shows its new text, an update or a creation.
     without = _section(build_artifact_page(1, [creation, row]), "What changed")
     assert change(without, "write", EXTENSION_PATH).startswith("<pre>export default function hello(pi) {")
     assert "+++ " not in without
@@ -627,11 +627,11 @@ def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> Non
         assert served_step(rows) == 4
         page = _page(dispatcher, 4)
         assert '<span class="selected">Published</span>' in _hero(page)
-        assert '<span class="chip">Active release</span>' in _sub(page)
+        assert '<span class="chip">Active selection</span>' in _sub(page)
         assert "a person activates it first" not in _section(page, "Result")
-        # The step still diffs against the release it was evaluated on.
+        # The step still diffs against the snapshot it was evaluated on.
         assert f"+++ {EXTENSION_PATH} ({artifact_id.removeprefix('artifact:')[:8]})" in _section(page, "What changed")
-        assert "Active release" not in _sub(_page(dispatcher, 1))
+        assert "Active selection" not in _sub(_page(dispatcher, 1))
         head = _section(_page(dispatcher, 1), "Chain")
         assert f'>v4</a><span class="id">{artifact_id}</span><span class="selected">Published</span>' in head
     finally:
@@ -644,7 +644,9 @@ def test_a_step_that_published_nothing_chains_to_the_release_it_ran_on() -> None
     rows = [{**CREATION, "active": False}, head, skipped]
     assert before_artifact_id(skipped) == "rel-1" and served_step(rows) == 1
     chain = _section(build_artifact_page(2, rows), "Chain")
-    assert '<dt>Ran on</dt><dd class="id">rel-1 (the active release at this step; nothing was evaluated)</dd>' in chain
+    assert (
+        '<dt>Ran on</dt><dd class="id">rel-1 (the active selection at this step; nothing was evaluated)</dd>' in chain
+    )
     assert "none (the candidate published nothing)" in chain
     assert "<dt>Parent</dt>" not in chain and "<dt>This artifact</dt>" not in chain and "rel-0" not in chain
     published = _section(build_artifact_page(1, rows), "Chain")

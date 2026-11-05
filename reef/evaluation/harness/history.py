@@ -44,7 +44,7 @@ RUNS_FILE = "runs.jsonl"
 DECISIONS_FILE = "decisions.jsonl"
 TREES_DIR = "trees"
 RUNS_DIR = "runs"
-#: Where a candidate came from: the seed tree, a method's step, or an earlier release.
+#: Where a candidate came from: the seed tree, a method's step, or an earlier snapshot.
 ORIGINS = ("seed", "method", "release")
 
 
@@ -78,7 +78,7 @@ class CandidateRecord:
         if self.origin not in ORIGINS:
             raise ValueError(f"CandidateRecord.origin must be one of {', '.join(ORIGINS)}")
         if (self.parent is None) != (self.origin in ("seed", "release")):
-            raise ValueError("CandidateRecord.parent is None exactly for a seed or a release")
+            raise ValueError("CandidateRecord.parent is None exactly for a seed or a snapshot")
         object.__setattr__(self, "notes", MappingProxyType(dict(self.notes)))
 
     def to_json(self) -> dict[str, Any]:

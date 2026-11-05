@@ -1,6 +1,6 @@
 # OpenAI Codex CLI, driven through its non-interactive exec mode.
 #
-# A release is a Codex plugin in plugin/, named reef, in the local marketplace
+# A snapshot is a Codex plugin in plugin/, named reef, in the local marketplace
 # reef at the root: its skills and commands load as reef:<name>. A plugin
 # carries no rules and no config keys, so a tree holds neither. A run's
 # render writes the plugin into CODEX_HOME as codex plugin add would; a
@@ -64,9 +64,9 @@ run:
       - workspace-write
       - --skip-git-repo-check
       - "{task}"
-  # How a person's machine runs Codex on a release: the person's own ~/.codex stays. register
+  # How a person's machine runs Codex on a snapshot: the person's own ~/.codex stays. register
   # installs the plugin reef from the local marketplace reef at the install root, and again for
-  # each release, because Codex reads a copy in its plugin cache; the plugin then loads in every
+  # each snapshot, because Codex reads a copy in its plugin cache; the plugin then loads in every
   # Codex session of the person. A session that Reef starts also takes -c arguments that bind the
   # model, with the key in an environment variable rather than on the command line, and turn
   # plugins on.
