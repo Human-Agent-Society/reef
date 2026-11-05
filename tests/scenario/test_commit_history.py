@@ -122,7 +122,7 @@ def test_commit_record_detaches_nested_metrics() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("legacy_version", ["reef-commit/5", "reef-commit/6"])
+@pytest.mark.parametrize("legacy_version", ["reef-commit/5", "reef-commit/6", "reef-commit/7"])
 def test_new_records_read_legacy_history_and_keep_selection_ids(open_history, legacy_version) -> None:
     legacy = sample_record().to_dict()
     legacy["record"] = legacy_version
@@ -151,7 +151,7 @@ def test_new_records_read_legacy_history_and_keep_selection_ids(open_history, le
     )
     open_history().append(restored)
     assert open_history().records() == (restored,)
-    assert restored.to_dict()["record"] == "reef-commit/7"
+    assert restored.to_dict()["record"] == "reef-commit/8"
     encoded = restored.to_dict()
     encoded["selection"]["model"] = "another-model"
     with pytest.raises(CommitHistoryError, match="components must match"):
@@ -558,7 +558,10 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     # The record's ref is exactly the serving head the scenario advanced to.
     scenario = dispatcher.get_or_create_scenario("math")
     committed_head = scenario.repository.require_current_artifact()
-    assert committed_head == records[4].snapshot == records[5].snapshot
+    located = scenario.store.history()
+    assert committed_head == located[4].snapshot == located[5].snapshot
+    # A stored record names artifacts, not a storage location.
+    assert "snapshot" not in records[4].to_dict() and records[4].selection is not None
     committed_state = scenario.trainer.state
     assert committed_state["last_job"]["job_id"] == second_job
     # The checkpoint's metadata carries its commit record; the checkpoint commit consumes nothing.
@@ -1303,7 +1306,8 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     assert (submitted.step, ended.step) == (1, 2)
     assert submitted.checkpoint is False and ended.checkpoint is False
     current = scenario.repository.require_current_artifact()
-    assert submitted.snapshot == ended.snapshot == current  # no new artifact published
+    located = scenario.store.history()
+    assert located[0].snapshot == located[1].snapshot == current  # no new artifact published
     state = JobLoopState.from_dict(ended.algorithm_state)
     assert state.job is None and state.finished_jobs == 1 and state.last_job.event == "finished"
     assert submitted.high_water_sequence == ended.high_water_sequence == 2
