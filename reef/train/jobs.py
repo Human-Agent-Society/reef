@@ -115,21 +115,13 @@ class JobLoopState:
 
 @dataclass(frozen=True)
 class JobCommit:
-    """One commit that a job loop gives its trainer: the result to commit, and the job end it records.
+    """One commit that a job loop gives its trainer.
 
     Values: ``result`` is the ``TrainStepResult`` whose ``state`` is the next ``JobLoopState`` as a dict.
-    ``ended`` is the outcome of the job whose end the commit records, which is that state's ``last_job``, or
-    None for a commit that submits a job or publishes one of its checkpoints. Purpose: ``JobLoop.submit``,
-    ``poll``, ``publish`` and ``end`` make it; the trainer commits ``result`` and, once the commit is durable,
-    gives ``ended`` to its training pipeline.
+    Purpose: ``JobLoop.submit``, ``poll``, ``publish`` and ``end`` make it; the trainer commits ``result``.
     """
 
     result: TrainStepResult
-    ended: JobOutcome | None = None
-
-    def __post_init__(self) -> None:
-        if self.ended is not None and not isinstance(self.ended, JobOutcome):
-            raise TypeError("JobCommit.ended must be a JobOutcome or None")
 
 
 class JobLoop:
@@ -299,8 +291,7 @@ class JobLoop:
                 state=ended.to_dict(),
                 metrics={**status.metrics, "training_job": event},
                 training_job_id=job.job_id,
-            ),
-            ended=outcome,
+            )
         )
 
     def cancel(self, state: JobLoopState) -> None:

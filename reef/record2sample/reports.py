@@ -188,7 +188,7 @@ def report_set(unit: RecordSetUnit) -> ReportSet:
 
 
 class ReportStatus(Enum):
-    """Where a report is in the stage, from its first read to its snapshot."""
+    """Where a report is in the stage, from its first read to its release."""
 
     #: A candidate whose samples the stage has not made yet. A failed assembly leaves it here for a retry.
     FORMED = "formed"
@@ -268,13 +268,13 @@ class ReportSamples(Record2Sample):
         self.admitted_report_type = context.admitted_report_type
         self.grouping = ReportGrouping() if grouping is None else grouping
         self.exclusive_sources = exclusive_sources
-        #: The inference records, by ID, until their snapshot.
+        #: The inference records, by ID, until their release.
         self.inferences: dict[str, AgentRecord] = {}
         #: The trajectories of the inference records that the stage read.
         self.trajectories = TrajectoryIndex()
-        #: Every report the stage read, by ID, until its snapshot.
+        #: Every report the stage read, by ID, until its release.
         self.reports: dict[str, ReportState] = {}
-        #: Inference records of the reports whose samples the pipeline stored, until their snapshot.
+        #: Inference records of the reports whose samples the pipeline stored, until their release.
         self.stored_sources: set[str] = set()
         #: Inference records that ended reports own. They are released once no live report references them.
         self.owned_sources: set[str] = set()

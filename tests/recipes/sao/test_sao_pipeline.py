@@ -294,7 +294,7 @@ def test_processor_rejects_non_finite_report_scores() -> None:
     with pytest.raises(ReportValidationError, match="finite"):
         processor.push(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready(1)
-    assert processor.releasable_record_ids().isdisjoint({"i1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.unit
@@ -318,12 +318,12 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
                 processor.push(item)
         else:
             processor.push(item)
-        processor.releasable_record_ids()  # a read between arrivals must not latch the snapshot
+        processor.record2sample.releasable_record_ids()  # a read between arrivals must not latch the release
 
     batch = processor.build_job_data(1)
     assert [source_record_id(sample) for sample in batch.samples] == ["i1"]
     processor.acknowledge(batch.data_id)
-    assert processor.releasable_record_ids() == frozenset({"retry", "i1"})
+    assert processor.record2sample.releasable_record_ids() == frozenset({"retry", "i1"})
 
 
 # --- backend preparation ---------------------------------------------------
@@ -487,7 +487,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
 
         _wait_for_finished_jobs(dispatcher, 1)
 
-        # The checkpoint is published as the chain tip, but never serves: only the root snapshot was activated.
+        # The checkpoint is published as the chain tip, but never serves: only the root release was activated.
         assert inference.activated == base
         [job] = component.submitted
         [record] = _checkpoint_commits(dispatcher)
@@ -526,7 +526,7 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
         _wait_for_finished_jobs(dispatcher, 1)
         head = scenario.repository.require_current_artifact()
         wait_for_serving(dispatcher)
-        # The new head is the saved snapshot of the trained checkpoint, and it
+        # The new head is the saved release of the trained checkpoint, and it
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.revision != pre_head.revision
         # The runtime loaded the checkpoint once, and the scenario serves its artifact.

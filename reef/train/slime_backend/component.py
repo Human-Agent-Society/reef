@@ -419,7 +419,7 @@ class SlimeJobRunner(SlimeJobs):
     def task_rollouts(self, job: TrainingJob, directory: Path, settings: RolloutSettings) -> TaskJobRollouts:
         """The rollouts of a task job: those of an earlier attempt, else new ones on the workers' weights.
 
-        The rollout group serves the actor's weights from its sync to its snapshot; colocated engines hold the
+        The rollout group serves the actor's weights from its sync to its release; colocated engines hold the
         training GPUs only for that span.
         """
         record = directory / ROLLOUTS_FILE

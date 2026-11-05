@@ -195,7 +195,6 @@ class StreamRun:
                     "request": None if batch.request is None else batch.request.id,
                     "items": [describe_item(item) for item in batch.samples],
                     "consumed": sorted(prepared.consumed_ids),
-                    "released": sorted(prepared.released_ids),
                 }
             )
 

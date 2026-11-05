@@ -52,6 +52,7 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import NoSamples, Record2Sample, RecordSetUnit
+from reef.record2sample.staleness import ServedArtifacts
 from reef.sample2job import NoJobData, Sample2Job
 from reef.storage.samples import SAMPLE_KINDS, StoredSample, consumed_sample_id, memory_samples
 from reef.train.types import JobData, Sample, TrajectorySample
@@ -203,6 +204,10 @@ class TrainingPipeline:
         self.reserved_sample_ids: tuple[str, ...] = ()
         #: The stored samples that job data of this process consumed; their train count may not be durable yet.
         self.trained_sample_ids: set[str] = set()
+        #: The ended records of the stage that this pipeline stored and no commit named yet.
+        self.stored_ended_record_ids: set[str] = set()
+        #: The artifacts that the scenario served, oldest first, for the staleness check.
+        self.served_artifacts = ServedArtifacts()
         self.set_training_mode(context.training_mode)
 
     @property
@@ -257,33 +262,27 @@ class TrainingPipeline:
 
     # ------------------------------------------------------------ requests
 
-    def queue_requests(self, requests: Iterable[TrainingRequest]) -> None:
+    def queue_requests(self, requests: Iterable[TrainingRequest], failures: Mapping[str, str] | None = None) -> None:
         """Hold the scenario's queued requests, oldest first: each one that this pipeline did not consume yet.
 
-        The scenario reads them from the training request queue before each step. A request that left the queue,
-        because a commit consumed it, leaves the pipeline with its failure.
+        The scenario reads them from the training request queue before each step. ``failures`` holds what the failed
+        step of each failed request said, by ID, as the queue stores it; they join the failures that this pipeline
+        holds. A request that left the queue, because a commit consumed it, leaves the pipeline with its failure.
         """
         queued = {request.id: request for request in requests if request.id not in self.consumed_requests}
         if set(queued) - set(self.training_requests):
             self.received_input = True
         self.training_requests = queued
-        self.failed_requests = {key: value for key, value in self.failed_requests.items() if key in queued}
+        held = {**self.failed_requests, **(failures or {})}
+        self.failed_requests = {key: value for key, value in held.items() if key in queued}
 
     def request_failure(self, request_id: str) -> str | None:
         """What the request's failed step said, when it failed at all."""
         return self.failed_requests.get(request_id)
 
-    def request_failures(self) -> Mapping[str, str]:
-        """The failed requests that the pipeline still holds, by id, with what their step said."""
-        return dict(self.failed_requests)
-
     def mark_request_failed(self, request_id: str, error: str) -> None:
         """Record that the request's step failed with ``error``; its next job data is consumed with a skip row."""
         self.failed_requests[request_id] = error
-
-    def set_request_failures(self, failures: Mapping[str, str]) -> None:
-        """Carry the failed requests of a replaced pipeline into this one."""
-        self.failed_requests = dict(failures)
 
     def discard_request(self, request_id: str) -> frozenset[str]:
         """Consume one queued request without job data; the committed row that names it is what recovery skips."""
@@ -377,8 +376,8 @@ class TrainingPipeline:
         self.record2sample.job_ended(outcome)
 
     def observe_serving_artifact_id(self, artifact_id: str) -> None:
-        """Give the record-to-sample stage the artifact that serves the scenario now, for its staleness check."""
-        self.record2sample.observe_serving_artifact_id(artifact_id)
+        """Add the artifact that serves the scenario now to those that served it, for the staleness check."""
+        self.served_artifacts.observe(artifact_id)
 
     # --------------------------------------------------------- job data cycle
 
@@ -457,7 +456,8 @@ class TrainingPipeline:
         stale_groups = {
             stored.group or stored.sample_id
             for stored, sample in candidates
-            if stored.component is not None and self.record2sample.is_stale((sample,))
+            if stored.component is not None
+            and self.record2sample.is_stale((sample,), self.served_artifacts.artifact_ids)
         }
         fresh = [entry for entry in candidates if (entry[0].group or entry[0].sample_id) not in stale_groups]
         prefix = fresh if self.buffer_size is None else fresh[: self.buffer_size]
@@ -536,6 +536,22 @@ class TrainingPipeline:
         self.store_samples()
         stored, self.received_input = self.received_input, False
         return stored
+
+    def settle_ended_records(self, committed_record_ids: frozenset[str] | set[str]) -> None:
+        """Let the stage release the ended records that a commit named, and store the ended records that no commit
+        named yet, for the trainer's next commit (``TrainerSamples.end_records``).
+
+        ``committed_record_ids`` holds the record IDs that the trainer's commits named, in whichever process they ran.
+        """
+        ended = self.record2sample.releasable_record_ids()
+        committed = ended & committed_record_ids
+        if committed:
+            self.record2sample.release_records(committed)
+        uncommitted = ended - committed - self.stored_ended_record_ids
+        if uncommitted:
+            self.store.end_records(uncommitted)
+            self.stored_ended_record_ids |= uncommitted
+        self.stored_ended_record_ids -= committed
 
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` samples for the next job.
@@ -621,14 +637,9 @@ class TrainingPipeline:
 
     # ------------------------------------------------------------- lifecycle
 
-    def releasable_record_ids(self) -> frozenset[str]:
-        """Records whose held state can be released after a durable commit."""
-        return frozenset(self.consumed_requests) | self.record2sample.releasable_record_ids()
-
-    def release_records(self, agent_record_ids: frozenset[str]) -> None:
-        """Release committed in-memory state without changing stored records."""
-        self.consumed_requests -= agent_record_ids
-        self.record2sample.release_records(agent_record_ids)
+    def release_requests(self, request_ids: frozenset[str]) -> None:
+        """Forget the consumed requests ``request_ids``, whose commit is durable: the queue no longer gives them."""
+        self.consumed_requests -= request_ids
 
     def background_jobs_running(self) -> bool:
         """Return True while background work of the record-to-sample stage runs, such as a judgment.
@@ -653,7 +664,7 @@ class TrainingPipeline:
         ``ready_samples`` against the trainer's ``job_samples`` says how close
         the next job's data is; ``buffer_size`` is the most samples of one
         automatic job, beside the rest of a group, or None for every sample. A caller waiting on a
-        snapshot needs it to tell job data that is still filling from data
+        release needs it to tell job data that is still filling from data
         that never will be: a scenario whose producer stopped short sits
         below ``job_samples`` with nothing else to report.
         The stages add terminal outcomes that can never train, so a bounded

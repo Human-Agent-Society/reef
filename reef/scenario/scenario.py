@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +24,7 @@ from reef.core.values import JsonValue
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
+from reef.record2sample.service import ProducedSamples
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.scenario.snapshots import ServedBesideArtifact
@@ -120,6 +120,10 @@ class Scenario:
         self._serving_config = ServingConfig()
         self._store = store
         self._closed = False
+        #: The newest step that each trainer has read (``Trainer.read_commits``), by component; the step that this
+        #: instance loaded before that. A new pipeline reads the last job end from its own state.
+        self.loaded_step = scenario_step
+        self.job_ends_read_step: dict[str, int] = {}
         #: Every trainer of this scenario with the component it evolves, in recipe order.
         self.trainers = validate_component_trainers(trainers, binding.components)
         self._artifact_chain = ArtifactSnapshotChain(repository)
@@ -320,50 +324,81 @@ class Scenario:
         for component_trainer in stepping:
             component_trainer.trainer.set_training_mode(training_mode)
 
-    def produce_samples(self) -> bool:
-        """Do the samples service's step for every trainer: make the samples of the new records
-        (``Trainer.produce_samples``). Return whether background work of a pipeline still runs. A process that
-        steps the scenario itself, such as a recipe's driver, calls it before ``prepare_training_step``."""
-        running = False
-        for component_trainer in self.trainers:
-            running = component_trainer.trainer.produce_samples().background or running
-        return running
+    def produce_samples(self, component: str | None = None) -> ProducedSamples:
+        """Do the samples service's step for ``component``'s trainer: read its newer commits, then make the samples of
+        the new records (``Trainer.produce_samples``).
+
+        The commit history gives the job ends and the records that the commits named, since control can run in another
+        process. The caller runs one step of the trainer at a time.
+        """
+        component_trainer = self._committer.component_trainer(component)
+        name = self._committer.component_on_record(component_trainer.component)
+        records = self._store.history() if self._store.durable else ()
+        read_step = self.job_ends_read_step.get(component_trainer.component, self.loaded_step)
+        new = [record for record in records if record.step > read_step and self._committer.own_record(record, name)]
+        component_trainer.trainer.read_commits(new)
+        if new:
+            self.job_ends_read_step[component_trainer.component] = new[-1].step
+        return component_trainer.trainer.produce_samples()
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare ``component``'s next commit: a job's submission, or a running job's checkpoint or end.
 
-        The caller runs one step of the scenario at a time, as the
-        dispatcher's cycle lock does. Thus no training commit of another
-        trainer lands while the step runs, and an activation refuses to run
-        while the job data is reserved. A lone trainer also holds the commit
-        lock. With several trainers the step runs outside that lock, so a
-        trainer without a backend advances its record cursor without waiting
-        for a long evaluation.
+        The caller runs one step of the scenario at a time, as the dispatcher's cycle lock does. Thus no training
+        commit of another trainer lands while the step runs, and an activation refuses to run while the job data is
+        reserved. A running job's step reads only the job's state, so it takes no commit lock and reads no pipeline.
+        Another step of a lone trainer holds the commit lock. With several trainers it runs outside that lock, so a
+        trainer without a backend advances its record cursor without waiting for a long evaluation.
         """
         trainer = self.trainer_for(component)
-        with self._committer.lock if len(self.trainers) == 1 else nullcontext():
-            # The staleness check measures data against the weights that serve; a scenario that loads no weights
-            # serves one fixed model, so its data never goes stale.
-            runtime = self.runtime
-            weights_load = self._binding.components.loaded_component is not None and runtime is not None
-            serving = self.served_artifact_id() if weights_load else None
-            if (
-                weights_load
-                and runtime is not None
-                and runtime.serves_requests
-                and self._binding.served_models is not None
-                and serving != self.serving_artifact_id()
-            ):
-                return None
-            self.refresh_requests()
-            component_trainer = self._committer.component_trainer(component)
-            # Only a job's submission needs the start, and it reads the commit history.
-            train_from_artifact_id = (
-                self.artifact_status()[component_trainer.component]["training_start"]
-                if component_trainer.trainer.job_due()
-                else None
+        # The staleness check measures data against the weights that serve; a scenario that loads no weights
+        # serves one fixed model, so its data never goes stale.
+        runtime = self.runtime
+        weights_load = self._binding.components.loaded_component is not None and runtime is not None
+        serving = self.served_artifact_id() if weights_load else None
+        if (
+            weights_load
+            and runtime is not None
+            and runtime.serves_requests
+            and self._binding.served_models is not None
+            and serving != self.serving_artifact_id()
+        ):
+            return None
+        if trainer.job_running:
+            return trainer.run_once()
+        if len(self.trainers) > 1:
+            return self.prepare_job(component, serving)
+        with self._committer.lock:
+            return self.prepare_job(component, serving)
+
+    def prepare_job(self, component: str | None, serving: str | None) -> TrainStepResult | None:
+        """Give ``component``'s trainer the requests and the served artifacts of the commit history, and take its next
+        step: a job's submission when its data is ready."""
+        component_trainer = self._committer.component_trainer(component)
+        trainer = component_trainer.trainer
+        self.refresh_requests()
+        served_component = self.served_component()
+        if serving is not None and served_component is not None:
+            history = self.release_queries.served_history(
+                self._committer.step, served_component, self._committer.component_names()
             )
-            return trainer.run_once(serving_artifact_id=serving, train_from_artifact_id=train_from_artifact_id)
+            if history:
+                trainer.restore_served_artifacts(history)
+        # Only a job's submission needs the start, and it reads the commit history.
+        train_from_artifact_id = (
+            self.artifact_status()[component_trainer.component]["training_start"] if trainer.job_due() else None
+        )
+        return trainer.run_once(serving_artifact_id=serving, train_from_artifact_id=train_from_artifact_id)
+
+    def fail_pending_request(self, error: str, component: str | None = None) -> bool:
+        """Store that ``component``'s reserved request failed with ``error``, so that its next job data is a skip row,
+        also after a reload or a restart; return whether a request was reserved."""
+        request_id = self.trainer_for(component).fail_pending_request(error)
+        if request_id is None:
+            return False
+        if self.training_requests is not None:
+            self.training_requests.mark_failed(request_id, error)
+        return True
 
     def pending_requests(self) -> int:
         """The queued requests that no trainer's commit consumed yet; 0 for a scenario without requests."""

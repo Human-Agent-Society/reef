@@ -431,7 +431,7 @@ def test_a_reload_leaves_the_harness_cycle_in_flight_its_instance(
     worker = threading.Thread(target=cycle)
     worker.start()
     assert slow.evaluating.wait(10)
-    reloading = threading.Thread(target=lambda: dispatcher.local_workers.reload("agent", scenario))
+    reloading = threading.Thread(target=lambda: dispatcher.registry.reload("agent"))
     reloading.start()
     reloading.join(5)
     # The reload does not wait for the cycle.
@@ -913,11 +913,11 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     # A job's submission consumes its rows; its checkpoint and its end consume none.
     submissions = [record for record in history if _job_event(record) == "submitted"]
     assert [sorted(record.consumed_ids) for record in submissions if record.component == HARNESS] == [
-        [consumed_sample_id(stage_item_id("agent", f"{HARNESS}:r1:0"))]
+        ["i1", "r1", consumed_sample_id(stage_item_id("agent", f"{HARNESS}:r1:0"))]
     ]
-    # Likewise, the weights trainer's sample was stored before the reload: its submission names the sample.
+    # Likewise, the weights trainer's sample was stored before the reload: its submission names it and its rows.
     assert [sorted(record.consumed_ids) for record in submissions if record.component == WEIGHTS] == [
-        [consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0"))]
+        ["i1", "r1", consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0"))]
     ]
 
 
@@ -1166,6 +1166,39 @@ def test_composite_recovery_refuses_a_registration_without_a_component_manifest(
 
 
 @pytest.mark.unit
+def test_the_samples_service_of_another_process_follows_the_commits_of_control(dispatchers: _Dispatchers) -> None:
+    """Control commits from the sample store, and its stage reads no record. The stage of the other process ends the
+    records, control's commit names them, and that stage then reads the job's end and releases them."""
+    dispatcher, _ = dispatchers.open(hold_local_cycles=True)
+    control = _loaded(dispatcher)
+    samples_process = dispatcher.registry._scenario_factory.load_or_create("agent")
+    try:
+        ended: list[str] = []
+        pipeline = samples_process.trainer_for(WEIGHTS).pipeline
+        original = pipeline.job_ended
+        pipeline.job_ended = lambda outcome: (ended.append(outcome.event), original(outcome))[1]
+        stage = pipeline.record2sample
+        control_stage = control.trainer_for(WEIGHTS).pipeline.record2sample
+        _append_records(control, 1)
+        samples_process.produce_samples(WEIGHTS)
+        assert {"i1", "r1"} <= stage.releasable_record_ids()
+        assert control_stage.releasable_record_ids() == frozenset()
+
+        assert _commit_step(control, WEIGHTS, make=False) == [("i1", "r1")]
+        assert {"i1", "r1"} <= _submission(control, WEIGHTS).consumed_ids
+        assert control_stage.releasable_record_ids() == frozenset()
+        assert ended == [], "the stage reads a job's end in the samples service's step"
+
+        samples_process.produce_samples(WEIGHTS)
+        assert ended == ["finished"]
+        assert not {"i1", "r1"} & stage.releasable_record_ids()
+        samples_process.produce_samples(WEIGHTS)
+        assert ended == ["finished"], "a job's end is read once"
+    finally:
+        samples_process.close()
+
+
+@pytest.mark.unit
 def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispatchers: _Dispatchers) -> None:
     """A restart between two trainers' commits of the same rows: the second still trains them, the first never again."""
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
@@ -1175,10 +1208,12 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
     reloaded = _reload(dispatcher)
     assert reloaded.prepare_training_step(HARNESS) is None
     assert _commit_step(reloaded, WEIGHTS) is not None
-    # The weights trainer saved its sample of the rows before the restart, and consumed the rows when it saved it:
-    # the commit names the sample.
+    # The weights trainer's stage ended the rows and saved its sample of them before the restart: the store keeps
+    # both, so the commit names them.
     assert _submission(reloaded, WEIGHTS).consumed_ids == {
-        consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0"))
+        "i1",
+        "r1",
+        consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0")),
     }
     assert reloaded.records.count("agent") == 2
 
@@ -1692,13 +1727,15 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     scenario = _scenario(restarted)
     assert _wait_for(lambda: _job_events(scenario)[:3] == ["submitted", "checkpoint", "finished"])
     assert training.submitted[0] == job
-    # The base answered the rows behind the job, so they are stale once the job's checkpoint serves. Rows that the
-    # checkpoint answers train in the next job, which starts from that checkpoint.
-    for record in _records(3, scenario.serving_artifact_id()):
-        restarted.accept_record(record)
+    # The commit history keeps the artifacts that served before the restart. The base answered the rows behind the
+    # job, and it is within the limit of the stage, so they train in the next job, which starts from the checkpoint.
+    component = scenario.served_component()
+    assert component is not None
+    served = scenario.release_queries.served_history(scenario.scenario_step, component, scenario.components.names)
+    assert len(served) == 2 and served[-1] == scenario.serving_artifact_id()
     assert _wait_for(lambda: len(training.submitted) == 2)
     assert [item.source_agent_record_ids for item in read_job_data(training.submitted[1].data_dir).samples] == [
-        ("i3", "r3")
+        ("i2", "r2")
     ]
     assert training.submitted[1].start == str(tmp_path / "checkpoints" / "1")
 

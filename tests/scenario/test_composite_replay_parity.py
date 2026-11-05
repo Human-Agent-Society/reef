@@ -351,7 +351,7 @@ def _another_roles_report(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
         assert _step(scenario, HARNESS) is None
         scenario.records.append(_turn("i3b", "s", 2))
         trained = _step(scenario, WEIGHTS)
-        released = scenario.trainer_for(HARNESS).pipeline.releasable_record_ids()
+        released = scenario.trainer_for(HARNESS).pipeline.record2sample.releasable_record_ids()
         return trained, "i3" in released, _stored(scenario)
     finally:
         dispatcher.close()
