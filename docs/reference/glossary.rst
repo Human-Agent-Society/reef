@@ -388,9 +388,10 @@ Rollout
 -------
 
 One run of one task by the policy model in weight training or in a checkpoint
-evaluation. It gives one trajectory and one score, as a harness run does. A
-task job runs each task ``rollouts_per_task`` times on the job's start
-weights.
+evaluation. It gives one trajectory and one score, as a harness run does. On
+Tinker, a task job runs each task ``rollouts_per_task`` times on the job's start
+weights. On Slime, ``n-samples-per-prompt`` gives the rollouts of each task, on
+the weights of the Slime rollout that holds them.
 
 Patch
 -----
