@@ -68,7 +68,7 @@ def test_training_pipeline_is_the_no_update_default() -> None:
     assert processor.ready(1) is False
     record = AgentRecord.create(scenario="math", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
     processor.push(record)
-    assert processor.releasable_record_ids() == frozenset()
+    assert processor.record2sample.releasable_record_ids() == frozenset()
     # The default holds no units, so it never becomes ready and
     # build_job_data refuses on that ground — the same refusal every pipeline gives.
     with pytest.raises(RuntimeError, match="no job data ready"):
@@ -99,7 +99,7 @@ def test_prepared_step_enforces_its_single_outcome() -> None:
 def test_custom_pipelines_default_to_releasing_no_records() -> None:
     processor = ExamplePipeline(PipelineContext("math"), [])
 
-    assert processor.releasable_record_ids() == frozenset()
+    assert processor.record2sample.releasable_record_ids() == frozenset()
 
 
 @pytest.mark.unit

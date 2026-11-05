@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass, replace
@@ -824,7 +825,7 @@ def test_a_failed_request_is_skipped_with_its_error_and_the_queue_moves_on(tmp_p
         assert "error" not in _committed_row(dispatcher, "fine")
         current = dispatcher.get_or_create_scenario("s")
         assert current.pending_requests() == 0
-        assert current.trainer.request_failures() == {}
+        assert current.trainer.pipeline.failed_requests == {}
         assert _wait(lambda: current.training_requests.get("poison").final)
         assert current.trainer.pipeline.training_mode == "manual"
     finally:
@@ -859,7 +860,7 @@ def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_reque
         assert not any(item.startswith(CONSUMED_SAMPLE_PREFIX) for item in skip.consumed_ids)
         assert current.records.get("s", "report-a") is not None
         assert current.pending_requests() == 0
-        assert current.trainer.request_failures() == {}
+        assert current.trainer.pipeline.failed_requests == {}
     finally:
         release.set()
     dispatcher.close()
@@ -920,7 +921,7 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
         assert _wait(lambda: scenario.scenario_step == 4)
         assert _last_committed(scenario).get("skipped") == UNCHANGED
         assert scenario.pending_requests() == 0
-        assert scenario.trainer.request_failures() == {}
+        assert scenario.trainer.pipeline.failed_requests == {}
         assert _wait(lambda: scenario.training_requests.get("poison").final)
     finally:
         release.set()
@@ -1133,6 +1134,30 @@ def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatc
     assert [job["train_from_artifact_id"] for job in asyncio.run(listing())] == [creation, creation, third_start]
 
 
+def test_a_running_jobs_step_reads_no_requests_and_takes_no_commit_lock(tmp_path, open_dispatcher, monkeypatch):
+    """A poll of a running job can wait on the training service, so an activation does not wait for the poll."""
+    component = SubmitRaisesForRequestOne(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    trainer = scenario.trainers[0].trainer
+    polled = threading.Event()
+
+    def poll(**_):
+        polled.set()
+
+    def read_requests():
+        raise AssertionError("a running job's step reads no requests")
+
+    monkeypatch.setattr(type(trainer), "job_running", property(lambda self: True))
+    monkeypatch.setattr(trainer, "run_once", poll)
+    monkeypatch.setattr(scenario, "refresh_requests", read_requests)
+    with scenario._committer.lock:
+        step = threading.Thread(target=scenario.prepare_training_step, daemon=True)
+        step.start()
+        assert polled.wait(10), "the step waited for the commit lock"
+    step.join(10)
+
+
 def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp_path, records, training_requests):
     component = SubmitRaisesForRequestOne(tmp_path / "checkpoints")
     trainer = Trainer.build(
@@ -1343,7 +1368,7 @@ def test_every_mode_keeps_the_samples_beyond_the_next_job_for_later_jobs(caplog,
                 fail(index)
         # Every ready unit is saved as items, which consumes its records; nothing is released untrained.
         assert processor.record2sample.ready_units == {}
-        retention = processor.releasable_record_ids()
+        retention = processor.record2sample.releasable_record_ids()
         assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
         assert not [record for record in caplog.records if record.name == "reef.train.pipeline"]
         if mode == "manual":
