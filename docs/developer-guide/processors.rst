@@ -50,7 +50,9 @@ The record-to-sample stage never calls the pipeline. When the samples service
 asks the pipeline for new samples (``produce``), the pipeline first calls the
 stage's ``advance(now)``. The stage then takes in background work that ended,
 such as judgments, and forms the sets that are due, such as the trajectories
-that went idle.
+that went idle. The samples service runs when the scenario accepts records and
+after each commit: a commit can end a job, and the job's end can make background
+work due, such as the next round of generated tasks.
 
 The recipe names a default class for each stage in its ``pipeline_spec()``.
 The deployment's ``pipeline`` section gives each stage its config and can name
