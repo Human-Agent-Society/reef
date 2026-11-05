@@ -17,7 +17,7 @@ from typing import Any, Self
 
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.commits import CommitRecord
+from reef.storage.commits import CommitRecord, CommitSnapshots
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
 from reef.storage.samples import SampleStore, TrainingState
@@ -138,6 +138,9 @@ class ObservedScenarioStore(ScenarioStore):
     @property
     def evaluations(self) -> EvaluationStore:
         return self._inner.evaluations
+
+    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
+        self._inner.use_snapshots(snapshots)
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()
