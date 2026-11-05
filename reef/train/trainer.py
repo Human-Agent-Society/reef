@@ -117,7 +117,7 @@ class PendingTrainingResult:
 
 @dataclass(frozen=True)
 class ComponentTrainer:
-    """One trainer and the release component it evolves."""
+    """One trainer and the snapshot component it evolves."""
 
     component: str
     trainer: Trainer
@@ -172,7 +172,7 @@ class Trainer:
         every kind empty parameters, so the training component's defaults
         apply. ``algorithm_state`` is the trainer's committed state, or
         ``None`` for a trainer that has none. Such a trainer that trains
-        starts its first job from ``root``, its scenario's root release
+        starts its first job from ``root``, its scenario's root snapshot
         (``TrainingComponent.root_start``); ``root`` is then required, and a
         root that the component cannot start from raises
         ``TrainingStartRefused``.
@@ -213,7 +213,7 @@ class Trainer:
                     start = job_loop.component.root_start(root)
                 except ValueError as exc:
                     raise TrainingStartRefused(
-                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.revision}: {exc}"
+                        f"scenario {scenario!r} cannot train from its root snapshot {root.artifact.ref.revision}: {exc}"
                     ) from exc
                 initial_state = JobLoopState(start).to_dict()
             trainer = cls(
@@ -764,7 +764,7 @@ class Trainer:
     def start_from(self, artifact: Artifact) -> None:
         """Set the training start to ``artifact``, and cancel the running job.
 
-        ``artifact`` is the trainer's component of a release, materialized. A
+        ``artifact`` is the trainer's component of a snapshot, materialized. A
         trainer's next job starts from what its training component imports of
         ``artifact`` (``TrainingComponent.import_start``). Raise ``TrainingStartRefused``,
         and change nothing, when this trainer cannot start from ``artifact``;

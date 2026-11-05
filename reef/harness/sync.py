@@ -3,12 +3,12 @@
 The ``evolve`` section of an adapter's ``adapter.yaml`` says where each file
 of a tree lands when the tree renders, such as ``rules.md`` at
 ``plugin/rules.md``; the kind of each file says how it merges. Its
-``run.layer`` says how a person's machine runs the agent with a release as a
+``run.layer`` says how a person's machine runs the agent with a snapshot as a
 layer over the person's own configuration (``AdapterLayer``). The client copies files and runs one command; it knows no
 adapter, and this module does the mapping on the server.
 
 Reef to client
-    ``HarnessFiles`` serves a release as the adapter's binary reads it: its
+    ``HarnessFiles`` serves a snapshot as the adapter's binary reads it: its
     source tree rendered without a model binding. ``layer_install`` renders
     it as a layer for one client install instead: the files, bound to Reef's
     route of the scenario, and the command that runs the agent on them.
@@ -16,17 +16,17 @@ Client to Reef
     ``import_files`` reads the files at their render paths back into a tree:
     each file that a part renders becomes the part's tree file. Config files
     are not read back. They hold the endpoints and credentials that the model
-    binding owns, so the import keeps the config parts of the release the
+    binding owns, so the import keeps the config parts of the snapshot the
     client installed. ``merge_trees`` then puts the client's changes on the
-    active release, which may have moved on since that release. The service
-    commits the merged tree as a ``"sync"``: it becomes the active release
+    active selection, which may have moved on since that snapshot. The service
+    commits the merged tree as a ``"sync"``: it becomes the active selection
     and the training start (``ScenarioCommitter.sync_artifact``).
 
 For a tree whose files are each in the form their render writes,
 ``import_files(render_tree(tree))`` is the tree again.
 
 The merge is per file, with ``b``, ``h`` and ``c`` a path's text in the base,
-the active release and the client's tree, absent counting as a value. Where both sides
+the active selection and the client's tree, absent counting as a value. Where both sides
 changed a file, its part's ``merge`` decides: ``file`` refuses, and ``lines``
 merges the lines each side changed, refusing only lines both changed
 (``merge_lines``).
@@ -60,9 +60,9 @@ TOKEN_PLACEHOLDER = "REEF_TOKEN_PLACEHOLDER"
 
 
 class HarnessFiles(FileTree):
-    """A release's files as the adapter's binary reads them: its source tree rendered without a model binding.
+    """A snapshot's files as the adapter's binary reads them: its source tree rendered without a model binding.
 
-    A release stores the source tree; the client gets the adapter's files,
+    A snapshot stores the source tree; the client gets the adapter's files,
     and binds its own model endpoint.
     """
 
@@ -79,7 +79,7 @@ class HarnessFiles(FileTree):
 
 @dataclass(frozen=True)
 class LayerInstall:
-    """A release as a layer for one client install, and the command that runs the agent on it.
+    """A snapshot as a layer for one client install, and the command that runs the agent on it.
 
     Values: ``files`` maps render paths under the install to text, with
     ``TOKEN_PLACEHOLDER`` where the client's token goes. ``args`` are added to
@@ -138,7 +138,7 @@ def layer_install(
 class ImportedTree:
     """A person's harness files read back into a tree.
 
-    Values: ``tree`` holds the config files of the release the client
+    Values: ``tree`` holds the config files of the snapshot the client
     installed, and one tree file for each imported file that a part renders
     to and that holds more than whitespace. ``ignored`` holds the imported
     paths that no part renders to, sorted.
@@ -153,7 +153,7 @@ class ImportedTree:
 def import_files(files: Mapping[str, str], base: HarnessTree, descriptor: AdapterDescriptor) -> ImportedTree:
     """``files``, by render path, as ``descriptor``'s tree: ``base``'s config files and a tree file per part file.
 
-    ``base`` is the release the client installed. A file that two parts render to goes back to the part whose tree
+    ``base`` is the snapshot the client installed. A file that two parts render to goes back to the part whose tree
     path ``base`` holds, else to the part declared first. A file that no part renders to is ignored, and an empty
     one is no file: a layer writes an empty rules file for a tree that has none. The imported files replace every
     other file of ``base``, so a file the person removed is removed from the tree too.

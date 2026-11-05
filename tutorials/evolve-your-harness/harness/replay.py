@@ -3,9 +3,9 @@
 ``python3 harness/replay.py [work] [out.html]`` reads the commit history in
 each scenario database (every step's result and the patch it recorded), the
 resident process's log (mounts, polls) and every session log (turns, stages,
-tool calls), and writes one self contained HTML page: the release chain with
+tool calls), and writes one self contained HTML page: the snapshot chain with
 each step's result and the files its patch changed,
-the loop graph of each release with a scrubber that replays a session's stage
+the loop graph of each snapshot with a scrubber that replays a session's stage
 path over it, the event log of each session, and the process timeline. No
 server, no network: the page carries its data inline.
 """
@@ -59,7 +59,7 @@ def changed(files: dict, patch: dict) -> dict:
 def collect(work: Path) -> dict:
     """Everything the page shows, as one JSON value.
 
-    Each release's files are the variant's seed tree with every published step's recorded patch applied in
+    Each snapshot's files are the variant's seed tree with every published step's recorded patch applied in
     order; the native variant's run leaves work/tree/native behind, the pi variant's does not.
     """
     tree_dir = work / "tree" / "native"
@@ -81,7 +81,7 @@ def collect(work: Path) -> dict:
         # An older record of one flat component names its artifact by its storage revision.
         artifact_id = (commit.artifact_ids or {}).get("harness", commit.snapshot.revision)
         if operation in ("activate", "train_from"):
-            # Not a step: a person activated a release or set the training start. The row carries no state.
+            # Not a step: a person activated a snapshot or set the training start. The row carries no state.
             # No step made an artifact that this log does not list, except the seed.
             named = files_by_artifact.get(artifact_id, seed_files)
             releases.append(
@@ -272,9 +272,9 @@ function layout(g) {
 function renderGraph() {
   const r = D.releases[state.release];
   const box = document.getElementById('graph');
-  if (!r) { box.innerHTML = '<div class="panel"><span class="empty">No release on record: nothing was pulled or committed under work/ yet.</span></div>'; return; }
+  if (!r) { box.innerHTML = '<div class="panel"><span class="empty">No snapshot on record: nothing was pulled or committed under work/ yet.</span></div>'; return; }
   const g = graphOf(r.files);
-  if (!g) { box.innerHTML = '<div class="panel"><span class="empty">This release carries no main graph (the seed graph runs).</span></div>'; return; }
+  if (!g) { box.innerHTML = '<div class="panel"><span class="empty">This snapshot carries no main graph (the seed graph runs).</span></div>'; return; }
   const L = layout(g); const s = D.sessions[state.session];
   const seen = new Set(), seenEdges = new Set(); let now = null;
   if (s) {

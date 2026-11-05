@@ -52,7 +52,7 @@ class SDPOGrouping(ReportGrouping):
     """One sampling step is one group, and its (group, rollout) coordinates are the slots.
 
     A step is ready when its grid is complete, it was sampled from one policy
-    release, and the rollouts of each question share one request. Otherwise the
+    artifact, and the rollouts of each question share one request. Otherwise the
     complete step is discarded and listed in ``failed_steps``.
     """
 
@@ -72,9 +72,9 @@ class SDPOGrouping(ReportGrouping):
             return GroupDecision.INCOMPLETE
         if not isinstance(key, int):
             raise TypeError("SDPO step must be an integer")
-        releases = {member.ends[0].artifact_id for member in members}
+        artifact_ids = {member.ends[0].artifact_id for member in members}
         reason = ""
-        if None in releases or len(releases) != 1:
+        if None in artifact_ids or len(artifact_ids) != 1:
             reason = "missing_or_mixed_artifact_ids"
         reports = [(member, parsed) for member in members if isinstance(parsed := member.parsed_report, SDPOReport)]
         for group in range(self.groups_per_step):
@@ -202,7 +202,7 @@ class SDPOJobData(Sample2Job):
     A report names its rollout's coordinates in the step's grid
     (``groups_per_step`` questions by ``rollouts_per_group`` attempts), and
     the coordinates are its retry slot in ``SDPOGrouping``: the first report at one wins. A step
-    trains only complete, sampled from one policy release, with one request
+    trains only complete, sampled from one policy artifact, with one request
     per question; anything else is discarded whole and listed in
     ``status()``. A rollout whose teacher reads no privileged information
     (no successful sibling, no feedback) keeps the plain request and a sample

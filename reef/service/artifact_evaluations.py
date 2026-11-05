@@ -442,8 +442,8 @@ class ArtifactEvaluations:
             raise ReefError(refusal or f"scenario {current.name!r} has no runtime")
         if request.harness is None:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
-        _, release = current.resolve_artifact(artifact_id, component)
-        artifact = release.materialize()
+        _, snapshot = current.resolve_artifact(artifact_id, component)
+        artifact = snapshot.materialize()
         return request, artifact, runtime.artifact_model(artifact)
 
     def accept(

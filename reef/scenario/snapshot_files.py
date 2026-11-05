@@ -1,4 +1,4 @@
-"""The scenario's committed releases as files: the head that a harness step builds on.
+"""The scenario's committed snapshots as files: the head that a harness step builds on.
 
 ``ScenarioArtifactFiles`` reads the commit history and the artifact
 repository of one scenario. It is what ``reef.train.backend.CommittedArtifacts``
@@ -17,15 +17,15 @@ from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 
 
 class ScenarioArtifactFiles(CommittedArtifacts):
-    """One scenario's releases, read through its commit history and artifact repository.
+    """One scenario's snapshots, read through its commit history and artifact repository.
 
     A component's head is its training start, as the scenario committer keeps
-    it: the release of the newest ``"train_from"`` or ``"sync"`` record for
+    it: the snapshot of the newest ``"train_from"`` or ``"sync"`` record for
     the component or of the newest training commit that made an artifact for
     it, whichever is later. An activation moves what serves, not the head, so a step builds on
     the latest tree it made even when the activation rule held that tree.
     Before any such record, and without a durable history, the head is the
-    repository's current release: the release the scenario was created on, as
+    repository's current snapshot: the snapshot the scenario was created on, as
     the catalog lists it.
     """
 
@@ -61,12 +61,12 @@ class ScenarioArtifactFiles(CommittedArtifacts):
 
 
 def component_files(components: ScenarioComponents, artifact: Artifact, component: str) -> dict[str, str]:
-    """``component``'s text files in ``artifact``, as the release stores them: the harness source tree."""
+    """``component``'s text files in ``artifact``, as the snapshot stores them: the harness source tree."""
     return dict(TextFileTree().read_files(components.component_artifact(artifact, component)) or {})
 
 
 def moves_head(record: CommitRecord, component: str) -> bool:
-    """Whether ``record`` makes its release ``component``'s head: a ``"train_from"`` or ``"sync"`` record for it, or
+    """Whether ``record`` makes its snapshot ``component``'s head: a ``"train_from"`` or ``"sync"`` record for it, or
     a training commit that made an artifact for it (``CommitRecord.sets_training_start``)."""
     if record.component not in (None, component):
         return False

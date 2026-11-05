@@ -12,7 +12,7 @@ The harness runs `python /opt/chemistry/stage.py` in this container. For each
 step the runner samples 32 questions 8 times each through the Reef service at
 `$REEF_SERVICE_URL`, reports every rollout against its receipt with its
 coordinates in the grid and its score, and waits for the step's training
-release before sampling the next grid. The recipe holds the step until the grid
+snapshot before sampling the next grid. The recipe holds the step until the grid
 is complete, then each rollout's teacher rereads the question with a successful
 sibling's response, and its distribution over the student's own tokens is the
 target of one optimizer step.

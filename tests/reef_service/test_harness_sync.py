@@ -1,6 +1,6 @@
-"""The sync routes through the real HTTP app: install a release as a layer, merge a client's changes, call the model.
+"""The sync routes through the real HTTP app: install a snapshot as a layer, merge a client's changes, call the model.
 
-``GET /reef/harness`` with ``form=client`` renders a release as a layer bound to the scenario's route, with the command
+``GET /reef/harness`` with ``form=client`` renders a snapshot as a layer bound to the scenario's route, with the command
 that runs the agent on it; that route records the call, and ``POST /reef/harness/import`` merges a client's changes.
 """
 
@@ -165,7 +165,7 @@ sys.exit(3)
 
 def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeypatch) -> None:
     """The client's whole round: connect sets the machine up so that the person's own pi command runs through Reef,
-    pi runs on the layer and the run sends what the session wrote when it exits, an edit merges onto a release a
+    pi runs on the layer and the run sends what the session wrote when it exits, an edit merges onto a snapshot a
     step made, a line both changed is refused, discard, and disconnect gives pi back."""
     home = tmp_path / "home"
     (home / ".pi" / "agent").mkdir(parents=True)
@@ -224,7 +224,7 @@ def test_a_person_connects_and_each_run_syncs_with_reef_client(tmp_path, monkeyp
         with pytest.raises(HarnessSyncError, match=r"both changed plugin/rules\.md"):
             install.sync()
         assert agents.read_text() == "Answer briefly, always.\n"
-        # Back to the base text, the rules take the step's, and the new skill merges onto its release.
+        # Back to the base text, the rules take the step's, and the new skill merges onto its snapshot.
         agents.write_text("Answer briefly.\n")
         assert "merged onto artifact" in install.sync()
         assert agents.read_text() == "marker rules\n" and other.exists() and install.changed() == []

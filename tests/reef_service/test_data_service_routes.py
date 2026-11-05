@@ -151,7 +151,7 @@ def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp
 
 
 def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_from_the_queue(tmp_path: Path) -> None:
-    # The root release that each scenario starts with holds one file.
+    # The root snapshot that each scenario starts with holds one file.
     dispatcher = dispatcher_for(tmp_path, UploadRecipe(start=DefaultStart(files={"model.txt": "w0"})))
     dispatcher.queue.add(queued_job("job-1", "s"))
 
@@ -194,7 +194,7 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
 
 
 class SigningBackend(InMemoryRepositoryBackend):
-    """An in-memory repository that signs a URL for each file of a release, as an object store does."""
+    """An in-memory repository that signs a URL for each file of a snapshot, as an object store does."""
 
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...]:
         files = DirectoryFiles(self.materialize(ref).local_path)

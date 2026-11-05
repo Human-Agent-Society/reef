@@ -92,7 +92,7 @@ class CampaignService:
         from reef_client import ReefClientError
 
         if path == "/reef/scenarios":
-            # Reef creates the scenario at its initial release.
+            # Reef creates the scenario at its initial snapshot.
             self.created_scenarios.append(payload["name"])
             return {"scenario": payload["name"]}, {}
         if scenario not in self.created_scenarios:
@@ -268,7 +268,7 @@ def test_resume_rejects_incomplete_historical_evaluation(monkeypatch, campaign_a
     path = campaign_args.output / "eval-0000.jsonl"
     path.write_text(path.read_text().splitlines()[0] + "\n")
     campaign_args.resume = True
-    with pytest.raises(RuntimeError, match="historical release"):
+    with pytest.raises(RuntimeError, match="historical snapshot"):
         Campaign(campaign_args).run()
     assert len(service.commits) == 1
     assert service.inference_calls == 4

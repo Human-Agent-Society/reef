@@ -99,7 +99,7 @@ MARKERS = ("TIDEPOOL-STONE-41", "TIDEPOOL-SKILL-23", "TIDEPOOL-COMMAND-31", "TID
 
 def first_request(tmp_path: Path, form: str, tree: HarnessTree, prompt: str) -> dict[str, Any]:
     """The first request pi sends for ``tree``, as a run or on a person's machine, where pi loads the person's
-    own directory, empty here, and the release as the adapter's layer over it."""
+    own directory, empty here, and the snapshot as the adapter's layer over it."""
     server = StubOpenAI()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
