@@ -45,10 +45,9 @@ def test_a_release_loads_for_its_scenario_only_on_a_runtime_of_per_scenario_adap
     assert shared.scenarios == [None]
 
 
-def test_nothing_loads_without_a_loaded_component_or_when_it_did_not_change(tmp_path: Path) -> None:
+def test_nothing_loads_without_a_loaded_component_or_a_runtime(tmp_path: Path) -> None:
     saved = checkpoint(tmp_path)
     runtime = RecordingRuntime(per_scenario=False)
     activate_release(ScenarioComponents({"harness": ComponentSpec(kind="harness_plugin")}), saved, runtime, "s")
-    activate_release(WEIGHTS, saved, runtime, "s", previous=saved)
     activate_release(WEIGHTS, saved, None, "s")
     assert runtime.scenarios == []

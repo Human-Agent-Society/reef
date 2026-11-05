@@ -28,7 +28,7 @@ from reef.core.errors import CommitPending, ReefError
 from reef.core.snapshot import RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
-from reef.scenario.binding import ScenarioBinding, activate_release
+from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases, ServedBesideArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
@@ -369,8 +369,7 @@ class ScenarioCommitter:
 
         The selected artifact replaces only its component in the scenario's
         active selection. No artifact is published. The checkpoint and every
-        training start stay. A standalone scenario activates the runtime first.
-        A service scenario leaves engine activation to inference after the commit.
+        training start stay. Inference loads the release after the commit.
         The ``"activate"`` record lands at the next step, then the active release moves.
         A crash before the record leaves the active release that the log names. Activating the active artifact
         changes nothing. Raise as :meth:`resolve_artifact` does, and
@@ -385,8 +384,6 @@ class ScenarioCommitter:
                 return selected
             self.require_no_pending_commit("activate an artifact")
             target = self.release_with(served, selected, release)
-            if self._binding.activates_runtime:
-                activate_release(components, target, self._binding.runtime, self._name, previous=served)
             record = self.append_operation_record(
                 "activate",
                 target.ref,
@@ -456,7 +453,6 @@ class ScenarioCommitter:
                 if target.ref.selection_view and target.ref.revision not in cached:
                     repository.discard(target)
                 raise
-            self._activate(target)
             record = self.append_operation_record(
                 "restore", target.ref, component=None, components=selection.artifact_ids, selection=selection
             )
@@ -637,8 +633,7 @@ class ScenarioCommitter:
         tip, and it is published beside the chain, as an import is. The
         release's admission check runs on the staged release first. The
         component's trainer then takes the release as its training start (``Trainer.start_from``).
-        A standalone scenario activates the runtime before the ``"sync"`` record lands with ``metrics``.
-        A service scenario leaves engine activation to inference after that record. The active release
+        The ``"sync"`` record lands with ``metrics``, and inference loads the release after it. The active release
         moves to it last; a crash before the record leaves the active release
         that the log names. The chain tip and the activation rule stay.
 
@@ -666,7 +661,6 @@ class ScenarioCommitter:
             next_step = self._step + 1
             staged = self.stage_publication(next_step, SavedArtifactPublication(artifact, component), checkpoint)
             try:
-                self._activate(staged)
                 # Published beside the chain: the chain tip and the backend head stay.
                 published_ref = self._artifacts.publish(
                     staged,
@@ -679,7 +673,6 @@ class ScenarioCommitter:
                 )
                 published = self._artifacts.resolve(published_ref)
                 self.start_trainer(component_trainer, published)
-                self._activate(published)
                 record = self.append_operation_record(
                     "sync",
                     published_ref,
@@ -851,8 +844,6 @@ class ScenarioCommitter:
                 )
             else:
                 artifacts.discard(local_artifact)
-            if activated:
-                self._activate(artifacts.resolve(published_ref))
             record = self._append_commit_record(
                 step=next_step,
                 snapshot=published_ref,
@@ -1001,15 +992,6 @@ class ScenarioCommitter:
             self._artifacts.discard(staged)
             raise
         return staged
-
-    def _activate(self, artifact: Artifact) -> None:
-        if not self._binding.activates_runtime:
-            return
-        # A component the engine already serves is not activated again, so a
-        # harness release never reloads weights; the active release is compared by
-        # identity and materialized only when a composed manifest is needed.
-        previous = Artifact(self._artifacts.current, self._artifacts.repository)
-        activate_release(self._binding.components, artifact, self._binding.runtime, self._name, previous=previous)
 
     def finish_committed_step(
         self,

@@ -72,10 +72,10 @@ Fields and where Reef reads them
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 
 ``activate_release`` (``reef.scenario.binding``) calls the runtime's
-``InferenceRuntime.activate_checkpoint`` for the loaded component. It runs at
-startup recovery, after a commit publishes a release that the activation rule
-activates, and at an activation, before the commit record makes the release
-active. Without a runtime or a loaded component, moving the head is enough.
+``InferenceRuntime.activate_checkpoint`` for the loaded component. The inference
+worker calls it for each selection that control queues, after the commit that
+makes the release active. Without a runtime or a loaded component, moving the
+head is enough.
 
 The scenario owns lifecycle ordering and admission; the service owns
 transport. The components supply only the facts at these sites.

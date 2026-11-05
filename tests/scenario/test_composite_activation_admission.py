@@ -64,11 +64,11 @@ def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> 
 
 
 def _scenario(dispatcher: Dispatcher, runtime: StubInferenceRuntime):
-    """Bind a standalone runtime for direct commit and admission checks."""
+    """Bind a runtime without serving routes for direct commit and admission checks."""
     scenario = dispatcher.get_or_create_scenario("agent")
     # Loading the scenario woke its workers: stopped, they leave every step to the test.
     stop_workers(dispatcher, "agent")
-    binding = replace(scenario._binding, runtime=runtime, activates_runtime=True, served_models=None)
+    binding = replace(scenario._binding, runtime=runtime, served_models=None)
     scenario._binding = binding
     scenario._committer._binding = binding
     return scenario
