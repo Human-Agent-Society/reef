@@ -698,6 +698,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     # compaction: it is protected, and only processor memory knew about it.
     assert committed_records(agent_record_dir)[-1].high_water_sequence == 3
     assert first.get_or_create_scenario("math").records.get("math", "i2") is not None
+    first.close()
 
     second_component = RecordingComponent()
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
@@ -720,7 +721,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     scenario = first.get_or_create_scenario("math")
 
-    original_release = scenario.trainer.pipeline.release_records
+    original_release = scenario.trainer.pipeline.release_requests
     crash = {"armed": True}
 
     def exploding_release(*args, **kwargs) -> None:
@@ -729,7 +730,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
             raise RuntimeError("simulated crash between record append and buffer release")
         original_release(*args, **kwargs)
 
-    monkeypatch.setattr(scenario.trainer.pipeline, "release_records", exploding_release)
+    monkeypatch.setattr(scenario.trainer.pipeline, "release_requests", exploding_release)
     # The failed cycle does not wake its worker again; the worker polls the recovered running job.
     monkeypatch.setattr(local_workers, "POLL_SECONDS", 0.01)
     train_pair(first, 1)
@@ -1097,7 +1098,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
     pending = scenario.trainer.pending_job_data
     assert pending is not None
     pipeline = scenario.trainer.pipeline
-    original = pipeline.release_records
+    original = pipeline.release_requests
     should_fail = True
 
     def fail_after_effect(*args, **kwargs):
@@ -1105,14 +1106,14 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
         outcome = original(*args, **kwargs)
         if should_fail:
             should_fail = False
-            raise RuntimeError("injected release_records failure")
+            raise RuntimeError("injected release_requests failure")
         return outcome
 
-    monkeypatch.setattr(pipeline, "release_records", fail_after_effect)
+    monkeypatch.setattr(pipeline, "release_requests", fail_after_effect)
     initial_state = dict(scenario.trainer.state)
 
     # The job's submission consumes the batch, so its commit releases the batch's records.
-    with pytest.raises(RuntimeError, match="injected release_records failure"):
+    with pytest.raises(RuntimeError, match="injected release_requests failure"):
         scenario.commit(result)
 
     assert scenario.scenario_step == 0
@@ -1221,7 +1222,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
         assert allow_reload.wait(synchronization_timeout_seconds)
         return reload_scenario(scenario)
 
-    original.trainer.pipeline.release_records = fail_release.__get__(
+    original.trainer.pipeline.release_requests = fail_release.__get__(
         original.trainer.pipeline, type(original.trainer.pipeline)
     )
     dispatcher.registry.reload = blocking_reload
