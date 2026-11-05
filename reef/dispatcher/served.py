@@ -154,7 +154,7 @@ class ServedModelsPublisher(ServiceWorker):
             self.stopped.wait(self.interval_seconds)
 
     def desired(self, scenario: str) -> dict[str, JsonValue]:
-        """The selected release, the route names and the serving config of the served component, without opening
+        """The selected snapshot, the route names and the serving config of the served component, without opening
         or calling an engine."""
         current = self.registry.get_loaded(scenario)
         if current is None or current.runtime is None or not current.runtime.serves_requests:

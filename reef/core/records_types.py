@@ -24,7 +24,7 @@ class RequestType(StrEnum):
 
 
 #: The request header that marks an inference call of a rollout that Reef runs itself. The service
-#: serves the call from the scenario's release as it serves any other, keeps no record of it, and returns the
+#: serves the call from the scenario's snapshot as it serves any other, keeps no record of it, and returns the
 #: response with its training block. Such a rollout is not user data, so it never becomes a record.
 ROLLOUT_HEADER = "x-reef-rollout"
 

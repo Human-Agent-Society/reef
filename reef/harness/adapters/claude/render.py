@@ -1,6 +1,6 @@
 """Claude Code adapter render steps: the plugin's own files, the model a frontmatter names, and the layer's files.
 
-A release is the plugin ``reef`` in ``plugin/``. ``finalize_render`` writes
+A snapshot is the plugin ``reef`` in ``plugin/``. ``finalize_render`` writes
 its manifest, and its output style from ``plugin/rules.md``, which Claude Code
 adds to its system prompt while the plugin is on (``force-for-plugin``). It
 drops ``plugin/hooks/hooks.json`` when the tree has no hooks. ``layer_files``

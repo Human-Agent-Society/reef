@@ -4,7 +4,7 @@ description: The pi 0.84.2 extension API in brief. Read before writing or changi
 ---
 # pi extension API (0.84.2)
 
-An extension is one module at plugin/extensions/<name>.ts, in the release's pi package. pi loads it with jiti, so plain JavaScript in a .ts file runs as is; type annotations are allowed but not needed. An extension file has no npm install: import only node: modules, typebox, @earendil-works/pi-coding-agent, @earendil-works/pi-ai and @earendil-works/pi-tui.
+An extension is one module at plugin/extensions/<name>.ts, in the snapshot's pi package. pi loads it with jiti, so plain JavaScript in a .ts file runs as is; type annotations are allowed but not needed. An extension file has no npm install: import only node: modules, typebox, @earendil-works/pi-coding-agent, @earendil-works/pi-ai and @earendil-works/pi-tui.
 
 This summary is versioned with Reef's pi installation pin. For a missing detail, locate `pi` on PATH,
 resolve its symlink and check the owning `package.json`. In that package, use these specific references:

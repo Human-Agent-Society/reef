@@ -244,8 +244,8 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
 
 
 def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_module, tmp_path, monkeypatch) -> None:
-    """The demo is the client: it pulls the source tree, checks what the release requires on this machine, and
-    renders the tree locally with its own model binding; a release that requires what the machine lacks stops it."""
+    """The demo is the client: it pulls the source tree, checks what the snapshot requires on this machine, and
+    renders the tree locally with its own model binding; a snapshot that requires what the machine lacks stops it."""
     manifest: dict = {"artifact_id": "r1", "files": {"rules.md": "Answer briefly.\n"}, "requires": []}
     paths: list[str] = []
 

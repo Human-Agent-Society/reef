@@ -1,7 +1,7 @@
 """Slime checkpoint records and the start directories that later jobs continue.
 
 Checkpoint saving and recovery ordering stay with the job runner. This module
-owns start.json, its validated values, and the release layout of saved starts.
+owns start.json, its validated values, and the snapshot layout of saved starts.
 """
 
 from __future__ import annotations
@@ -146,20 +146,20 @@ def write_rollout_start(
     """Write the saved rollout's start and return (start directory, release directory).
 
     The runner supplies a validated, non-symlink Hugging Face directory.
-    Full-weight releases use that directory directly. LoRA releases copy its
+    Full-weight artifacts use that directory directly. LoRA artifacts copy its
     files into the start's release/adapter directory. The start records the
     supplied schedule and the rollout's objective state before returning.
     """
     start_dir = starts_root / f"rollout_{rollout.rollout_id}"
-    release = hf_directory
+    artifact_dir = hf_directory
     if lora:
-        release = start_dir / "release"
-        shutil.rmtree(release, ignore_errors=True)
-        shutil.copytree(hf_directory, release / ADAPTER_DIR)
+        artifact_dir = start_dir / "release"
+        shutil.rmtree(artifact_dir, ignore_errors=True)
+        shutil.copytree(hf_directory, artifact_dir / ADAPTER_DIR)
     SlimeStart(
         rollout.rollout_id,
         rollout.objective,
         rollout.algorithm_state,
         schedule_state,
     ).write(start_dir)
-    return start_dir, release
+    return start_dir, artifact_dir

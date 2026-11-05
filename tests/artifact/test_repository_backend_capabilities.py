@@ -13,7 +13,7 @@ from reef.artifact import (
     RepositoryBackend,
     RepositoryBackendFactory,
     SnapshotRef,
-    StagedReleaseRepositoryBackend,
+    StagedSnapshotRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
 from reef.storage.sql_coordination import memory_coordination
@@ -57,16 +57,16 @@ class BasicBackend(RepositoryBackend):
         return self.delegate.publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
 
 
-class IncompleteStagedBackend(BasicBackend, StagedReleaseRepositoryBackend):
+class IncompleteStagedBackend(BasicBackend, StagedSnapshotRepositoryBackend):
     pass
 
 
 class UndeclaredStagedBackend(BasicBackend):
-    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
-        self.delegate.commit_release(ref, expected_parent=expected_parent)
+    def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
+        self.delegate.commit_snapshot(ref, expected_parent=expected_parent)
 
 
-class StagedBackend(UndeclaredStagedBackend, StagedReleaseRepositoryBackend):
+class StagedBackend(UndeclaredStagedBackend, StagedSnapshotRepositoryBackend):
     pass
 
 
@@ -127,7 +127,7 @@ def test_commit_history_rejects_basic_backend_before_reading_or_changing_registr
     try:
         with monkeypatch.context() as patch:
             patch.setattr(backend, "metadata", unexpected_metadata)
-            with pytest.raises(ArtifactPublicationError, match="StagedReleaseRepositoryBackend"):
+            with pytest.raises(ArtifactPublicationError, match="StagedSnapshotRepositoryBackend"):
                 dispatcher.get_or_create_scenario("math")
         assert backend.metadata() == before
     finally:
@@ -151,7 +151,7 @@ def test_basic_backend_remains_usable_without_commit_log(tmp_path):
 
 
 def test_staged_backend_requires_a_commit_implementation(tmp_path):
-    with pytest.raises(TypeError, match="commit_release"):
+    with pytest.raises(TypeError, match="commit_snapshot"):
         IncompleteStagedBackend(InMemoryRepositoryBackend("math"))
 
 
