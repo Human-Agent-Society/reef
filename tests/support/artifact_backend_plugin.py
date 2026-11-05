@@ -15,7 +15,7 @@ from reef.artifact import (
 
 
 class MemoryArtifactBackend(CachedRepositoryBackendFactory, ConfigurableRepositoryBackendFactory):
-    """In-memory scenario backends whose releases live under the context's cache directory."""
+    """In-memory scenario backends whose snapshots live under the context's cache directory."""
 
     def __init__(self, context: RepositoryBackendContext, *, label: str) -> None:
         super().__init__()

@@ -50,7 +50,7 @@ USER_AGENT = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120 Safari/537.3
 # Each box is a title and two lines of description.
 SERVING = [
     ("Harness", "agent, prompts and tools", "receipt-linked feedback"),
-    ("Scenario", "freezes the release", "stores the interaction"),
+    ("Scenario", "freezes the snapshot", "stores the interaction"),
     ("Inference", "provider-native requests", "OpenAI, Anthropic compatible"),
 ]
 LEARNING = [
@@ -240,9 +240,9 @@ def render(theme: str, fonts) -> str:
         o.append(arrow(gx1 - 3, y, "right", p["line"]))
         o.append(label((gx0 + gx1) / 2, Y2 + BH + 24, labels[k], p["muted"]))
     ex, ew = ROW2[2]
-    o.append(label(ex + ew / 2, Y2 + BH + 48, "rejected: keep the current release", p["faint"], size=NOTE))
+    o.append(label(ex + ew / 2, Y2 + BH + 48, "rejected: keep the current snapshot", p["faint"], size=NOTE))
     lx, lw = ROW2[3]
-    o.append(label(lx + lw / 2, Y2 + BH + 48, "harness pulls the release", p["faint"], size=NOTE))
+    o.append(label(lx + lw / 2, Y2 + BH + 48, "harness pulls the snapshot", p["faint"], size=NOTE))
 
     # scenario -> records, and release -> scenario
     sx, sw = ROW1[1]

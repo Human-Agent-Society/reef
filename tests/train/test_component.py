@@ -1,4 +1,4 @@
-"""The training-job values: what a job, a saved checkpoint, a job status and a release format may hold."""
+"""The training-job values: what a job, a saved checkpoint, a job status and a artifact format may hold."""
 
 from __future__ import annotations
 
@@ -178,5 +178,5 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     StubTrainingComponent(artifact_format=ArtifactFormat("adapter", 8, ("all",))).check_artifact(
         DirectoryFiles(adapter)
     )
-    with pytest.raises(ValueError, match="takes no imported releases"):
+    with pytest.raises(ValueError, match="takes no imported snapshots"):
         StubTrainingComponent(artifact_format=None).check_artifact(DirectoryFiles(full))

@@ -53,7 +53,7 @@ odd length.
 THUDM/slime#2376 fixes the call site. This patch is a helper-side variant
 with the same result.
 
-The image also replaces the base's FlashInfer with 0.7.0. Earlier releases
+The image also replaces the base's FlashInfer with 0.7.0. Earlier snapshots
 can compute wrong attention in SGLang's default `flashinfer` backend (upstream
 FlashInfer issue #2896), so rollout log-probs drift from the trained policy.
 If you serve from another environment with FlashInfer older than 0.7.0, set

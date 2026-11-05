@@ -324,7 +324,7 @@ class _Trial(ServeState):
 
     @property
     def client(self) -> ArtifactClient:
-        raise AssertionError("trying a patch reads no release")
+        raise AssertionError("trying a patch reads no snapshot")
 
     @property
     def artifact_id(self) -> str | None:

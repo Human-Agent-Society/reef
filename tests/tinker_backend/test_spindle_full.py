@@ -47,7 +47,7 @@ def settings(tmp_path: Path, **options: str) -> SpindleFullConfig:
 
 
 class Exporter(CheckpointExporter):
-    """Exports each checkpoint to the next commit of the release repo, and keeps what it exported."""
+    """Exports each checkpoint to the next commit of the snapshot repo, and keeps what it exported."""
 
     def __init__(self) -> None:
         self.exported: list[tuple[str, HuggingFaceRevision]] = []
@@ -192,11 +192,11 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
     release = Path(status.checkpoints[0].artifact_path)
     saved = TinkerCheckpoint.read(release)
     assert saved.lora_rank is None and saved.service == SPINDLE
-    # The release refers to the checkpoint's weights, which the exporter put in the release repo.
+    # The snapshot refers to the checkpoint's weights, which the exporter put in the snapshot repo.
     assert exporter.exported == [(saved.state_path, HuggingFaceRevision(MODEL, COMMIT))]
     assert read_reference(release) == HuggingFaceRevision(RELEASES, f"{1:040x}")
 
-    # A job from a saved release restores its checkpoint, whatever its reference names.
+    # A job from a saved snapshot restores its checkpoint, whatever its reference names.
     train(component, start=str(release))
     assert client.starts[-1] == saved
 
@@ -221,7 +221,7 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     full.write(tmp_path / "full")
     with pytest.raises(ValueError, match=f"holds {REFERENCE_FILE} beside its manifest"):
         component.check_artifact(DirectoryFiles(tmp_path / "full"))
-    # A release's reference must resolve to full weights.
+    # A snapshot's reference must resolve to full weights.
     (tmp_path / "full" / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision(MODEL, COMMIT).to_dict()))
     component.check_artifact(DirectoryFiles(tmp_path / "full"))
     assert client.checked[-1] == full

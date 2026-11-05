@@ -72,7 +72,7 @@ def test_the_anthropic_dialect_presents_the_token_in_its_own_header() -> None:
 
 
 def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
-    """The token a recipe's evaluation calls carry runs candidate code: it samples the served release through the
+    """The token a recipe's evaluation calls carry runs candidate code: it samples the served artifact through the
     evaluation routes, in either header, and every other route refuses it."""
 
     async def run() -> None:

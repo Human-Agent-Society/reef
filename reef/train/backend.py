@@ -1,4 +1,4 @@
-"""The values of one harness step: a prepared step, and the committed releases that a step reads its head from."""
+"""The values of one harness step: a prepared step, and the committed snapshots that a step reads its head from."""
 
 from __future__ import annotations
 
@@ -81,10 +81,10 @@ class CommittedArtifacts(ABC):
     Purpose: a harness trainer reads the committed head here, as the artifact of
     its next job's start, and the scenario layer implements it over its commit
     history and artifact repository. A component's head is its training
-    start: the release of the later of its newest ``train_from`` record and
+    start: the snapshot of the later of its newest ``train_from`` record and
     its newest training commit that made an artifact, active or not. An
     ``activate`` record moves what serves, not the head. Before any such
-    record, the head is the scenario's root release.
+    record, the head is the scenario's root snapshot.
     """
 
     @abstractmethod
