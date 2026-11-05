@@ -215,7 +215,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
             )
@@ -228,7 +228,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             }
 
             stream = await runtime.inference_handler.inference_stream(
-                Artifact(SnapshotRef("version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
             )
@@ -270,7 +270,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("rev", None), None),
+                Artifact(SnapshotRef("rev", None), None, artifact_id="rev"),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},
             )
