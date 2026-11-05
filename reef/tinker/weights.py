@@ -23,8 +23,8 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
-from reef.core.weight_layout import ReleaseWeights, WeightFiles, WeightLayout
-from reef.tinker.checkpoint import TinkerRelease
+from reef.core.weight_layout import ArtifactWeights, WeightFiles, WeightLayout
+from reef.tinker.checkpoint import TinkerArtifact
 from reef.tinker.service import close_service, tinker_sdk
 
 
@@ -44,7 +44,7 @@ class TinkerSamplerWeightsSettings(PluginSettings):
     timeout_s: float = config_option(600.0, help="Seconds to wait for the service's download URL.")
 
 
-class TinkerSamplerWeights(ReleaseWeights):
+class TinkerSamplerWeights(ArtifactWeights):
     """The adapter at a Tinker release's ``sampler_path``, downloaded from ``base_url`` and converted to PEFT.
 
     Values: ``cache_dir`` holds ``<sha256 of the sampler path>/adapter/`` for each adapter downloaded so far;
@@ -91,7 +91,7 @@ class TinkerSamplerWeights(ReleaseWeights):
         if layout != "adapter":
             raise ReefError(f"a Tinker release serves as an adapter, not as {layout} weights")
         try:
-            manifest = TinkerRelease.read(release)
+            manifest = TinkerArtifact.read(release)
         except (OSError, TypeError, ValueError) as exc:
             raise ReefError(f"the release in {release} holds no Tinker checkpoint manifest: {exc}") from exc
         if manifest.service != self.base_url:
