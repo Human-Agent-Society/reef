@@ -1,4 +1,4 @@
-"""A client evaluates an artifact of a release: Reef runs the rollouts and stores their policy evaluation."""
+"""A client evaluates an artifact of a snapshot: Reef runs the rollouts and stores their policy evaluation."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ TOKEN = "artifact-evaluation-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
-class ReleaseHandler(InferenceHandler):
+class ArtifactHandler(InferenceHandler):
     """Answers every chat call, and records the artifact that it was asked to answer from."""
 
     def __init__(self) -> None:
@@ -59,16 +59,16 @@ class ReleaseHandler(InferenceHandler):
         return {"choices": [{"message": {"role": "assistant", "content": "ls"}, "finish_reason": "stop"}]}
 
 
-class ReleaseRuntime(InferenceRuntime):
-    """A runtime that answers each call from the release that the call names, as a sampler for each checkpoint.
+class ArtifactRuntime(InferenceRuntime):
+    """A runtime that answers each call from the snapshot that the call names, as a sampler for each checkpoint.
 
     Its engine serves every scenario under one model name, so control writes the ``served_models`` rows that the
     inference routes answer from."""
 
-    def __init__(self, *, serves_any_release: bool = True) -> None:
+    def __init__(self, *, serves_any_artifact: bool = True) -> None:
         super().__init__(base_url="http://runtime.invalid")
-        self.handler = ReleaseHandler()
-        self.serves_any_release = serves_any_release
+        self.handler = ArtifactHandler()
+        self.serves_any_artifact = serves_any_artifact
 
     @property
     def inference_handler(self) -> InferenceHandler:
@@ -83,7 +83,7 @@ class ReleaseRuntime(InferenceRuntime):
 
     @property
     def serves_artifacts_on_request(self) -> bool:
-        return self.serves_any_release
+        return self.serves_any_artifact
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}")
@@ -116,7 +116,7 @@ class WeightRecipe(Recipe):
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -206,7 +206,7 @@ async def created(client: TestClient, tmp_path: Path, *names: str) -> str:
 
 @pytest.mark.integration
 def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_release_it_names(tmp_path: Path) -> None:
-    runtime = ReleaseRuntime()
+    runtime = ArtifactRuntime()
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
     lab = ModelCallingLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"}))
 
@@ -260,7 +260,7 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
 
 @pytest.mark.integration
 def test_a_request_that_the_scenario_cannot_run_is_refused_before_any_rollout(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
 
     async def run() -> None:
         app = create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher))
@@ -305,7 +305,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
                 refused = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
                 assert refused.status == 400 and "harness artifact yet" in await refused.text()
 
-    current = ReleaseRuntime(serves_any_release=False)
+    current = ArtifactRuntime(serves_any_artifact=False)
     asyncio.run(
         run(
             dispatcher_for(tmp_path / "current", WeightRecipe(runtime=current)),
@@ -314,7 +314,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
             harness=False,
         )
     )
-    composed = WeightRecipe(runtime=ReleaseRuntime(), harness=True)
+    composed = WeightRecipe(runtime=ArtifactRuntime(), harness=True)
     asyncio.run(
         run(
             dispatcher_for(tmp_path / "harness", composed),
@@ -327,7 +327,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
 
 @pytest.mark.integration
 def test_a_started_evaluation_service_fails_the_evaluations_whose_rollouts_the_queue_lost(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
 
     async def run() -> None:
         evaluations = ArtifactEvaluations(dispatcher)
@@ -358,7 +358,7 @@ def test_a_started_evaluation_service_fails_the_evaluations_whose_rollouts_the_q
 
 @pytest.mark.integration
 def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_the_queue(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
     new_artifacts = NewArtifacts()
 
     async def run() -> None:
@@ -420,7 +420,7 @@ async def settings_of(client: TestClient) -> dict[str, Any]:
 def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_after_a_restart(
     tmp_path: Path,
 ) -> None:
-    recipe = WeightRecipe(runtime=ReleaseRuntime(), activation=activation_reference({"module": "never"}))
+    recipe = WeightRecipe(runtime=ArtifactRuntime(), activation=activation_reference({"module": "never"}))
     (tmp_path / "initial").mkdir()
     # The in-memory repository keeps its registrations in its factory: a restart reuses it.
     factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
@@ -473,7 +473,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
 def test_the_evaluated_activation_needs_artifact_evaluation_in_either_order_and_a_plugin_rule_is_refused(
     tmp_path: Path,
 ) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
     evaluated = {"module": "evaluated", "config": {"min_mean_score": 0.5}}
     evaluation = {"harness": {"name": "terminus-2"}}
 
@@ -519,7 +519,7 @@ def test_a_scenario_under_a_deployment_evaluated_rule_without_artifact_evaluatio
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     evaluated = activation_reference({"module": "evaluated", "config": {"min_mean_score": 0.5}})
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime(), activation=evaluated))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime(), activation=evaluated))
     with caplog.at_level("WARNING", logger="reef.scenario.registry"):
         dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
     assert "activates no new artifact" in caplog.text
@@ -550,7 +550,7 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
         session.commit_step(expected_step=1, commit=kept)
         assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None, "a1")
         assert new_artifacts.queue.empty(), "a step that publishes nothing reports no artifact"
-        # An activation, even one that publishes a composed release, and a new training start make no artifact.
+        # An activation, even one that publishes a composed snapshot, and a new training start make no artifact.
         operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
         activation = CommitRecord(
             step=3,

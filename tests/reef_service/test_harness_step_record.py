@@ -21,7 +21,7 @@ from tests.support.harness_steps import (
     MODEL,
     PI_SEED,
     UNCHANGED,
-    TreeReleases,
+    TreeArtifacts,
     build_harness_backend,
     changed_rules,
     harness_backend,
@@ -106,7 +106,7 @@ def native_backend(
     binary: str | None = None,
     workers: int = 1,
     **fields,
-) -> tuple[HarnessBackend, TreeReleases]:
+) -> tuple[HarnessBackend, TreeArtifacts]:
     """The native backend over the fake native binary, and its in-memory history whose base is the native seed."""
     recipe = harness_recipe(
         tmp_path,
@@ -118,7 +118,7 @@ def native_backend(
         **fields,
     )
     recipe = replace(recipe, worker_executor=ExecutorSettings(workers=workers))
-    releases = TreeReleases(recipe.seed)
+    releases = TreeArtifacts(recipe.seed)
     return build_harness_backend(recipe, "demo", releases), releases
 
 

@@ -106,7 +106,7 @@ def save_untrained_lora_adapter(args: Any, output_dir: Path) -> None:
     A LoRA adapter adds ``B @ A`` to each target module, so zero weights leave
     the model at its startup weights. The adapter has the names, shapes and
     files of an adapter that training exports (``save_lora_adapter_to_path``),
-    so serving loads it as any release. The names and shapes come from the
+    so serving loads it as any snapshot. The names and shapes come from the
     Hugging Face model at ``args.hf_checkpoint``, built on the meta device, so
     no weight is read. Its metadata records no rollout. Raise ``ValueError``
     when the model has no linear module that the adapter targets.

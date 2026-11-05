@@ -74,7 +74,7 @@ def decode_snapshot_ref(value: Mapping[str, object]) -> SnapshotRef:
 
 @dataclass(frozen=True)
 class RootSource:
-    """Where the content of a scenario's root release came from.
+    """Where the content of a scenario's root snapshot came from.
 
     Values: ``kind`` is ``"default"`` or ``"item"``.
 
@@ -85,7 +85,7 @@ class RootSource:
       the source names none), as an import records them. ``inputs`` is empty.
 
     Purpose: ``ScenarioFactory`` makes the value when it creates a scenario, and the scenario metadata stores it as
-    ``to_dict``. A trainer gives it to ``TrainingComponent.root_start``, and the release list shows it on the
+    ``to_dict``. A trainer gives it to ``TrainingComponent.root_start``, and the snapshot list shows it on the
     creation row.
     """
 

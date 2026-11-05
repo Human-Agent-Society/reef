@@ -1,4 +1,4 @@
-"""The harness backend: one evolution step, from the head tree to a release.
+"""The harness backend: one evolution step, from the head tree to a snapshot.
 
 One step runs in three phases, one training job of the harness training
 component (``reef.train.harness_backend.component``):
@@ -31,7 +31,7 @@ component (``reef.train.harness_backend.component``):
     decides whether it serves, from the tree kinds it changes.
 
 Nothing is restored on a rejection or an abort: the candidate is a new value,
-and the head stays the committed release.
+and the head stays the committed snapshot.
 """
 
 from __future__ import annotations

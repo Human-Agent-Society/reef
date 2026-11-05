@@ -66,7 +66,7 @@ def test_bundle_scores_best_revisions_and_tokens(tmp_path):
     first, second = bundle["attempts"]
     assert first["inference_calls"] == 2 and first["prompt_tokens"] == 110
     assert second["artifact_ids"] == ["rel-1"]
-    # the revision check the issue asks for: later attempt on a newer release
+    # the revision check the issue asks for: later attempt on a newer snapshot
     assert [(a["commit_hash"], a["artifact_ids"]) for a in bundle["attempts"]] == [
         ("c1", ["rel-0"]),
         ("c2", ["rel-1"]),

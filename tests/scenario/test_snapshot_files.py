@@ -1,7 +1,7 @@
-"""A scenario's committed releases as files: the head a harness backend builds on, and a release by id.
+"""A scenario's committed snapshots as files: the head a harness backend builds on, and a snapshot by id.
 
 The scenarios are real: a dispatcher over a pi harness recipe whose base
-release is the seed, steps committed through the scenario, and activations and
+snapshot is the seed, steps committed through the scenario, and activations and
 training starts through the dispatcher.
 """
 
@@ -18,8 +18,8 @@ from reef.core.plugins import PluginReference
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
-from reef.scenario.release_files import ScenarioArtifactFiles
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.backend import ArtifactTextFiles
@@ -43,7 +43,7 @@ def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) 
     return dispatcher, scenario
 
 
-def release_files(scenario: Scenario) -> ScenarioArtifactFiles:
+def snapshot_files(scenario: Scenario) -> ScenarioArtifactFiles:
     return ScenarioArtifactFiles(
         name=scenario.name, store=scenario.store, repository=scenario.repository, components=scenario.components
     )
@@ -52,12 +52,12 @@ def release_files(scenario: Scenario) -> ScenarioArtifactFiles:
 def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_it(tmp_path: Path) -> None:
     answers = iter((MARKER, None))
     dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: next(answers))
-    releases = release_files(scenario)
+    releases = snapshot_files(scenario)
     created = scenario.artifact_status()[COMPONENT]["active"]
     try:
-        # The release the scenario was created on is its root release.
+        # The snapshot the scenario was created on is its root snapshot.
         assert scenario.repository.resolve(scenario.repository.start_artifact).artifact_id == created
-        # Before a publish the head is the release the scenario was created on, the one the catalog lists.
+        # Before a publish the head is the snapshot the scenario was created on, the one the catalog lists.
         assert releases.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
         assert releases.artifact(created, COMPONENT).files == PI_SEED.files
         run_step(scenario, "1")
@@ -66,7 +66,7 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
         assert releases.head(COMPONENT) == ArtifactTextFiles(published, dict(MARKED.files))
         assert run_step(scenario, "2").metrics["skipped"] == "the method left the head tree unchanged"
         assert releases.head(COMPONENT).artifact_id == published
-        # Every committed release reads by id, the root included; an id the scenario never committed is not found.
+        # Every committed snapshot reads by id, the root included; an id the scenario never committed is not found.
         assert releases.artifact(created, COMPONENT).files == PI_SEED.files
         assert releases.artifact(published, COMPONENT).files == MARKED.files
         with pytest.raises(ArtifactNotFound, match="has no artifact 'nope'"):
@@ -85,9 +85,9 @@ def test_an_inactive_release_is_the_head_the_next_step_builds_on(tmp_path: Path)
     created = scenario.artifact_status()[COMPONENT]["active"]
     try:
         run_step(scenario, "1")
-        # The activation rule kept the release inactive, but it is the head: steps build on what training made.
+        # The activation rule kept the snapshot inactive, but it is the head: steps build on what training made.
         assert scenario.artifact_status()[COMPONENT]["active"] == created
-        inactive = release_files(scenario).head(COMPONENT)
+        inactive = snapshot_files(scenario).head(COMPONENT)
         assert inactive.artifact_id != created and inactive.files == MARKED.files
         # Step 2 starts from the inactive tree, where the same patch changes nothing.
         assert run_step(scenario, "2").metrics["skipped"] == "the method left the head tree unchanged"
@@ -100,7 +100,7 @@ def test_a_training_start_moves_the_head_and_an_activation_does_not(tmp_path: Pa
     dispatcher, scenario = harness_scenario(
         tmp_path, lambda workspace, services: MARKER, activation=PluginReference(NeverActivate, {})
     )
-    releases = release_files(scenario)
+    releases = snapshot_files(scenario)
     created = scenario.artifact_status()[COMPONENT]["active"]
     seed_artifact_id = scenario.artifact_status()[COMPONENT]["training_start"]
     try:
@@ -118,7 +118,7 @@ def test_a_training_start_moves_the_head_and_an_activation_does_not(tmp_path: Pa
 
 def test_a_sync_moves_the_head_to_the_persons_tree(tmp_path: Path) -> None:
     dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: MARKER)
-    releases = release_files(scenario)
+    releases = snapshot_files(scenario)
     person = PI_SEED.apply(TreePatch(changed_rules("person rules\n")))
     person.write(tmp_path / "person")
     try:
@@ -142,7 +142,7 @@ def test_a_sync_moves_the_head_to_the_persons_tree(tmp_path: Path) -> None:
 
 def test_without_a_durable_history_the_head_is_the_served_release(tmp_path: Path) -> None:
     dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: MARKER, durable=False)
-    releases = release_files(scenario)
+    releases = snapshot_files(scenario)
     try:
         assert not scenario.store.durable
         run_step(scenario, "1")

@@ -28,9 +28,9 @@ class RefusingHandler(InferenceHandler):
 
 
 class Runtime(InferenceRuntime):
-    def __init__(self, *, serves_any_release: bool) -> None:
+    def __init__(self, *, serves_any_artifact: bool) -> None:
         super().__init__(base_url="http://runtime.invalid")
-        self.serves_any_release = serves_any_release
+        self.serves_any_artifact = serves_any_artifact
         self.handler = RefusingHandler()
 
     @property
@@ -39,7 +39,7 @@ class Runtime(InferenceRuntime):
 
     @property
     def serves_artifacts_on_request(self) -> bool:
-        return self.serves_any_release
+        return self.serves_any_artifact
 
     def artifact_model(self, artifact):
         return PolicyModel("base", artifact.ref.revision)
@@ -65,7 +65,7 @@ def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_
     release = Artifact(
         SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
     )
-    runtime = Runtime(serves_any_release=True)
+    runtime = Runtime(serves_any_artifact=True)
     with ArtifactEndpoint(runtime, release) as endpoint:
         # The agent names the base model; the call still samples the endpoint's artifact, under its served name.
         chat = {"model": "base", "messages": [{"role": "user", "content": "ok"}]}
@@ -82,4 +82,4 @@ def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_
         runtime.close_admission()
         assert call(endpoint.url, "/v1/chat/completions", chat)[0] == 503
     with pytest.raises(ValueError, match="serves only its current artifact"):
-        ArtifactEndpoint(Runtime(serves_any_release=False), release)
+        ArtifactEndpoint(Runtime(serves_any_artifact=False), release)
