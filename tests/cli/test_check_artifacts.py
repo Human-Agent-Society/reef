@@ -9,7 +9,7 @@ from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.cli import main
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.snapshot import RootSource
-from reef.service.check_artifacts import check_scenario
+from reef.service.check_artifacts import check_scenario, repeated_artifacts
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     UNLOCATED_SNAPSHOT,
@@ -85,6 +85,16 @@ def test_a_release_without_stored_files_is_a_problem(published, monkeypatch: pyt
     monkeypatch.setattr(backend, "materialize", materialize)
     problems = check_scenario("math", backend, store)
     assert any(head.revision in problem and "no stored files" in problem for problem in problems)
+
+
+def test_artifacts_with_the_same_files_count_as_extra_model_loads(published, tmp_path: Path) -> None:
+    backend, _, trained_id = published
+    same = stored_tree(tmp_path / "same", "trained")
+    other = stored_tree(tmp_path / "other", "other")
+    head = backend.current()
+    same_ref = backend.publish(same, expected_parent=head)
+    backend.publish(other, expected_parent=same_ref)
+    assert repeated_artifacts(backend, [trained_id, same.artifact_id, other.artifact_id, "artifact:missing"]) == 1
 
 
 def test_the_command_exits_with_the_check_result(tmp_path: Path, fake_git_lfs: None, capsys) -> None:

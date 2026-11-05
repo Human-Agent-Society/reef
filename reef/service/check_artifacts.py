@@ -8,7 +8,8 @@ service start does.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+import json
+from collections.abc import Iterable, Mapping
 
 from reef.artifact.artifact import ArtifactError, ArtifactNotFound, SnapshotRef, artifact_components
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackend
@@ -59,6 +60,25 @@ def check_scenario(name: str, backend: RepositoryBackend, store: ScenarioStore) 
     return problems
 
 
+def repeated_artifacts(backend: RepositoryBackend, artifact_ids: Iterable[str]) -> int:
+    """How many of ``artifact_ids`` hold the same files and metadata as an earlier one.
+
+    Reef reuses a loaded artifact only by its ID, so each of these artifacts can cost one more load when it serves.
+    The result is the most extra loads: an artifact that never serves costs none. An ID without a binding is left out.
+    """
+    contents: set[str] = set()
+    repeated = 0
+    for artifact_id in artifact_ids:
+        try:
+            ref = backend.artifact_snapshot(artifact_id)
+        except ArtifactNotFound:
+            continue
+        content = json.dumps(backend.artifact_content(ref, artifact_id), sort_keys=True, default=str)
+        repeated += content in contents
+        contents.add(content)
+    return repeated
+
+
 def check_deployment(settings: ServiceConfig) -> list[str]:
     """The problems of each scenario that the deployment's artifact backend lists."""
     backend_factory = build_artifact_backend(settings)
@@ -70,7 +90,17 @@ def check_deployment(settings: ServiceConfig) -> list[str]:
         for name in backend_factory.list_registrations():
             store = storage.open(name)
             try:
-                problems.extend(check_scenario(name, backend_factory(name), store))
+                backend = backend_factory(name)
+                found = check_scenario(name, backend, store)
+                problems.extend(found)
+                if not found:
+                    artifact_ids = {
+                        artifact_id
+                        for record in store.history()
+                        for artifact_id in (record.artifact_ids or {}).values()
+                    }
+                    repeated = repeated_artifacts(backend, sorted(artifact_ids))
+                    print(f"{name}: {len(artifact_ids)} artifacts, {repeated} can cost one more model load each")
             finally:
                 store.close()
     finally:

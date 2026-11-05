@@ -933,7 +933,9 @@ answers.
    history and fetches each stored release that the history names, so it can
    need as much disk space as all the releases. It prints each problem, and it
    exits with status 1 when it finds one. Fix each problem before you continue.
-   You can run it again at any time.
+   You can run it again at any time. For each scenario, it also prints how many
+   artifacts hold the same files as another. Reef reuses a loaded artifact only by
+   its ID, so each of them can cost one more model load when it serves.
 #. Start Reef. It binds the artifact IDs of older records when it opens each
    scenario. This step can run again after a stop.
 
