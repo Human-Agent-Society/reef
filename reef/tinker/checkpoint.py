@@ -1,6 +1,6 @@
-"""The manifest of a Tinker release, as the serving side reads it.
+"""The manifest of a Tinker artifact, as the serving side reads it.
 
-A Tinker release holds only the manifest ``MANIFEST``. The training component
+A Tinker artifact holds only the manifest ``MANIFEST``. The training component
 writes the whole manifest (``reef.train.tinker_backend.checkpoint``), and the
 serving side reads only the sampler that it names (``TinkerArtifact``).
 """
@@ -18,15 +18,15 @@ MANIFEST = "tinker-checkpoint.json"
 
 @dataclass(frozen=True)
 class TinkerArtifact:
-    """The sampler weights that a Tinker release serves, on the service that holds them.
+    """The sampler weights that a Tinker artifact serves, on the service that holds them.
 
     Values: ``base_model`` is non-empty. ``sampler_path`` is a ``tinker://`` path to the weights that the service's
     sampler serves; for a LoRA, it is the adapter that a serving runtime downloads to load into its own engines.
     ``service`` is the base URL of the Tinker-compatible service that holds the path (``TinkerConfig.base_url``), or
     ``None`` for Thinking Machines' hosted Tinker.
 
-    Purpose: ``from_dict`` makes the value from a release's manifest, and ``read`` from the manifest in a directory. The Tinker inference runtime and
-    ``TinkerSamplerWeights`` read it, and ``check_compatible`` refuses a release of another model or service.
+    Purpose: ``from_dict`` makes the value from a snapshot's manifest, and ``read`` from the manifest in a directory. The Tinker inference runtime and
+    ``TinkerSamplerWeights`` read it, and ``check_compatible`` refuses a snapshot of another model or service.
     """
 
     base_model: str

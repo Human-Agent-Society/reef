@@ -1,7 +1,7 @@
 """The HTTP service's inference runtimes for engines that run on an inference component.
 
 Requests go to the component, which forwards them to its engines. The
-control plane controls the component itself and serves published releases
+control plane controls the component itself and serves published snapshots
 (kind ``remote_serving``): each scenario's adapter
 (``reef.inference.serving.AdapterServingRuntime``) or one scenario's full
 weights (``reef.inference.serving.FullWeightServingRuntime``), as the training
@@ -77,7 +77,7 @@ def serving_engine_config(
     if engine == "vllm":
         # The serving assembly already refused more than one vLLM engine (``prepare_engine_serving``).
         if artifact_format.layout != "full":
-            raise ValueError("inference.backend: vllm serves full weights only, not PEFT adapter releases")
+            raise ValueError("inference.backend: vllm serves full weights only, not PEFT adapter artifacts")
         values.setdefault("trust_remote_code", True)
         return {**placement, "options": values, "env_vars": {}}
     # Router options keep their native names after the router- prefix; the first router binds router-port.
@@ -121,7 +121,7 @@ class RemoteServingRuntimeConfig:
     ``options`` holds the engine's native options and
     ``inference_handler_config`` the request handler's own options.
     ``executor`` and ``executor_options`` select the engines' executor (the
-    ``rollout`` role). ``weights`` is ``None``, which reads each release's own
+    ``rollout`` role). ``weights`` is ``None``, which reads each snapshot's own
     files (``ArtifactWeightFiles``), or a ``ArtifactWeights`` plugin reference.
     Purpose: the serving assembly writes the value from the deployment's
     ``inference`` settings and the training backend's engine weights;
@@ -147,7 +147,7 @@ class RemoteServingRuntimeConfig:
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
     weights: str | Mapping[str, Any] | None = config_option(
-        None, help="A ArtifactWeights plugin that gives each release's weight files; unset reads the release's own."
+        None, help="A ArtifactWeights plugin that gives each snapshot's weight files; unset reads the snapshot's own."
     )
 
     def __post_init__(self) -> None:
@@ -207,7 +207,7 @@ class ComponentEngines(ServingEngines):
 
 
 class RemoteServingRuntimeFactory(RuntimeFactory):
-    """Start the component's engines and serve published releases on them, in the layout of their release format.
+    """Start the component's engines and serve published snapshots on them, in the layout of their snapshot format.
 
     The engine's own request handler speaks to the component, with the
     inference token as a bearer header; a ``module:factory`` engine needs an

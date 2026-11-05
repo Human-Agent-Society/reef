@@ -103,13 +103,13 @@ training backend runs a training component inside the HTTP service. Reef
 submits each job's ready data to that component as a bounded job, and the
 component saves checkpoints. Reef evaluates each saved checkpoint and
 publishes the selected ones as releases. The serving engines load only
-published releases, from files. With the default Slime backend and an engine
+published snapshots, from files. With the default Slime backend and an engine
 (``inference.backend: sglang`` or ``vllm``), ``reef serve`` starts these
 services:
 
 - ``inference``: a local inference component (``python -m
   reef.inference.remote``) on a free loopback port. It starts the serving
-  engines and loads each published release into them. An ``inference.remote``
+  engines and loads each published snapshot into them. An ``inference.remote``
   section replaces it with a component on another host.
 - ``distill-teacher``: a frozen SGLang teacher engine, only when a ``teacher``
   section is set.
@@ -134,9 +134,9 @@ The same path supports CLI-only training with
 trains LoRA adapters remotely without local GPUs. Tinker's sampler serves
 them by default. Reef's SGLang engines serve them instead when the
 ``inference`` section configures engines: the control plane downloads each
-release's adapter from its sampler path; see `Train with Tinker <../user-guide/tinker.rst>`__.
+snapshot's adapter from its sampler path; see `Train with Tinker <../user-guide/tinker.rst>`__.
 The ``spindle_full`` backend trains all the parameters of one Hugging Face
-revision on a Spindle deployment, and exports each release's weights to a
+revision on a Spindle deployment, and exports each snapshot's weights to a
 Hugging Face repo; see `Train all the parameters on Spindle
 <../user-guide/tinker.rst#train-all-the-parameters-on-spindle>`__.
 ``training.backend`` also accepts an installed ``reef.training_backends``
@@ -176,30 +176,30 @@ Serving of a weight-training deployment
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The ``inference`` section alone decides how a weight-training deployment
-serves its releases. The training backend builds only its training
-component, and that component declares the format of its releases: full
+serves its snapshots. The training backend builds only its training
+component, and that component declares the format of its snapshots: full
 weights, or a PEFT adapter with its rank and target modules.
 
 .. container:: config
 
    ``inference.serving`` : ``engines`` when an engine setting is set, else the training backend's default
-       ``engines``: Reef's engines on an inference component load each release (Slime's default); ``trainer``: the training backend serves its own releases (Tinker's sampler, Tinker's default); ``none``: nothing serves; ``module:Factory``: a serving ``RuntimeFactory``
+       ``engines``: Reef's engines on an inference component load each snapshot (Slime's default); ``trainer``: the training backend serves its own snapshots (Tinker's sampler, Tinker's default); ``none``: nothing serves; ``module:Factory``: a serving ``RuntimeFactory``
 
    ``inference.serving-config`` : {}
-       the settings of a ``module:Factory`` serving runtime; it also receives the release format as ``artifact_format``, ``null`` when the releases hold no weight files
+       the settings of a ``module:Factory`` serving runtime; it also receives the artifact format as ``artifact_format``, ``null`` when the snapshots hold no weight files
 
    ``inference.max-loaded-adapters`` : 1
-       adapters the engines keep resident when the releases are PEFT adapters. Each scenario keeps its served adapter resident, so set at least the number of training scenarios; one more lets a scenario's new adapter load beside its served one
+       adapters the engines keep resident when the snapshots are PEFT adapters. Each scenario keeps its served adapter resident, so set at least the number of training scenarios; one more lets a scenario's new adapter load beside its served one
 
    ``inference.prefix-sharing`` : false
-       share prefix-cache entries between requests. Each release load then retracts the requests in flight, which prefill again on the new weights. SGLang keeps the cache only where that is safe
+       share prefix-cache entries between requests. Each snapshot load then retracts the requests in flight, which prefill again on the new weights. SGLang keeps the cache only where that is safe
 
 The engine settings are ``inference.backend``, ``inference.num-gpus``,
 ``inference.tensor-parallel-size``, ``inference.options``,
 ``inference.remote``, ``inference.handler-factory``,
 ``inference.handler-config``, ``inference.max-loaded-adapters`` and
 ``inference.prefix-sharing``. Another serving mode refuses them. The engines
-start with the release format: an adapter format enables SGLang's adapter
+start with the artifact format: an adapter format enables SGLang's adapter
 table with the adapter's rank and target modules. Releases without weight
 files, such as Tinker's, are served by engines only when the training backend
 names how to fetch their weights (``TrainingDeployment.engine_weights``);
@@ -209,7 +209,7 @@ starts.
 The control plane checks the inference component every 30 seconds. When the
 component has restarted, or an engine has failed, the control plane pauses
 generation, starts the lost engines again, loads each scenario's served
-release into them, and resumes.
+artifact into them, and resumes.
 
 Engine-serving inference uses the same ``inference`` fields as standalone
 serving. ``inference.num-gpus`` is the total inference GPU budget;
@@ -240,7 +240,7 @@ CLI overrides use the same parser, for example
 ``--inference.num-gpus 4 --inference.tensor-parallel-size 2`` or
 ``--inference.options.mem-fraction-static 0.7``. Native engine options use
 SGLang's names without a ``sglang-`` prefix. Reef builds the engines' input
-from the ``inference`` section and the release format; Slime starts no serving
+from the ``inference`` section and the artifact format; Slime starts no serving
 engine. ``router-port`` binds the first router's HTTP
 port, and other supported router flags keep their native ``router-*`` names.
 ``router-ip`` is refused, because the serving engines use no external
@@ -287,7 +287,7 @@ step: Slime cuts each job's data into optimizer batches of that size.
 
 The SGLang integration lives in ``reef.inference.sglang``. Its native engine
 launch and control do not depend on Slime. The serving runtime turns the
-``inference`` section and the release format into plain engine configuration
+``inference`` section and the artifact format into plain engine configuration
 data (``reef.inference.remote.runtime.serving_engine_config``), and the
 inference component starts the engines from that data. See
 `Independent SGLang backend
@@ -311,7 +311,7 @@ handled by the inference component (see `Engine supervision
 ``inference.backend: vllm`` selects the vLLM engine integration. The
 inference component launches one vLLM server per engine on its GPUs with
 ``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
-``--logprobs-mode processed_logprobs``. It loads each published release
+``--logprobs-mode processed_logprobs``. It loads each published snapshot
 through vLLM's control routes: ``/pause?mode=keep`` (a retracting pause adds
 ``/reset_prefix_cache?reset_running_requests=true``),
 ``/update_weight_version``, ``/collective_rpc reload_weights`` and the
@@ -333,15 +333,15 @@ cannot add truncation or a temperature the trainer never sees. It rejects
 ``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
 instead) and enables prefix caching only under a retracting pause.
 
-vLLM engines serve full-weight releases only. The HTTP service refuses
-adapter releases, such as Slime's with ``training.options.megatron-lora-rank``
+vLLM engines serve full-weight artifacts only. The HTTP service refuses
+adapter artifacts, such as Slime's with ``training.options.megatron-lora-rank``
 or Tinker's, when it starts. Reef starts no vLLM
 router, so one engine serves the stack: ``inference.num-gpus`` must equal
 ``inference.tensor-parallel-size``. Engine options come from
 ``inference.options`` in vLLM's own names.
 
 Reef's serving engines run on an inference component, local or remote.
-The HTTP service uploads each published release to the component as files:
+The HTTP service uploads each published snapshot to the component as files:
 
 - Full-weight training publishes the checkpoint's Hugging Face export. The
   component reloads it in place of the served weights. Each load moves the
@@ -351,7 +351,7 @@ The HTTP service uploads each published release to the component as files:
   beside the base model. Only ``inference.backend: sglang`` serves LoRA
   adapters.
 
-The HTTP service reads each release from the checkpoint directory. With
+The HTTP service reads each snapshot from the checkpoint directory. With
 multi-node training, put the checkpoint directory on storage that the HTTP
 service's host can read.
 
@@ -405,7 +405,7 @@ Training in this mode works as follows:
   between jobs.
 - Each job saves one checkpoint: the Megatron checkpoint and its HF export.
   This mode refuses an ``evaluation`` section, so Reef publishes every
-  checkpoint as a release. See `Set the checkpoint cadence
+  checkpoint as a snapshot. See `Set the checkpoint cadence
   <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 - A restart continues from the last saved checkpoint, as with an engine.
 
@@ -852,7 +852,7 @@ persistent.
        where releases are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
 
    ``storage.artifact-repository`` : .reef/artifacts.git
-       the Git LFS repository of the release chain; only for ``git_lfs``. A Hugging Face repository needs the factory's ``refs`` and ``token_env`` options (`Choose the artifact backend <../user-guide/operate.rst#choose-the-artifact-backend>`__)
+       the Git LFS repository of the snapshot chain; only for ``git_lfs``. A Hugging Face repository needs the factory's ``refs`` and ``token_env`` options (`Choose the artifact backend <../user-guide/operate.rst#choose-the-artifact-backend>`__)
 
    ``storage.artifact-work-dir`` : .reef/artifact-work
        materialization scratch
@@ -1091,11 +1091,11 @@ whose recipe component trains weights is deployed the way that recipe is.
 inference runtime serve every recipe component. A top-level ``pipeline`` or
 ``evaluation`` section goes to the recipe component that trains weights.
 
-A scenario's root release keeps one directory per recipe component. Reef
+A scenario's root snapshot keeps one directory per recipe component. Reef
 writes each recipe component's default start there: its seed, and the model
 snapshot under the directory of the recipe component that trains weights. A
 recipe component whose recipe seeds nothing starts empty. Each recipe component's trainer runs as its own
-worker and commits into the same release chain. Every step therefore
+worker and commits into the same snapshot chain. Every step therefore
 checkpoints, and the recipe components share one ``training_mode``. Reef
 admits a report when the contract of any recipe component accepts it. Each
 trainer keeps the reports its own contract parses:
@@ -1228,7 +1228,7 @@ that plays task directories (an npm ``install``) and
        ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), or an entry-point adapter, such as ``terminus`` from the Meta-Harness Terminal-Bench campaign
 
    ``evolution.seed``
-       the directory of the first tree: every regular file under it, at its relative path as its tree path; a new scenario's root release holds it, and an existing scenario keeps its own root and head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the empty tree, unless a recipe subclass sets its own (for example Reefine's starter skill)
+       the directory of the first tree: every regular file under it, at its relative path as its tree path; a new scenario's root snapshot holds it, and an existing scenario keeps its own root and head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the empty tree, unless a recipe subclass sets its own (for example Reefine's starter skill)
 
    ``evolution.binary``
        a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
@@ -1240,7 +1240,7 @@ that plays task directories (an npm ``install``) and
        optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
 
    ``evolution.state_dir`` : .reef/harness
-       the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the release component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, run and decision, which is the score cache; and ``steps/``, one step record per step (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried step lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
+       the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the snapshot component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, run and decision, which is the score cache; and ``steps/``, one step record per step (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried step lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
 
    ``evolution.max_steps`` : 0
        skip automatic evolve steps once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
@@ -1387,7 +1387,7 @@ names on a remote inference component instead of this host. The component's
 <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
 Any training backend can serve on a remote component. Without the section, a
 training stack's engines run on a component that ``reef serve`` starts on
-this host. The release format sets what the engines serve: one scenario's
+this host. The artifact format sets what the engines serve: one scenario's
 full weights, or one adapter per scenario. The section tells Reef how to reach
 the component:
 

@@ -26,7 +26,7 @@ class TrainingExperimentContext:
     run_step: int = 0
     backend: str | None = None
     backend_config: Mapping[str, Any] | None = None
-    #: The release component whose trainer made the step, when the scenario runs several trainers.
+    #: The snapshot component whose trainer made the step, when the scenario runs several trainers.
     component: str | None = None
 
     def __post_init__(self) -> None:

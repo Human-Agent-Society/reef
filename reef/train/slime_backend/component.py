@@ -23,8 +23,8 @@ LoRA, the PEFT adapter) of a checkpoint that passes evaluation.
 
 Training continues from Slime's latest checkpoint: every driver loads the
 latest Megatron checkpoint of one save root. A job therefore starts from the
-component's latest checkpoint. A new training start from another release
-(``train-from``) is refused, as Slime cannot load a published release back
+component's latest checkpoint. A new training start from another snapshot
+(``train-from``) is refused, as Slime cannot load a published snapshot back
 into its workers.
 
 Every job trains the loss family and learning-rate schedule its parameters
@@ -141,13 +141,13 @@ class WorkerTrainingSettings:
 
 
 class SlimeJobs(LocalJobComponent):
-    """The jobs of one Slime save root: their directories, the starts they continue from, and the releases.
+    """The jobs of one Slime save root: their directories, the starts they continue from, and the snapshots.
 
     ``args`` are Slime's parsed arguments of the deployment, ``lora`` whether
     the actor trains a LoRA adapter. Beside the checkpoint roots, ``reef-jobs/``
     holds the jobs (see ``LocalJobComponent``) and ``reef-starts/rollout_<id>/``
     the start of each saved rollout: its ``start.json`` and, with LoRA, the
-    published release in ``release/adapter/``; ``reef-starts/base/`` is the
+    published snapshot in ``release/adapter/``; ``reef-starts/base/`` is the
     start of the untrained weights. ``SlimeTrainingComponent`` (the component
     Reef calls) and ``SlimeJobRunner`` (the driver that trains a job) are the
     two subclasses, over the same directories. A subclass names the rollout
@@ -207,10 +207,10 @@ class SlimeJobs(LocalJobComponent):
         }
 
     def default_start(self) -> DefaultStart:
-        """The startup weights as a release: the model directory, or with LoRA an adapter whose weights are zero.
+        """The startup weights as a snapshot: the model directory, or with LoRA an adapter whose weights are zero.
 
-        Full-weight releases are Hugging Face checkpoints, so the default start
-        is ``hf_checkpoint`` itself. LoRA releases hold the adapter in
+        Full-weight artifacts are Hugging Face checkpoints, so the default start
+        is ``hf_checkpoint`` itself. LoRA artifacts hold the adapter in
         ``adapter/``, so the default start holds the untrained adapter there:
         every LoRA weight is zero, so it serves the startup weights unchanged.
         """
@@ -219,10 +219,10 @@ class SlimeJobs(LocalJobComponent):
             return DefaultStart(model_files=ModelDirectory(Path(inputs["model"])), inputs=inputs)
         from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
 
-        release = self.base_start_dir / "release"
-        if not (release / ADAPTER_DIR).is_dir():
-            save_untrained_lora_adapter(self.args, release / ADAPTER_DIR)
-        return DefaultStart(model_files=ModelDirectory(release), inputs=inputs)
+        artifact_dir = self.base_start_dir / "release"
+        if not (artifact_dir / ADAPTER_DIR).is_dir():
+            save_untrained_lora_adapter(self.args, artifact_dir / ADAPTER_DIR)
+        return DefaultStart(model_files=ModelDirectory(artifact_dir), inputs=inputs)
 
     @property
     def base_start(self) -> str:
@@ -236,7 +236,7 @@ class SlimeJobs(LocalJobComponent):
     def root_start(self, root: ScenarioRoot) -> str:
         """The startup weights, when ``root`` holds the default start of this configuration; else ``ValueError``.
 
-        Slime's workers load ``hf_checkpoint`` when they start and cannot load a release, so they train a scenario
+        Slime's workers load ``hf_checkpoint`` when they start and cannot load a snapshot, so they train a scenario
         only when its root came from the same configured inputs.
         """
         configured = self.default_start_inputs
@@ -252,9 +252,9 @@ class SlimeJobs(LocalJobComponent):
             )
         return self.base_start
 
-    def import_start(self, release: Path) -> str:
+    def import_start(self, artifact_dir: Path) -> str:
         raise ValueError(
-            "Slime continues training from its own latest checkpoint; it cannot load a published release "
+            "Slime continues training from its own latest checkpoint; it cannot load a published snapshot "
             "into its workers"
         )
 
@@ -738,9 +738,9 @@ class SlimeJobRunner(SlimeJobs):
         if hf.is_symlink() or not hf.is_dir():
             raise RuntimeError(f"checkpoint is missing or unsafe: {hf}")
         self.next_rollout_id = max(self.next_rollout_id, rollout.rollout_id + 1)
-        start_dir, release = write_rollout_start(self.starts_root, hf, rollout, schedule_state, lora=self.lora)
+        start_dir, artifact_dir = write_rollout_start(self.starts_root, hf, rollout, schedule_state, lora=self.lora)
         self.loaded_rollout_id = rollout.rollout_id
-        self.save_checkpoint(directory, SavedCheckpoint(rollout.step, str(start_dir), str(release), metrics))
+        self.save_checkpoint(directory, SavedCheckpoint(rollout.step, str(start_dir), str(artifact_dir), metrics))
 
     # -- Loss families and worker switches
 

@@ -74,7 +74,7 @@ BOXES = [
     (2, "A2", WIDE, "machine", 1, "Your agent", "`claude · pi · opencode · codex"),
     (4, "A2", COL_W, "store", None, "Model provider", "OpenAI or Anthropic API"),
     (0, "B1", COL_W, "reef", None, "Client install", "the head as a plugin"),
-    (1, "B1", COL_W, "reef", None, "Client sync", "merges onto the active release"),
+    (1, "B1", COL_W, "reef", None, "Client sync", "merges onto the active selection"),
     (2, "B1", COL_W, "reef", 3, "Feedback", "a score per session"),
     (3, "B1", COL_W, "reef", 2, "Model proxy", "forwards and records"),
     (0, "B2", WIDE, "store", None, "Releases", "every tree, in Git; the newest is the head"),
@@ -169,8 +169,8 @@ def render(theme: str, fonts) -> str:
             f"agent's own plugin, beside the person's own configuration, and starts the agent. The agent's model calls go through "
             f"Reef's model proxy, which records them, and a report scores a session. In a training step, the "
             f"workspace gets the head and a batch of raw traces, a method edits the copy, the check and the "
-            f"evaluation test the candidate, a selected candidate is a new release, and the activation rule serves it or holds it for a person. "
-            f"After a session, the client sends the changed files back, and Reef merges them onto the active release. "
+            f"evaluation test the candidate, a selected candidate is a new snapshot, and the activation rule serves it or holds it for a person. "
+            f"After a session, the client sends the changed files back, and Reef merges them onto the active selection. "
             f"An offline deployment gets its traces from uploaded Harbor tasks instead: the train tasks run on the "
             f'head as runs, and the eval tasks score the candidates.">'
         ),

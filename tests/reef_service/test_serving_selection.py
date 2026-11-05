@@ -1,4 +1,4 @@
-"""How a weight-training deployment serves its releases: the serving mode and the serving runtime's config."""
+"""How a weight-training deployment serves its snapshots: the serving mode and the serving runtime's config."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def test_any_engine_setting_selects_reefs_engines(setting):
             TinkerDeployment(),
             "remove inference.max-loaded-adapters",
         ),
-        (slime(inference_serving=TRAINER), SlimeDeployment(), "serves its own releases"),
+        (slime(inference_serving=TRAINER), SlimeDeployment(), "serves its own snapshots"),
         (slime(inference_serving="sampler"), SlimeDeployment(), "engines, trainer, none or module:Factory"),
         (slime(inference_backend="none", inference_serving=ENGINES), SlimeDeployment(), "serves nothing"),
         (tinker(inference_serving_config={"replicas": 2}), TinkerDeployment(), "module:Factory serving runtime only"),
@@ -108,7 +108,7 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
 def test_engines_load_tinker_releases_from_their_sampler_paths():
     resolved = tinker(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
     config = serving_runtime_config(resolved, TinkerDeployment(), None)
-    # A Tinker release holds only its manifest: the engines load the adapter that TinkerSamplerWeights downloads.
+    # A Tinker artifact holds only its manifest: the engines load the adapter that TinkerSamplerWeights downloads.
     assert config["artifact_format"] == ArtifactFormat("adapter", 32, ("all",)).to_dict()
     assert config["weights"] == {
         "module": "reef.tinker.weights:TinkerSamplerWeights",

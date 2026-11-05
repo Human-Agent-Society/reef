@@ -58,7 +58,7 @@ class StoreChangesWatcher(ServiceWorker):
     change; ``interval_seconds`` is the time between rounds. ``record_sequences`` holds the newest record sequence
     seen for each loaded scenario, ``queue_sequence`` the newest ``changed_sequence`` read from the samples queue,
     ``jobs_sequence`` the newest one read from the jobs queue, and ``request_sequence`` the newest one read from
-    the training request queue. ``serving_sequence`` tracks startup completions that release training's wait.
+    the training request queue. ``serving_sequence`` tracks startup completions that snapshot training's wait.
 
     Purpose: the dispatcher of a control instance runs it.
     """
