@@ -8,7 +8,7 @@ package. The same lazy path makes the reference available in the driver and in
 every worker. A family may instead register its
 :class:`SlimeAlgorithm` with :func:`register_loss_family` from a module imported
 at boot, or is named as a dotted ``"package.module:SPEC"`` reference wherever a
-loss family is named (a recipe's ``training_spec().loss_family``).
+loss family is named (a ``SlimeObjective.loss_family``).
 ``SPEC`` is the ``@register_loss_family``-decorated class (an instance is
 accepted too). Resolving a dotted reference imports the module and registers
 the spec under its canonical ``loss_family`` name, so the wire payload's plain
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import importlib
 
+# Importing the objectives registers the references of the built-in families.
+import reef.train.slime_backend.objectives  # noqa: F401
 from reef.train.algos.registry import _unregister_loss_family_ref, loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, _loss_families
 

@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
+from recipes.tttd.objective import tttd_signal
+from reef.train.algos.signals import TrainingSignal
 from reef.train.tinker_backend.losses import MatrixInput, TinkerLoss, TokenRow
+from reef.train.tinker_backend.objectives import TinkerObjective, register_tinker_objective
+from reef.train.types import JobData
+
+
+@register_tinker_objective
+class TttdTinkerObjective(TinkerObjective):
+    name = "tttd"
+    loss_family = "tttd"
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        return tttd_signal(data, state)
 
 
 class TttdTinkerLoss(TinkerLoss):

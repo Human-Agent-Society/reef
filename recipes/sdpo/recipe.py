@@ -9,8 +9,9 @@ from typing import Any
 from recipes.sdpo.processor import SDPOJobData, SDPOSamples
 from recipes.sdpo.report import SDPOReport
 from reef.core.reports import ReportBase
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -45,8 +46,8 @@ class SDPORecipe(WeightTrainingRecipe):
         return SDPOReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="sdpo")
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "sdpo"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
