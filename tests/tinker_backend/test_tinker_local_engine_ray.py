@@ -264,7 +264,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [service["name"] for service in config["services"]] == ["reef"]
     component, inference = connect_training_component(
-        service_config_from_mapping(config), model_path=MODEL, loss_family="tttd"
+        service_config_from_mapping(config), model_path=MODEL, default_parameters={}
     )
     dispatcher = None
     try:

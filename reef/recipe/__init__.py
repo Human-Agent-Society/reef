@@ -5,8 +5,7 @@ weights or the harness*. This package holds everything a method binds to:
 
 - ``base`` — ``Recipe`` (the default record-only recipe and base contract:
   ``build``, ``build_components``) and
-  ``WeightTrainingRecipe`` with its
-  ``WeightTrainingSpec`` (training objective and data processor).
+  ``WeightTrainingRecipe``, with its default job parameters.
 - ``harness`` — ``HarnessEvolutionRecipe``, the recipe contract every harness
   evolution method extends; it assembles ``reef.train.harness_backend``.
 - ``composite`` — ``CompositeRecipe`` binds one recipe per snapshot component
@@ -37,7 +36,7 @@ runtime as peers. Scenario coordination consumes recipes. Recipes depend on ``tr
 weight backends are loaded only when a weight-training recipe builds them.
 """
 
-from reef.recipe.base import Recipe, WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config import load_recipe_config
 from reef.recipe.config_fields import config_field
@@ -49,7 +48,6 @@ __all__ = [
     "Recipe",
     "RecipeConfigError",
     "WeightTrainingRecipe",
-    "WeightTrainingSpec",
     "build_named_recipe",
     "build_recipe",
     "config_field",

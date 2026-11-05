@@ -20,7 +20,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
-import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -36,18 +35,17 @@ from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import read_job_data
+from reef.storage.job_data import JobDataKind, read_job_data
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
-from reef.train.algos.registry import job_training
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import SavedCheckpoint, TrainingJob
+from reef.train.learning_rate import learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.method import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
+from reef.train.tinker_backend.parameters import TinkerJobParameters, rollout_settings, tinker_parameters_schema
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
 
@@ -55,52 +53,15 @@ from reef.train.tinker_backend.rollout import SamplerChat
 SAMPLER_WARM_TIMEOUT_S = 3600.0
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
-#: The parameters of a Tinker job besides ``method`` and ``scheduling``.
-JOB_PARAMETER_NAMES = frozenset({"batch_size", "kl_coef", "learning_rate", "save_interval", "rollout"})
-
-
-@dataclass(frozen=True)
-class TinkerJobParameters:
-    """The parameters of one Tinker job, with the component's defaults for those the job leaves out.
-
-    Values: ``method`` and ``scheduling`` as ``job_training`` reads them; ``batch_size`` a positive int, the
-    rollouts of one optimizer step; ``learning_rate`` finite and positive; ``kl_coef`` finite and non-negative;
-    ``save_interval`` a positive int, the optimizer steps between two saved checkpoints, or None for one
-    checkpoint when the job ends; ``rollout`` the rollouts of a task job, or None for a job of trajectories.
-    Purpose: ``TinkerTrainingComponent.job_parameters`` makes it when it checks and when it runs a job; the run
-    reads it.
-    """
-
-    method: TrainingMethod
-    scheduling: StepScheduling
-    batch_size: int
-    learning_rate: float
-    kl_coef: float
-    save_interval: int | None
-    rollout: RolloutSettings | None
-
-    def __post_init__(self) -> None:
-        counts = {
-            "batch_size": self.batch_size,
-            "save_interval": 1 if self.save_interval is None else self.save_interval,
-        }
-        for name, count in counts.items():
-            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
-                raise ValueError(f"{name} must be a positive int")
-        for name, rate in (("learning_rate", self.learning_rate), ("kl_coef", self.kl_coef)):
-            if isinstance(rate, bool) or not isinstance(rate, int | float) or not math.isfinite(rate):
-                raise ValueError(f"{name} must be a finite number")
-        if self.learning_rate <= 0 or self.kl_coef < 0:
-            raise ValueError("learning_rate must be positive and kl_coef non-negative")
 
 
 class TinkerJobComponent(LocalJobComponent, ABC):
     """Train each job as remote sessions on a Tinker-compatible service from the job's start, in a background thread.
 
-    A job's parameters are ``TinkerJobParameters``: ``method``, optionally
-    ``scheduling``, and ``batch_size``, ``kl_coef``, ``learning_rate``,
-    ``save_interval`` and ``rollout``, where ``batch_size``, ``kl_coef`` and
-    ``learning_rate`` default to the component's ``TinkerServiceConfig``.
+    A job's parameters are ``TinkerJobParameters``: ``objective``, optionally
+    ``learning_rate_schedule`` and ``scheduling``, and ``batch_size``, ``kl_coef``,
+    ``learning_rate``, ``save_interval`` and ``rollout``, where ``batch_size``,
+    ``kl_coef`` and ``learning_rate`` default to the component's ``TinkerServiceConfig``.
     ``submit`` refuses any other parameter or a malformed value. Jobs of
     several scenarios can share the component, since each job trains from its
     own start.
@@ -264,19 +225,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     def job_parameters(self, parameters: Mapping[str, Any]) -> TinkerJobParameters:
         """``parameters`` over the component's defaults; ``ValueError`` for an unknown or a malformed parameter."""
-        unknown = set(parameters) - {"method", "scheduling", *JOB_PARAMETER_NAMES}
-        if unknown:
-            raise ValueError(f"Tinker jobs accept no parameters {sorted(unknown)}")
-        method, scheduling = job_training(parameters)
-        return TinkerJobParameters(
-            method,
-            scheduling,
-            parameters.get("batch_size", self._config.batch_size),
-            parameters.get("learning_rate", self._config.learning_rate),
-            parameters.get("kl_coef", self._config.kl_coef),
-            parameters.get("save_interval"),
-            None if parameters.get("rollout") is None else RolloutSettings.from_parameters(parameters),
-        )
+        return TinkerJobParameters.from_parameters(parameters, self._config)
+
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
+        return tinker_parameters_schema(kind)
 
     def check_job(self, job: TrainingJob) -> None:
         parameters = self.job_parameters(job.parameters)
@@ -297,9 +249,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         """A task job rolls its tasks out on this component's sampler, as the ``rollout`` parameter says."""
         if self._sampler is None:
             raise ValueError("this Tinker component has no sampler, so it cannot roll tasks out")
-        if parameters.get("rollout") is None:
-            raise ValueError("a task job needs the rollout parameter as an object")
-        RolloutSettings.from_parameters(parameters)
+        self.job_parameters(parameters)
+        rollout_settings(parameters)
 
     def close_resources(self) -> None:
         try:
@@ -375,7 +326,6 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
         start = self.start_at(Path(job.start))
-        method = parameters.method
         data = read_job_data(job.data_dir, job.data_id)
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
@@ -400,8 +350,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                     return rollout_metrics
         prepared = prepare_tinker_job(
             data,
-            method,
-            start.state_for(method.objective),
+            parameters.objective,
+            start.state_for(parameters.objective),
             parameters.scheduling,
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
@@ -413,7 +363,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             return {**prepared.metrics, **rollout_metrics}
         steps = prepared.steps
         schedule = resolve_learning_rate_schedule_state(
-            start.learning_rate_schedule_state, method.learning_rate_schedule
+            start.learning_rate_schedule_state, parameters.learning_rate_schedule
         )
         learning_rates = (
             (parameters.learning_rate,) * len(steps) if schedule is None else schedule.learning_rates(len(steps))
@@ -441,7 +391,9 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                 self.validated(checkpoint),
                 learning_rate_schedule_state=schedule_state,
                 algorithm_state=dict(prepared.next_algorithm_state) if final else dict(start.algorithm_state),
-                objective=(method.objective if prepared.next_algorithm_state else None) if final else start.objective,
+                objective=(
+                    (parameters.objective if prepared.next_algorithm_state else None) if final else start.objective
+                ),
             )
             target = directory / str(last)
             current.write(target)

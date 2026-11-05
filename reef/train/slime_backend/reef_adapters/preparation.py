@@ -1,8 +1,7 @@
 """Slime's job preparation: run the job's objective on its data and build Slime's training payload.
 
-The objective's signal (loss family, advantages, next state) and the step
-schedule are backend-neutral (``reef.train.algos``). This module turns them
-into Slime's own wire rows (``build_slime_payload``), and cuts the payload
+This module turns the objective's signal (loss family, advantages, next state)
+and the job's step schedule into Slime's own wire rows (``build_slime_payload``), and cuts the payload
 into the steps that one Slime rollout trains (``slime_payload_steps``).
 """
 
@@ -12,18 +11,17 @@ import bisect
 from collections.abc import Mapping
 from typing import Any
 
-from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, StepScheduling, schedule_job_data
 from reef.train.algos.signals import PreparedJob
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.objectives import resolve_slime_objective
 from reef.train.slime_backend.score_centering import sampler_topk_columns
 from reef.train.types import JobData, trajectories
 
 
 def prepare_slime_job(
     data: JobData,
-    method: TrainingMethod,
+    objective_reference: str,
     algorithm_state: Mapping[str, Any],
     scheduling: StepScheduling,
     *,
@@ -32,15 +30,13 @@ def prepare_slime_job(
 ) -> PreparedJob:
     """Resolve the job's training objective and produce its complete Slime training payload.
 
-    ``method`` is the objective and learning-rate schedule the job's plan
-    selected; the payload records it, so it is part of the job's identity.
-    ``scheduling`` is the job's step schedule, which ``job_training`` already
-    checked against the objective. ``step_size`` is Slime's
+    ``objective_reference`` is the job's ``objective`` parameter. ``scheduling`` is the job's step schedule, which
+    ``SlimeJobParameters`` already checked against the objective. ``step_size`` is Slime's
     ``--global-batch-size``, the rollouts in one optimizer step.
     ``sampler_topk`` adds each row's recorded sampler top-K, which score
     centering reads.
     """
-    objective = resolve_objective(method.objective)
+    objective = resolve_slime_objective(objective_reference)
     signal = objective.prepare(data, algorithm_state)
     if signal.action == "skip":
         return PreparedJob(
@@ -50,7 +46,6 @@ def prepare_slime_job(
         )
     schedule = schedule_job_data(data, objective.rollout_unit, scheduling, step_size=step_size)
     payload = build_slime_payload(data, objective.loss_family, signal.advantages, schedule, sampler_topk=sampler_topk)
-    payload["method"] = method.to_dict()
     metrics = dict(signal.metrics)
     if schedule.epochs > 1:
         metrics.setdefault("epochs", schedule.epochs)
