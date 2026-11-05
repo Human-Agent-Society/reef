@@ -35,7 +35,7 @@ from reef.harness.tasks.vendor_install import (
 from reef.harness.tree import TreePatch
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
 
@@ -250,7 +250,7 @@ def _backend(
     return build_harness_backend(recipe, "demo")
 
 
-def _step(backend: HarnessBackend) -> TrainStepResult:
+def _step(backend: HarnessBackend) -> TrainingCommit:
     return backend_step(backend, JobData("demo:1"), HarnessState().to_json())
 
 

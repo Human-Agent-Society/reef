@@ -40,7 +40,7 @@ from reef.sample2job import Sample2Job
 from reef.train.backend import PreparedStep
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
-from reef.train.types import JobData, Sample, TaskSample, TrainStepResult, TrajectorySample
+from reef.train.types import JobData, Sample, TaskSample, TrainingCommit, TrajectorySample
 
 __all__ = [
     "ComponentTrainer",
@@ -50,8 +50,8 @@ __all__ = [
     "Sample",
     "Sample2Job",
     "TaskSample",
-    "TrainStepResult",
     "Trainer",
+    "TrainingCommit",
     "TrainingPipeline",
     "TrajectorySample",
 ]
