@@ -48,7 +48,7 @@ from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.trainer import PendingTrainingResult, PreparedTrainingResult
+from reef.train.trainer import PendingTrainingResult
 from reef.train.types import JobData, PreparedCommit, TrainStepResult
 
 NUM_GPUS = 0
@@ -415,13 +415,13 @@ def test_prepared_snapshot_must_match_its_training_result(
     result = TrainStepResult({"steps": 1}, training_job_id="job-1")
     prepared = PreparedCommit(prepared_state, 0, 0, training_job_id=prepared_job_id)
     with pytest.raises(ValueError, match=r"prepared.*match.*result"):
-        PreparedTrainingResult(data=None, result=result, prepared_commit=prepared)
+        PendingTrainingResult(data=None, result=result, prepared_commit=prepared)
 
 
 @pytest.mark.unit
 def test_prepared_training_result_requires_a_state_mapping() -> None:
     with pytest.raises(TypeError, match=r"state.*mapping"):
-        PreparedTrainingResult(
+        PendingTrainingResult(
             data=None,
             result=TrainStepResult(None),
             prepared_commit=PreparedCommit({}, 0, 0),
@@ -429,16 +429,14 @@ def test_prepared_training_result_requires_a_state_mapping() -> None:
 
 
 @pytest.mark.unit
-def test_annotation_after_preparation_preserves_the_cached_commit() -> None:
+def test_a_retried_preparation_returns_the_cached_commit() -> None:
     with one_pair_records() as records, closing(preparing_trainer(records)) as trainer:
         make_samples(trainer)
         result = trainer.run_once()
         assert result is not None
-        prepared = trainer.prepare_commit(result)
-        annotated = trainer.add_commit_metrics(result, {"provider_request_id": "request-1"})
-        assert annotated.metrics["provider_request_id"] == "request-1"
-        assert prepared.metrics is not None and "provider_request_id" not in prepared.metrics
-        assert trainer.prepare_commit(annotated) is prepared
+        prepared = trainer.prepare_commit(result, {"provider_request_id": "request-1"})
+        assert prepared.metrics is not None and prepared.metrics["provider_request_id"] == "request-1"
+        assert trainer.prepare_commit(result, {"provider_request_id": "request-2"}) is prepared
         trainer.commit(prepared)
         assert trainer.algorithm_state_dict() == result.state
         finish(trainer)
