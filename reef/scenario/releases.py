@@ -280,6 +280,20 @@ class ScenarioReleases:
             return {components[0]: legacy_artifact_id(revision, None)}
         return {}
 
+    def served_history(self, scenario_step: int, component: str, components: tuple[str, ...]) -> tuple[str, ...]:
+        """The artifacts of ``component`` that the active releases of the scenario bound, oldest first, with no two
+        neighbors equal: the creation's, then each activating record's. Empty for a store without a durable history."""
+        records = self.records()
+        if not records:
+            return ()
+        history: list[str] = []
+        revisions = (self.creation_artifact.revision, *(r.snapshot.revision for r in records if r.activates))
+        for revision in revisions:
+            artifact_id = self.bound_artifact_ids(revision, components, scenario_step).get(component)
+            if artifact_id is not None and (not history or history[-1] != artifact_id):
+                history.append(artifact_id)
+        return tuple(history)
+
     def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedBesideArtifact]:
         """The artifacts that the scenario serves beside its active release, by ``artifact_id``.
 

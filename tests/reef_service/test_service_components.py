@@ -269,8 +269,11 @@ def test_failed_assembly_stops_workers_before_closing_their_stores(
 @pytest.mark.unit
 def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_the_jobs_to_control() -> None:
     made: list[str] = []
-    trainer = SimpleNamespace(trains=True, produce_samples=lambda: made.append("weights") or False)
-    current = SimpleNamespace(trainers=(SimpleNamespace(component="weights", trainer=trainer),))
+    trainer = SimpleNamespace(trains=True)
+    current = SimpleNamespace(
+        trainers=(SimpleNamespace(component="weights", trainer=trainer),),
+        produce_samples=lambda component: made.append(component) or False,
+    )
     loads: list[tuple[str, object]] = []
 
     class Registry:
