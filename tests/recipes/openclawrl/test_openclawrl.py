@@ -123,7 +123,7 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     processor.acknowledge(batch.data_id)
     processor.produce()
     assert not processor.ready(1)
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert "t1" in decision
     assert "t2" not in decision  # still the session's open turn
 
@@ -158,9 +158,9 @@ def test_side_calls_and_retried_turns_are_terminal() -> None:
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t1-retry", Q1))  # identical request: retried logical turn
 
-    releasable = processor.releasable_record_ids()
+    releasable = processor.record2sample.releasable_record_ids()
     assert {"side", "t1-retry"} <= set(releasable)
-    assert "t1" not in processor.releasable_record_ids()
+    assert "t1" not in processor.record2sample.releasable_record_ids()
     assert not worker.jobs
 
 
@@ -172,7 +172,7 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
     time.sleep(0.001)
     processor.produce()
     assert not processor.ready(1)  # catches up: the TTL pass runs
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert "t1" in decision
     assert not processor.background_jobs_running()
 
@@ -186,7 +186,7 @@ def test_untrainable_verdicts_are_terminal() -> None:
     worker.push(TurnJudgment("declined"))  # judge declined: no RL, no directive
     processor.produce()
     assert not processor.ready(1)
-    assert "declined" in processor.releasable_record_ids()
+    assert "declined" in processor.record2sample.releasable_record_ids()
 
     # A scored judgment without a teacher candidate: candidate construction failed, so the turn never trains.
     processor.push(_turn("no-candidates", Q2))
@@ -194,7 +194,7 @@ def test_untrainable_verdicts_are_terminal() -> None:
     worker.push(TurnJudgment("no-candidates", score=-1.0))
     processor.produce()
     assert not processor.ready(1)
-    assert "no-candidates" in processor.releasable_record_ids()
+    assert "no-candidates" in processor.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -211,7 +211,7 @@ def test_candidates_behind_the_served_artifact_leave_the_buffer() -> None:
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
     processor.produce()
     assert not processor.ready(2)  # the stale candidate is not in the buffer, 1 < 2
-    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert {"old", "new"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
 
 
@@ -222,7 +222,7 @@ def test_correlate_only_mode_never_trains_and_releases_everything() -> None:
     processor.push(_turn("t2", _successor(Q1, "ok")))
     processor.produce()
     assert not processor.ready(1)
-    assert "t1" in processor.releasable_record_ids()
+    assert "t1" in processor.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -460,7 +460,7 @@ def test_sequential_sessions_with_identical_openers_stay_separate() -> None:
 def test_reports_are_terminal_on_sight() -> None:
     processor = _processor(worker=FakeWorker())
     processor.push(AgentRecord.create(scenario="s", request_type=RequestType.REPORT, payload={}, agent_record_id="r1"))
-    releasable = processor.releasable_record_ids()
+    releasable = processor.record2sample.releasable_record_ids()
     assert "r1" in set(releasable)
 
 
@@ -473,7 +473,7 @@ def test_rejected_submission_retires_the_turn() -> None:
     processor = _processor(worker=RefusingWorker())
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "ok")))
-    assert "t1" in processor.releasable_record_ids()
+    assert "t1" in processor.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit

@@ -867,22 +867,25 @@ def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tm
     p, _ = rounds(tmp_path, ScriptedGenerator(), worker=worker, **SOURCES)
     sessions(p, "a")
     sessions(p, "untagged", tags={})
-    assert {"rec-untagged", "rep-untagged"} <= p.releasable_record_ids(), "an untagged session is released"
-    assert not {"rec-a", "rep-a"} & p.releasable_record_ids()
+    assert {
+        "rec-untagged",
+        "rep-untagged",
+    } <= p.record2sample.releasable_record_ids(), "an untagged session is released"
+    assert not {"rec-a", "rep-a"} & p.record2sample.releasable_record_ids()
     assert p.operational_metrics()["waiting_source_sessions"] == 1
     p.ready(BATCH_SIZE)
     assert [record.agent_record_id for record in worker.submitted[0].source_records] == ["rec-a", "rep-a"]
-    assert not {"rec-a", "rep-a"} & p.releasable_record_ids(), "the round runs"
+    assert not {"rec-a", "rep-a"} & p.record2sample.releasable_record_ids(), "the round runs"
     worker.finish()
     p.ready(BATCH_SIZE)
-    assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
+    assert {"rec-a", "rep-a"} <= p.record2sample.releasable_record_ids()
 
 
 def test_without_a_share_of_sessions_the_rounds_read_only_the_description(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator()
     p, _ = rounds(tmp_path, task_generator, rounds=1, source_tag="source=session")
     sessions(p, "a")
-    assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
+    assert {"rec-a", "rep-a"} <= p.record2sample.releasable_record_ids()
     looked(p)
     assert task_generator.requests == [TaskGenerationRequest((), DESCRIPTION)]
 
@@ -893,7 +896,7 @@ def test_no_session_waits_once_the_rounds_are_over(tmp_path: Path) -> None:
     for _ in range(3):
         looked(p)
     sessions(p, "late")
-    assert {"rec-late", "rep-late"} <= p.releasable_record_ids()
+    assert {"rec-late", "rep-late"} <= p.record2sample.releasable_record_ids()
     assert len(task_generator.requests) == 1
 
 
