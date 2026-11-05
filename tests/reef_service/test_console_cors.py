@@ -26,7 +26,7 @@ def make_client(origins=(ORIGIN,)):
         return web.json_response({"scenario": request.headers.get("x-reef-scenario")})
 
     async def stream(request):
-        response = web.StreamResponse(headers={"content-type": "text/event-stream", "x-reef-release-id": "release-1"})
+        response = web.StreamResponse(headers={"content-type": "text/event-stream", "x-reef-artifact-id": "release-1"})
         await response.prepare(request)
         await response.write(b"data: hello\n\n")
         await response.write_eof()
@@ -115,7 +115,7 @@ def test_streaming_responses_and_errors_have_cors_headers():
             assert response.status == 200
             assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
             assert "x-reef-artifact-id" in response.headers["Access-Control-Expose-Headers"]
-            assert "x-reef-release-id" in response.headers["Access-Control-Expose-Headers"]
+            assert "x-reef-artifact-id" in response.headers["Access-Control-Expose-Headers"]
             assert "Origin" in response.headers.getall("Vary")
             assert await response.text() == "data: hello\n\n"
             response = await client.get("/missing", headers={"Origin": ORIGIN, "Authorization": "Bearer local-secret"})

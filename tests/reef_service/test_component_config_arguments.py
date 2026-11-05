@@ -307,7 +307,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         ("reef.train.tinker_backend.launch:component_factory", {"state_dir": "state"}),
         (
             "remote_serving",
-            {"remote": {"url": "http://gpu-host:8000"}, "release_format": {"layout": "full"}},
+            {"remote": {"url": "http://gpu-host:8000"}, "artifact_format": {"layout": "full"}},
         ),
     ],
     ids=["tinker", "remote_serving"],

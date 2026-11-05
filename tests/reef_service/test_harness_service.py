@@ -75,12 +75,12 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             imported = await response.json()
             assert imported["changed"] is True and imported["parent_release_id"] == base
             current = control.get_or_create_scenario("demo").current_snapshot()
-            assert current.revision == imported["release_id"] == response.headers["x-reef-release-id"]
+            assert current.revision == imported["release_id"]
             # The harness service reads the release that control committed.
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert source["release_id"] == imported["release_id"] and source["files"]["rules.md"] == "Mine.\n"
-            releases = await (await client.get("/reef/harness/releases", headers=HEADERS)).json()
-            assert releases["releases"][-1]["release_id"] == imported["release_id"]
+            releases = await (await client.get("/reef/harness/artifacts", headers=HEADERS)).json()
+            assert releases["artifacts"][-1]["artifact_id"] == imported["artifact_id"]
             # The same files again are a new import, which merges onto the tree they made: nothing changes.
             again = await client.post(
                 "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_release_id": base}
@@ -98,7 +98,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
                 refused = await client.post("/reef/harness/import", headers=headers, json=body)
                 assert refused.status == status, await refused.text()
             # The pages and the writes stay with control.
-            assert (await client.get("/reef/harness/releases/0/page", headers=HEADERS)).status == 404
+            assert (await client.get("/reef/harness/artifacts/0/page", headers=HEADERS)).status == 404
             assert (await client.get("/reef/status")).status == 404
 
     try:

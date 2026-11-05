@@ -32,30 +32,24 @@ def register_harness_routes(app: web.Application, *, request_service: RequestSer
         )
         return web.json_response(
             manifest,
-            headers={"x-reef-artifact-id": manifest["artifact_id"], "x-reef-release-id": manifest["release_id"]},
+            headers={"x-reef-artifact-id": manifest["artifact_id"]},
         )
 
     async def harness_import(request: web.Request) -> web.Response:
         payload = await read_object(request)
         answer = await asyncio.to_thread(imports.import_files, request.headers, payload)
-        return web.json_response(
-            answer, headers={"x-reef-artifact-id": answer["artifact_id"], "x-reef-release-id": answer["release_id"]}
-        )
+        return web.json_response(answer, headers={"x-reef-artifact-id": answer["artifact_id"]})
 
     async def harness_artifacts(request: web.Request) -> web.Response:
         catalog = await asyncio.to_thread(request_service.harness_artifacts, request.headers)
-        return web.json_response(catalog)
-
-    async def harness_releases(request: web.Request) -> web.Response:
-        catalog = await asyncio.to_thread(request_service.harness_releases, request.headers)
         # Each row names its step's page, the step being its position oldest first; the link carries a page key in
         # place of the token.
         query = page_query(request, catalog["scenario"])
         rows = [
-            {**row, "page_path": f"/reef/harness/releases/{step}/page?{query}"}
-            for step, row in enumerate(catalog["releases"])
+            {**row, "page_path": f"/reef/harness/artifacts/{step}/page?{query}"}
+            for step, row in enumerate(catalog["artifacts"])
         ]
-        return web.json_response({**catalog, "releases": rows})
+        return web.json_response({**catalog, "artifacts": rows})
 
     async def adapters(request: web.Request) -> web.Response:
         names = await asyncio.to_thread(available_adapters)
@@ -84,7 +78,6 @@ def register_harness_routes(app: web.Application, *, request_service: RequestSer
     app.router.add_get("/reef/harness", harness)
     app.router.add_post("/reef/harness/import", harness_import)
     app.router.add_get("/reef/harness/artifacts", harness_artifacts)
-    app.router.add_get("/reef/harness/releases", harness_releases)
     app.router.add_get("/reef/harness/adapters", adapters)
 
 
