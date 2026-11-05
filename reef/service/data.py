@@ -4,7 +4,8 @@ A client creates, reads, queries, updates and deletes the data items of one owne
 to a scenario, or removes one, follows the same order:
 
 1. Check the scenarios that the items are to use: each existing one must have the owner, and must be able to train
-   on its new items (``Dispatcher.check_use``). A scenario that does not exist yet is checked when it opens.
+   on its new items (``Dispatcher.check_use``). A scenario that does not exist yet is checked when it opens. A recipe
+   that refuses images refuses an item with an image here, for any scenario that the item names.
 2. Write the data store.
 3. Ask control to sync each scenario that the write touched (``request_data_sync``), and wait up to
    ``SYNC_WAIT_SECONDS`` for the syncs to end. The response says whether they ended (``synced``); a sync that did
@@ -27,6 +28,7 @@ from harbor.models.task.task import Task as HarborTaskLoader
 
 from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
+from reef.core.trajectories import has_image_content
 from reef.dispatcher import Dispatcher
 from reef.service.tasks import unpack_task_archive
 from reef.storage.data import (
@@ -108,7 +110,9 @@ class Use:
     """One item that one scenario is to use in a split other than before.
 
     Values: ``item_id`` is the item's ID. ``trajectory`` is the item's content as a ``TrajectorySample`` for a
-    trajectory, else None. ``train_task`` is True exactly for a task in the ``train`` split.
+    trajectory, else None. ``train_task`` is True exactly for a task in the ``train`` split. ``holds_image`` is True
+    exactly for a trajectory whose content holds an image, or a record whose ``payload`` holds one
+    (``has_image_content``).
 
     Purpose: a write collects the new uses of each scenario, and ``check_uses`` checks them before the write.
     """
@@ -116,11 +120,17 @@ class Use:
     item_id: str
     trajectory: TrajectorySample | None
     train_task: bool
+    holds_image: bool
 
 
 def new_use(item_id: str, kind: str, content: Mapping[str, Any] | None, split: str) -> Use:
     trajectory = TrajectorySample(content) if kind == "trajectory" and content is not None else None
-    return Use(item_id, trajectory, kind == "task" and split == "train")
+    # A record item holds the record's payload; the store checks the shape of its content later.
+    image_source = content.get("payload") if kind == "record" and content is not None else content
+    holds_image = (
+        kind in ("trajectory", "record") and isinstance(image_source, Mapping) and has_image_content(image_source)
+    )
+    return Use(item_id, trajectory, kind == "task" and split == "train", holds_image)
 
 
 def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait: bool = True) -> bool:
@@ -145,9 +155,15 @@ def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait
 def check_uses(data: DataAccess, owner: str, uses: Mapping[str, list[Use]]) -> None:
     """Check the new uses of each scenario, step 1 of every write.
 
-    Raise ``ValueError`` for an existing scenario of another owner, or one that cannot train on its new items.
+    Raise ``ValueError`` for an item with an image when the deployment's recipe refuses images, also for a scenario
+    that does not exist yet; for an existing scenario of another owner; or for one that cannot train on its new items.
     """
     for scenario, scenario_uses in sorted(uses.items()):
+        image_item = next((use.item_id for use in scenario_uses if use.holds_image), None)
+        if image_item is not None and data.scenarios.refuses_images:
+            raise ValueError(
+                f"item {image_item!r} holds an image, and the recipe of scenario {scenario!r} does not support images"
+            )
         scenario_owner = data.scenarios.scenario_owner(scenario)
         if scenario_owner is None:
             continue

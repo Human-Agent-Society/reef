@@ -51,7 +51,7 @@ def sample_ids(storage, session) -> list[str]:
 def test_the_first_open_sets_the_owner_and_each_open_reads_the_owners_items(stores):
     stores.data.create("math", [trajectory("own", math="train")])
     stores.data.create("acme", [trajectory("t1", math="train")])
-    opened = DataScenarioStorage(stores.storage, stores.data)
+    opened = DataScenarioStorage(stores.storage, stores.data, refuses_images=False)
     with closing(opened.open("math")) as session:
         assert opened.read_settings("math").owner == "math"
         assert sample_ids(opened, session) == ["own"]
@@ -63,7 +63,7 @@ def test_the_first_open_sets_the_owner_and_each_open_reads_the_owners_items(stor
 
 def test_an_archive_releases_the_items_so_a_new_scenario_of_the_name_uses_none(stores):
     stores.data.create("math", [trajectory("t1", math="train")])
-    opened = DataScenarioStorage(stores.storage, stores.data)
+    opened = DataScenarioStorage(stores.storage, stores.data, refuses_images=False)
     with closing(opened.open("math")) as session:
         assert sample_ids(opened, session) == ["t1"]
     opened.archive("math")

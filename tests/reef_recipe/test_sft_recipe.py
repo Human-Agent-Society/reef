@@ -19,6 +19,7 @@ from reef.core.job_data import JobData, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
+from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.recipe.sft import SFTJobData, SftObjective, SFTRecipe, SFTSamples, SFTSettings
@@ -503,6 +504,19 @@ def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnToke
 
 
 @pytest.mark.unit
+def test_a_weight_recipe_refuses_images_unless_it_supports_them() -> None:
+    class ImageRecipe(SFTRecipe):
+        @property
+        def supports_images(self) -> bool:
+            return True
+
+    plain, text_only, with_images = Recipe(), SFTRecipe(**runtime_bindings()), ImageRecipe(**runtime_bindings())
+    assert (plain.supports_images, plain.refuses_images) == (False, False)
+    assert (text_only.supports_images, text_only.refuses_images) == (False, True)
+    assert (with_images.supports_images, with_images.refuses_images) == (True, False)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("steps", "reason"),
     [
@@ -516,6 +530,7 @@ def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnToke
         (({**ASK, "message": [{"type": "image", "source": {}}]}, ANSWER), "image part needs source.path"),
         (({**ASK, "message": [{"type": "image", "source": "a"}]}, ANSWER), "image part needs source.path"),
         (({**ASK, "message": ["a.png"]}, ANSWER), "content parts must be objects"),
+        (({**ASK, "message": [{"type": "image", "source": {"path": "a.png"}}]}, ANSWER), "renders text only"),
         (({**ASK, "message": [{"type": "text", "text": None}]}, ANSWER), "text part needs a string text"),
         ((ASK, {**ANSWER, "observation": "ok"}), "observation must be an object"),
     ],

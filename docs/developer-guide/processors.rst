@@ -371,8 +371,9 @@ scenario with no trainer that accepts uploaded trajectories.
 The record-to-sample stage turns each upload into its training sample with
 ``Record2Sample.uploaded_sample(trajectory)``. The default returns the trajectory
 as uploaded. A stage can override it to check the structure or add
-metadata: ``SFTSamples`` refuses a trajectory with no agent turn to train and
-adds its ``max_tokens``. The method must be pure. Admission calls it from the request
+metadata: ``SFTSamples`` refuses a trajectory with no agent turn to train or
+with a part that is not text, and adds its ``max_tokens``. The method must be
+pure. Admission calls it from the request
 thread for each trajectory and each trainer that accepts uploads; a
 ``ValueError`` refuses the whole upload with 400, and the message names the
 trajectory. The pipeline calls it again when it reads the upload. A

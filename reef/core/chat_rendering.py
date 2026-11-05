@@ -12,13 +12,16 @@ tokenizer. The message helpers bring provider messages into the form that chat t
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from reef.core.job_data import JobData, Sample, TrajectorySample
-from reef.core.trajectories import atif_messages
+from reef.core.trajectories import atif_messages, source_record_id
+
+logger = logging.getLogger(__name__)
 
 
 def flatten_content(content: Any) -> str:
@@ -146,12 +149,20 @@ def trained_turns(trajectory: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
     """The chat messages of an ATIF trajectory, normalized for a chat template, and the positions of its trained
     turns: the agent steps that are not copied context (``render_trajectory``).
 
-    ``ValueError``: ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first
-    trained step has no step before it. A trajectory that passes may still fail to render, with a chat template that
-    does not render a trained turn after its own generation prompt.
+    ``ValueError``: a message or an observation result holds a part that is not text, such as an image;
+    ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first trained step has
+    no step before it. A trajectory that passes may still fail to render, with a chat template that does not render a
+    trained turn after its own generation prompt.
     """
     steps = trajectory.get("steps") or []
-    conversation = normalize_messages_for_template(atif_messages(trajectory))
+    messages = atif_messages(trajectory)
+    # The normalized messages keep only text parts, so the sample would train on the text without its images.
+    if any(
+        isinstance(message["content"], list) and any(part.get("type") != "text" for part in message["content"])
+        for message in messages
+    ):
+        raise ValueError("training renders text only, and the trajectory holds an image or another non-text part")
+    conversation = normalize_messages_for_template(messages)
     # atif_messages turns each agent step into exactly one assistant message, in step order.
     copied = [step.get("is_copied_context", False) for step in steps if step["source"] == "agent"]
     if any(not isinstance(value, bool) for value in copied):
@@ -178,9 +189,9 @@ def render_trajectory(template: ChatTemplate, trajectory: Mapping[str, Any]) -> 
     the tokens after its first generation prompt (``RenderedTrajectory``). A template that renders each turn as a
     prefix of the whole conversation gives one segment.
 
-    ``ValueError``: ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first
-    trained step has no step before it; or the chat template does not render a trained turn after its own generation
-    prompt.
+    ``ValueError``: a message or an observation result holds a part that is not text, such as an image;
+    ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first trained step has
+    no step before it; or the chat template does not render a trained turn after its own generation prompt.
     """
     conversation, trained = trained_turns(trajectory)
     tools = trajectory_tools(trajectory)
@@ -352,7 +363,8 @@ def rendered_samples(sample: TrajectorySample, template: ChatTemplate) -> list[T
     sample_template = template.with_arguments(arguments) if arguments else template
     try:
         segments = render_trajectory(sample_template, sample.trajectory)
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("sample %.200s is left out of its job: %.200s", source_record_id(sample), exc)
         return None
     max_tokens = sample.metadata.get("max_tokens")
     if isinstance(max_tokens, int) and max_tokens > 0 and any(len(part.tokens) > max_tokens for part in segments):

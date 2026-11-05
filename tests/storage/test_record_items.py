@@ -108,8 +108,13 @@ def test_another_scenario_of_the_owner_holds_copies_that_get_no_items_and_stay(t
             copy_records(session.records, data, "acme", "math", 0)
         data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": "train"}})
         with closing(storage.open("code")) as session:
-            assert sync_scenario_records(session.records, data, "acme", "code") == ("math/i1", "math/r1")
-            assert sync_scenario_records(session.records, data, "acme", "code") == (), "a sync again adds nothing"
+            assert sync_scenario_records(session.records, data, "acme", "code", refuses_images=False) == (
+                "math/i1",
+                "math/r1",
+            )
+            assert (
+                sync_scenario_records(session.records, data, "acme", "code", refuses_images=False) == ()
+            ), "a sync again adds nothing"
             assert session.records.get("code", "math/r1").references == ("math/i1",)
             assert copy_records(session.records, data, "acme", "code", 0) == 2
             assert [item.item_id for item in data.query("acme")] == ["math/i1", "math/r1"]
@@ -118,8 +123,25 @@ def test_another_scenario_of_the_owner_holds_copies_that_get_no_items_and_stay(t
             with pytest.raises(ValueError, match="stays in 'math'"):
                 data.update("acme", ["math/r1"], {"scenarios": {"math": None}})
             data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": None}})
-            assert sync_scenario_records(session.records, data, "acme", "code") == ()
+            assert sync_scenario_records(session.records, data, "acme", "code", refuses_images=False) == ()
             assert session.records.get("code", "math/i1") is not None
+
+
+def test_a_sync_for_a_recipe_that_refuses_images_skips_an_item_with_one(tmp_path, caplog):
+    data = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    data.create(
+        "acme",
+        [
+            record_item(record("image", RequestType.INFERENCE, messages=[{"role": "user", "content": [image]}])),
+            record_item(record("text", RequestType.INFERENCE, messages=[{"role": "user", "content": "q"}])),
+        ],
+    )
+    data.update("acme", ["math/image", "math/text"], {"scenarios": {"code": "train"}})
+    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage, closing(storage.open("code")) as session:
+        assert sync_scenario_records(session.records, data, "acme", "code", refuses_images=True) == ("math/text",)
+        assert "skips record item 'math/image'" in caplog.text
+        assert sync_scenario_records(session.records, data, "acme", "code", refuses_images=False) == ("math/image",)
 
 
 def test_an_archive_releases_the_items_of_the_scenario_but_not_the_records_it_made(tmp_path):

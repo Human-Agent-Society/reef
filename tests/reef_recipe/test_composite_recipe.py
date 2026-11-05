@@ -264,6 +264,17 @@ _LOCAL_TRAINING = "tests.support._training_deployment:LocalDeployment"
 
 
 @pytest.mark.unit
+def test_a_composite_refuses_images_when_a_component_does() -> None:
+    class TextOnlyRecipe(_ConfigRecipe):
+        @property
+        def refuses_images(self) -> bool:
+            return True
+
+    assert not CompositeRecipe(components={"a": _ConfigRecipe(), "b": _TreeRecipe()}).refuses_images
+    assert CompositeRecipe(components={"a": TextOnlyRecipe(), "b": _TreeRecipe()}).refuses_images
+
+
+@pytest.mark.unit
 def test_composite_recipe_names_its_weight_training_component() -> None:
     from recipes.sao.recipe import SAORecipe
 

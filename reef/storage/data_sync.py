@@ -25,6 +25,7 @@ class ScenarioUses(ABC):
     ``scenario_owner(scenario)`` is the owner of ``scenario`` in the data store, or None when the scenario does not
     exist. ``check_use(scenario, trajectories, train_tasks)`` raises ``ValueError`` unless ``scenario`` can train
     on the new ``trajectories`` (pairs of item ID and sample), and on train tasks when ``train_tasks``.
+    ``refuses_images`` says whether the deployment's recipe refuses an item that holds an image.
 
     Purpose: the dispatcher implements it; the data writes (``reef.service.data``) call it before they store.
     """
@@ -36,6 +37,10 @@ class ScenarioUses(ABC):
     def check_use(
         self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
     ) -> None: ...
+
+    @property
+    @abstractmethod
+    def refuses_images(self) -> bool: ...
 
 
 def release_items(data: DataStore, owner: str, scenario: str) -> None:

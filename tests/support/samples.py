@@ -23,7 +23,9 @@ def data_storage(directory: Path | None = None) -> DataScenarioStorage:
     same task files."""
     storage = SQLiteScenarioStorage(directory)
     return DataScenarioStorage(
-        storage, SQLiteDataStore(None if directory is None else directory / "data", storage.task_files)
+        storage,
+        SQLiteDataStore(None if directory is None else directory / "data", storage.task_files),
+        refuses_images=False,
     )
 
 

@@ -191,6 +191,7 @@ def create_app(
         ),
         timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
         for_codex=dispatcher.recipe.harness_adapter == "codex",
+        refuses_images=dispatcher.recipe.refuses_images,
     )
     request_service = RequestService(dispatcher, inference_url=harness_inference_url)
     app = service_application(tokens, evaluation_tokens=evaluation_tokens)

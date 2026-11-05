@@ -728,6 +728,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.request_artifact_copy(scenario)
         self.request_record_copy(scenario)
 
+    @property
+    def refuses_images(self) -> bool:
+        """Whether the deployment's recipe refuses image content (``Recipe.refuses_images``)."""
+        return self.recipe.refuses_images
+
     def check_use(
         self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
     ) -> None:
@@ -753,7 +758,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         and wake its workers, which read the items that the write changed. The caller holds the scenario's lock."""
         if self.data_store is None:
             raise ReefError("this dispatcher has no data store")
-        if sync_scenario_records(current.store.records, self.data_store, owner, current.name):
+        if sync_scenario_records(
+            current.store.records, self.data_store, owner, current.name, refuses_images=current.refuses_images
+        ):
             self.process_accepted_records(current)
         else:
             self.local_workers.wake(current)

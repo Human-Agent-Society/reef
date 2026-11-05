@@ -12,6 +12,7 @@ from tests.support.runtime_stubs import RecordingComponent
 from tests.support.samples import made_task
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
@@ -96,6 +97,17 @@ class LearningRecipe(Recipe):
             training_mode=self.training_mode,
             root=root,
         )
+
+
+class TextOnlyRecipe(LearningRecipe):
+    @property
+    def refuses_images(self) -> bool:
+        return True
+
+
+def image_payload():
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    return {**inference_payload("q"), "messages": [{"role": "user", "content": [image]}]}
 
 
 def served_recipe() -> LearningRecipe:
@@ -345,6 +357,70 @@ def test_imported_reports_follow_the_recipes_report_schema(tmp_path):
             )
             assert response.status == 400
             assert dispatcher.get_or_create_scenario("s").records.get("s", "missing-score") is None
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_recipe_that_refuses_images_refuses_an_imported_image_and_stores_nothing(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, TextOnlyRecipe())
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            image = imported("image", image_payload())
+            response = await client.post("/reef/records", headers=HEADERS, json=image)
+            assert response.status == 400
+            assert "record 'image' holds an image" in await response.text()
+            body = {"records": [imported("text"), image]}
+            response = await client.post("/reef/records/batch", headers=HEADERS, json=body)
+            assert response.status == 400, "a batch is atomic"
+            current = dispatcher.get_or_create_scenario("s")
+            assert current.records.count("s") == 0
+            assert current.operations.snapshot()["ingest/rejected_request_total"] == 2
+            # A retry of a record that an earlier version stored keeps its receipt.
+            current.records.append(
+                AgentRecord.create(
+                    scenario="s", request_type=RequestType.INFERENCE, payload=image_payload(), agent_record_id="old"
+                )
+            )
+            response = await client.post("/reef/records", headers=HEADERS, json=imported("old", image_payload()))
+            assert response.status == 200, await response.text()
+            assert (await client.post("/reef/records", headers=HEADERS, json=imported("text"))).status == 200
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_the_app_gives_the_recipes_refusal_to_its_inference_routes(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, TextOnlyRecipe())
+    handler = EchoHandler()
+
+    async def run():
+        app = create_app(dispatcher, tokens="import-test-token", inference_handler=handler)
+        async with TestClient(TestServer(app)) as client:
+            body = {"model": "m", "messages": image_payload()["messages"]}
+            response = await client.post("/v1/chat/completions", headers=HEADERS, json=body)
+            assert response.status == 400
+            assert "does not support images" in await response.text()
+        assert handler.calls == 0
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_recipe_that_keeps_images_stores_an_imported_image(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            image = imported("image", image_payload())
+            assert (await client.post("/reef/records", headers=HEADERS, json=image)).status == 200
 
     try:
         asyncio.run(run())
