@@ -383,11 +383,13 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.local_workers.wake(instance)
 
     def scenario_committed(self, instance: Scenario) -> None:
-        """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it, and
-        ask the data service to copy the scenario's artifacts to artifact items.
+        """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it, ask
+        the data service to copy the scenario's artifacts to artifact items, and ask the samples service for a
+        selection.
 
         The commit is durable already, so a failed write does not undo it: the publisher's next round writes the rows
-        again, and the next commit asks for the copy again.
+        again, and the next commit asks again. A commit can end a job, and the job's end can make a stage's background
+        work due, such as the next round of generated tasks; no record asks the samples service for it.
         """
         try:
             if self.publisher is not None:
@@ -396,6 +398,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         except Exception:
             logger.exception(
                 "scenario %r: the commit is durable, but its served models were not written", instance.name
+            )
+        try:
+            self.request_samples(instance)
+        except Exception:
+            logger.exception(
+                "scenario %r: the commit is durable, but the samples service was not asked", instance.name
             )
 
     def follow_commits(self, current: Scenario) -> Scenario:
