@@ -52,7 +52,8 @@ class TrainingJob:
     component does not need it. ``component`` is the scenario component that the job trains, or None when the
     trainer names none. ``previous_job_id`` is the last job whose end the trainer committed, or None before the
     first: a component whose state advances also in a job that saves no checkpoint, such as a harness, continues the
-    state after it.
+    state after it. ``train_from_artifact_id`` is the artifact that ``start`` came from, or None when the trainer did
+    not give it. Reef's job listing reads it; a component does not need it.
 
     Reef makes the value and names the job with ``job_id_for``, so a retry of
     the same request has the same ID. A component reads it in ``submit``.
@@ -67,6 +68,7 @@ class TrainingJob:
     request_id: str | None = field(default=None, kw_only=True)
     component: str | None = field(default=None, kw_only=True)
     previous_job_id: str | None = field(default=None, kw_only=True)
+    train_from_artifact_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not self.job_id:
@@ -81,7 +83,7 @@ class TrainingJob:
             raise TypeError("TrainingJob.data must be a JobDataRef")
         if not isinstance(self.parameters, Mapping):
             raise TypeError("TrainingJob.parameters must be a mapping")
-        for name in ("request_id", "component", "previous_job_id"):
+        for name in ("request_id", "component", "previous_job_id", "train_from_artifact_id"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"TrainingJob.{name} must be a non-empty string or None")

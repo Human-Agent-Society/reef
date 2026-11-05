@@ -356,7 +356,14 @@ class Scenario:
             ):
                 return None
             self.refresh_requests()
-            return trainer.run_once(serving_artifact_id=serving)
+            component_trainer = self._committer.component_trainer(component)
+            # Only a job's submission needs the start, and it reads the commit history.
+            train_from_artifact_id = (
+                self.artifact_status()[component_trainer.component]["training_start"]
+                if component_trainer.trainer.job_due()
+                else None
+            )
+            return trainer.run_once(serving_artifact_id=serving, train_from_artifact_id=train_from_artifact_id)
 
     def pending_requests(self) -> int:
         """The queued requests that no trainer's commit consumed yet; 0 for a scenario without requests."""
