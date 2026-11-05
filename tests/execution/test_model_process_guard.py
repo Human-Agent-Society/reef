@@ -70,7 +70,8 @@ def test_a_missing_guard_retires_its_group_once_the_worker_is_gone(tmp_path, mon
     retired: list[tuple[int, float | None]] = []
     monkeypatch.setattr(process_guard, "_directory", lambda token: tmp_path)
     monkeypatch.setattr(process_guard, "_worker_alive", lambda group: group == 12345 and worker_alive)
-    monkeypatch.setattr(process_guard, "_retire_group", lambda group, started: retired.append((group, started)))
+    monkeypatch.setattr(process_guard, "_kill_group", lambda group, started: retired.append((group, started)))
+    monkeypatch.setattr(process_guard, "_group_alive", lambda group: False)
     # Ray kills an exiting worker's children, its guard among them, so the guard can be gone before it confirms.
     (tmp_path / "12345.json").write_text(json.dumps({"guard_pid": 99999999, "guard_started": 0}))
     if worker_alive:
