@@ -46,7 +46,7 @@ from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
-from reef.train import Trainer, TrainStepResult
+from reef.train import Trainer, TrainingCommit
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
@@ -451,7 +451,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
             )
         )
         make_samples(scenario)
-        result = scenario.prepare_training_step("harness")
+        result = scenario.next_commit("harness")
         assert result is not None
         scenario.commit(result, component="harness")
 
@@ -468,7 +468,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         # The job ended in submit: its checkpoint and its end follow, and consume nothing.
         checkpoint = None
         while scenario.trainer_for("harness").job_running:
-            polled = scenario.prepare_training_step("harness")
+            polled = scenario.next_commit("harness")
             checkpoint = polled if polled.artifact is not None else checkpoint
             scenario.commit(polled, component="harness")
         assert checkpoint is not None
@@ -652,7 +652,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         evolved = tmp_path / "evolved"
         evolved.mkdir()
         (evolved / "rules.md").write_text("evolved")
-        scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
+        scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_snapshot().revision
         source = service.harness_manifest(headers, form="source")
         assert source["files"] == {"rules.md": "evolved"}
@@ -842,7 +842,7 @@ def test_a_recipe_that_overrides_build_artifact_validator_still_admits_through_i
         evolved.mkdir()
         (evolved / "AGENTS.md").write_text("unvetted")
         with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
+            scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(evolved)))
         assert scenario.current_snapshot() == head
     composite = CompositeRecipe(components={"harness": flat, "config": _ConfigRecipe()})
     with pytest.raises(ValueError, match="validator refused the artifact"):
@@ -881,7 +881,7 @@ def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_vali
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.components.validate(Artifact.local(evolved))
         with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
+            scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(evolved)))
         assert scenario.current_snapshot() == head
     finally:
         dispatcher.close()
@@ -934,9 +934,9 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
         assert scenario is not None
         seed = scenario.current_snapshot()
         with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="notes")
+            scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="notes")
         assert scenario.current_snapshot() == seed
-        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="notes")
+        scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="notes")
         assert scenario.current_snapshot() != seed
 
 
@@ -963,9 +963,9 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_
         assert scenario is not None
         seed = scenario.current_snapshot()
         with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="harness")
+            scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="harness")
         assert scenario.current_snapshot() == seed
-        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
+        scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
         published = scenario.current_snapshot()
         assert published != seed
         # The root snapshot made the creation's artifacts, under its own release ID.
@@ -1031,9 +1031,9 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
     with closing(_serve(composite, tmp_path / "svc")) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "a", "one")), component="harness")
+        scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "a", "one")), component="harness")
         first = scenario.current_snapshot()
-        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "b", "two")), component="harness")
+        scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "b", "two")), component="harness")
         checks.count = 0
         dispatcher.activate("agent", scenario.repository.resolve(first).component("harness").artifact_id, "harness")
         served = scenario.repository.materialize(scenario.current_snapshot()).components
@@ -1043,7 +1043,7 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
         assert checks.count == 0
         head = scenario.current_snapshot()
         scenario.commit(
-            TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), changed_kinds=frozenset({"held"})),
+            TrainingCommit(state={}, artifact=_tree(tmp_path, "c", "three"), changed_kinds=frozenset({"held"})),
             component="harness",
         )
         assert scenario.current_snapshot() == head

@@ -620,7 +620,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     consumed: set[str] = set()
     # Submission, the checkpoint decision and the job's end are one commit each.
     for step in range(1, 4):
-        result = first.run_once()
+        result = first.advance_job()
         assert result is not None
         prepared = first.prepare_commit(result)
         first_session.commit_step(
@@ -636,7 +636,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
                 consumed_ids=prepared.consumed_ids,
             ),
         )
-        first.commit(prepared)
+        first.settle_commit(prepared)
         consumed |= prepared.consumed_ids
     assert JobLoopState.from_dict(first.state).finished_jobs == 1
     assert first_session.records.count("math") == 4
@@ -651,7 +651,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         make_samples(second)
         assert JobLoopState.from_dict(second.state).finished_jobs == 1
-        assert second.run_once() is not None
+        assert second.advance_job() is not None
         assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.submitted] == [
             "i1",
             "i2",

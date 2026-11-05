@@ -19,7 +19,7 @@ class SavedArtifactPublication:
     Values: ``artifact`` is the snapshot to publish, and ``component`` is None
     or the non-empty name of the snapshot component that ``artifact`` replaces;
     the committer carries the other components forward. Purpose:
-    ``TrainStepResult.publication`` makes the value, and the scenario committer
+    ``TrainingCommit.publication`` makes the value, and the scenario committer
     publishes it. The published version, not a runtime load ID, names it.
     """
 
@@ -34,7 +34,7 @@ ArtifactPublication = NoArtifactPublication | SavedArtifactPublication
 
 
 @dataclass(frozen=True)
-class TrainStepResult:
+class TrainingCommit:
     """One commit's worth of training: the trainer state to commit, its metrics and what it publishes.
 
     ``state`` is the trainer state the commit records, a mapping, or ``None``
