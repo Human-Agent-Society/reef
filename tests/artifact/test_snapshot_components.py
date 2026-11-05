@@ -38,7 +38,7 @@ from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer
-from reef.train.types import TrainStepResult
+from reef.train.types import TrainingCommit
 
 WEIGHTS = "weights"
 HARNESS = "harness"
@@ -267,7 +267,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
 
         # A harness step carries the weights forward and does not reload them.
         evolved = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "evolved"}))
-        scenario.commit(TrainStepResult(state={}, artifact=evolved, component=HARNESS))
+        scenario.commit(TrainingCommit(state={}, artifact=evolved, component=HARNESS))
         after_harness = scenario.repository.materialize(scenario.current_snapshot())
         assert after_harness.components is not None
         assert after_harness.components.entries[WEIGHTS].artifact_id == base_weights
@@ -281,7 +281,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         trained = Artifact.local(
             _tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
         )
-        scenario.commit(TrainStepResult(state={}, artifact=trained, component=WEIGHTS))
+        scenario.commit(TrainingCommit(state={}, artifact=trained, component=WEIGHTS))
         after_weights = scenario.repository.materialize(scenario.current_snapshot())
         assert after_weights.components is not None
         assert after_weights.components.entries[WEIGHTS].artifact_id == trained.artifact_id
@@ -300,12 +300,12 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         ]
 
         # A publication naming no component replaces the committing trainer's own; unknown names are refused.
-        scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "x"}))))
+        scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "x"}))))
         assert components.read_files(scenario.repository.materialize(scenario.current_snapshot())) == {
             "AGENTS.md": "x"
         }
         with pytest.raises(ReefError, match="serves no component"):
-            scenario.commit(TrainStepResult(state={}, artifact=evolved, component="config"))
+            scenario.commit(TrainingCommit(state={}, artifact=evolved, component="config"))
 
         # Activating the harness-only step's harness binds it to the weights served now: no weights reload.
         served_before = len(runtime.activated_ids)
@@ -343,7 +343,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         # A harness step held for review is made on the chain tip; activating its harness binds it to the weights
         # served now.
         held = Artifact.local(_tree(tmp_path / "h3", {"AGENTS.md": "held"}))
-        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
+        scenario.commit(TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
         assert components.read_files(scenario.repository.materialize(scenario.current_snapshot())) == {
             "AGENTS.md": "evolved"
         }
@@ -363,10 +363,10 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         held_weights = Artifact.local(
             _tree(tmp_path / "w3", {"adapter_config.json": '{"r": 32}'}), metadata={"runtime_load_id": "inc:3"}
         )
-        scenario.commit(TrainStepResult(state={}, artifact=held_weights, component=WEIGHTS, changed_kinds=HELD))
+        scenario.commit(TrainingCommit(state={}, artifact=held_weights, component=WEIGHTS, changed_kinds=HELD))
         held_weights_snapshot = scenario.store.history()[-1].snapshot.revision
         newest = Artifact.local(_tree(tmp_path / "h4", {"AGENTS.md": "newest"}))
-        scenario.commit(TrainStepResult(state={}, artifact=newest, component=HARNESS))
+        scenario.commit(TrainingCommit(state={}, artifact=newest, component=HARNESS))
         scenario.activate(held_weights.artifact_id, WEIGHTS)
         served = scenario.repository.materialize(scenario.current_snapshot())
         assert served.components is not None
@@ -400,13 +400,13 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
         with closing(factory.load_or_create("agent")) as scenario:
             initial = {name: state["active"] for name, state in scenario.artifact_status().items()}
             scenario.commit(
-                TrainStepResult(
+                TrainingCommit(
                     state={}, artifact=Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "one"})), component=HARNESS
                 )
             )
             after_first = {name: state["active"] for name, state in scenario.artifact_status().items()}
             scenario.commit(
-                TrainStepResult(
+                TrainingCommit(
                     state={},
                     artifact=Artifact.local(_tree(tmp_path / "w1", {"adapter_config.json": '{"r":8}'})),
                     component=WEIGHTS,
@@ -414,7 +414,7 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
             )
             weights_id = scenario.artifact_status()[WEIGHTS]["active"]
             scenario.commit(
-                TrainStepResult(
+                TrainingCommit(
                     state={},
                     artifact=Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "held"})),
                     component=HARNESS,
@@ -437,7 +437,7 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
             assert {name: state["training_start"] for name, state in scenario.artifact_status().items()} == starts
             assert {row["artifact_id"] for row in scenario.artifacts()} == artifacts
             assert scenario.repository.require_checkpoint_artifact() == checkpoint
-            scenario.commit(TrainStepResult(state={}))
+            scenario.commit(TrainingCommit(state={}))
             active = scenario.current_snapshot()
             assert active.selection_view
 
@@ -461,7 +461,7 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
             # A later held checkpoint stores the current selection independently of the operation history.
             monkeypatch.setattr(recovered.repository.backend, "publish", publish)
             recovered.commit(
-                TrainStepResult(
+                TrainingCommit(
                     state={},
                     artifact=Artifact.local(_tree(tmp_path / "h3", {"AGENTS.md": "also held"})),
                     component=HARNESS,
@@ -565,7 +565,7 @@ def test_restoring_a_selection_does_not_readmit_unchanged_component_artifacts(tm
         with closing(factory.load_or_create("agent")) as scenario:
             for step in (1, 2):
                 scenario.commit(
-                    TrainStepResult(
+                    TrainingCommit(
                         state={},
                         component=HARNESS,
                         artifact=Artifact.local(_tree(tmp_path / f"h{step}", {"AGENTS.md": f"harness {step}"})),
@@ -589,7 +589,7 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
         )
         with closing(factory.load_or_create("agent")) as scenario:
             scenario.commit(
-                TrainStepResult(
+                TrainingCommit(
                     state={},
                     artifact=Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"})),
                     component=HARNESS,
@@ -635,11 +635,11 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
         assert components.files_component is not None
         creation = scenario.repository.materialize(scenario.current_snapshot())
         held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
-        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
+        scenario.commit(TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
         later = Artifact.local(
             _tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
         )
-        scenario.commit(TrainStepResult(state={}, artifact=later, component=WEIGHTS))
+        scenario.commit(TrainingCommit(state={}, artifact=later, component=WEIGHTS))
         assert creation.local_path is not None
         shutil.rmtree(creation.local_path)
         scenario.activate(held.artifact_id, HARNESS)
@@ -666,7 +666,7 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         scenario.commit(
-            TrainStepResult(
+            TrainingCommit(
                 state={}, artifact=Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "one"})), component=HARNESS
             )
         )
@@ -674,8 +674,8 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         weights = Artifact.local(
             _tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
         )
-        scenario.commit(TrainStepResult(state={}, artifact=weights, component=WEIGHTS))
-        scenario.commit(TrainStepResult(state={}, metrics={"selected": False}), component=HARNESS)
+        scenario.commit(TrainingCommit(state={}, artifact=weights, component=WEIGHTS))
+        scenario.commit(TrainingCommit(state={}, metrics={"selected": False}), component=HARNESS)
         steps = scenario.scenario_step
         # The first harness artifact serves already: activating it changes nothing.
         assert scenario.activate(first_harness_id, HARNESS).artifact_id == first_harness_id
@@ -703,7 +703,7 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
-        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
+        scenario.commit(TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
         served = scenario.current_snapshot()
         before = {path for path in staged_root.rglob("*") if path.is_dir()}
 

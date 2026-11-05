@@ -52,9 +52,9 @@ def commit_running_job(trainer):
     """Commit the end of the job whose submission ``trainer`` committed, when one runs: a ``RecordingComponent`` job
     ends in ``submit``, so its end is the trainer's next result."""
     while trainer.job_running:
-        ended = trainer.run_once()
+        ended = trainer.advance_job()
         assert ended is not None, "the running job has its end to commit"
-        trainer.commit(trainer.prepare_commit(ended))
+        trainer.settle_commit(trainer.prepare_commit(ended))
 
 
 def inference(receipt, scenario="s"):
@@ -230,7 +230,7 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     )
     # Stored samples start no job in manual, however many there are, and the pipeline keeps none of them in memory.
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert not trainer.job_data_ready()
     assert not trainer.pipeline.held
     held = [source_record_id(stored.sample) for stored in trainer.pipeline.store.page()]
@@ -239,7 +239,7 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     chosen = held[-2:]
     file(training_requests, "request-1", sample_ids_of(trainer.pipeline, *chosen))
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None
     batch = backend.batches[0]
     assert batch.request_id == "request-1"
@@ -249,16 +249,16 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     # The job data consumes the samples it takes; the samples that the client did not choose wait.
     assert len({item for item in prepared.consumed_ids if item.startswith(CONSUMED_SAMPLE_PREFIX)}) == len(chosen)
     assert prepared.metrics["training_request"]["text"] == "request-1"
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     assert not trainer.pipeline.held
     assert records.get("s", "turn-1") is not None
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     # A retry of the request returns its queue item and does not train again.
     assert file(training_requests, "request-1", sample_ids_of(trainer.pipeline, *chosen)).final
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
 
 
 def test_auto_keeps_recipe_batching(records, build):
@@ -266,10 +266,10 @@ def test_auto_keeps_recipe_batching(records, build):
     trainer = build(backend, mode="auto", job_samples=2)
     records.append(inference("a"))
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     records.append(inference("b"))
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     assert [source_record_id(sample) for sample in backend.batches[0].samples] == ["a", "b"]
     assert backend.batches[0].request_id is None
 
@@ -281,9 +281,9 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     records.append(inference("a"))
     file(training_requests, "committed")
     make_samples(first)
-    result = first.run_once()
+    result = first.advance_job()
     prepared = first.prepare_commit(result)
-    first.commit(prepared)
+    first.settle_commit(prepared)
     # Simulate a crash after the commit history landed but before compaction.
     file(training_requests, "pending")
     first.close()
@@ -293,7 +293,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     recovered.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
     recovered.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
     make_samples(recovered)
-    assert recovered.run_once() is not None
+    assert recovered.advance_job() is not None
     assert [batch.request_id for batch in backend.batches] == ["committed", "pending"]
     recovered.close()
     records.close()
@@ -372,7 +372,7 @@ def test_manual_runs_the_request_of_a_stage_that_reads_requests(records, build, 
     trainer = build(backend, request_pipeline)
     file(training_requests, "change")
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     # The job of the request has the request's data ID; with nothing held it has no samples.
     assert backend.batches[0].data_id == "s:request:change"
     assert backend.batches[0].request_id == "change"
@@ -491,15 +491,15 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
     trainer = build(backend, trajectory_pipeline, mode=mode, job_samples=2)
     records.append(inference("first"))
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     records.append(inference("second"))
     if mode == "manual":
         # The job samples are held, and manual still waits for a request.
         make_samples(trainer)
-        assert trainer.run_once() is None
+        assert trainer.advance_job() is None
         file(training_requests, "use-the-trajectory", sample_ids_of(trainer.pipeline, "first", "second"))
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     # The same hook shapes the job data of both modes.
     assert [source_record_id(sample) for sample in backend.batches[0].samples] == ["first", "second"]
     assert (backend.batches[0].request_id is None) == (mode == "auto")
@@ -511,10 +511,10 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
         {"use-the-trajectory"} if mode == "manual" else set()
     )
     assert prepared.consumed_ids == frozenset(expected)
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
 
 
 def test_factory_cannot_silently_change_the_processor_mode(build):
@@ -530,7 +530,7 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, bu
     else:
         file(training_requests, "first")
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     original = trainer.pending_job_data
     target = "manual" if mode == "auto" else "auto"
     processor = trainer.pipeline
@@ -540,14 +540,14 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, bu
     assert trainer.pending_job_data is original
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == ({"first", "sample:s.first:0"} if mode == "auto" else {"first"})
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     if target == "manual":
         file(training_requests, "next")
     else:
         records.append(inference("next"))
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     following = trainer.pending_job_data
     assert (following.request is not None) == (target == "manual")
 
@@ -557,31 +557,31 @@ def test_switch_preserves_incomplete_auto_batch_and_unread_manual_requests(recor
     trainer = build(backend, mode="auto", job_samples=2)
     records.append(inference("a"))
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     trainer.set_training_mode("manual")
     file(training_requests, "change")
     # Change back before the accepted request has been read.
     trainer.set_training_mode("auto")
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     records.append(inference("b"))
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert [source_record_id(item) for item in backend.batches[-1].samples] == ["a", "b"]
-    trainer.commit(trainer.prepare_commit(result))
+    trainer.settle_commit(trainer.prepare_commit(result))
     commit_running_job(trainer)
     # The automatic job did not consume the request: it stays queued for manual.
     make_samples(trainer)
     assert not training_requests.get("change").final
     trainer.set_training_mode("manual")
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert backend.batches[-1].request_id == "change"
-    trainer.commit(trainer.prepare_commit(result))
+    trainer.settle_commit(trainer.prepare_commit(result))
     commit_running_job(trainer)
     trainer.set_training_mode("auto")
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
 
 
 @pytest.mark.parametrize("takes_requests", [False, True], ids=["record-only", "harness"])
@@ -1149,10 +1149,10 @@ def test_a_running_jobs_step_reads_no_requests_and_takes_no_commit_lock(tmp_path
         raise AssertionError("a running job's step reads no requests")
 
     monkeypatch.setattr(type(trainer), "job_running", property(lambda self: True))
-    monkeypatch.setattr(trainer, "run_once", poll)
+    monkeypatch.setattr(trainer, "advance_job", poll)
     monkeypatch.setattr(scenario, "refresh_requests", read_requests)
     with scenario._committer.lock:
-        step = threading.Thread(target=scenario.prepare_training_step, daemon=True)
+        step = threading.Thread(target=scenario.next_commit, daemon=True)
         step.start()
         assert polled.wait(10), "the step waited for the commit lock"
     step.join(10)
@@ -1170,25 +1170,25 @@ def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp
     )
     failure(records, "a")
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     file(training_requests, "one", sample_ids_of(trainer.pipeline, "a"))
     with pytest.raises(RuntimeError, match="submit failed"):
         make_samples(trainer)
-        trainer.run_once()
+        trainer.advance_job()
     # What the dispatcher does when a request's step raises.
     assert trainer.fail_pending_request("RuntimeError: submit failed")
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result.metrics["skipped"] == "request failed"
     assert result.metrics["error"] == "RuntimeError: submit failed"
     prepared = trainer.prepare_commit(result)
     # The skip consumes the request and the records whose sample is stored; it trains no sample.
     assert prepared.consumed_ids == frozenset({"one", "a", "report-a"})
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     # The skipped request trained no sample, so the next request can name it.
     file(training_requests, "two", sample_ids_of(trainer.pipeline, "a"))
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     assert component.submit_texts == ["one", "two"]
     assert [source_record_id(sample) for sample in read_job_data(component.submitted[-1].data_dir).samples] == ["a"]
     trainer.close()
@@ -1215,7 +1215,7 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
     assert [row["training_request"]["text"] for row in rows] == ["one", "two"]
     assert [row["skipped"] for row in rows] == [UNCHANGED, UNCHANGED]
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
 
     # An automatic step past the budget skips; the two requests above ran past it.
     backend = job_backend(trainer)
@@ -1251,12 +1251,12 @@ def test_manual_traffic_is_available_to_auto_without_a_replay(records, build, pr
                 )
             )
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     original = trainer.pipeline
     offset = trainer.data_offset
     trainer.set_training_mode("auto")
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     assert trainer.pipeline is original
     assert trainer.data_offset == offset
     assert [source_record_id(sample) for sample in backend.batches[-1].samples] == ["a", "b"]
@@ -1280,10 +1280,10 @@ def test_manual_runs_a_harness_request_alone_when_no_units_are_held(records, bui
     backend = RecordingComponent()
     trainer = build(backend, processor, job_samples=2)
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     file(training_requests, "alone")
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None
     batch = backend.batches[0]
     assert batch.data_id == "s:request:alone"
@@ -1292,12 +1292,12 @@ def test_manual_runs_a_harness_request_alone_when_no_units_are_held(records, bui
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == frozenset({"alone"})
     assert prepared.metrics["training_request"]["id"] == "alone"
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     make_samples(trainer)
     assert training_requests.get("alone").final
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert trainer.pipeline.training_mode == "manual"
 
 
@@ -1323,10 +1323,10 @@ def test_manual_gives_each_request_the_failures_that_it_names(records, build, tr
 
     def step():
         make_samples(trainer)
-        result = trainer.run_once()
+        result = trainer.advance_job()
         if result is None:
             return None
-        trainer.commit(trainer.prepare_commit(result))
+        trainer.settle_commit(trainer.prepare_commit(result))
         commit_running_job(trainer)
         batch = backend.batches[-1]
         return batch.request_id, [source_record_id(sample) for sample in batch.samples]
