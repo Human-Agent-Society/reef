@@ -299,7 +299,6 @@ class RequestService:
         tree = merge.tree
         answer = {
             "parent_artifact_id": active_manifest["artifact_id"],
-            "parent_release_id": active_manifest["release_id"],
             "merged": base_tree != active,
             "files": sorted(tree.files),
             "ignored": list(imported.ignored),
@@ -308,7 +307,6 @@ class RequestService:
             return {
                 **answer,
                 "artifact_id": active_manifest["artifact_id"],
-                "release_id": active_manifest["release_id"],
                 "changed": False,
             }
         validation = validate_tree(tree, descriptor)
@@ -341,7 +339,6 @@ class RequestService:
         return {
             **answer,
             "artifact_id": manifest["artifact_id"],
-            "release_id": manifest["release_id"],
             "changed": True,
         }
 
@@ -424,9 +421,6 @@ class RequestService:
         manifest = {
             "artifact_id": artifact_id,
             "parent_artifact_id": None if row is None else row["parent_artifact_id"],
-            # These fields keep installed reef-client versions working during migration.
-            "release_id": artifact.ref.revision,
-            "parent_release_id": artifact.ref.parent_revision,
             "files": dict(files),
             "evaluation": None if row is None or row["operation"] != "training" else row.get("metrics"),
             # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
