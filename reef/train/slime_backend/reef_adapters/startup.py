@@ -177,6 +177,10 @@ def stamp_loss_family_reference(args: SlimeArguments, reference: str) -> None:
         args.loss_family_ref = dotted
 
 
+#: The credentials of Harbor's cloud task environments, which Ray's actors do not inherit from this process.
+TASK_ENVIRONMENT_CREDENTIALS = ("E2B_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
+
+
 def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Ray job ``runtime_env`` for the training workers: the CUDA/NCCL defaults and this process's ``PYTHONPATH``.
 
@@ -184,7 +188,9 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     service. The workers get ``CUDA_DEVICE_MAX_CONNECTIONS=1`` and
     ``NCCL_NVLS_ENABLE=0`` unless this process sets them, and the service's
     ``PYTHONPATH``: cookbook loss families resolve inside the workers, so
-    without it the first actor fails to import ``recipes``.
+    without it the first actor fails to import ``recipes``. A task job's
+    Harbor rollouts run in Slime's rollout manager, an actor too, so it gets the
+    credentials of a cloud task environment that this process sets.
     """
     source = os.environ if environ is None else environ
     env_vars = {
@@ -194,6 +200,7 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     pythonpath = source.get("PYTHONPATH", "").strip()
     if pythonpath:
         env_vars["PYTHONPATH"] = pythonpath
+    env_vars.update({name: source[name] for name in TASK_ENVIRONMENT_CREDENTIALS if source.get(name)})
     return {"env_vars": env_vars}
 
 
