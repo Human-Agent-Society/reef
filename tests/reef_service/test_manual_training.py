@@ -1087,6 +1087,52 @@ def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_pa
     assert job["experiment"] is None
 
 
+def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatcher):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    for receipt in ("a", "b", "c"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    component_name = scenario.trainers[0].component
+
+    def start():
+        return scenario.artifact_status()[component_name]["training_start"]
+
+    creation = start()
+
+    def finished(count):
+        return _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == count)
+
+    file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
+    assert finished(1)
+    checkpoint = start()
+    assert checkpoint != creation
+    scenario.train_from(creation, component_name)
+    file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
+    assert finished(2)
+    third_start = start()
+    file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
+    assert finished(3)
+
+    # The first job starts at the creation artifact, the second where train-from set it, the third at the second's
+    # checkpoint.
+    assert [job.train_from_artifact_id for job in component.submitted] == [creation, creation, third_start]
+
+    async def listing():
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            return (await (await client.get("/reef/scenarios/s/jobs")).json())["jobs"]
+
+    assert [job["train_from_artifact_id"] for job in asyncio.run(listing())] == [creation, creation, third_start]
+
+
 def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp_path, records, training_requests):
     component = SubmitRaisesForRequestOne(tmp_path / "checkpoints")
     trainer = Trainer.build(
