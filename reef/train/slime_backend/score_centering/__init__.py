@@ -34,9 +34,9 @@ log-prob gap and the same sample weights and effective loss masks.
 
 The sampler's log-probs are those at the point the trainer reads (after
 temperature, before top-k, top-p and min-p filters; see the configuration
-reference). Only the task rollouts of a training component record them, at
-least ``--score-centering-top-k`` per position: serving records no tensors,
-so a sample that serving recorded cannot train with score centering.
+reference). A sample must carry them, at least ``--score-centering-top-k`` per
+position, from a method that provides it: serving records no tensors, and a task
+job on Slime trains the ``slime`` family, which uses Slime's own score centering.
 """
 
 from __future__ import annotations
