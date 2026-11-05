@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 #: The queue of training requests.
 TRAINING_REQUESTS_QUEUE = "training_requests"
+#: The ``WorkItem.metadata`` key that holds what the failed step of a request said.
+REQUEST_FAILURE_KEY = "failure"
 
 
 def training_request_kind(scenario: str) -> str:
@@ -109,6 +111,21 @@ class ScenarioTrainingRequests:
             if not item.final
         )
 
+    def mark_failed(self, request_id: str, error: str) -> None:
+        """Store that the step of the request ``request_id`` failed with ``error``, so that a reload or a restart
+        still consumes the request with a skip row."""
+        self.queue.set_metadata(TRAINING_REQUESTS_QUEUE, request_id, REQUEST_FAILURE_KEY, error)
+
+    def failures(self) -> dict[str, str]:
+        """What the failed step of each queued request said, by ID; a request whose step did not fail has none."""
+        return {
+            item.id: str(item.metadata[REQUEST_FAILURE_KEY])
+            for item in self.queue.items(
+                TRAINING_REQUESTS_QUEUE, scenario=self.scenario, kind=training_request_kind(self.scenario)
+            )
+            if not item.final and REQUEST_FAILURE_KEY in item.metadata
+        }
+
     def settle(self, consumed: Iterable[str]) -> None:
         """Finish the items of the queued requests whose IDs are in ``consumed``, oldest first.
 
@@ -139,8 +156,9 @@ class ScenarioTrainingRequests:
             consumed |= trainer.consumed_among(ids)
         self.settle(consumed)
         pending = tuple(request for request in queued if request.id not in consumed)
+        failures = self.failures()
         for trainer in trainers:
-            trainer.queue_requests(pending)
+            trainer.queue_requests(pending, failures)
 
 
 __all__ = ["TRAINING_REQUESTS_QUEUE", "ScenarioTrainingRequests", "TrainingRequestQueue", "training_request_kind"]

@@ -23,7 +23,7 @@ builds a component from its config. ``slime_backend.component`` and
 them. Each component
 saves checkpoints, and an inference runtime serves the published ones:
 Tinker's sampler (``reef.inference.tinker``) reads the checkpoint manifest of
-a release, and ``reef.inference.serving`` loads a release's weight files.
+a snapshot, and ``reef.inference.serving`` loads a snapshot's weight files.
 Tinker SDK imports stay inside its client adapter, and method loss policy
 remains in the recipe package.
 

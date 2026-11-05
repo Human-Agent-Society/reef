@@ -132,7 +132,7 @@ def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
     processor.admit_reports_of(any_component_report((TTTDGroupedRolloutReport, ScoredRolloutReport)))
     processor.push(report("r1", "i1"))  # the harness component's plain scored report
     assert processor.assembled == []
-    assert "r1" in processor.releasable_record_ids()
+    assert "r1" in processor.record2sample.releasable_record_ids()
     grid = AgentRecord.create(
         scenario="math",
         request_type=RequestType.REPORT,
@@ -198,7 +198,7 @@ def test_inferences_wait_for_reports_and_batch_counts_completed_samples() -> Non
     assert not processor.ready(2)
     processor.push(report("r2", "i2"))
     assert reports(processor.build_job_data(2)) == ("r1", "r2")
-    assert "i3" not in processor.releasable_record_ids()
+    assert "i3" not in processor.record2sample.releasable_record_ids()
 
 
 def test_report_before_inference_fails_without_queuing_it() -> None:
@@ -219,7 +219,7 @@ def test_invalid_references_do_not_create_a_sample(references: tuple[str, ...]) 
     with pytest.raises(ReportValidationError):
         processor.push(report("r1", *references))
     assert not processor.ready(1)
-    assert processor.releasable_record_ids().isdisjoint({"i1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.parametrize("request_type", [RequestType.INFERENCE, RequestType.REPORT])
@@ -256,7 +256,7 @@ def test_assembly_failure_protects_inputs_and_does_not_acknowledge_a_retry() -> 
     for _ in range(2):
         with pytest.raises(ValueError, match="broken training data"):
             processor.push(report("r1", "i1"))
-    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1", "r1"})
     assert not processor.ready(1)
     processor.fail_assembly = False
     processor.push(report("r1", "i1"))
@@ -276,7 +276,7 @@ def test_duplicate_reports_and_batch_polls_do_not_assemble_twice() -> None:
     batch = processor.build_job_data(1)
     assert reports(batch) == ("r1",)
     assert processor.acknowledge(batch.data_id) == {"sample:math.r1:0"}
-    assert {"i1", "r1"} <= processor.releasable_record_ids()
+    assert {"i1", "r1"} <= processor.record2sample.releasable_record_ids()
     processor.push(report("late", "i1"))
     assert not processor.ready(1)
     assert processor.assembled == ["r1"]
@@ -288,15 +288,15 @@ def test_a_second_report_on_the_inference_of_a_live_report_ends_without_training
     processor.push(report("r1", "i1"))
     processor.push(report("r2", "i1"))
     # r2 ends at once. The live r1, which waits for its group, keeps i1.
-    assert processor.releasable_record_ids() == {"r2"}
+    assert processor.record2sample.releasable_record_ids() == {"r2"}
     processor.push(inference("i3"))
     processor.push(report("r3", "i3"))
     assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:math.r1:0", "sample:math.r3:0"}
     assert processor.assembled == ["r1", "r3"]
     assert not processor.ready(1)
-    assert processor.releasable_record_ids() == {"i1", "r1", "r2", "i3", "r3"}
-    processor.release_records(frozenset({"i1", "r1", "r2", "i3", "r3"}))
-    assert processor.releasable_record_ids() == set()
+    assert processor.record2sample.releasable_record_ids() == {"i1", "r1", "r2", "i3", "r3"}
+    processor.record2sample.release_records(frozenset({"i1", "r1", "r2", "i3", "r3"}))
+    assert processor.record2sample.releasable_record_ids() == set()
 
 
 def test_group_waits_for_complete_samples() -> None:
@@ -315,7 +315,7 @@ def test_group_discard_releases_all_members_and_refuses_later_members() -> None:
         processor.push(inference(f"i{index}"))
         processor.push(report(f"r{index}", f"i{index}"))
     assert not processor.ready(1)
-    assert processor.releasable_record_ids() == {"i1", "i2", "i3", "r1", "r2", "r3"}
+    assert processor.record2sample.releasable_record_ids() == {"i1", "i2", "i3", "r1", "r2", "r3"}
 
 
 def test_slot_retry_preserves_first_report() -> None:
@@ -325,7 +325,7 @@ def test_slot_retry_preserves_first_report() -> None:
         record = report(f"r-{record_id}", record_id)
         processor.push(replace(record, payload={**record.payload, "metadata": {"slot": slot}}))
     assert reports(processor.build_job_data(1)) == ("r-first", "r-second")
-    assert {"r-retry", "retry"} <= processor.releasable_record_ids()
+    assert {"r-retry", "retry"} <= processor.record2sample.releasable_record_ids()
 
 
 def test_groups_and_singleton_samples_train_together_in_store_order() -> None:
@@ -355,15 +355,15 @@ def test_group_arrivals_after_reservation_are_left_for_the_next_batch() -> None:
     processor.push(report("r3", "i3"))
     assert processor.build_job_data(1) is first
     assert processor.acknowledge(first.data_id) == {"sample:math.r1:0", "sample:math.r2:0"}
-    assert {"i1", "i2", "r1", "r2"} <= processor.releasable_record_ids()
-    assert processor.releasable_record_ids().isdisjoint({"i3", "r3"})
+    assert {"i1", "i2", "r1", "r2"} <= processor.record2sample.releasable_record_ids()
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i3", "r3"})
     assert not processor.ready(1)
     processor.push(inference("i4"))
     processor.push(report("r4", "i4"))
     second = processor.build_job_data(1)
     assert reports(second) == ("r3", "r4")
     assert processor.acknowledge(second.data_id) == {"sample:math.r3:0", "sample:math.r4:0"}
-    assert {"i3", "i4", "r3", "r4"} <= processor.releasable_record_ids()
+    assert {"i3", "i4", "r3", "r4"} <= processor.record2sample.releasable_record_ids()
 
 
 def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> None:
@@ -380,7 +380,7 @@ def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> N
     assert reports(batch) == ("r1",)
     # The omitted sample is consumed with the job data all the same.
     assert processor.acknowledge(batch.data_id) == {"sample:math.r1:0", "sample:math.r2:0"}
-    assert {"i1", "i2", "r1", "r2"} <= processor.releasable_record_ids()
+    assert {"i1", "i2", "r1", "r2"} <= processor.record2sample.releasable_record_ids()
     assert not processor.ready(1)
 
 
@@ -394,8 +394,8 @@ def test_untyped_assembly_output_fails_and_keeps_report_retryable() -> None:
     processor.fail_assembly = True
     with pytest.raises(TypeError, match="Sample"):
         processor.push(report("r1", "i1"))
-    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1", "r1"})
     processor.fail_assembly = False
     processor.push(report("r1", "i1"))
     assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:math.r1:0"}
-    assert {"i1", "r1"} <= processor.releasable_record_ids()
+    assert {"i1", "r1"} <= processor.record2sample.releasable_record_ids()

@@ -6,7 +6,7 @@ artifact item of the scenario's owner, whose ``source_uri`` names the directory 
 stores a copy, or a reference to a revision that cannot change, in a temporary directory under
 ``ArtifactImports.work_dir`` before it publishes it (``Dispatcher.import_artifact``). A new scenario can also start
 from an artifact item (RFC #1062, RFC #1070): ``ArtifactImports.create_from_item`` reads the item, and the scenario
-factory checks it and writes it as the new scenario's root release. No aiohttp types appear here.
+factory checks it and writes it as the new scenario's root snapshot. No aiohttp types appear here.
 ``reef.service.routes.artifact_imports`` and the create route of ``reef.service.routes.scenarios`` adapt it to HTTP.
 """
 
@@ -84,7 +84,7 @@ class ArtifactImports:
     def create_from_item(
         self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str
     ) -> tuple[Scenario, bool]:
-        """The scenario ``scenario``, and True exactly when this call created it: a new scenario's root release holds
+        """The scenario ``scenario``, and True exactly when this call created it: a new scenario's root snapshot holds
         the artifact item ``item_id`` of ``owner`` in ``component`` (``Dispatcher.create_scenario``).
 
         The item is read and its files opened first, so an item that cannot be read registers nothing. Raise as

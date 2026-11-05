@@ -30,7 +30,7 @@ The map, one subpackage per job:
     the loopback gateway an agent process reaches its model and its tools
     through, which meters each call.
 ``delivery``
-    the file tree that serves a release to a client: its source tree rendered
+    the file tree that serves a snapshot to a client: its source tree rendered
     for the scenario's adapter.
 
 This package depends on core values, runtime and artifact contracts, and

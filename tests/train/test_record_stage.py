@@ -232,7 +232,7 @@ def test_the_pipeline_keeps_requests_and_sends_records_through_its_stage() -> No
     )
     assert processor.stage.assembled == ["i1"]
     assert len(processor.training_requests) == 1
-    assert processor.releasable_record_ids() == {"drop-1"}
+    assert processor.record2sample.releasable_record_ids() == {"drop-1"}
 
 
 @pytest.mark.unit
@@ -268,8 +268,10 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == {"i1", "r1", "drop-1", consumed_sample_id(stage_item_id("s", "r1:0"))}
     trainer.commit(prepared)
-    assert not trainer.pipeline.releasable_record_ids()
     assert "drop-1" in trainer.consumed_record_ids
+    assert "drop-1" in trainer.pipeline.record2sample.releasable_record_ids(), "the commit does not reach the stage"
+    make_samples(trainer)
+    assert not trainer.pipeline.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -292,7 +294,7 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     processor.push(slotted("r3", "i3", "b"))
     batch = processor.build_job_data(1)
     assert task_names(batch) == ["r1", "r3"]
-    assert {"r2", "i2"} <= processor.releasable_record_ids()
+    assert {"r2", "i2"} <= processor.record2sample.releasable_record_ids()
     assert "r2" not in processor.record2sample.set_samples
 
 
@@ -304,7 +306,7 @@ def test_a_failed_assembly_keeps_the_report_and_leaves_its_slot_free() -> None:
     processor.pair_tasks.fail_assembly = True
     with pytest.raises(ValueError, match="broken training data"):
         processor.push(slotted("r1", "i1", "a"))
-    assert not processor.releasable_record_ids() & {"r1", "i1"}
+    assert not processor.record2sample.releasable_record_ids() & {"r1", "i1"}
     processor.pair_tasks.fail_assembly = False
     processor.push(slotted("r1", "i1", "a"))
     processor.push(slotted("r2", "i2", "b"))
@@ -316,7 +318,7 @@ def test_a_skipped_report_is_released_and_never_batched() -> None:
     processor = PairPipeline()
     processor.push(inference("i1"))
     processor.push(slotted("skip-1", "i1", "a"))
-    assert {"skip-1", "i1"} <= processor.releasable_record_ids()
+    assert {"skip-1", "i1"} <= processor.record2sample.releasable_record_ids()
     assert not processor.ready(1)
 
 
@@ -330,7 +332,7 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     batch = processor.build_job_data(1)
     assert task_names(batch) == ["r2", "r1"]
     # The ready group's records are consumed when its samples are stored; the job data consumes the samples.
-    assert {"i1", "i2", "r1", "r2"} <= processor.releasable_record_ids()
+    assert {"i1", "i2", "r1", "r2"} <= processor.record2sample.releasable_record_ids()
     assert processor.acknowledge(batch.data_id) == {
         consumed_sample_id(stage_item_id("s", "r2:0")),
         consumed_sample_id(stage_item_id("s", "r1:0")),
@@ -350,7 +352,7 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
     batch = processor.build_job_data(1)
     assert [item.source_agent_record_ids for item in batch.samples] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
-    assert {"r1", "i1"} <= processor.releasable_record_ids()
+    assert {"r1", "i1"} <= processor.record2sample.releasable_record_ids()
     assert "r1" not in processor.record2sample.set_samples
 
 
@@ -361,7 +363,7 @@ def test_the_default_pipeline_makes_no_sample_and_no_batch() -> None:
     processor.push(inference("i1"))
     processor.push(report("r1", "i1"))
     assert processor.record2sample.take_ready_units() == ()
-    assert not processor.ready(1) and not processor.releasable_record_ids()
+    assert not processor.ready(1) and not processor.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -372,7 +374,7 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
     assert not processor.ready(1) and processor.background_jobs_running()
     processor.later_tasks.finish("i2", SampleResult.skipped())
     processor.produce()
-    assert not processor.ready(1) and processor.releasable_record_ids() == {"i2"}
+    assert not processor.ready(1) and processor.record2sample.releasable_record_ids() == {"i2"}
     processor.later_tasks.finish("i1", SampleResult.ready((named_task("t1"),)))
     processor.produce()
     assert processor.ready(1), "the result alone makes a batch, without another record"
@@ -455,7 +457,7 @@ def test_uploaded_trajectories_train_in_store_order_and_count_as_one_sample_each
     batch = processor.build_job_data(1)
     assert batch.samples == (TRAJECTORY,)
     assert processor.acknowledge(batch.data_id) == {"sample:t3"}
-    assert "i1" in processor.releasable_record_ids()
+    assert "i1" in processor.record2sample.releasable_record_ids()
     assert not processor.ready(1)
 
 
@@ -555,7 +557,7 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     # Both units are stored and their records consumed; the buffer takes one sample, and the other waits.
     assert processor.status()["ready_samples"] == 1
     assert len(processor.store.page()) == 2
-    assert processor.releasable_record_ids() == {"i1", "i2"}
+    assert processor.record2sample.releasable_record_ids() == {"i1", "i2"}
     # Trajectories without a producing artifact become stale once the served artifact is known.
     processor.observe_serving_artifact_id("e:1")
     processor.advance()
@@ -621,7 +623,7 @@ def test_samples_beyond_the_buffer_size_wait_for_the_next_job_data() -> None:
     processor.advance()
     # The reserved job data stays, nothing is dropped, and the buffer holds buffer_size samples of one kind.
     assert processor.build_job_data(1) is reserved
-    assert {"i1", "i2", "i3", "i4", "i5"} <= processor.releasable_record_ids()
+    assert {"i1", "i2", "i3", "i4", "i5"} <= processor.record2sample.releasable_record_ids()
     assert processor.status()["ready_samples"] == 2
     assert processor.acknowledge(reserved.data_id) == {"sample:s.i1:0"}
     # Each later job data takes the next buffer_size samples in store order; the uploads wait for their own kind.
@@ -772,7 +774,8 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
         consumed_sample_id(stage_item_id("s", "valid-report:0")),
     }
     trainer.commit(prepared)
-    assert not trainer.pipeline.releasable_record_ids()
+    make_samples(trainer)
+    assert not trainer.pipeline.record2sample.releasable_record_ids()
 
     restored = Trainer.build(
         "s",

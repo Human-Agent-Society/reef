@@ -50,7 +50,9 @@ The record-to-sample stage never calls the pipeline. When the samples service
 asks the pipeline for new samples (``produce``), the pipeline first calls the
 stage's ``advance(now)``. The stage then takes in background work that ended,
 such as judgments, and forms the sets that are due, such as the trajectories
-that went idle.
+that went idle. The samples service runs when the scenario accepts records and
+after each commit: a commit can end a job, and the job's end can make background
+work due, such as the next round of generated tasks.
 
 The recipe names a default class for each stage in its ``pipeline_spec()``.
 The deployment's ``pipeline`` section gives each stage its config and can name
@@ -186,11 +188,12 @@ nothing:
   changes nothing, so a stage may return a sample again after a restart. A
   stored sample trains like every other sample.
 - ``job_ended(outcome)``: a training job ended, and the commit of its end is
-  durable. ``outcome`` is a ``JobOutcome`` (``reef.core.job_data``): the job
+  durable. The samples service calls it, also when control runs in another
+  process. ``outcome`` is a ``JobOutcome`` (``reef.core.job_data``): the job
   ID, the component name, ``event`` (``finished`` or ``failed``), the job's
   ``metrics``, and ``error``, which is set exactly when the job failed. A
   trainer that starts with no running job calls it again for the last job
-  that ended, before any other call to a new stage.
+  that ended, before it reads a record.
 
 The generated-task recipe trains its saved tasks this way (see `Task
 generation contract <#task-generation-contract>`__).
@@ -204,7 +207,8 @@ None. The samples service then runs the next selection at that time, without a
 new record. ``close()`` closes both stages.
 ``releasable_record_ids()`` returns
 the completed records that no held set references, and
-``release_records(ids)`` frees their memory after a successful commit. New
+``release_records(ids)`` frees their memory once a commit names them. The
+samples service calls both, and it reads the commits from the commit history. New
 commits retain the stored bodies; consumption progress prevents retraining
 on restart. Storage can independently evict any body under capacity pressure,
 with warnings and durable loss totals. In a scenario with one trainer per
@@ -405,10 +409,15 @@ the staleness check. It places reports in their groups, and it ends units and
 records that can no longer train.
 
 A record that the stage ends, for example a report in a taken slot, appears
-in ``releasable_record_ids()``. The next commit
-names it, so the record never trains after a restart. The default bookkeeping
-keeps ended records until their release; a stage with its own record
-lifecycle overrides the lifecycle methods.
+in ``releasable_record_ids()``. The samples service stores its ID, and the
+next commit names it, so the record never trains after a restart. A restart
+before that commit reads the record again, so the stage makes the same decision
+again. The default bookkeeping keeps ended records until their release; a stage
+with its own record lifecycle overrides the lifecycle methods.
+
+Only the samples service feeds a stage. Control asks only ``is_stale`` and
+``uploaded_sample``, so these methods must depend only on their arguments and
+the stage's config.
 
 Staleness
 ~~~~~~~~~
@@ -436,14 +445,13 @@ The check has these steps:
    payload in ``extra.reef.records``, and ``TrajectorySample.artifact_id``
    reads the ``artifact_id`` of its last call. A task rollout of a training
    component names its artifact in ``training.artifact_id`` instead.
-2. When the scenario reserves job data, it gives the pipeline the
-   ``artifact_id`` of the artifact that serves it now
-   (``observe_serving_artifact_id``). The stage keeps these artifacts, oldest
-   first.
+2. When the scenario reserves job data, it gives the pipeline the artifacts
+   that it served, oldest first. The commit history holds them, so a reload or
+   a restart keeps them.
 3. Each time the pipeline selects the next automatic job, it asks the stage
    whether each sample that the trainer made from records has data more than
    ``max_staleness`` artifacts behind the current artifact
-   (``Record2Sample.is_stale``). The job leaves out a stale sample and
+   (``Record2Sample.is_stale(samples, served_artifact_ids)``). The job leaves out a stale sample and
    every other sample of its group. The sample stays in the store untrained.
 
 The lag counts only the artifacts that this scenario served. A publication of
@@ -777,8 +785,9 @@ rollouts.
    rollout rewards in the job's metrics (``rollout_rewards``).
 3. The commit of the submission counts the tasks trained in the sample
    store, as it does for every sample.
-4. When the commit of the job's end is durable, the trainer gives the job's
-   outcome to the record-to-sample stage (``Record2Sample.job_ended``). The
+4. When the commit of the job's end is durable, the samples service reads it
+   and gives the job's outcome to the record-to-sample stage
+   (``Record2Sample.job_ended``). The
    stage gives each task that a committed job trained and that has no result
    its rewards from ``rollout_rewards``. A task without rewards, for example
    in a job that failed or that a ``train-from`` cancelled, gets an
