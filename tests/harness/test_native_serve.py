@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,9 @@ import pytest
 from tests.support.harness_render import native_hook, native_json, native_tool
 
 from reef.harness.adapters import get_adapter
-from reef.harness.capture import CaptureProxy, ReleaseObserver
+from reef.harness.capture import CaptureProxy
 from reef.harness.runners.native import serve
-from reef.harness.runners.native.release_client import ArtifactClient, ArtifactClientError, HeadWatch
+from reef.harness.runners.native.artifact_client import ArtifactClient, ArtifactClientError, HeadWatch
 from reef.harness.runners.native.serve import HARNESS_RELEASE_FILE, ServeError, Server
 from reef.harness.tree import HarnessTree, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_RESERVED_TOOL_NAMES
@@ -76,6 +77,20 @@ def _call(name: str, arguments: dict[str, Any], call_id: str) -> dict[str, Any]:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
 
 
+@dataclass(frozen=True)
+class _HeadMove:
+    """What the next model call does: publish ``tree`` as the new head of ``r1``, and have ``server`` poll for it."""
+
+    artifact_id: str
+    tree: Mapping[str, str]
+    server: Any
+
+    def apply(self, reef: _FakeReef) -> None:
+        reef.head_move = None
+        reef.release(self.artifact_id, dict(self.tree), parent="r1")
+        self.server._watch.poll_once()
+
+
 class _FakeReef(ThreadingHTTPServer):
     """The model, the release catalog, and one source tree per release."""
 
@@ -85,12 +100,12 @@ class _FakeReef(ThreadingHTTPServer):
         self.order: list[str] = []
         self.head = ""
         self.replies: list[dict[str, Any]] = []
+        self.head_move: _HeadMove | None = None
         self.requests: list[dict[str, Any]] = []
         self.fail_releases = False
         self.delay_s = 0.0
         self.hang_manifest_s = 0.0  # the next manifest read sleeps this long once, as behind a step's lock
         self.polls = 0
-        self.artifact_header = False
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
     @property
@@ -167,12 +182,12 @@ class _Handler(BaseHTTPRequestHandler):
             if reef.delay_s:
                 time.sleep(reef.delay_s)
             message = reef.replies.pop(0) if reef.replies else _reply("done")
+            if reef.head_move is not None:
+                reef.head_move.apply(reef)
             self._json(
                 200,
                 {"choices": [{"message": message}]},
                 x_reef_agent_record_id=f"r-{len(reef.requests)}",
-                x_reef_release_id=reef.head,
-                **({"x_reef_artifact_id": "weights-artifact"} if reef.artifact_header else {}),
             )
         else:
             self._json(404, {"error": {"message": "no route"}})
@@ -305,7 +320,7 @@ def test_two_turns_in_one_session_keep_the_messages_and_number_the_turns(tmp_pat
     assert not server.mounts_dir.exists() and not server.socket_path.exists()
 
 
-def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
+def test_a_poll_during_a_turn_moves_the_head_and_the_mount_lands_between_two_steps(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
     reef.release("r1", {**RULES, **_tool("whisper", "    return 'quiet'")})
@@ -317,9 +332,9 @@ def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
     dest = _tree(tmp_path, reef, "r1")
     r2 = {**RULES, **_tool("whisper", "    return 'quiet'"), **_tool("shout", "    return 'LOUD'")}
     with _running(dest) as server:
-        # The head moves after the boot poll: the only way this process learns of r2 is the answer's header.
+        # The head moves during the first model call, and a poll finds it before the answer returns.
         _wait(lambda: reef.polls >= 1)
-        reef.release("r2", r2, parent="r1")
+        reef.head_move = _HeadMove("r2", r2, server)
         result, _ = _turn(server, "shout")
         assert result["exit"] == 0 and server.status()["artifact_id"] == "r2"
         assert sorted(server.host.tools) == ["shout", "whisper"]
@@ -458,9 +473,6 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
 
         def new_head(self, artifact_id: str, source: str) -> None:
             self.heads.append((artifact_id, source))
-
-        def new_legacy_head(self, revision: str) -> None:
-            self.heads.append((revision, "legacy"))
 
     events: list[dict[str, Any]] = []
 
@@ -800,21 +812,11 @@ def test_validation_refuses_a_tree_tool_with_a_self_tools_name() -> None:
 # -- the pieces on their own -------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("artifact_header", [False, True])
-def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags(
-    reef: _FakeReef, artifact_header
-) -> None:
+def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags(reef: _FakeReef) -> None:
     import urllib.request
 
     reef.release("r1", {})
-    reef.artifact_header = artifact_header
-    seen: list[str] = []
-
-    class Observer(ReleaseObserver):
-        def observe(self, artifact_id: str) -> None:
-            seen.append(artifact_id)
-
-    proxy = CaptureProxy(reef.base_url, SCENARIO, "tok", tags={"artifact_id": "r1"}, observer=Observer())
+    proxy = CaptureProxy(reef.base_url, SCENARIO, "tok", tags={"artifact_id": "r1"})
     proxy.start()
     try:
 
@@ -837,7 +839,6 @@ def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags
         second = [(capture["receipt"], capture["tags"]) for capture in proxy.drain()]
     finally:
         proxy.stop()
-    assert seen == ([] if artifact_header else ["r1", "r1", "r1"])
     tags = [(r["headers"].get("x-reef-tag-artifact_id"), r["headers"].get("x-reef-tag-trial")) for r in reef.requests]
     assert tags == [("r1", None), ("r1", "t1"), ("r1", None)]
     assert {r["headers"]["authorization"] for r in reef.requests} == {"Bearer tok"}
@@ -868,7 +869,8 @@ def test_a_mount_that_orphans_the_pinned_graph_closes_the_turn_with_an_error(tmp
     reef.replies = [_reply(tool_calls=[_call("shout", {}, "c1")]), _reply("thinking done"), _reply("helper")]
     with _running(dest) as server:
         _wait(lambda: reef.polls >= 1)
-        reef.release("r2", {**_tool("shout", "    return 'LOUD'"), **_graph(SEED_STAGES, SEED_EDGES)}, parent="r1")
+        tree = {**_tool("shout", "    return 'LOUD'"), **_graph(SEED_STAGES, SEED_EDGES)}
+        reef.head_move = _HeadMove("r2", tree, server)
         result, streamed = _turn(server, "go")
         assert result["exit"] == 1 and result["text"] == ""
         ended = _typed(streamed, "turn/end")[-1]

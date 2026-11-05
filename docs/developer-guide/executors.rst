@@ -67,7 +67,7 @@ model. Reef reads none of the parameters. The component contract is:
    to describe jobs and import starts, and never run a job. A component that
    keeps its job state on disk, such as Tinker's ``state_dir``, locks it
    here, so one process at a time runs its jobs.
-``starts_from_releases``
+``starts_from_artifacts``
    False when ``import_start`` refuses every release; the default is true.
    A client reads it in the scenario contract before it offers a
    ``train-from``.
@@ -78,7 +78,7 @@ model. Reef reads none of the parameters. The component contract is:
    is false.
 
 Each ``SavedCheckpoint`` has a ``path`` (what a later job starts from) and a
-``release_path`` (the weights that serving loads, without training state).
+``artifact_path`` (the weights that serving loads, without training state).
 
 A weight trainer has one training component, and it drives the component
 through ``reef.train.jobs.JobLoop``:
@@ -157,7 +157,7 @@ The ``inference`` section selects the serving, not the training backend
 reef.inference.remote``) as the ``inference`` service, unless
 ``inference.remote`` names a component that runs elsewhere. The control plane
 reaches the component through ``RemoteInferenceBackend`` and the runtime kind
-``remote_serving``. The training component's ``release_format`` chooses the
+``remote_serving``. The training component's ``artifact_format`` chooses the
 runtime (``adapter`` or ``full``) and the engines' adapter settings. The local
 component joins the deployment's Ray cluster, so its engines and the training
 workers reserve separate GPUs.

@@ -42,10 +42,10 @@ from reef.evaluation.harness import TaskEvaluationWorker
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
+from reef.harness.runners.native.artifact_client import ArtifactClient
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
 from reef.harness.runners.native.host import NativeHost
-from reef.harness.runners.native.release_client import ArtifactClient
 from reef.harness.runners.native.selftools import SelfTools, ServeState
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TaskResult

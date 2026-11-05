@@ -32,7 +32,7 @@ from reef.artifact.repository import DefaultStart
 from reef.core.config import ConfiguredFactory
 from reef.core.errors import RuntimeConfigError
 from reef.core.snapshot import RootSource
-from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
+from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.storage.job_data import JobDataKind, JobDataRef
 
 JobState = Literal["running", "finished", "failed"]
@@ -132,7 +132,7 @@ class SavedCheckpoint:
 
     ``step`` is a non-negative int, counted within the job. ``path`` is a
     non-empty directory path as the component wrote it, which a later job
-    can start from. ``release_path`` is the non-empty directory that Reef
+    can start from. ``artifact_path`` is the non-empty directory that Reef
     publishes as a release when it serves the checkpoint: the weights that
     serving loads, without the training state that only the component reads
     (for example ``path`` itself, or its Hugging Face export).
@@ -143,7 +143,7 @@ class SavedCheckpoint:
 
     step: int
     path: str
-    release_path: str
+    artifact_path: str
     metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -151,8 +151,8 @@ class SavedCheckpoint:
             raise ValueError("SavedCheckpoint.step must be a non-negative int")
         if not isinstance(self.path, str) or not self.path:
             raise ValueError("SavedCheckpoint.path must be a non-empty string")
-        if not isinstance(self.release_path, str) or not self.release_path:
-            raise ValueError("SavedCheckpoint.release_path must be a non-empty string")
+        if not isinstance(self.artifact_path, str) or not self.artifact_path:
+            raise ValueError("SavedCheckpoint.artifact_path must be a non-empty string")
         if not isinstance(self.metrics, Mapping):
             raise TypeError("SavedCheckpoint.metrics must be a mapping")
         json.dumps(dict(self.metrics), allow_nan=False)
@@ -233,7 +233,7 @@ class TrainingComponent(ABC):
 
     @property
     @abstractmethod
-    def release_format(self) -> ReleaseFormat | None:
+    def artifact_format(self) -> ArtifactFormat | None:
         """The weight files that each saved checkpoint's release holds.
 
         ``None`` means the releases hold no weight files that an engine
@@ -246,7 +246,7 @@ class TrainingComponent(ABC):
         """The component's untrained checkpoint, laid out as one of its releases, and the configuration it comes from.
 
         A scenario that is created without an artifact item holds it in its root release, in the component that
-        this component trains. It has the layout of every other release (``release_format``), so serving and
+        this component trains. It has the layout of every other release (``artifact_format``), so serving and
         training read it as they read any release. Its ``inputs`` name the model and the settings that decide its
         content. Every service process can call this method, so a component whose model files cost a remote call
         gives them as ``BaseModelFiles`` that make them on the first ``directory`` call.
@@ -256,7 +256,7 @@ class TrainingComponent(ABC):
         """The start of the first job of a trainer whose scenario has the root release ``root``.
 
         The default is ``import_start`` of the root's files. A component that imports no release
-        (``starts_from_releases`` False) overrides it, and raises ``ValueError`` for a root that it cannot start
+        (``starts_from_artifacts`` False) overrides it, and raises ``ValueError`` for a root that it cannot start
         from.
         """
         local_path = root.artifact.materialize().local_path
@@ -265,7 +265,7 @@ class TrainingComponent(ABC):
         return self.import_start(local_path)
 
     @property
-    def starts_from_releases(self) -> bool:
+    def starts_from_artifacts(self) -> bool:
         """Whether ``import_start`` can take a published release as the start of later jobs.
 
         False exactly when the component refuses every release, so no trainer of it can train from an artifact.
@@ -304,22 +304,22 @@ class TrainingComponent(ABC):
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
 
-    def check_release(self, files: ArtifactFiles) -> None:
+    def check_artifact(self, files: ArtifactFiles) -> None:
         """Raise ``ValueError`` unless ``files`` are a release in the layout of this component's releases.
 
         An artifact import calls it (RFC #980) on the directory it copied or on the revision it keeps by reference
-        (RFC #995). The default reads ``release_format``: ``"full"`` needs ``config.json`` and weight files at the
+        (RFC #995). The default reads ``artifact_format``: ``"full"`` needs ``config.json`` and weight files at the
         root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank is at most ``adapter_rank`` and whose
         target modules are within ``adapter_target_modules``. It reads only file names and
         ``adapter/adapter_config.json``, so a revision is checked without downloading its weights. ``None``
         refuses every release. A component whose releases name weights on a service overrides it and also checks
         that each path resolves there.
         """
-        release_format = self.release_format
-        if release_format is None:
+        artifact_format = self.artifact_format
+        if artifact_format is None:
             raise ValueError(f"the {self.name} training component takes no imported releases")
         paths = set(files.paths())
-        if release_format.layout == "full":
+        if artifact_format.layout == "full":
             if "config.json" not in paths or not any(
                 "/" not in path and path.endswith((".safetensors", ".bin")) for path in paths
             ):
@@ -332,11 +332,11 @@ class TrainingComponent(ABC):
         except (OSError, ValueError) as exc:
             raise ValueError(f"{ADAPTER_DIR}/adapter_config.json is no readable JSON object: {exc}") from exc
         rank = config.get("r") if isinstance(config, dict) else None
-        # ReleaseFormat's invariant: an adapter format has a rank.
-        max_rank = cast(int, release_format.adapter_rank)
+        # ArtifactFormat's invariant: an adapter format has a rank.
+        max_rank = cast(int, artifact_format.adapter_rank)
         if isinstance(rank, bool) or not isinstance(rank, int) or not 0 < rank <= max_rank:
             raise ValueError(f"the adapter's rank must be a positive int at most {max_rank}")
-        targets = release_format.adapter_target_modules
+        targets = artifact_format.adapter_target_modules
         modules = config.get("target_modules")
         if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
             raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
@@ -355,7 +355,7 @@ class TrainingComponent(ABC):
         from into its own durable directory, since ``release`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
         component cannot start from these weights. A component whose
-        ``starts_from_releases`` is False refuses every release.
+        ``starts_from_artifacts`` is False refuses every release.
         """
 
     @abstractmethod
@@ -390,22 +390,22 @@ class TrainingComponent(ABC):
 
 
 @dataclass(frozen=True)
-class ReleaseLayout(ArtifactLayout):
+class TrainingArtifactLayout(ArtifactLayout):
     """The layout of the releases of ``component``: an import of the component it trains must meet it.
 
-    ``check`` is ``component.check_release``. The releases resolve a reference when they hold weight files
-    (``release_format``), which the serving runtimes read through ``ReleaseFiles``. A weight recipe binds it on its
-    ``weights`` component.
+    ``check`` is ``component.check_artifact``. The releases resolve a reference when they hold weight files
+    (``artifact_format``), which the serving runtimes read through ``ArtifactWeightFiles``. A weight recipe binds it on
+    its ``weights`` component.
     """
 
     component: TrainingComponent
 
     def check(self, files: ArtifactFiles) -> None:
-        self.component.check_release(files)
+        self.component.check_artifact(files)
 
     @property
     def resolves_references(self) -> bool:
-        return self.component.release_format is not None
+        return self.component.artifact_format is not None
 
 
 class TrainingComponentFactory(ConfiguredFactory):

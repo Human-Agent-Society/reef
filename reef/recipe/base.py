@@ -37,7 +37,7 @@ from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerS
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
-from reef.train.component import ReleaseLayout, ScenarioRoot, TrainingComponent
+from reef.train.component import ScenarioRoot, TrainingArtifactLayout, TrainingComponent
 from reef.train.jobs import JobLoop
 from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
@@ -522,7 +522,9 @@ class WeightTrainingRecipe(Recipe):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        weights = ComponentSpec(kind=self.runtime.served_weight_kind, layout=ReleaseLayout(self.training_component))
+        weights = ComponentSpec(
+            kind=self.runtime.served_weight_kind, layout=TrainingArtifactLayout(self.training_component)
+        )
         return ScenarioComponents({WEIGHTS_COMPONENT: weights})
 
     def default_start(self) -> DefaultStart:
