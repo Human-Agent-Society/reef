@@ -1190,6 +1190,8 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
   from 0.
 - ``sample_kind``: ``trajectory`` or ``task``, the kind of the job's samples.
   It is ``null`` for a job with no sample.
+- ``train_from_artifact_id``: the artifact that the job started from. It is
+  ``null`` for a job that an earlier Reef added.
 - ``request``: ``{id, text, parameters}`` of the training request
   (``POST /reef/train``) that the job trains. ``parameters`` is what the
   request gave, ``{}`` when it gave none. It is ``null`` for a job that
