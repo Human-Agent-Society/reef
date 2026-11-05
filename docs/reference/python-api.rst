@@ -2091,7 +2091,6 @@ Neither inherits from the other, and no trainer holds a serving engine.
   opens the runtime, loads the published snapshot, and publishes routes when
   activation returns. Route publication and startup completion share one
   transaction. A superseded request cannot publish routes.
-  A standalone scenario keeps synchronous activation by default.
   ``train-from`` still imports the artifact into the trainer before it writes
   a ``train_from`` record.
 
@@ -2099,8 +2098,8 @@ Neither inherits from the other, and no trainer holds a serving engine.
 ``Scenario.served_artifact_id()`` reads the published route when a dispatcher
 owns the scenario. Training staleness checks use this served identity.
 Automatic weight training waits while the selected artifact has no matching
-served route. Standalone scenarios and deployments without inference keep
-their existing training behavior.
+served route. Deployments without inference keep their existing training
+behavior.
 Startup status is available through the inference service's
 ``GET /reef/scenarios/{scenario}/inference/status`` route.
 
