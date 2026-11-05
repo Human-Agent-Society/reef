@@ -1662,8 +1662,9 @@ reference to a method that it provides. Its stages are ``GeneratedTaskSamples`` 
 only the train tasks that earlier generations saved in the scenario. Each
 job is a task job: the training component rolls the job's tasks out on its own
 sampler and trains on their rollouts, as ``recipe.config.job_parameters`` says:
-``rollout`` on Tinker, ``harbor`` on Slime. The recipe refuses a config without
-the objective and the rollouts.
+``rollout`` on Tinker, ``harbor`` on Slime, whose objective has the ``slime`` loss
+family (`Task jobs on Slime`_). The recipe refuses a config without the objective
+and the rollouts.
 
 .. code:: yaml
 
@@ -1762,14 +1763,16 @@ whatever Tinker's batch size (``training.options.batch-size``) is:
        the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
-job's start weights, and the Slime component on its own rollout engines (see
-`Task jobs on Slime`_). The ``rollout`` job parameter on Tinker, and the ``harbor``
-job parameter on Slime, configure them with the same keys. They say only where the
-samples come from; the ``objective`` parameter says how the samples train.
+job's start weights, as the ``rollout`` job parameter says. The Slime component runs
+them inside Slime's own loop, on its rollout engines, as the ``harbor`` job parameter
+says (see `Task jobs on Slime`_). ``harbor`` takes the keys below except
+``rollouts_per_task``: Slime's ``n-samples-per-prompt`` gives the count. These
+parameters say only how to run Harbor; the ``objective`` parameter says how the
+samples train.
 
 .. container:: config
 
-   ``rollout.rollouts_per_task`` : required
+   ``rollout.rollouts_per_task`` : required on Tinker
        training rollouts of each task, at least 2; the samples of one task form its group
 
    ``rollout.agent`` : terminus-2
@@ -1817,30 +1820,17 @@ engines.
        rollout-num-gpus-per-engine: 1
        sglang-mem-fraction-static: 0.5
 
-A task job loads the workers' weights into the engines, runs the rollouts the
-``harbor`` parameter describes, frees the colocated engines' memory, and
-trains the samples of each task's group with the job's objective. The
-engines answer OpenAI text chat: system, user and assistant text messages, no
-tools. A task job whose options give the engines no GPUs fails. A LoRA actor
-cannot have rollout engines, since Reef's adapters do not reach Slime's weight
-transfer.
-
-The job's objective must have a loss family that Slime trains; the component
-checks it when the job is submitted, before any rollout. A method that a
-deployment provides can select the ``importance_sampling`` family: the
-loss of a response token is ``-A * sg[min(p / q, c)] * log p``, with ``q`` the
-engines' log-probability of the sampled token, ``c`` Slime's ``--tis-clip``
-(default 2) and Slime's per-sample mean as the reduction. Tinker's loss of
-that name takes the untruncated ratio and sums the tokens. Reef computes the
-advantages, so set ``disable-compute-advantages-and-returns``.
-
-With ``score-centering: true`` in ``training.options``, the engines also
-record the top ``score-centering-top-k`` log-probabilities of each response
-token, and the job trains with score centering (`Loss families
-<../developer-guide/loss-families.rst>`__). The recorded distribution must be
-the one the trainer reads, so the job needs ``rollout-temperature`` 1,
-``rollout-top-p`` 1 and ``rollout-top-k`` -1, and the engines answer a request
-that sets another temperature, top-p or top-k with 400.
+A task job runs as a dataset job (`Dataset jobs on Slime`_) whose prompts are
+Harbor tasks and whose generate step is a Harbor rollout. GRPO is a training
+method and the tasks are only a source of samples, so Slime's own options set
+the method. Slime's rollout manager serves each task as a prompt, and
+``n-samples-per-prompt`` gives the rollouts of each prompt, which form a prompt
+group. Each rollout runs the agent in the task's Harbor environment, and the
+agent's model calls reach the engines. The rollout becomes one Slime sample,
+with the verifier's reward. Slime then computes the advantages with
+``advantage-estimator`` and trains ``policy_loss``. Each Slime rollout runs
+Slime's own sequence: the engines take the workers' weights, generate the
+rollout and free their memory, and the workers train it.
 
 .. code:: yaml
 
@@ -1848,10 +1838,79 @@ that sets another temperature, top-p or top-k with 400.
      backend: slime
      options:
        colocate: true
-       disable-compute-advantages-and-returns: true
-       tis-clip: 2.0
-       score-centering: true
-       score-centering-top-k: 128
+       rollout-num-gpus-per-engine: 1
+       advantage-estimator: grpo
+       loss-type: policy_loss
+       rollout-batch-size: 4
+       n-samples-per-prompt: 4
+       global-batch-size: 16
+       rollout-max-response-len: 2048
+
+.. code:: yaml
+
+   recipe:
+     config:
+       job_parameters:
+         objective: slime_dataset
+         save_interval: 10
+         harbor:
+           environment: modal
+           concurrency: 8
+
+The recipe's default objective sets the workers' loss family, so a deployment that
+runs task jobs starts with the ``slime`` family and refuses jobs of trajectories.
+
+The job's rollouts are ``ceil(tasks / rollout-batch-size)``, so each task runs
+at least once. The last batch wraps to the first tasks when the tasks do not
+fill it. To train the tasks again, submit another job. ``save_interval`` counts
+Slime rollouts, as on a dataset job. A resumed job continues after its last
+checkpoint and skips the tasks of the rollouts it saved. The rollouts that a
+stopped driver did not train run again.
+
+The engines answer OpenAI text chat: system, user and assistant text messages,
+no tools. Each call samples Slime's ``rollout-temperature``, ``rollout-top-p``
+and ``rollout-top-k``, whatever the agent asks, since the trainer reads that
+distribution. ``rollout-max-response-len`` bounds each call's response.
+
+A rollout that fails in the infrastructure, or whose model calls do not assemble
+into one sample, trains nothing. Its sample has no trained token, and Slime leaves
+its reward out of its group's mean and deviation, so the group's other rollouts
+train against each other. A group with one sample left has advantage 0. When
+no group of a Slime rollout can train, the job fails before the workers train it,
+with the first rollout's error. Slime's metrics such as ``rollout/raw_reward``
+count a removed sample with reward 0. The job's metrics report
+``rollout_rewards``, by task, ``rollout_samples`` and ``removed_rollouts``.
+
+The driver refuses a task job, when it is submitted, in these cases:
+
+- The deployment's loss family, or the objective's, is not ``slime``. The built-in
+  objective of that family is ``slime_dataset``.
+- The job sets ``learning_rate_schedule`` or ``scheduling``. Slime's options set
+  the learning rate and the optimizer steps.
+- An option replaces a part of this loop or adds data that the rollouts do not
+  record: ``group-rm``, ``reward-key``, ``custom-generate-function-path``,
+  ``data-source-path``, another ``rollout-function-path``, ``partial-rollout``, an
+  ``over-sampling-batch-size`` other than ``rollout-batch-size``,
+  ``dynamic-sampling-filter-path``, a ``rollout-top-p`` other than 1 or
+  ``use-rollout-routing-replay``.
+- ``n-samples-per-prompt`` is 1 with a group baseline: ``advantage-estimator``
+  ``grpo``, ``gspo``, ``cispo`` or ``reinforce_plus_plus_baseline`` with reward
+  normalization, which would center each reward to 0.
+
+Slime's ``use-score-centering`` works: each response token that the model sampled
+carries the engines' top ``score-centering-top-k`` log-probabilities.
+
+The rollouts run in Slime's rollout manager, a Ray actor of the serving session.
+So its node needs the ``harbor`` package and the Harbor environment, and reaches
+the job's directory and the tasks through the shared save root.
+``agent_host`` names that node. The driver passes ``E2B_API_KEY``,
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` from its environment to the job's Ray
+actors, which include the training workers and the engines. A driver that stops
+during a rollout leaves its Harbor rollouts running, and the next driver's attach
+waits for them.
+
+A task job whose options give the engines no GPUs fails. A LoRA actor cannot have
+rollout engines, since Reef's adapters do not reach Slime's weight transfer.
 
 Dataset jobs on Slime
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1862,7 +1921,7 @@ them with its reward model, computes the advantages and trains its loss; Reef
 records each saved rollout as a candidate. The deployment selects the built-in
 recipe ``reef.recipe.dataset:DatasetRecipe`` with ``data.training_mode:
 manual``. Its loss family, ``slime``, leaves the training signal to Slime and
-refuses every other job. Each training request (``POST /reef/train``)
+refuses every other job except a task job. Each training request (``POST /reef/train``)
 whose ``parameters`` hold ``dataset`` is one job:
 
 .. code:: json
