@@ -401,6 +401,11 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
         return ()
 
 
+def selection_digest(selection: ArtifactSelection) -> str:
+    """The key of the local view of ``selection``. Equal selections have equal keys."""
+    return hashlib.sha256(json.dumps(selection.to_dict(), sort_keys=True).encode()).hexdigest()
+
+
 class Repository(ArtifactRepository):
     """Scenario-scoped release chain and persistence facade.
 
@@ -574,7 +579,7 @@ class Repository(ArtifactRepository):
         # Readers can materialize the same recovered view concurrently. Only its first reader builds the tree.
         # This lock is separate from head movement, which never waits for file I/O.
         with self.selection_lock:
-            digest = hashlib.sha256(json.dumps(selection.to_dict(), sort_keys=True).encode()).hexdigest()
+            digest = selection_digest(selection)
             cache_key = f"{SELECTION_VIEW_PREFIX}{digest}"
             cached = self._local_artifacts.get(cache_key)
             if cached is not None:
