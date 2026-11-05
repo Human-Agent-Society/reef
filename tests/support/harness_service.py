@@ -39,7 +39,7 @@ from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 
 def harness_repository(tmp_path: Path) -> CachedRepositoryBackendFactory:
@@ -101,7 +101,7 @@ def report_once(scenario: Scenario, suffix: str, *, prompt: str = "q", score: fl
     make_samples(scenario)
 
 
-def drive_job(scenario: Scenario, *, seconds: float = 30.0) -> TrainStepResult:
+def drive_job(scenario: Scenario, *, seconds: float = 30.0) -> TrainingCommit:
     """Commit one training job of ``scenario``'s trainer, from its submission to its end; the step's result.
 
     The step's result is the commit of the job's checkpoint when the step kept a tree, else the commit of the job's
@@ -109,9 +109,9 @@ def drive_job(scenario: Scenario, *, seconds: float = 30.0) -> TrainStepResult:
     the job does not end within ``seconds``.
     """
     deadline = time.monotonic() + seconds
-    step: TrainStepResult | None = None
+    step: TrainingCommit | None = None
     while time.monotonic() < deadline:
-        result = scenario.prepare_training_step()
+        result = scenario.next_commit()
         if result is None:
             time.sleep(0.02)
             continue
@@ -124,19 +124,19 @@ def drive_job(scenario: Scenario, *, seconds: float = 30.0) -> TrainStepResult:
     raise AssertionError(f"scenario {scenario.name!r} ran no whole training job in {seconds}s")
 
 
-def checkpoint_result(scenario: Scenario, *, seconds: float = 30.0) -> TrainStepResult:
+def checkpoint_result(scenario: Scenario, *, seconds: float = 30.0) -> TrainingCommit:
     """Commit the submission of ``scenario``'s next job, then wait for the job's checkpoint; the result that publishes
     it, not committed yet.
 
     ``AssertionError`` when the job submits nothing, ends without a checkpoint, or saves none within ``seconds``.
     """
-    submitted = scenario.prepare_training_step()
+    submitted = scenario.next_commit()
     if submitted is None or submitted.metrics["training_job"]["event"] != "submitted":
         raise AssertionError(f"scenario {scenario.name!r} submitted no job")
     scenario.commit(submitted)
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        result = scenario.prepare_training_step()
+        result = scenario.next_commit()
         if result is None:
             time.sleep(0.02)
             continue
@@ -146,7 +146,7 @@ def checkpoint_result(scenario: Scenario, *, seconds: float = 30.0) -> TrainStep
     raise AssertionError(f"the job of scenario {scenario.name!r} saved no checkpoint in {seconds}s")
 
 
-def drive_trainer_job(trainer: Trainer, *, seconds: float = 30.0) -> TrainStepResult | None:
+def drive_trainer_job(trainer: Trainer, *, seconds: float = 30.0) -> TrainingCommit | None:
     """Commit one job of ``trainer``, built alone from a harness recipe, from its submission to its end; the step's
     result as ``drive_job`` gives it, or None when the trainer has no job to submit.
 
@@ -155,16 +155,16 @@ def drive_trainer_job(trainer: Trainer, *, seconds: float = 30.0) -> TrainStepRe
     """
     trainer.job_loop_required().component.start_jobs()
     deadline = time.monotonic() + seconds
-    step: TrainStepResult | None = None
+    step: TrainingCommit | None = None
     submitted = False
     while time.monotonic() < deadline:
-        result = trainer.run_once()
+        result = trainer.advance_job()
         if result is None:
             if not submitted:
                 return None
             time.sleep(0.02)
             continue
-        trainer.commit(trainer.prepare_commit(result))
+        trainer.settle_commit(trainer.prepare_commit(result))
         event = result.metrics["training_job"]["event"]
         if event == "submitted":
             submitted = True
@@ -186,7 +186,7 @@ def job_backend(trainer: Trainer, component: str = "harness") -> HarnessBackend:
     return harness.backend_for(trainer.scenario, component)
 
 
-def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
+def run_step(scenario: Scenario, suffix: str) -> TrainingCommit:
     """One report, then the job of the step it wakes, committed; the step's result (``drive_job``)."""
     report_once(scenario, suffix)
     return drive_job(scenario)
@@ -215,7 +215,7 @@ def backend_step(
     policy: CandidateEvaluationPlugin | None = None,
     *,
     scenario_step: int | None = None,
-) -> TrainStepResult:
+) -> TrainingCommit:
     """One step of ``backend`` on its ``head_of`` head as a job runs it, decided by ``policy`` (a win-count
     comparison by default).
 
@@ -226,7 +226,7 @@ def backend_step(
     scenario_step = SCENARIO_STEPS.get(backend, 0) if scenario_step is None else scenario_step
     prepared = backend.prepare_step(data, state, scenario_step, head=head_of(backend))
     if prepared.candidate is None:
-        result = TrainStepResult(prepared.state, prepared.metrics)
+        result = TrainingCommit(prepared.state, prepared.metrics)
     else:
         selection = ComparePolicy(backend) if policy is None else policy
         try:

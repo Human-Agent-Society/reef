@@ -192,7 +192,7 @@ class LocalTrainingWorkers:
                 # Reloaded while this worker waited: look again on the rebuilt instance, whose rows are unread.
                 return True
             try:
-                result = current.prepare_training_step(component)
+                result = current.next_commit(component)
             except Exception as exc:
                 self.fail_request(current, exc, component)
                 self.reload_after_local_failure(current)

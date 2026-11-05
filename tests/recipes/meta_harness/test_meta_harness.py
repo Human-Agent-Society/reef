@@ -46,7 +46,7 @@ from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 #: A tree without the marker: it scores 0 like the seed, so compare rejects it.
 LOSER = HarnessTree({"rules.md": "Answer quickly.\n"})
@@ -71,7 +71,7 @@ def run(
     *,
     policy: ComparePolicy | None = None,
     request: TrainingRequest | None = None,
-) -> TrainStepResult:
+) -> TrainingCommit:
     """Step ``number``, which answers ``request`` (else a request of its own), decided on means; a selected tree
     becomes the next snapshot."""
     request = TrainingRequest("Propose the next candidate.", "", "", f"ask-{number}") if request is None else request

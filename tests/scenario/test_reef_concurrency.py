@@ -22,7 +22,7 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import TrainingJobWorker
-from reef.train.types import TrainStepResult
+from reef.train.types import TrainingCommit
 
 
 class CountingComponent(StubTrainingComponent):
@@ -230,7 +230,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
             candidate = tmp_path / f"candidate-{index}"
             candidate.mkdir()
             (candidate / "model.txt").write_text(f"v{index}")
-            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+            dispatcher.registry.get("chat").commit(TrainingCommit(state=None, artifact=Artifact.local(candidate)))
 
     errors = run_workers(thread_count, worker)
 
