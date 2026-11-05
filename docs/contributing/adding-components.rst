@@ -119,7 +119,7 @@ Implementation
   with the objective that ``method`` names. Cut the data into optimizer steps
   with ``reef.train.algos.schedule.schedule_job_data`` under the objective's
   ``rollout_unit``. Write each
-  ``SavedCheckpoint.release_path`` in a form that serving loads: a Hugging Face
+  ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
 - Implement ``import_start`` to load a published release as the start of the
   next job. Raise ``ValueError`` when the framework cannot do this; Reef then
@@ -129,7 +129,7 @@ Implementation
   integration. Contract changes need focused compatibility tests.
 - Implement ``TrainingDeployment`` in the integration to describe process
   preparation, and a ``RuntimeFactory`` that returns the
-  ``TrainingComponent``. Declare the component's ``release_format``; the
+  ``TrainingComponent``. Declare the component's ``artifact_format``; the
   ``inference`` section builds the serving from it, so the integration builds
   no serving runtime. A backend with its own serving returns its runtime
   config from ``trainer_serving_config``. In-process integrations can extend

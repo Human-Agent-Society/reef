@@ -1,6 +1,6 @@
 """The layout both harness pages share: the document wrapper, the design tokens and the status vocabulary.
 
-``GET /reef/harness/releases/{step}/page`` and
+``GET /reef/harness/artifacts/{step}/page`` and
 ``GET /reef/harness/requests/{record_id}/page`` are two views of one thing, a
 request becoming a release, and a person moves between them by the link each
 carries. They therefore share this module's header, palette, card shapes and

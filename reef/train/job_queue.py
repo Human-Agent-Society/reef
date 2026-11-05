@@ -18,7 +18,7 @@ A jobs-queue item:
   it. Control writes it (``JobExperimentRecorder``) when its experiment tracker records a commit of the job, so the
   job listing of any service reads it from the item.
 
-A checkpoint's ``path`` and ``release_path`` are paths of the training service. In the one-process layout they
+A checkpoint's ``path`` and ``artifact_path`` are paths of the training service. In the one-process layout they
 are local; a split deployment gives control and the training service one volume for them.
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
@@ -40,7 +40,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.observability.base import (
     ExperimentLogger,
@@ -156,7 +156,7 @@ def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
     return {
         "step": checkpoint.step,
         "path": checkpoint.path,
-        "release_path": checkpoint.release_path,
+        "artifact_path": checkpoint.artifact_path,
         "metrics": cast(JsonValue, dict(checkpoint.metrics)),
     }
 
@@ -169,7 +169,7 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
     return SavedCheckpoint(
         step,
         json_text(entry.get("path"), "a checkpoint's path"),
-        json_text(entry.get("release_path"), "a checkpoint's release_path"),
+        json_text(entry.get("artifact_path"), "a checkpoint's artifact_path"),
         json_object(entry.get("metrics"), "a checkpoint's metrics"),
     )
 
@@ -313,8 +313,8 @@ class JobQueueComponent(TrainingComponent):
         return self.component.name
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
-        return self.component.release_format
+    def artifact_format(self) -> ArtifactFormat | None:
+        return self.component.artifact_format
 
     def default_start(self) -> DefaultStart:
         return self.component.default_start()
@@ -327,8 +327,8 @@ class JobQueueComponent(TrainingComponent):
         return self.component.shares_scenarios
 
     @property
-    def starts_from_releases(self) -> bool:
-        return self.component.starts_from_releases
+    def starts_from_artifacts(self) -> bool:
+        return self.component.starts_from_artifacts
 
     def check_job(self, job: TrainingJob) -> None:
         self.component.check_job(job)
@@ -336,8 +336,8 @@ class JobQueueComponent(TrainingComponent):
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         self.component.check_task_jobs(parameters)
 
-    def check_release(self, files: ArtifactFiles) -> None:
-        self.component.check_release(files)
+    def check_artifact(self, files: ArtifactFiles) -> None:
+        self.component.check_artifact(files)
 
     def import_start(self, release: Path) -> str:
         return self.component.import_start(release)

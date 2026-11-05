@@ -29,7 +29,7 @@ from reef.artifact import Artifact, ModelDirectory
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.snapshot import RootSource
 from reef.core.trajectories import trajectory_reward
-from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
+from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import ExecutorFuture, base
 from reef.storage.durable_files import write_json
 from reef.train.algos import TrainingObjective, TrainingSignal
@@ -277,7 +277,7 @@ def test_a_job_trains_one_rollout_and_saves_it_as_the_start_of_the_next_job(tmp_
     start = tmp_path / "reef-starts" / "rollout_0"
     # The checkpoint, after the job's two optimizer steps, is the job's start directory; Reef publishes the
     # rollout's Hugging Face export.
-    assert (checkpoint.step, checkpoint.path, checkpoint.release_path) == (2, str(start), str(tmp_path / "hf" / "0"))
+    assert (checkpoint.step, checkpoint.path, checkpoint.artifact_path) == (2, str(start), str(tmp_path / "hf" / "0"))
     assert checkpoint.metrics["train/loss"] == 0.5
     assert SlimeStart.read(start) == SlimeStart(0, "sft", {"steps": 1}, None)
     assert json.loads((start / START_STATE).read_text())["rollout_id"] == 0
@@ -384,7 +384,7 @@ def test_a_restarted_job_continues_after_its_last_saved_rollout(tmp_path, stacks
                 {
                     "step": 1,
                     "path": str(first),
-                    "release_path": str(tmp_path / "hf" / "0"),
+                    "artifact_path": str(tmp_path / "hf" / "0"),
                     "metrics": {},
                     "changed_kinds": [],
                 }
@@ -605,7 +605,7 @@ def test_a_lora_release_holds_the_adapter_where_serving_loads_it(tmp_path, stack
 
     (checkpoint,) = status.checkpoints
     release = Path(checkpoint.path) / "release"
-    assert checkpoint.release_path == str(release)
+    assert checkpoint.artifact_path == str(release)
     assert (release / ADAPTER_DIR / "adapter_config.json").is_file()
     assert (release / ADAPTER_DIR / "adapter_model.safetensors").read_text() == "adapter-0"
     assert {path.name for path in release.iterdir()} == {ADAPTER_DIR}
@@ -615,15 +615,15 @@ def test_a_lora_release_holds_the_adapter_where_serving_loads_it(tmp_path, stack
 def test_the_release_format_names_full_weights_or_the_lora_adapter_in_the_engines_module_names(
     tmp_path, stacks
 ) -> None:
-    assert stacks(tmp_path / "full").component.release_format == ReleaseFormat("full")
+    assert stacks(tmp_path / "full").component.artifact_format == ArtifactFormat("full")
     lora = stacks(tmp_path / "lora", lora=True, megatron_lora_rank=8, megatron_lora_target_modules=None)
-    assert lora.component.release_format == ReleaseFormat(
+    assert lora.component.artifact_format == ArtifactFormat(
         "adapter", 8, ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     )
     attention = stacks(
         tmp_path / "attention", lora=True, megatron_lora_rank=4, megatron_lora_target_modules=["linear_qkv"]
     )
-    assert attention.component.release_format == ReleaseFormat("adapter", 4, ("q_proj", "k_proj", "v_proj"))
+    assert attention.component.artifact_format == ArtifactFormat("adapter", 4, ("q_proj", "k_proj", "v_proj"))
 
 
 @pytest.mark.unit
@@ -678,7 +678,7 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
                     {
                         "step": 2,
                         "path": str(saved_start),
-                        "release_path": str(tmp_path / "hf" / "0"),
+                        "artifact_path": str(tmp_path / "hf" / "0"),
                         "metrics": {},
                         "changed_kinds": [],
                     }

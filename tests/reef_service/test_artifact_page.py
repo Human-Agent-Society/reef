@@ -1,6 +1,6 @@
 """The page per catalog step: why a version exists, what it changed, the evaluation's result, its setup and its chain.
 
-``GET /reef/harness/releases/{step}/page`` renders it from the releases row,
+``GET /reef/harness/artifacts/{step}/page`` renders it from the releases row,
 the step being the row's position oldest first with the creation row as 0. The
 chain driven here runs in ``training_mode: manual``: one published win and one
 rejected candidate answering requests posted to ``POST /reef/train``, one
@@ -31,10 +31,10 @@ from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.service.app import create_app
+from reef.service.artifact_page import before_artifact_id, build_artifact_page, result_of, served_step
 from reef.service.page_layout import status_label
-from reef.service.release_page import before_artifact_id, build_release_page, result_of, served_step
 
-MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
+MODULE = Path(__file__).parents[2] / "reef" / "service" / "artifact_page.py"
 LAYOUT = Path(__file__).parents[2] / "reef" / "service" / "page_layout.py"
 
 OLD_CODE = "export default function hello(pi) {\n  if (1 < 2) return;\n}\n"
@@ -157,7 +157,7 @@ def _pages(dispatcher: Dispatcher, *paths: str) -> list[tuple[int, str, str]]:
 
 
 def _page(dispatcher: Dispatcher, step: int) -> str:
-    ((status, content_type, page),) = _pages(dispatcher, f"/reef/harness/releases/{step}/page")
+    ((status, content_type, page),) = _pages(dispatcher, f"/reef/harness/artifacts/{step}/page")
     assert status == 200 and content_type.startswith("text/html")
     page.encode("ascii")
     return page
@@ -238,7 +238,7 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
     assert f'>v1</a><span class="id">{rows[1]["artifact_id"]}</span><span class="selected">Published</span>' in chain
     assert '<span class="rejected">' not in chain
     # Each child links the page of its own step, opened the way this one was.
-    assert 'href="/reef/harness/releases/1/page"' in chain
+    assert 'href="/reef/harness/artifacts/1/page"' in chain
     head = _section(_page(dispatcher, 1), "Chain")
     assert head.count('class="step-name"') == 3 and ">v1</a>" not in head
     for step in (2, 3):
@@ -250,10 +250,10 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
 
     (missing, letters, long, longer) = _pages(
         dispatcher,
-        "/reef/harness/releases/9/page",
-        "/reef/harness/releases/x/page",
-        "/reef/harness/releases/9999999999/page",
-        f"/reef/harness/releases/{'9' * 5000}/page",
+        "/reef/harness/artifacts/9/page",
+        "/reef/harness/artifacts/x/page",
+        "/reef/harness/artifacts/9999999999/page",
+        f"/reef/harness/artifacts/{'9' * 5000}/page",
     )
     assert missing[0] == 404 and "has no step 9" in missing[2] and "steps 0 to 4" in missing[2]
     assert letters[0] == 404
@@ -342,7 +342,7 @@ def test_the_page_carries_the_shared_layout_and_links_the_other_steps_with_the_q
         "metrics": {"selected": True},
     }
     query = {"scenario": "a b", "token": "t&<"}
-    page = build_release_page(0, [creation, row], link_query=query)
+    page = build_artifact_page(0, [creation, row], link_query=query)
     page.encode("ascii")
     logo = (MODULE.parents[2] / "docs" / "assets" / "reef-logo-light.svg").read_text().strip()
     # The same logo the request page carries, which its own test pins against the same file.
@@ -353,9 +353,9 @@ def test_the_page_carries_the_shared_layout_and_links_the_other_steps_with_the_q
     # The scenario names the page in the header, and the token never shows.
     assert '<span class="context">a b</span>' in page and "t&<" not in page
     assert "<b>Versions</b>" in page
-    assert 'href="/reef/harness/releases/1/page?scenario=a+b&amp;token=t%26%3C"' in _section(page, "Chain")
+    assert 'href="/reef/harness/artifacts/1/page?scenario=a+b&amp;token=t%26%3C"' in _section(page, "Chain")
     # Without a query the links stay bare, as a curl with headers reads them.
-    assert 'href="/reef/harness/releases/1/page"' in _section(build_release_page(0, [creation, row]), "Chain")
+    assert 'href="/reef/harness/artifacts/1/page"' in _section(build_artifact_page(0, [creation, row]), "Chain")
 
 
 def test_the_top_bar_and_the_step_walk_lead_to_the_pages_a_browser_can_open() -> None:
@@ -371,28 +371,28 @@ def test_the_top_bar_and_the_step_walk_lead_to_the_pages_a_browser_can_open() ->
         {**PUBLISHED, "checkpoint": False, "active": False, "metrics": {"selected": False}},
     ]
     query = {"scenario": "agents", "token": "secret"}
-    head = f"/reef/harness/releases/1/page?{urlencode(query)}"
+    head = f"/reef/harness/artifacts/1/page?{urlencode(query)}"
     assert served_step(rows) == 1
 
-    middle = build_release_page(2, rows, link_query=query)
+    middle = build_artifact_page(2, rows, link_query=query)
     # The logo and the Harness crumb lead to the active release.
     assert f'<a class="brand" href="{html.escape(head)}" aria-label="Harness home">' in middle
     assert f'<a href="{html.escape(head)}">Harness</a>' in middle
     walk = middle.partition('<nav class="steps"')[2].partition("</nav>")[0]
-    assert f'href="/reef/harness/releases/1/page?{html.escape(urlencode(query))}" rel="prev"' in walk
+    assert f'href="/reef/harness/artifacts/1/page?{html.escape(urlencode(query))}" rel="prev"' in walk
     assert "v2 of v2" in walk and 'rel="next"' not in walk
     # The catalog's ends have no neighbour that way, so the arrow is text, not a dead link.
-    first = build_release_page(0, rows, link_query=query).partition('<nav class="steps"')[2].partition("</nav>")[0]
+    first = build_artifact_page(0, rows, link_query=query).partition('<nav class="steps"')[2].partition("</nav>")[0]
     assert 'rel="prev"' not in first and "<span>&#8592;</span>" in first
-    assert f'href="/reef/harness/releases/1/page?{html.escape(urlencode(query))}" rel="next"' in first
+    assert f'href="/reef/harness/artifacts/1/page?{html.escape(urlencode(query))}" rel="next"' in first
     # On the page of the active release the crumb has nowhere to go, so it stays text.
-    served = build_release_page(1, rows, link_query=query)
+    served = build_artifact_page(1, rows, link_query=query)
     assert '<div class="brand">' in served and "<span>Harness</span>" in served
     assert 'aria-label="Harness home"' not in served
     # Every link a page draws is a page route; nothing points at a JSON route a browser cannot open.
     for page in (first, middle, served):
         for href in re.findall(r'href="([^"]+)"', page):
-            assert re.match(r"^/reef/harness/(releases/\d+|requests/[^/?]+)/page(\?|$)", href), href
+            assert re.match(r"^/reef/harness/(artifacts/\d+|requests/[^/?]+)/page(\?|$)", href), href
 
 
 def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses() -> None:
@@ -419,13 +419,13 @@ def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses
             "metrics": metrics[state],
         }
         served = {**creation, "active": state != "selected"}
-        page = build_release_page(1, [served, row])
+        page = build_artifact_page(1, [served, row])
         assert f'<span class="{css_class}">{label}</span>' in _hero(page)
         # The hero's tone drives the palette, so the card headline and the pill agree.
         assert f'<main class="tone-{css_class}">' in page
         assert status_label(state) == label
     # The creation row is no step's result; it reads as the starting point.
-    assert '<span class="creation">Starting point</span>' in _hero(build_release_page(0, [creation]))
+    assert '<span class="creation">Starting point</span>' in _hero(build_artifact_page(0, [creation]))
 
 
 def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() -> None:
@@ -492,7 +492,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             },
         },
     }
-    page = build_release_page(1, [creation, row])
+    page = build_artifact_page(1, [creation, row])
     page.encode("ascii")
     assert "<script>alert" not in page and "&lt;script&gt;alert(1)&lt;/script&gt;" in page
     assert "caf&#233;" in page
@@ -570,17 +570,17 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
     twilio_row = '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td><td></td></tr>'
     notify_row = '<tr><td>notify</td><td>permission</td><td class="id">test -d /</td><td>Allow notifications</td></tr>'
 
-    assert "nothing to set up" in _section(build_release_page(0, rows), "Setup")
-    own_only = _section(build_release_page(1, rows), "Setup")
+    assert "nothing to set up" in _section(build_artifact_page(0, rows), "Setup")
+    own_only = _section(build_artifact_page(1, rows), "Setup")
     assert twilio_row in own_only and "Carried from earlier steps" not in own_only
-    candidate = _section(build_release_page(2, rows), "Setup")
+    candidate = _section(build_artifact_page(2, rows), "Setup")
     assert '<tr><td>never</td><td>service</td><td class="id"></td><td></td></tr>' in candidate
     assert "TWILIO_SID" not in candidate and "Carried from earlier steps" not in candidate
-    own, _, carried = _section(build_release_page(3, rows), "Setup").partition("<h3>Carried from earlier steps</h3>")
+    own, _, carried = _section(build_artifact_page(3, rows), "Setup").partition("<h3>Carried from earlier steps</h3>")
     assert notify_row in own and twilio_row not in own
     assert twilio_row in carried and notify_row not in carried
     assert "Reef does not check them" in carried
-    own, _, carried = _section(build_release_page(4, rows), "Setup").partition("<h3>Carried from earlier steps</h3>")
+    own, _, carried = _section(build_artifact_page(4, rows), "Setup").partition("<h3>Carried from earlier steps</h3>")
     assert "nothing of its own" in own and twilio_row in carried and notify_row in carried
     assert carried.index(twilio_row) < carried.index(notify_row)
 
@@ -601,17 +601,17 @@ def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> N
         return page.partition(f"{head}</div>")[2].partition('<div class="change">')[0]
 
     # The release the step ran on is not restorable: a written file shows its new text, an update or a creation.
-    without = _section(build_release_page(1, [creation, row]), "What changed")
+    without = _section(build_artifact_page(1, [creation, row]), "What changed")
     assert change(without, "write", EXTENSION_PATH).startswith("<pre>export default function hello(pi) {")
     assert "+++ " not in without
     change(without, "remove", "rules.md")
     before = {EXTENSION_PATH: OLD_CODE, "rules.md": "Answer briefly.\n"}
-    with_files = _section(build_release_page(1, [creation, row], before_files=before), "What changed")
+    with_files = _section(build_artifact_page(1, [creation, row], before_files=before), "What changed")
     update = change(with_files, "update", EXTENSION_PATH)
     assert f"+++ {EXTENSION_PATH} (rel-1)" in update and '<span class="add">+  pi.on(' in update
     assert change(with_files, "create", "skills/notes/SKILL.md").startswith("<pre># notes")
     assert change(with_files, "remove", "rules.md") == "</div>"
-    unchanged = build_release_page(1, [creation, row], before_files={EXTENSION_PATH: NEW_CODE})
+    unchanged = build_artifact_page(1, [creation, row], before_files={EXTENSION_PATH: NEW_CODE})
     assert f"{EXTENSION_PATH} is unchanged" in _section(unchanged, "What changed")
 
 
@@ -643,16 +643,16 @@ def test_a_step_that_published_nothing_chains_to_the_release_it_ran_on() -> None
     skipped = {**PUBLISHED, "checkpoint": False, "active": False, "metrics": {"skipped": UNCHANGED}}
     rows = [{**CREATION, "active": False}, head, skipped]
     assert before_artifact_id(skipped) == "rel-1" and served_step(rows) == 1
-    chain = _section(build_release_page(2, rows), "Chain")
+    chain = _section(build_artifact_page(2, rows), "Chain")
     assert '<dt>Ran on</dt><dd class="id">rel-1 (the active release at this step; nothing was evaluated)</dd>' in chain
     assert "none (the candidate published nothing)" in chain
     assert "<dt>Parent</dt>" not in chain and "<dt>This artifact</dt>" not in chain and "rel-0" not in chain
-    published = _section(build_release_page(1, rows), "Chain")
+    published = _section(build_artifact_page(1, rows), "Chain")
     assert '<dt>Parent</dt><dd class="id">rel-0</dd>' in published
     assert '<dt>This artifact</dt><dd class="id">rel-1</dd>' in published
     # The skipped step ran on rel-1, so it is rel-1's child and not rel-0's, though its row names rel-0 as parent.
     assert '>v2</a><span class="id">rel-1</span><span class="skipped">No changes</span></li>' in published
-    seed = _section(build_release_page(0, rows), "Chain")
+    seed = _section(build_artifact_page(0, rows), "Chain")
     assert seed.count('class="step-name"') == 1 and ">v1</a>" in seed
 
 
@@ -664,7 +664,7 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
         "operation": "training",
         "metrics": {"selected": True, "patch": {EXTENSION_PATH: "let n = 0;\n++n;\n"}},
     }
-    page = build_release_page(1, [creation, row], before_files={EXTENSION_PATH: "let n = 0;\n--n;\n"})
+    page = build_artifact_page(1, [creation, row], before_files={EXTENSION_PATH: "let n = 0;\n--n;\n"})
     changed = _section(page, "What changed")
     assert f'<span class="hunk">--- {EXTENSION_PATH} (rel-0)</span>' in changed
     assert f'<span class="hunk">+++ {EXTENSION_PATH} (rel-1)</span>' in changed
@@ -688,7 +688,7 @@ def test_the_page_shows_the_method_summary_and_notes_and_escapes_them() -> None:
             "method_notes": notes,
         },
     }
-    page = build_release_page(1, [creation, row])
+    page = build_artifact_page(1, [creation, row])
     page.encode("ascii")
     assert _sections(page) == ["Why", "Method summary", "What changed", "Result", "Method notes", "Setup", "Chain"]
     assert '<p class="text">Add an &lt;away&gt; command.\n\nHow to use: type /away on.</p>' in _section(
@@ -711,7 +711,7 @@ def test_a_row_without_a_method_summary_or_notes_has_no_such_section() -> None:
         {"skipped": UNCHANGED},
     ):
         row = {"artifact_id": "rel-1", "parent_artifact_id": "rel-0", "operation": "training", "metrics": metrics}
-        assert _sections(build_release_page(1, [creation, row])) == plain
+        assert _sections(build_artifact_page(1, [creation, row])) == plain
 
 
 def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothing() -> None:
@@ -728,7 +728,7 @@ def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothin
             "training_request": {"id": "q-1", "text": "text me"},
         },
     }
-    page = build_release_page(1, [creation, row])
+    page = build_artifact_page(1, [creation, row])
     page.encode("ascii")
     assert result_of(row) == "failed" and served_step([creation, row]) == 0 and before_artifact_id(row) == "rel-0"
     assert '<span class="failed">Failed</span>' in page
@@ -745,7 +745,7 @@ def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothin
     for metrics in ({"skipped": "request failed"}, {"skipped": "request failed", "error": "  "}):
         without = {**row, "metrics": metrics}
         assert result_of(without) == "skipped"
-        assert "<h3>Error</h3>" not in build_release_page(1, [creation, without])
+        assert "<h3>Error</h3>" not in build_artifact_page(1, [creation, without])
 
 
 @pytest.mark.parametrize("legacy_policy_version", [False, True])
@@ -774,7 +774,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
     }
     if legacy_policy_version:
         row["metrics"]["selection"]["policy_version"] = "1"
-    selection_result = _section(build_release_page(1, [creation, row]), "Result")
+    selection_result = _section(build_artifact_page(1, [creation, row]), "Result")
     assert '<span class="selected">Published</span>' in selection_result
     assert "<dt>Passed</dt><dd>1</dd>" in selection_result and "<dt>Failed</dt><dd>0</dd>" in selection_result
     assert (
@@ -792,7 +792,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
     assert "<dt>Evaluation tokens</dt><dd>300 in, 20 out</dd>" in selection_result
     assert "candidate met the floor on all 1 tasks" in selection_result
     both = {**row, "metrics": {**row["metrics"], "evaluation_sides": ["candidate", "current"], "ties": 0}}
-    selection_result = _section(build_release_page(1, [creation, both]), "Result")
+    selection_result = _section(build_artifact_page(1, [creation, both]), "Result")
     assert "<dt>Evaluation sides</dt><dd>candidate, current</dd>" in selection_result
     assert selection_result.index("<dt>Ties</dt>") < selection_result.index("<dt>Passed</dt>")
     # The headline already says the step was published, so the record's own selected flag is no metric of its own.
@@ -825,7 +825,7 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
             },
         },
     }
-    page = build_release_page(1, [creation, row])
+    page = build_artifact_page(1, [creation, row])
     page.encode("ascii")
     setup = _section(page, "Setup")
     own, _, refused = setup.partition("<h3>Refused by the step</h3>")
@@ -845,6 +845,6 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
     # With nothing to set up, the refused table still closes the section.
     request = {"id": "q-1", "text": "text me", "refused_requires": refused_items}
     only_refused = {**row, "metrics": {"selected": True, "training_request": request}}
-    setup = _section(build_release_page(1, [creation, only_refused]), "Setup")
+    setup = _section(build_artifact_page(1, [creation, only_refused]), "Setup")
     assert "nothing to set up" in setup and "<td>phone</td>" in setup
     assert setup.index("nothing to set up") < setup.index("<h3>Refused by the step</h3>")

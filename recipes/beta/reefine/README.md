@@ -129,7 +129,7 @@ measurement of which requests passed the checks.
    and its summary says the review did not run, rather than reading like a
    step that had no review to give.
 3. Result. The request page and the step's page
-   (`GET /reef/harness/releases/<step>/page`) give the result: published
+   (`GET /reef/harness/artifacts/<step>/page`) give the result: published
    as a release, inactive because it changes an extension, rejected by the
    evaluation, or skipped with the reason, followed by the step's summary.
    The request page also gives the next action: the activate route for an
@@ -536,7 +536,7 @@ Every step's catalog row carries the request under
 `metrics.training_request`, the method's plain-text summary under
 `metrics.method_summary` (why nothing changed, the design with its How to
 use paragraph, and the review) and its notes under `metrics.method_notes`;
-the step page (`GET /reef/harness/releases/<step>/page`) shows them:
+the step page (`GET /reef/harness/artifacts/<step>/page`) shows them:
 
 * `design`: the plan for the request, a few sentences ending with the How
   to use paragraph.

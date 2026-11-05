@@ -102,7 +102,7 @@ def row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
 def artifact_chain(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -> list[Mapping[str, Any]]:
     """The content chain of ``artifact_id`` through the catalog ``rows``, newest first.
 
-    ``rows`` come oldest first, as ``GET /reef/harness/releases`` lists
+    ``rows`` come oldest first, as ``GET /reef/harness/artifacts`` lists
     them, and the row that published an id is its oldest row; the chain
     continues at each row's parent."""
     published: dict[str, Mapping[str, Any]] = {}
