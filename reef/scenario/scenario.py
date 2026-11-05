@@ -439,12 +439,11 @@ class Scenario:
     def served_artifact_id(self) -> str | None:
         """The artifact that serves requests, or None before inference publishes a route.
 
-        Standalone scenarios activate their own runtime, so their selected artifact is also their served artifact.
         Training uses this identity while a newly selected artifact still starts.
         """
         routes = self._binding.served_models
         if routes is None:
-            return self.serving_artifact_id() if self._binding.activates_runtime else None
+            return None
         served = routes.read(ScenarioModel(self.name))
         return None if served is None else served.artifact_id
 
