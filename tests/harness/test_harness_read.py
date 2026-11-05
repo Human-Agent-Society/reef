@@ -56,9 +56,10 @@ def test_the_manifest_serves_the_release_rendered_or_as_its_source_tree(tmp_path
     service = _service(tmp_path, recipe=_HarnessRecipe(rules="rule"))
     rendered = service.harness_manifest({"x-reef-scenario": "delivery"})
     assert rendered["files"] == PI_RULES_RENDER
-    assert rendered["release_id"]
+    assert rendered["artifact_id"]
+    assert not {"release_id", "parent_release_id", "content_id"} & rendered.keys()
     source = service.harness_manifest({"x-reef-scenario": "delivery"}, form="source")
-    assert source["files"] == {"rules.md": "rule"} and source["release_id"] == rendered["release_id"]
+    assert source["files"] == {"rules.md": "rule"} and source["artifact_id"] == rendered["artifact_id"]
     with pytest.raises(ValueError, match="form must be 'rendered', 'source' or 'client'"):
         service.harness_manifest({"x-reef-scenario": "delivery"}, form="tree")
 
