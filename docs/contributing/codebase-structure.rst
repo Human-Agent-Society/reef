@@ -214,8 +214,8 @@ Training and inference meet only through contracts that neither side owns.
   holds ``TrainingMethod`` and its learning-rate schedule.
 
 The values that both sides read are in ``core/weight_layout.py``:
-``ReleaseFormat``, ``WeightFiles`` and ``ReleaseWeights``. In ``tinker/``,
-the serving side reads a release's manifest only as a ``TinkerRelease``; the
+``ArtifactFormat``, ``WeightFiles`` and ``ArtifactWeights``. In ``tinker/``,
+the serving side reads a release's manifest only as a ``TinkerArtifact``; the
 whole manifest, with the training state, is in
 ``train/tinker_backend/checkpoint.py``. ``execution/executor/`` owns worker launch and control RPC
 for both sides. ``storage/durable_files.py`` writes JSON files and directories
