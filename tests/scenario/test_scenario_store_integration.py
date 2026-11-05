@@ -25,7 +25,7 @@ from reef.storage.tasks import TaskFileStore, TaskStorage
 from reef.train.backend import ComponentArtifacts
 from reef.train.component import ScenarioRoot
 from reef.train.trainer import Trainer
-from reef.train.types import TrainStepResult
+from reef.train.types import TrainingCommit
 
 
 class OpaqueStore(ScenarioStore):
@@ -194,7 +194,7 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         assert scenario.store is factory.sessions[0]
         assert scenario.store.durable
         scenario.records.append(trace("first"))
-        scenario.commit(TrainStepResult(state={}))
+        scenario.commit(TrainingCommit(state={}))
         assert scenario.scenario_step == 1
         assert ("commit", "math") in factory.events
         assert [row["step"] for row in dispatcher.read_commits("math")["commits"]] == [1]
@@ -300,7 +300,7 @@ def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatc
     try:
         current = dispatcher.get_or_create_scenario("math")
         assert current is not None
-        current.commit(TrainStepResult(state={}))
+        current.commit(TrainingCommit(state={}))
         with monkeypatch.context() as patch:
             patch.setattr(Trainer, "close", track_close)
             if failure_point == "binding":

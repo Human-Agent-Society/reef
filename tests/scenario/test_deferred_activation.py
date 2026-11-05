@@ -52,7 +52,7 @@ def test_load_training_activation_and_recovery_do_not_load_an_engine(deferred_fa
                 ServedArtifact(scenario.serving_artifact_id(), "http://engine", "selected-model"),
                 control_lease_number=lease.number,
             )
-            result = scenario.prepare_training_step()
+            result = scenario.next_commit()
             assert result is not None
             scenario.commit(result)
         assert scenario.current_snapshot() != root
@@ -82,7 +82,7 @@ def test_training_waits_for_the_selected_artifact_then_excludes_old_samples(defe
         make_samples(scenario)
 
         before = dict(scenario.trainer.state)
-        assert scenario.prepare_training_step() is None
+        assert scenario.next_commit() is None
         assert scenario.trainer.state == before
         assert scenario.served_artifact_id() == "previous-artifact"
         assert scenario.serving_artifact_id() == selected
@@ -96,7 +96,7 @@ def test_training_waits_for_the_selected_artifact_then_excludes_old_samples(defe
         for record in _records(2, selected, "math"):
             scenario.records.append(record)
         make_samples(scenario)
-        result = scenario.prepare_training_step()
+        result = scenario.next_commit()
         assert result is not None
         scenario.commit(result)
         (job,) = scenario.training_component.submitted
