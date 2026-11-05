@@ -68,11 +68,6 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
             return ref
         raise ArtifactNotFound(f"release does not exist: {revision}")
 
-    def index_snapshot(self, ref: SnapshotRef) -> None:
-        """Add immutable ID bindings for a previously stored snapshot."""
-        with self._storage.lock:
-            self.bind_artifact_ids(self.materialize(ref))
-
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._storage.lock:
             ref = self._storage.artifacts.get(artifact_id)
