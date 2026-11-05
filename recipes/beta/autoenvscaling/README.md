@@ -257,6 +257,17 @@ python -m recipes.beta.autoenvscaling.tmax --tasks tmax-tasks --out /data/tmax-s
 - `task.json`'s `description` becomes `instruction.md`, and `test_final_state.py` becomes `tests/test_outputs.py`. The verifier, `tmax_verifier.sh`, scores the fraction of those tests that pass with pytest's own JUnit report. It scores 0 when the report is missing or holds no test, never counts a skipped test as passed, removes reports and rewards left before it runs, and reads no pytest config file or `conftest.py` above the tests.
 - TMax ships no reference solution, so `solution/solve.sh` does nothing. Upstream's initial-state check is not used.
 
+TMax v1.1 (`TMaxxx/tmax-13k-v1.1-harbor`) ships its 13,565 tasks as Harbor tasks, with repaired verifiers and rebuilt images. Download `tasks.zip` and `extract_tasks.py`, extract the tasks, then convert them with `--harbor`:
+
+```bash
+python extract_tasks.py --archive tasks.zip --output tmax-v11-tasks
+python -m recipes.beta.autoenvscaling.tmax --harbor --tasks tmax-v11-tasks --out /data/tmax-v11-seeds
+```
+
+- Each task keeps its instruction, environment and verifier, and its agent, verifier and environment settings (v1.1's `allow_internet` becomes Harbor's `network_mode`). Its Dockerfile gains the tmux and pytest steps, and its `solution/solve.sh` does nothing.
+- Its verifier is binary: 1 when every test passes, 0 otherwise.
+- A task that the v1.1 audit did not validate, one with a known verifier defect, one whose answer leak kept its original image, or one with a binary file is refused. Of the 13,565 tasks, 6,844 become seeds: 6,550 were not validated, 89 have a known verifier defect, 6 kept a leaking image, and 76 hold a binary file.
+
 Limits:
 
 - **Text fixtures only.** A reef task holds text files, so a task with a binary fixture is refused. So is a task with a fixture that no file or several files match equally, two fixtures with one name under `fixtures/`, no `From:` image, no description or no final-state tests.

@@ -19,6 +19,13 @@ extracted directory and downloads nothing. Each task directory with a ``task.jso
 - TMax ships no reference solution, so ``solution/solve.sh`` does nothing: its oracle trial scores the untouched
   environment.
 
+TMax v1.1 (``TMaxxx/tmax-13k-v1.1-harbor``) ships Harbor tasks already. With ``--harbor``, ``--tasks`` names its
+extracted ``tasks.zip``, and each task directory with a ``task.toml`` becomes one seed (:func:`harbor_task_seed`): its
+instruction, environment and verifier as they are, its own timeouts and environment settings, the tool steps added
+to its Dockerfile, and the same do-nothing ``solution/solve.sh``. Its verifier is binary: 1 when every test
+passes. A task that the v1.1 audit did not validate, one with a known verifier defect, one whose answer leak kept its
+original image, or one with a binary file is refused.
+
 A task with a binary fixture (a reef task holds text files only), a fixture that no file or several files of the
 task directory match, two fixtures with the same name under ``fixtures/``, no ``From:`` image, no description or no
 final-state tests is refused. So is a task whose environment a variant's reply could not hold. ``test_initial_state.py`` is not used. ``conversion.json`` in the output directory
@@ -32,6 +39,7 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -69,6 +77,12 @@ TOOL_STEPS = (
     " || python3 -m pip install -q --break-system-packages pytest"
     " || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pytest)",
 )
+# A v1.1 task has network, but its image may still lack tmux, which the solver's agent needs, or pytest.
+HARBOR_TOOL_STEPS = ("# Reef: the solver's agent needs tmux, and the verifier needs pytest.", *TOOL_STEPS[1:])
+# The v1.1 task metadata a seed keeps, besides the task id.
+HARBOR_METADATA_KEYS = ("domain", "skill_type")
+# A v1.1 task builds from its published image; this bounds the build like a v1 task's.
+HARBOR_BUILD_TIMEOUT_SEC = 900
 SOLVE_SCRIPT = """#!/bin/bash
 # TMax ships no reference solution. This one does nothing, so its oracle trial scores the untouched environment.
 exit 0
@@ -240,17 +254,73 @@ def converted_task(task_dir: Path, verifier: str) -> tuple[HarborTask, Container
     return task, definition
 
 
+def harbor_task_seed(task_dir: Path) -> HarborTask:
+    """The seed task of one TMax v1.1 Harbor task directory. Raises ``ValueError`` for a task it refuses.
+
+    The task keeps its instruction, its environment and its verifier; its Dockerfile gains the tool steps, and its
+    solution does nothing. Its ``[agent]``, ``[verifier]`` and ``[environment]`` tables stay as the v1.1 audit
+    validated them.
+    """
+    for required in ("task.toml", "instruction.md", "environment/Dockerfile", "tests/test.sh"):
+        if not (task_dir / required).is_file():
+            raise ValueError(f"the task has no {required}")
+    config = tomllib.loads(text_file(task_dir / "task.toml"))
+    audit = config.get("metadata", {})
+    if audit.get("validation_status") != "validated":
+        raise ValueError(f"the v1.1 audit did not validate the task: {audit.get('validation_status')}")
+    if audit.get("known_verifier_defect"):
+        raise ValueError("the v1.1 audit found a defect in its verifier")
+    if audit.get("rubric_label") == "ANSWER-LEAK" and not audit.get("image_rebuilt"):
+        raise ValueError("the task leaks its answer, and v1.1 kept its original image")
+    environment = {
+        path.relative_to(task_dir / "environment").as_posix(): text_file(path)
+        for path in sorted((task_dir / "environment").rglob("*"))
+        if path.is_file()
+    }
+    environment["Dockerfile"] = environment["Dockerfile"].rstrip("\n") + "\n" + "\n".join(HARBOR_TOOL_STEPS) + "\n"
+    tests = {
+        path.relative_to(task_dir / "tests").as_posix(): text_file(path)
+        for path in sorted((task_dir / "tests").rglob("*"))
+        if path.is_file()
+    }
+    metadata: dict[str, object] = {"tmax_task": task_dir.name, "tmax_release": "v1.1"}
+    metadata.update({key: audit[key] for key in HARBOR_METADATA_KEYS if isinstance(audit.get(key), str)})
+    environment_config = dict(config.get("environment", {}))
+    # Harbor 0.23, which reef reads, names the network setting network_mode; v1.1's newer schema says allow_internet.
+    if "allow_internet" in environment_config:
+        environment_config["network_mode"] = "public" if environment_config.pop("allow_internet") else "no-network"
+    task_config = {
+        "agent": dict(config.get("agent", {})),
+        "verifier": dict(config.get("verifier", {})),
+        "environment": {**environment_config, "build_timeout_sec": HARBOR_BUILD_TIMEOUT_SEC},
+    }
+    try:
+        return HarborTask(
+            name=task_name(task_dir.name),
+            instruction=text_file(task_dir / "instruction.md"),
+            tests=tests,
+            environment=environment,
+            config=task_config,
+            metadata=metadata,
+            solution={"solve.sh": SOLVE_SCRIPT},
+        )
+    except HarborTaskError as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def convert(
-    tasks_dir: Path, out_dir: Path, task_ids: Sequence[str] | None = None
+    tasks_dir: Path, out_dir: Path, task_ids: Sequence[str] | None = None, *, harbor: bool = False
 ) -> dict[str, list[dict[str, object]]]:
     """Write the seed task of each TMax task in ``tasks_dir`` (those ``task_ids`` names, else every directory
-    with a ``task.json``) under ``out_dir``, and the conversion's result as ``out_dir/conversion.json``.
+    with a ``task.json``, or with ``harbor`` a ``task.toml``) under ``out_dir``, and the conversion's result as
+    ``out_dir/conversion.json``. With ``harbor`` the tasks are TMax v1.1 Harbor tasks (:func:`harbor_task_seed`).
 
     A task that is refused, or whose name another task took, is listed with the reason and not written. A task
     written before with the same content is kept; one with different content is refused.
     """
+    marker = "task.toml" if harbor else "task.json"
     if task_ids is None:
-        task_ids = sorted(path.name for path in tasks_dir.iterdir() if (path / "task.json").is_file())
+        task_ids = sorted(path.name for path in tasks_dir.iterdir() if (path / marker).is_file())
     verifier = VERIFIER.read_text(encoding="utf-8")
     converted: list[dict[str, object]] = []
     refused: list[dict[str, object]] = []
@@ -261,7 +331,10 @@ def convert(
         try:
             if not task_dir.is_dir():
                 raise ValueError("no task directory has this id")
-            task, definition = converted_task(task_dir, verifier)
+            if harbor:
+                task, definition = harbor_task_seed(task_dir), None
+            else:
+                task, definition = converted_task(task_dir, verifier)
             if task.name in names:
                 raise ValueError(f"its task name {task.name} is taken by the task {names[task.name]}")
             write_harbor_task(task, out_dir)
@@ -269,6 +342,9 @@ def convert(
             refused.append({"task_id": task_id, "reason": str(exc)})
             continue
         names[task.name] = task_id
+        if definition is None:
+            converted.append({"task_id": task_id, "name": task.name, "release": "v1.1"})
+            continue
         converted.append(
             {
                 "task_id": task_id,
@@ -293,6 +369,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="a JSON list of the task ids to convert, or upstream's list of {task_id, ...}; default: every task",
     )
+    parser.add_argument(
+        "--harbor",
+        action="store_true",
+        help="the tasks are TMax v1.1 Harbor tasks (TMaxxx/tmax-13k-v1.1-harbor's tasks.zip)",
+    )
     arguments = parser.parse_args(argv)
     task_ids: list[str] | None = None
     if arguments.select is not None:
@@ -306,7 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not isinstance(task_id, str):
                 parser.error("--select must name a JSON list of task ids or of objects with a task_id")
             task_ids.append(task_id)
-    result = convert(arguments.tasks, arguments.out, task_ids)
+    result = convert(arguments.tasks, arguments.out, task_ids, harbor=arguments.harbor)
     for entry in result["refused"]:
         print(f"refused {entry['task_id']}: {entry['reason']}")
     total = len(result["converted"]) + len(result["refused"])

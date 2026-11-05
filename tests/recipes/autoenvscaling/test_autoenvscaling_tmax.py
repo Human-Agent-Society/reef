@@ -52,6 +52,114 @@ def tmax_task(
     return task_dir
 
 
+V11_TOML = """schema_version = "1.1"
+
+[task]
+name = "tmax/{task_id}-v1.1"
+
+[metadata]
+task_id = "{task_id}"
+domain = "data_querying"
+skill_type = "Data Comprehension"
+rubric_label = "{label}"
+validation_status = "{status}"
+image_rebuilt = {rebuilt}
+known_verifier_defect = {defect}
+
+[agent]
+timeout_sec = 600.0
+user = "root"
+
+[verifier]
+timeout_sec = 300.0
+user = "root"
+
+[environment]
+workdir = "/app"
+cpus = 1
+memory_mb = 2048
+allow_internet = true
+"""
+V11_DOCKERFILE = "FROM --platform=linux/amd64 hamishivi/swerl-tmax-hardened:task_000007_ab12cd34-0c4e\nWORKDIR /app\n"
+V11_TEST = "#!/bin/bash\nif python3 -m pytest /tmp/t.py -x; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi\n"
+
+
+def harbor_task(
+    root: Path,
+    task_id: str,
+    *,
+    status: str = "validated",
+    defect: bool = False,
+    label: str = "OK",
+    rebuilt: bool = True,
+    truth: bytes = b"[1, 2]\n",
+) -> Path:
+    """One TMax v1.1 task directory as TMaxxx/tmax-13k-v1.1-harbor's tasks.zip holds it."""
+    task_dir = root / task_id
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "tests").mkdir()
+    (task_dir / "task.toml").write_text(
+        V11_TOML.format(
+            task_id=task_id, status=status, defect=str(defect).lower(), label=label, rebuilt=str(rebuilt).lower()
+        )
+    )
+    (task_dir / "instruction.md").write_text(DESCRIPTION)
+    (task_dir / "setup.sh").write_text("#!/bin/bash\necho baked into the image\n")
+    (task_dir / "environment" / "Dockerfile").write_text(V11_DOCKERFILE)
+    (task_dir / "environment" / "docker-compose.yaml").write_text("services:\n  main:\n    platform: linux/amd64\n")
+    (task_dir / "tests" / "test.sh").write_text(V11_TEST)
+    (task_dir / "tests" / ".truth.json").write_bytes(truth)
+    return task_dir
+
+
+def test_a_tmax_v11_harbor_task_becomes_a_seed_that_keeps_its_verifier_and_settings(tmp_path: Path) -> None:
+    harbor_task(tmp_path / "tasks", "task_000007_ab12cd34")
+    arguments = ["--harbor", "--tasks", str(tmp_path / "tasks"), "--out", str(tmp_path / "seeds")]
+    assert tmax.main(arguments) == 0
+
+    task = read_harbor_task(tmp_path / "seeds" / "task-000007-ab12cd34")
+    assert task.instruction == DESCRIPTION
+    # The binary verifier and its hidden truth stay as v1.1 ships them.
+    assert task.tests == {"test.sh": V11_TEST, ".truth.json": "[1, 2]\n"}
+    assert task.solution == {"solve.sh": tmax.SOLVE_SCRIPT}
+    assert task.environment["Dockerfile"].splitlines() == [*V11_DOCKERFILE.splitlines(), *tmax.HARBOR_TOOL_STEPS]
+    assert "docker-compose.yaml" in task.environment
+    assert task.metadata == {
+        "tmax_task": "task_000007_ab12cd34",
+        "tmax_release": "v1.1",
+        "domain": "data_querying",
+        "skill_type": "Data Comprehension",
+    }
+    # The task keeps the settings the v1.1 audit validated, in the names Harbor 0.23 reads.
+    assert task.config["agent"]["timeout_sec"] == 600 and task.config["verifier"]["timeout_sec"] == 300
+    assert task.config["environment"]["network_mode"] == "public"
+    assert task.config["environment"]["memory_mb"] == 2048
+    assert [seed.name for seed in seed_tasks(tmp_path / "seeds")] == ["task-000007-ab12cd34"]
+    assert json.loads((tmp_path / "seeds" / "conversion.json").read_text()) == {
+        "converted": [{"task_id": "task_000007_ab12cd34", "name": "task-000007-ab12cd34", "release": "v1.1"}],
+        "refused": [],
+    }
+
+
+def test_a_v11_task_the_audit_did_not_clear_or_with_a_binary_file_is_refused(tmp_path: Path) -> None:
+    tasks = tmp_path / "tasks"
+    harbor_task(tasks, "task_000001_aaaaaaaa", status="not_validated")
+    harbor_task(tasks, "task_000002_bbbbbbbb", defect=True)
+    harbor_task(tasks, "task_000003_cccccccc", label="ANSWER-LEAK", rebuilt=False)
+    harbor_task(tasks, "task_000004_dddddddd", truth=b"\xff\xfe binary oracle")
+    harbor_task(tasks, "task_000005_eeeeeeee", label="ANSWER-LEAK")
+    assert tmax.main(["--harbor", "--tasks", str(tasks), "--out", str(tmp_path / "seeds")]) == 1
+
+    result = json.loads((tmp_path / "seeds" / "conversion.json").read_text())
+    reasons = {entry["task_id"]: entry["reason"] for entry in result["refused"]}
+    assert reasons["task_000001_aaaaaaaa"].startswith("the v1.1 audit did not validate the task")
+    assert reasons["task_000002_bbbbbbbb"] == "the v1.1 audit found a defect in its verifier"
+    assert reasons["task_000003_cccccccc"] == "the task leaks its answer, and v1.1 kept its original image"
+    assert "binary file" in reasons["task_000004_dddddddd"]
+    # A leak that v1.1 repaired with a rebuilt image is a seed.
+    assert [entry["task_id"] for entry in result["converted"]] == ["task_000005_eeeeeeee"]
+
+
 def test_a_tmax_task_becomes_a_reef_harbor_task_that_reads_back(tmp_path: Path) -> None:
     tmax_task(tmp_path / "tasks", "Task_007")
     assert tmax.main(["--tasks", str(tmp_path / "tasks"), "--out", str(tmp_path / "seeds")]) == 0
