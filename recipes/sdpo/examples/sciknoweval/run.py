@@ -5,7 +5,7 @@ One rollout is one training run:
     train  — reef-eval runs the ``harbor/chemistry`` task under our agent; the
              agent runs the stage in the task container, which samples each
              step's 32x8 grid through Reef, reports every rollout with its
-             coordinates, waits for the step's training release, and evaluates
+             coordinates, waits for the step's training snapshot, and evaluates
              avg@n on the test split every few steps
     verify — Harbor's isolated verifier reads the run's curve and reports its
              last avg@n

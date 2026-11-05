@@ -43,7 +43,7 @@ Training job and serving contracts run in the regular CPU suite:
      tests/train/test_jobs.py tests/runtime/test_serving.py -q
 
 These cover job identity, durable job submission and resumption after a
-restart, the trainer's job loop, and loading published releases into serving
+restart, the trainer's job loop, and loading published snapshots into serving
 engines. They use fake components and engines. Real Slime training and
 engine weight loads require a supported GPU run.
 

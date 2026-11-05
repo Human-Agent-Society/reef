@@ -149,7 +149,7 @@ class CaptureProxy:
         self.config = ServeConfig(
             upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
         )
-        #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
+        #: The tag channel: the record keeps which snapshot (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)
         for name, value in (tags or {}).items():
             self.tags[name] = value

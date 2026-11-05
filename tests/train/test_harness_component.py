@@ -38,7 +38,7 @@ def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
 
 
 def seed_start(component: HarnessTrainingComponent, tmp_path: Path) -> str:
-    """The start of a job from the seed tree: the component's import of a release that holds the seed."""
+    """The start of a job from the seed tree: the component's import of a snapshot that holds the seed."""
     release = tmp_path / "seed-release"
     if not release.is_dir():
         PI_SEED.write(release)
@@ -175,7 +175,7 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
     assert component.artifact_format is None and component.shares_scenarios
     assert component.default_start().files == dict(PI_SEED.files)
-    # An imported start is a copy of the release's tree, under its checksum, without the repository's own files.
+    # An imported start is a copy of the snapshot's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
     # An import's directory holds the tree alone.

@@ -33,15 +33,15 @@ DATA = "/reef/namespaces/acme/data"
 
 
 class UriBackend(InMemoryRepositoryBackend):
-    """An in-memory repository that names each release's directory with a ``file`` URI, as an object store names it
+    """An in-memory repository that names each snapshot's directory with a ``file`` URI, as an object store names it
     with an ``s3`` URI."""
 
-    def release_uri(self, ref: SnapshotRef) -> str:
+    def snapshot_uri(self, ref: SnapshotRef) -> str:
         return self.materialize(ref).local_path.as_uri() + "/"
 
 
 def weights(directory: Path, content: bytes) -> Path:
-    """A full-weight release: the layout of the test policy's releases."""
+    """A full-weight artifact: the layout of the test policy's releases."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -166,7 +166,7 @@ def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
 
 @pytest.mark.integration
 def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path) -> None:
-    """RFC #1062, RFC #1070: the item is the scenario's root release, so it is the active artifact and the training
+    """RFC #1062, RFC #1070: the item is the scenario's root snapshot, so it is the active artifact and the training
     start, and the creation row names the item as its source.
 
     A process trains one scenario, so each new scenario has a Cell of its own; the Cells share the data store.
@@ -217,7 +217,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
                 # The root is the only release: no default start was written first.
-                assert len(scenario.release_queries.snapshot_rows(scenario.scenario_step)) == 1
+                assert len(scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(

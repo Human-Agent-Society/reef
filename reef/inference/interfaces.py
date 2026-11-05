@@ -346,11 +346,11 @@ class InferenceRuntime(ABC):
 
     @abstractmethod
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Serve the published release ``artifact``; return the runtime load ID that serves it.
+        """Serve the published snapshot ``artifact``; return the runtime load ID that serves it.
 
-        Reef calls it at a commit that activates a release, at an activation
-        and at a start, before traffic routes to the release. ``scenario`` names
-        the release's scenario exactly when the runtime serves a separate
+        Reef calls it at a commit that activates a snapshot, at an activation
+        and at a start, before traffic routes to the snapshot. ``scenario`` names
+        the snapshot's scenario exactly when the runtime serves a separate
         adapter per scenario (``per_scenario_adapters``). A raise leaves the
         runtime serving what it served before. A runtime that loads weights
         makes a new runtime load ID for each load; a runtime that loads
@@ -443,7 +443,7 @@ class InferenceRuntime(ABC):
 
     @property
     def served_weight_kind(self) -> ArtifactKind:
-        """The kind of the weights that this runtime serves from a release.
+        """The kind of the weights that this runtime serves from a snapshot.
 
         ``model_adapter`` is a LoRA adapter on the runtime's base model, and ``model`` is a whole model's weights,
         which is the default.
@@ -498,7 +498,7 @@ class InferenceRuntime(ABC):
         """Whether several training scenarios can share this runtime, each served its own weights.
 
         A runtime that loads one model into its engines serves one training
-        scenario: a second scenario's release would replace the first one's
+        scenario: a second scenario's snapshot would replace the first one's
         weights.
         """
         return False

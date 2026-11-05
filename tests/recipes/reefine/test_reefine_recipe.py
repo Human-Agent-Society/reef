@@ -40,7 +40,7 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     # By default a person activates a tree that changes an extension.
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
-    # The floor: the candidate alone must pass every evaluation task; the current release is not run.
+    # The floor: the candidate alone must pass every evaluation task; the current snapshot is not run.
     assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
     assert isinstance(built.scorer, AnswerScorer)
     # Without evolution.seed the first tree is the packaged one: the starter skill.

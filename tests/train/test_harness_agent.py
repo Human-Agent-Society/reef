@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import TreeReleases, build_harness_backend, harness_recipe
+from tests.support.harness_steps import TreeArtifacts, build_harness_backend, harness_recipe
 
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
@@ -133,7 +133,7 @@ def agent_backend(tmp_path: Path, upstream: Upstream, mode: str = ""):
         agent=AgentSettings("pi", LocalExecutor(), 60.0, str(binary)),
         models={"proposer": ModelBinding(base_url=upstream.base_url, model="proposer-model", api_key="k")},
     )
-    releases = TreeReleases(recipe.seed)
+    releases = TreeArtifacts(recipe.seed)
     return build_harness_backend(recipe, "demo", releases)
 
 

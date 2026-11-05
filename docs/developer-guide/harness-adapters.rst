@@ -31,7 +31,7 @@ pi's ``adapter.yaml``, shortened:
    binary: pi
    install: {kind: npm, package: "@earendil-works/pi-coding-agent", version: "0.84.2",
              binary_path: node_modules/.bin/pi}
-   evolve:                                  # what Reef may evolve: its path in the release's pi package
+   evolve:                                  # what Reef may evolve: its path in the snapshot's pi package
      rules: {renders: plugin/rules.md, holds: ...}
      skill: plugin/skills/{name}/SKILL.md
      command: plugin/prompts/{name}.md
@@ -114,7 +114,7 @@ How Reef runs an agent
        scores the tests' reward.
      - an npm ``install``
    * - A person's machine
-     - ``reef-client harness`` installs the release as the agent's plugin,
+     - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
        Reef.
      - ``run.layer``
@@ -257,8 +257,8 @@ Config targets and a person's machine
 A tree's ``config/<target>.json`` merges into the target's file and must pass
 the target's checks (`Config checks`_). A key that the model binding writes
 never comes from a tree: validation refuses it. The last column says whether
-the adapter has a ``run.layer``, so that ``reef-client`` runs its releases on a
-person's machine (`A person's machine`_). Without one, a release runs only in
+the adapter has a ``run.layer``, so that ``reef-client`` runs its snapshots on a
+person's machine (`A person's machine`_). Without one, a snapshot runs only in
 Reef's runs.
 
 .. list-table::
@@ -460,7 +460,7 @@ Prefer a check to a step for a rule on config values.
 A person's machine
 ------------------
 
-On a person's machine, the release is the agent's own plugin, installed
+On a person's machine, the snapshot is the agent's own plugin, installed
 with the agent's own command. The agent then loads it in every session,
 beside the person's own configuration, which Reef never reads. A session
 that Reef starts also sends its model calls to Reef.
@@ -471,7 +471,7 @@ that Reef starts also sends its model calls to Reef.
 
    * - Agent
      - ``register``
-     - Loads a new release
+     - Loads a new snapshot
    * - ``claude``
      - ``claude plugin marketplace add <install>``, ``claude plugin install
        reef@reef``
@@ -489,7 +489,7 @@ that Reef starts also sends its model calls to Reef.
 
 ``reef-client harness`` asks ``GET /reef/harness?form=client&root=<install>``
 and installs the files under ``<install>``. It runs ``register`` once per
-installed release, and ``unregister`` on ``disconnect``. A release that a
+installed artifact, and ``unregister`` on ``disconnect``. A snapshot that a
 person activates (``POST /reef/scenarios/<scenario>/activate``) installs at
 the client's next sync. The layer's render starts each config target from
 nothing and skips the checks; ``layer_files`` adds what ``register`` names

@@ -109,7 +109,7 @@ class ServiceConfig:
         None,
         public_path=("inference", "serving"),
         help=(
-            "How a weight-training deployment serves its releases: engines (Reef's engines on an inference "
+            "How a weight-training deployment serves its snapshots: engines (Reef's engines on an inference "
             "component), trainer (the training backend's own serving, such as Tinker's sampler), none, or a "
             "module:Factory runtime factory. Default: engines when engine settings are given, else the "
             "training backend's default."
@@ -124,13 +124,13 @@ class ServiceConfig:
     inference_max_loaded_adapters: int = config_option(
         1,
         public_path=("inference", "max_loaded_adapters"),
-        help="Adapters the serving engines keep resident when the releases are PEFT adapters.",
+        help="Adapters the serving engines keep resident when the snapshots are PEFT adapters.",
     )
     inference_prefix_sharing: bool = config_option(
         False,
         public_path=("inference", "prefix_sharing"),
         help=(
-            "Share prefix-cache entries between requests. Each release load then retracts the requests in "
+            "Share prefix-cache entries between requests. Each snapshot load then retracts the requests in "
             "flight, which prefill again on the new weights."
         ),
     )

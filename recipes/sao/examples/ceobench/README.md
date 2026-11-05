@@ -176,7 +176,7 @@ decision turn of week N is reported with the week's credit as its score.
 The game is paced to the trainer through `CEOBENCH_PACE_BATCH`, which is the
 deployment's `job_samples` of 8. Before each model call the harness reports the
 weeks whose credit window has closed and then waits until every filled job
-has committed a release, so a week is played by a policy trained on every
+has committed a snapshot, so a week is played by a policy trained on every
 week reported so far. A wait longer than `CEOBENCH_PACE_TIMEOUT_S` (20
 minutes) is forgiven. `CEOBENCH_REPORTS=0` turns reporting and pacing off,
 which gives the untrained baseline. The Harbor reward stays the benchmark's
@@ -223,7 +223,7 @@ commented out for a cold start. Replicates are independent runs from the base
 model with one stack each, so run `docker compose down` between them or use
 a fresh `RUN_DIR`. A Slime deployment trains one scenario for its lifetime, and
 a second seed on the same stack would start from the first seed's adapter.
-After the rollout, `run.py` waits until the scenario's training releases
+After the rollout, `run.py` waits until the scenario's training snapshots
 have stopped growing for fifteen quiet minutes. This is longer than one step,
 so the adapter on disk is the one the rollout ended with:
 

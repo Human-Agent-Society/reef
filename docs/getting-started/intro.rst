@@ -30,13 +30,13 @@ offline pipelines.
        forward the request and keep the exchange
 
    Record
-       store the release that produced the response
+       store the snapshot that produced the response
 
    **Learn**
        the recipe uses records to create a candidate version
 
    Publish
-       an accepted candidate becomes the active release
+       an accepted candidate becomes the active selection
 
    :Loop: the next request is served by the new version
 
