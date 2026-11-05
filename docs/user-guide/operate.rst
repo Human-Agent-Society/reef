@@ -945,6 +945,28 @@ answers.
 The first new record is the point of no return. An older Reef cannot read it,
 so a rollback needs the backup from step 2.
 
+Rewrite older commit records
+----------------------------
+
+Reef reads commit records of older formats. A later Reef can stop reading them.
+Rewrite them before you upgrade to that Reef.
+
+#. Stop every Reef process that writes to the deployment.
+#. Back up the deployment (see `Back up a deployment`_). A rewrite cannot be
+   undone without the backup.
+#. Run ``reef migrate-commits -c <config>``. It changes nothing. It prints how
+   many records of each scenario it would rewrite, and each problem. It fetches
+   each stored snapshot that the history names, so it can need as much disk space
+   as all the snapshots.
+#. Fix each problem. A flat snapshot needs a component name in the scenario's
+   manifest, so a scenario without one stays as it is.
+#. Run ``reef migrate-commits -c <config> --apply``. It rewrites the records of
+   each scenario in one transaction. If it stops, run it again.
+#. Run ``reef check-artifacts -c <config>``, and then start Reef.
+
+The command does not change Git history. A snapshot without an explicit artifact
+ID keeps its revision-based ID.
+
 Back up a deployment
 --------------------
 
