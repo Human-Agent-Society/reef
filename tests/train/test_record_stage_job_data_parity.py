@@ -211,7 +211,7 @@ class StreamRun:
                     payload = {
                         "text": step.request_id,
                         "session": "session-1",
-                        "release_id": "release-1",
+                        "artifact_id": "release-1",
                         "samples": list(step.sample_ids),
                     }
                     self.training_requests.file(step.request_id, normalize_training_request_payload(payload))

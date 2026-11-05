@@ -58,10 +58,6 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             served = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert served["files"] == dict(PI_SEED.files)
             base = served["artifact_id"]
-            # An older client names the snapshot that it installed.
-            revision = control.get_or_create_scenario("demo").current_snapshot().revision
-            legacy = await client.get("/reef/harness", params={"release_id": revision}, headers=HEADERS)
-            assert (await legacy.json())["artifact_id"] == base
             # A client's layer sends its model calls to the inference service that the deployment names.
             layer = await client.get(
                 "/reef/harness",
@@ -72,7 +68,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             assert f"{INFERENCE_URL}/reef/scenarios/demo" in text and "harness.example" not in text
             # An import goes to control, which commits it as the active selection.
             response = await client.post(
-                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_release_id": revision}
+                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_artifact_id": base}
             )
             assert response.status == 200, await response.text()
             imported = await response.json()
@@ -84,7 +80,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             assert releases["artifacts"][-1]["artifact_id"] == imported["artifact_id"]
             # The same files again are a new import, which merges onto the tree they made: nothing changes.
             again = await client.post(
-                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_release_id": revision}
+                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_artifact_id": base}
             )
             assert again.status == 200 and (await again.json())["changed"] is False
             # Control's refusals keep their status: a file that both sides changed, an import without its base,

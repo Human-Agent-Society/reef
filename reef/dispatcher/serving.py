@@ -210,10 +210,7 @@ class ServingWorker(QueueWorker):
             self.repositories[item.scenario] = repository
 
         def selected_artifact(value: Mapping[str, object]) -> Artifact:
-            if "selection" in value:
-                return repository.select(ArtifactSelection.from_dict(value["selection"]))
-            # Work queued before component selections carried a durable storage revision.
-            return Artifact(backend.resolve_snapshot(require_text(value.get("release_id"), "release_id")), repository)
+            return repository.select(ArtifactSelection.from_dict(value["selection"]))
 
         artifact = selected_artifact(item.payload)
         components = self.recipe.scenario_components(item.scenario)
