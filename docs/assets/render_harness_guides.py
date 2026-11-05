@@ -72,7 +72,7 @@ def method_step(theme: str, fonts) -> str:
         "One training step from the method's view. Reef writes the workspace: a copy of the head in harness, "
         "the step's material, and the method's state from the last step. Reef calls step(context) once; the "
         "method reads the workspace, calls the services, and writes the candidate tree, its state and its output. "
-        "Reef then checks the candidate and evaluates it; a selected candidate is a release, which the activation "
+        "Reef then checks the candidate and evaluates it; a selected candidate is a snapshot, which the activation "
         "rule serves or holds for a person.",
         "One training step, from the method's view",
         "Numbers 5 to 8 are the steps of the architecture figure in Evolve your harness.",
@@ -136,7 +136,7 @@ def method_step(theme: str, fonts) -> str:
         write(
             40,
             STEP_H - 20,
-            "An unchanged tree, or one that fails the check, skips the step: no evaluation and no release.",
+            "An unchanged tree, or one that fails the check, skips the step: no evaluation and no snapshot.",
             BODY,
             p["muted"],
         )
@@ -312,9 +312,9 @@ def harness_tutorial_overview(theme: str, fonts) -> str:
         TUTORIAL_H,
         "What runs where. On your machine, your agent keeps your own settings, rules and skills, and reef-client "
         "installs and syncs Reef's version. It sends model calls and changed files to Reef, and gets answers and new "
-        "versions back. In Reef, a method proposes a new version, and the releases keep every version in Git.",
+        "versions back. In Reef, a method proposes a new version, and the snapshots keep every version in Git.",
         "What runs where",
-        "reef-client sits beside your agent; the method and the releases run in Reef.",
+        "reef-client sits beside your agent; the method and the snapshots run in Reef.",
         [("your machine", "machine"), ("Reef", "reef"), ("files", "store")],
     )
     top = 100

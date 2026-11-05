@@ -20,11 +20,11 @@ from reef.storage.job_data import read_job_data
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
-#: The release format of a stub component that does not name one.
+#: The artifact format of a stub component that does not name one.
 FULL_WEIGHTS = ArtifactFormat("full")
 #: The file a stub checkpoint holds: the version name that serving the checkpoint reports.
 VERSION_FILE = "model.txt"
-#: The root release of a trainer that a test builds outside a scenario; a stub's ``root_start`` does not read it.
+#: The root snapshot of a trainer that a test builds outside a scenario; a stub's ``root_start`` does not read it.
 STUB_ROOT = ScenarioRoot(Artifact.local(Path("stub-root")), RootSource("default"))
 
 
@@ -36,7 +36,7 @@ class StubTrainingComponent(TrainingComponent):
     saves the checkpoints that :meth:`train` returns; the default saves one
     checkpoint, ``<checkpoint_root>/<n>``, that holds ``model.txt`` with the
     version name ``w<n>`` for the ``n``-th job. ``submitted`` lists the jobs
-    in submission order and ``imported`` the releases given to
+    in submission order and ``imported`` the snapshots given to
     :meth:`import_start`. ``shares_scenarios`` is what the component reports
     for :attr:`TrainingComponent.shares_scenarios`, and ``artifact_format`` for
     :attr:`TrainingComponent.artifact_format` (full weights by default). Like
@@ -150,14 +150,14 @@ class RecordingComponent(StubTrainingComponent):
 
 
 class StubInferenceRuntime(InferenceProxyRuntime):
-    """An inference proxy that records the releases it serves.
+    """An inference proxy that records the snapshots it serves.
 
-    A release serves under the version its ``model.txt`` names, or under its
+    A snapshot serves under the version its ``model.txt`` names, or under its
     release ID when it holds no such file. ``activated`` lists the versions
-    of the releases it served, at commits, activations and starts, in order;
+    of the snapshots it served, at commits, activations and starts, in order;
     ``served`` is the last one, ``None`` before the first one.
 
-    With ``answers_each_release``, the runtime answers each call from the artifact it names, as Tinker does: each
+    With ``answers_each_artifact``, the runtime answers each call from the artifact it names, as Tinker does: each
     artifact has its own model name, ``sampler:<artifact_id>``.
     """
 
@@ -166,11 +166,11 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
         self.served: str | None = None
-        self.answers_each_release = False
+        self.answers_each_artifact = False
 
     @property
     def serves_artifacts_on_request(self) -> bool:
-        return self.answers_each_release
+        return self.answers_each_artifact
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", artifact.ref.revision)

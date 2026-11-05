@@ -1,6 +1,6 @@
-"""The components a scenario's releases bind, and how each one is checked, imported and read.
+"""The components a scenario's snapshots bind, and how each one is checked, imported and read.
 
-A recipe declares them (``Recipe.build_components``). A release binds named
+A recipe declares them (``Recipe.build_components``). A snapshot binds named
 components (``weights``, ``harness``, ``config``, ...). A scenario with no
 component records traffic only. The inference runtime loads the component of
 a weight kind; a client pulls the component that has a file tree.
@@ -69,7 +69,7 @@ class ArtifactLayout(ABC):
     """The directory layout of one component's artifacts, which an artifact import must meet (RFC #980).
 
     ``check(files)`` returns when ``files`` are an artifact of the component, in the layout of the component's
-    releases, and every remote path they name resolves on the component's service. Otherwise it raises
+    snapshots, and every remote path they name resolves on the component's service. Otherwise it raises
     ``ValueError`` naming what does not hold. ``files`` is the source's files, wherever the source keeps them, so a
     check reads files through it and reads no more of them than it needs.
 
@@ -105,7 +105,7 @@ class ArtifactLayout(ABC):
 
 @dataclass(frozen=True)
 class ComponentSpec:
-    """How one named component of a release is admitted, imported and read, and what kind it is.
+    """How one named component of a snapshot is admitted, imported and read, and what kind it is.
 
     Values: ``validator`` admits an artifact of the component before it is
     published or activated; the default accepts any. ``kind`` is the
@@ -135,16 +135,16 @@ class ComponentSpec:
 
 @dataclass(frozen=True)
 class ScenarioComponents:
-    """The components that every release of one scenario binds, by name.
+    """The components that every snapshot of one scenario binds, by name.
 
     Values: ``components`` maps valid component names to ``ComponentSpec``s, in
     declaration order; it may be empty. At most one component is ``loaded`` and
-    at most one has ``files``. ``validator`` is the whole release's admission
+    at most one has ``files``. ``validator`` is the whole snapshot's admission
     check, run before each component's; it carries the
     ``build_artifact_validator`` of a recipe that serves no component.
 
-    A release with at most one component is flat: the whole artifact is the
-    component. A release with several keeps each one in a directory named after
+    A snapshot with at most one component is flat: the whole artifact is the
+    component. A snapshot with several keeps each one in a directory named after
     it, and ``component_artifact`` reads that directory.
 
     Purpose: a recipe makes it in ``build_components``; the scenario factory,
@@ -176,7 +176,7 @@ class ScenarioComponents:
 
     @property
     def single(self) -> bool:
-        """True when the release is flat: the whole artifact is the one component, or there is none."""
+        """True when the snapshot is flat: the whole artifact is the one component, or there is none."""
         return len(self.components) <= 1
 
     @property
@@ -210,11 +210,11 @@ class ScenarioComponents:
         return component, layout
 
     def component_artifact(self, artifact: Artifact, name: str) -> Artifact:
-        """``name``'s view of a release: the artifact itself when the release is flat."""
+        """``name``'s view of a snapshot: the artifact itself when the snapshot is flat."""
         return artifact if self.single else artifact.component(name)
 
     def read_files(self, artifact: Artifact) -> Mapping[str, str] | None:
-        """The client-pulled file tree of the release ``artifact``; ``None`` when no component has one."""
+        """The client-pulled file tree of the snapshot ``artifact``; ``None`` when no component has one."""
         name = self.files_component
         if name is None:
             return None
@@ -224,7 +224,7 @@ class ScenarioComponents:
         return tree.read_files(self.component_artifact(artifact, name))
 
     def validate(self, artifact: Artifact) -> None:
-        """Run the release's own admission check, then every component's against its view of ``artifact``."""
+        """Run the snapshot's own admission check, then every component's against its view of ``artifact``."""
         self.validator.validate(artifact)
         for name, component in self.components.items():
             component.validator.validate(self.component_artifact(artifact, name))

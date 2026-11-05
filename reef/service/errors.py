@@ -13,7 +13,7 @@ import logging
 from aiohttp import web
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
-from reef.artifact.release_chain import ReleaseNotRestorable
+from reef.artifact.snapshot_chain import SnapshotNotRestorable
 from reef.core.errors import (
     CommitPending,
     InferenceUnavailable,
@@ -40,7 +40,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ScenarioCapacityFull, web.HTTPServiceUnavailable),
     (ArtifactConflict, web.HTTPConflict),
     (CommitPending, web.HTTPConflict),
-    (ReleaseNotRestorable, web.HTTPBadRequest),
+    (SnapshotNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
     (InferenceUnavailable, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),

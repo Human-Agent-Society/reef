@@ -1,4 +1,4 @@
-"""Wait for the inference worker when a test needs the selected release to serve."""
+"""Wait for the inference worker when a test needs the selected snapshot to serve."""
 
 import time
 

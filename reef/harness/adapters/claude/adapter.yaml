@@ -23,7 +23,7 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 renderer: reef.harness.adapters.claude.render:ClaudeAdapterRenderer
-# A release is a Claude Code plugin in plugin/, named reef: its skills and commands load as
+# A snapshot is a Claude Code plugin in plugin/, named reef: its skills and commands load as
 # reef:<name>, its rules as the plugin's output style, and its extensions as hooks. A run
 # loads it with --plugin-dir; a person's machine installs it from the local marketplace reef at
 # the install root, and Claude Code loads it in place in every session. A plugin carries no
@@ -68,7 +68,7 @@ run:
       DISABLE_UPDATES: "1"
       DISABLE_TELEMETRY: "1"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-  # How a person's machine runs Claude Code on a release: the person's own ~/.claude stays.
+  # How a person's machine runs Claude Code on a snapshot: the person's own ~/.claude stays.
   # register installs the plugin reef from the local marketplace reef at the install root, and
   # Claude Code loads it in place in every session; a session that Reef starts also takes the
   # settings that bind the model, which win over the person's.

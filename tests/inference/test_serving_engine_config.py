@@ -1,4 +1,4 @@
-"""The serving engines' input that Reef builds from the inference settings and the training component's release format."""
+"""The serving engines' input that Reef builds from the inference settings and the training component's snapshot format."""
 
 from __future__ import annotations
 
