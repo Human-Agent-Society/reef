@@ -294,7 +294,7 @@ def test_processor_rejects_non_finite_report_scores() -> None:
     with pytest.raises(ReportValidationError, match="finite"):
         processor.push(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready(1)
-    assert processor.releasable_record_ids().isdisjoint({"i1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.unit
@@ -318,12 +318,12 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
                 processor.push(item)
         else:
             processor.push(item)
-        processor.releasable_record_ids()  # a read between arrivals must not latch the release
+        processor.record2sample.releasable_record_ids()  # a read between arrivals must not latch the release
 
     batch = processor.build_job_data(1)
     assert [source_record_id(sample) for sample in batch.samples] == ["i1"]
     processor.acknowledge(batch.data_id)
-    assert processor.releasable_record_ids() == frozenset({"retry", "i1"})
+    assert processor.record2sample.releasable_record_ids() == frozenset({"retry", "i1"})
 
 
 # --- backend preparation ---------------------------------------------------
