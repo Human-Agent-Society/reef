@@ -10,10 +10,16 @@ the worker hooks (``objective.py``).
 from __future__ import annotations
 
 from argparse import Namespace
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
+from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.algorithm import register_loss_family
 from reef.train.slime_backend.distill import DistillAlgorithm, DistillSettings
+from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.types import JobData, trajectories
 
 
 @dataclass(frozen=True)
@@ -62,4 +68,18 @@ class SdpoAlgorithm(DistillAlgorithm):
             raise RuntimeError(f"{source} requires the sequence-mean reduction: omit --calculate-per-token-loss")
 
 
-__all__ = ["SdpoAlgorithm", "SdpoSettings"]
+@register_slime_objective
+class SdpoObjective(SlimeObjective):
+    name = "sdpo"
+    loss_family = "sdpo"
+    supports_multiple_epochs = False
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
+        if not samples:
+            raise ValueError("SDPO requires a complete sampling step")
+        steps = next_steps(state)
+        return TrainingSignal("train", {"steps": steps}, {"steps": steps, "samples": len(samples)})
+
+
+__all__ = ["SdpoAlgorithm", "SdpoObjective", "SdpoSettings"]

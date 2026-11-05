@@ -20,11 +20,8 @@ from reef.inference.tinker import TinkerInferenceRuntime
 from reef.service.deploy.training import training_deployment_for
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos import TrainingSignal
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob, job_id_for
-from reef.train.method import TrainingMethod
 from reef.train.tinker_backend import client as client_module
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
@@ -32,6 +29,11 @@ from reef.train.tinker_backend.config import SpindleFullConfig
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
 from reef.train.tinker_backend.launch import SpindleFullDeployment, spindle_full_settings
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
+from reef.train.tinker_backend.objectives import (
+    TinkerObjective,
+    register_tinker_objective,
+    unregister_tinker_objective,
+)
 from reef.train.tinker_backend.spindle_export import CheckpointExporter, checkpoint_directory, checkpoint_upload
 
 MODEL = "org/model"
@@ -98,7 +100,7 @@ class SpindleClient(TinkerClient, TinkerSampler):
         return
 
 
-class Objective(TrainingObjective):
+class Objective(TinkerObjective):
     loss_family = "importance_sampling"
     name = "spindle-full-test-objective"
 
@@ -109,9 +111,9 @@ class Objective(TrainingObjective):
 @pytest.fixture
 def objective():
     value = Objective()
-    register_objective(value)
+    register_tinker_objective(value)
     yield value
-    unregister_objective(value.name)
+    unregister_tinker_objective(value.name)
 
 
 @pytest.fixture
@@ -165,7 +167,7 @@ def train(component, start=None):
             ),
         ),
     )
-    parameters = {"method": TrainingMethod(Objective.name).to_dict()}
+    parameters = {"objective": Objective.name}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
     component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
