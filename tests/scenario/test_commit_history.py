@@ -624,7 +624,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             records,
             pipeline_factory=ProtectAllPipeline,
             job_loop=JobLoop(component, scenario=scenario),
-            job_parameters={kind: {"method": {"objective": "sft"}} for kind in SAMPLE_KINDS},
+            job_parameters={kind: {"objective": "sft"} for kind in SAMPLE_KINDS},
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             root=root,
@@ -840,7 +840,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 2
     # The component saved no checkpoint, so the job failed and published no snapshot.
-    assert component.submitted[0].parameters == {"method": {"objective": "sft"}}
+    assert component.submitted[0].parameters == {"objective": "sft"}
     assert committed["metrics"]["training_job"]["event"] == "failed"
     assert not list(tmp_path.rglob("*.sqlite3"))
 
@@ -1017,7 +1017,7 @@ def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["stage", "publish", "activation", "commit_history"])
+@pytest.mark.parametrize("failure_point", ["stage", "publish", "commit_history"])
 def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, monkeypatch, failure_point) -> None:
     agent_record_dir = tmp_path / "records" if failure_point == "commit_history" else None
     dispatcher, backend = _build_saved_artifact_dispatcher(
@@ -1044,9 +1044,6 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         target = scenario.store.commit_history
         method_name = "append"
         assert target is not None
-    elif failure_point == "activation":
-        target = committer
-        method_name = "_activate"
     else:
         target = committer._artifacts
         method_name = failure_point

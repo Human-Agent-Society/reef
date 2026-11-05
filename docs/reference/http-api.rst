@@ -983,12 +983,15 @@ uploaded trajectories, run an RL job on uploaded train tasks:
      -H "Content-Type: application/json" \
      -d '{"agent_record_id":"rl-001","text":"RL on the uploaded tasks","session":"session-1","artifact_id":"artifact-1",
           "samples":["task-a","task-b"],
-          "parameters":{"method":{"objective":"task_group"},"rollout":{"rollouts_per_task":4}}}'
+          "parameters":{"objective":"my_methods.objectives:MyObjective","rollout":{"rollouts_per_task":4}}}'
 
-The Tinker component takes ``method``, ``scheduling``, ``batch_size``,
-``learning_rate``, ``kl_coef``, ``save_interval`` and ``rollout``; ``rollout``
-only on a job of tasks. Slime takes ``method``, ``scheduling`` and
-``save_interval``, and trains no tasks.
+The Tinker component takes ``objective``, ``learning_rate_schedule``,
+``scheduling``, ``batch_size``, ``learning_rate``, ``kl_coef``, ``save_interval``
+and ``rollout``; ``rollout`` only on a job of tasks. Slime takes ``objective``,
+``learning_rate_schedule``, ``scheduling``, ``save_interval``, ``dataset`` and
+``harbor``; ``harbor`` only on a job of tasks. ``GET
+/reef/scenarios/{scenario}/contract`` serves the JSON Schema. A job with no
+objective, from the recipe or the request, is refused.
 
 .. code:: bash
 
@@ -1158,7 +1161,12 @@ returns HTTP 404, and you create the scenario first:
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types, training_mode,      |
-|                                             | status, capabilities}``                     |
+|                                             | status, capabilities,                       |
+|                                             | parameters_schema}``;                       |
+|                                             | ``parameters_schema`` maps a sample kind    |
+|                                             | to the JSON Schema of a job's parameters,   |
+|                                             | for each kind whose schema the training     |
+|                                             | component declares                          |
 +---------------------------------------------+---------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``; 404 unknown     |
 +---------------------------------------------+---------------------------------------------+
@@ -1184,8 +1192,8 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
   queued job, else ``null``.
 - ``parameters``: the job's parameters, a JSON object: the recipe's
   parameters for the kind of the job's samples, with the request's
-  parameters merged in. They hold the training ``method`` and the
-  ``scheduling`` when the recipe or the request gives them.
+  parameters merged in. The training component owns their names, such as
+  ``objective`` and ``scheduling``.
 - ``sample_count``: the number of samples that the job trains, an integer
   from 0.
 - ``sample_kind``: ``trajectory`` or ``task``, the kind of the job's samples.
@@ -1223,7 +1231,7 @@ For example:
      ],
      "result": {"state": "finished", "metrics": {"loss": 0.41}},
      "error": null,
-     "parameters": {"method": {"objective": "sft"}, "learning_rate": 1e-05},
+     "parameters": {"objective": "sft", "learning_rate": 1e-05},
      "sample_count": 8,
      "sample_kind": "trajectory",
      "request": {"id": "train-1", "text": "Prefer tests first",
@@ -1413,7 +1421,7 @@ scenario:
      "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
      "serving_config": {"weights": {"temperature": 0.6}},
      "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
-     "job_parameters": {"trajectory": {"method": {"objective": "reef.recipe.sft:SftObjective", "learning_rate_schedule": null}, "save_interval": 50}}
+     "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
 - ``training_mode`` is what the scenario runs.

@@ -50,6 +50,7 @@ from reef.observability.base import (
     TrainingExperimentEvent,
 )
 from reef.storage.data import DataStore
+from reef.storage.job_data import JobDataKind
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.training_requests import TRAINING_REQUESTS_QUEUE
@@ -326,6 +327,9 @@ class JobQueueComponent(TrainingComponent):
 
     def check_job(self, job: TrainingJob) -> None:
         self.component.check_job(job)
+
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
+        return self.component.parameters_schema(kind)
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         self.component.check_task_jobs(parameters)

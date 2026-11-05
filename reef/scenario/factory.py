@@ -39,7 +39,7 @@ from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
-from reef.scenario.binding import ScenarioBinding, activate_snapshot
+from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
@@ -112,6 +112,15 @@ class RepositoryCommitSnapshots(CommitSnapshots):
         return SnapshotRef(f"{SELECTION_VIEW_PREFIX}{selection_digest(selection)}", None)
 
     def locate(self, records: Sequence[CommitRecord]) -> tuple[CommitRecord, ...]:
+        wanted = {
+            artifact_id
+            for record in records
+            if record.snapshot == UNLOCATED_SNAPSHOT and (record.checkpoint or record.operation != "training")
+            for artifact_id in (record.artifact_ids or {}).values()
+            if artifact_id not in self.bindings
+        }
+        if wanted:
+            self.bindings.update(self.backend.artifact_snapshots(wanted))
         seen: set[str] = set()
         active = self.start
         located = []
@@ -236,8 +245,7 @@ def recovered_trainer_states(
 class ScenarioFactory:
     """Register, assemble, and recover complete scenario instances.
 
-    ``activates_runtime`` permits direct activation on load and commit for standalone scenarios.
-    Service scenarios leave activation to inference. ``served_models`` supplies the actual serving artifact for training.
+    Inference loads each selected release. ``served_models`` supplies the actual serving artifact for training.
     """
 
     def __init__(
@@ -249,14 +257,12 @@ class ScenarioFactory:
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
         experiment_reports: ExperimentReportQueue | None = None,
-        activates_runtime: bool = True,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._recipe = recipe
         #: The training requests of every scenario; None builds scenarios that take no request.
         self._training_requests = training_requests
-        self._activates_runtime = activates_runtime
         self.served_models = served_models
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
@@ -485,10 +491,6 @@ class ScenarioFactory:
                     # Only an older record has no selection: current records bind their IDs when they publish.
                     backend.index_snapshot(record.snapshot)
             repository.synchronize_checkpoint()
-            # Traffic must not reach a recovered scenario before its committed
-            # head is servable; a failed activation leaves the scenario unloaded.
-            if self._activates_runtime:
-                activate_snapshot(components, Artifact(current_artifact, repository), runtime, name)
 
             root_artifacts = repository.selection(start_artifact, components.names or (RECORDS_COMPONENT,))
             training_artifacts = root_artifacts
@@ -542,7 +544,6 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_component=self._recipe.training_component,
                     activation_rule=self._recipe.activation_rule(),
-                    activates_runtime=self._activates_runtime,
                     served_models=self.served_models,
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
