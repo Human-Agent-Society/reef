@@ -52,7 +52,7 @@ from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
-from reef.storage.samples import ListedSample, StoredSample
+from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import WorkItem
@@ -213,7 +213,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             experiment_tracker=self.experiment_tracker,
             admission=scenario_admission,
             lifecycle=self,
-            activates_runtime=False,
             served_models=coordination.served_models,
             training_requests=TrainingRequestQueue(self.queue),
         )
@@ -540,9 +539,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             )
 
     def scenario_contract(self, scenario: str) -> dict[str, Any]:
+        """What ``scenario`` accepts. ``parameters_schema`` is the JSON Schema of a training job's parameters, by the
+        kind of its samples: only the kinds whose schema the training component declares
+        (``TrainingComponent.parameters_schema``)."""
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
             pipeline = current.trainer.pipeline
+            component = current.training_component
+            schemas = {kind: None if component is None else component.parameters_schema(kind) for kind in SAMPLE_KINDS}
             return {
                 "scenario": scenario,
                 # The key keeps its name for callers; the value names the recipe's sample-to-job stage.
@@ -551,6 +555,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
                 "capabilities": current.capabilities().to_json(),
+                "parameters_schema": {kind: schema for kind, schema in schemas.items() if schema is not None},
             }
 
     def activate(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:

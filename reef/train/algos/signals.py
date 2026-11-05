@@ -1,9 +1,9 @@
 """What an objective computes from one job's data, and what a training component prepares from it.
 
-``TrainingSignal`` is the objective's backend-neutral result. ``PreparedJob``
-is that result as one backend's payload. How a component cuts the job data into
-optimizer steps is part of neither: the component reads it from the job's
-``scheduling`` parameter (``reef.train.algos.schedule.StepScheduling``).
+``TrainingSignal`` is an objective's result. ``PreparedJob`` is that result as
+one backend's payload. How a component cuts the job data into optimizer steps
+is part of neither: the component reads it from its job parameters
+(``reef.train.algos.schedule.StepScheduling``).
 """
 
 from __future__ import annotations

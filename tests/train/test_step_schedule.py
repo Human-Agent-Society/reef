@@ -35,28 +35,6 @@ def test_step_scheduling_validates_fields(kwargs, message) -> None:
         StepScheduling(**kwargs)
 
 
-@pytest.mark.unit
-def test_a_job_without_a_scheduling_parameter_gets_the_default_schedule() -> None:
-    assert StepScheduling.from_parameters({"method": {"objective": "sft"}}) == StepScheduling()
-    assert StepScheduling.from_parameters({"scheduling": {"epochs": 2, "shuffle": True}}) == StepScheduling(
-        epochs=2, shuffle=True
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "scheduling, error",
-    [
-        (None, "must be an object of epochs, shuffle, remainder and packing_length"),
-        ({"unit": "sample"}, "must be an object of epochs, shuffle, remainder and packing_length"),
-        ({"epochs": 0}, "epochs must be a positive int"),
-    ],
-)
-def test_a_malformed_scheduling_parameter_is_refused(scheduling, error) -> None:
-    with pytest.raises(ValueError, match=error):
-        StepScheduling.from_parameters({"scheduling": scheduling})
-
-
 def grouped_batch(group_ids) -> JobData:
     return JobData(
         "grouped",

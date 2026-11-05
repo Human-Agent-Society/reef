@@ -27,8 +27,9 @@ component's latest checkpoint. A new training start from another snapshot
 (``train-from``) is refused, as Slime cannot load a published snapshot back
 into its workers.
 
-Every job trains the loss family and learning-rate schedule its parameters
-name. The workers start with the recipe's startup family; a job of another
+A job's parameters are ``SlimeJobParameters``. Every job trains the loss family
+of its objective and the learning-rate schedule it selects. The workers start
+with the startup family, that of the recipe's default objective; a job of another
 family is validated against the workers' startup arguments before it trains,
 and the actor workers switch to it (and to the job's schedule) when they
 receive the job's data.
@@ -56,11 +57,14 @@ from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import resolve
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import read_job_data
-from reef.train.algos.registry import job_training, resolve_objective
+from reef.storage.job_data import JobDataKind, read_job_data
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
+from reef.train.learning_rate import (
+    LearningRateScheduleState,
+    learning_rate_metrics,
+    resolve_learning_rate_schedule_state,
+)
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.method import LearningRateScheduleState, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.checkpoints import (
     START_STATE,
@@ -73,6 +77,8 @@ from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings, save_root
 from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
+from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.parameters import SlimeJobParameters, harbor_settings, slime_parameters_schema
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
@@ -102,8 +108,6 @@ from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train
 ROLLOUT_FILE = "rollout.json"
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
-#: A job's parameters; ``rollout`` applies only to a task job.
-JOB_PARAMETER_NAMES = frozenset({"method", "scheduling", "save_interval", "rollout", "dataset"})
 #: The settings a job's driver starts with, in the job's directory.
 DRIVER_FILE = "driver.json"
 #: The metrics of a job whose driver finished, in the job's directory.
@@ -258,17 +262,17 @@ class SlimeJobs(LocalJobComponent):
             "into its workers"
         )
 
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
+        return slime_parameters_schema(kind)
+
     def check_job(self, job: TrainingJob) -> None:
-        unknown = set(job.parameters) - JOB_PARAMETER_NAMES
-        if unknown:
-            raise ValueError(f"Slime jobs accept no parameters {sorted(unknown)}")
+        parameters = SlimeJobParameters.from_parameters(job.parameters)
         dataset_family = self.args.loss_family == SLIME_NATIVE_FAMILY
-        if "dataset" in job.parameters:
+        if parameters.dataset is not None:
             if not dataset_family:
                 raise ValueError(f"a dataset job needs the {SLIME_NATIVE_FAMILY!r} loss family, which Slime trains")
             if job.sample_count:
                 raise ValueError("a dataset job has no samples: Slime rolls out the dataset's prompts")
-            DatasetSettings.from_parameters(job.parameters)
         elif dataset_family:
             raise ValueError(f"the {SLIME_NATIVE_FAMILY!r} loss family trains only dataset jobs")
         if job.kind == "task":
@@ -277,13 +281,9 @@ class SlimeJobs(LocalJobComponent):
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
                 raise ValueError("the tasks of one job need distinct names: each name groups its task's samples")
-        elif "rollout" in job.parameters:
-            raise ValueError("the rollout parameter applies only to a job of tasks")
-        interval = job.parameters.get("save_interval")
-        if interval is not None and (isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0):
-            raise ValueError("save_interval must be a positive int")
-        method, _ = job_training(job.parameters)
-        loss_family = resolve_objective(method.objective).loss_family
+        elif parameters.harbor is not None:
+            raise ValueError("the harbor parameter applies only to a job of tasks")
+        loss_family = resolve_slime_objective(parameters.objective).loss_family
         try:
             resolve_loss_family(loss_family)
         except UnknownLossFamilyError as exc:
@@ -302,13 +302,14 @@ class SlimeJobs(LocalJobComponent):
             raise ValueError(f"Slime continues {held}; a job cannot start from {wanted} ({start})")
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
-        """A task job rolls its tasks out on Slime's own engines, as the ``rollout`` parameter says.
+        """A task job rolls its tasks out on Slime's own engines, as the ``harbor`` parameter says.
 
         With score centering, the engines record the heads of the untruncated distribution at temperature 1, so the
         trainer must read that distribution too: ``--rollout-temperature`` 1, ``--rollout-top-p`` 1 and
         ``--rollout-top-k`` -1.
         """
-        RolloutSettings.from_parameters(parameters)
+        SlimeJobParameters.from_parameters(parameters)
+        harbor_settings(parameters)
         if settings_from_args(self.args) is not None and (
             self.args.rollout_temperature != 1 or self.args.rollout_top_p != 1 or self.args.rollout_top_k != -1
         ):
@@ -323,10 +324,7 @@ class SlimeJobRunner(SlimeJobs):
 
     A job's driver makes one runner and calls ``run`` for its job; the CPU
     tests run it as an in-process component. A job's parameters are
-    ``method`` (a ``TrainingMethod`` as a dict), optionally ``scheduling`` (a
-    ``StepScheduling`` as a dict, see ``job_training``), optionally
-    ``save_interval``, a positive int: the optimizer steps between two saved
-    checkpoints, and, for a task job, ``rollout`` (``RolloutSettings``). Each
+    ``SlimeJobParameters``. Each
     run of ``save_interval`` steps trains as one Slime rollout and saves one
     checkpoint; without it, the job is one rollout with one checkpoint. A
     checkpoint's step is the job's optimizer steps up to it. The job's last
@@ -405,7 +403,7 @@ class SlimeJobRunner(SlimeJobs):
         super().__init__(args, lora=lora)
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
-        """A task job rolls its tasks out on this runner's rollout engines, as the ``rollout`` parameter says."""
+        """A task job rolls its tasks out on this runner's rollout engines, as the ``harbor`` parameter says."""
         if self.rollout_group is None:
             raise ValueError(
                 "Slime started no rollout engines for this task job; set training.options.colocate or rollout-num-gpus"
@@ -491,10 +489,10 @@ class SlimeJobRunner(SlimeJobs):
     # -- One job
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
-        if "dataset" in job.parameters:
-            return self.run_dataset(job, directory, DatasetSettings.from_parameters(job.parameters))
+        parameters = SlimeJobParameters.from_parameters(job.parameters)
+        if parameters.dataset is not None:
+            return self.run_dataset(job, directory, parameters.dataset, parameters.save_interval)
         start = SlimeStart.read(Path(job.start))
-        method, scheduling = job_training(job.parameters)
         saved = self.saved(directory)
         started = read_json(directory / ROLLOUT_FILE)
         # The workers hold the job's last saved rollout, or its start before it saved one. After a restart that
@@ -504,8 +502,8 @@ class SlimeJobRunner(SlimeJobs):
             self.check_held_weights(held.rollout_id, job.start)
         data = read_job_data(job.data_dir, job.data_id)
         rollout_metrics: dict[str, Any] = {}
-        if "rollout" in job.parameters:
-            rollouts = self.task_rollouts(job, directory, RolloutSettings.from_parameters(job.parameters))
+        if parameters.harbor is not None:
+            rollouts = self.task_rollouts(job, directory, parameters.harbor)
             rollout_metrics = {
                 "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
                 "rollout_samples": len(rollouts.samples),
@@ -522,12 +520,12 @@ class SlimeJobRunner(SlimeJobs):
                 rollout_metrics["unrenderable_samples"] = len(left_out)
                 if not data.samples:
                     return rollout_metrics
-        start_state = start.state_for(method.objective)
+        start_state = start.state_for(parameters.objective)
         prepared = prepare_slime_job(
             data,
-            method,
+            parameters.objective,
             start_state,
-            scheduling,
+            parameters.scheduling,
             step_size=self.args.global_batch_size,
             sampler_topk=self.score_centering is not None,
         )
@@ -542,11 +540,13 @@ class SlimeJobRunner(SlimeJobs):
             # A resumed job continues after its last saved checkpoint, with that checkpoint's schedule progress.
             schedule_state = SlimeStart.read(Path(saved[-1].path)).schedule_state
         else:
-            schedule_state = resolve_learning_rate_schedule_state(start.schedule_state, method.learning_rate_schedule)
+            schedule_state = resolve_learning_rate_schedule_state(
+                start.schedule_state, parameters.learning_rate_schedule
+            )
         if schedule_state is not None and self.args.decoupled_lr is not None:
             raise RuntimeError("a recipe-selected learning-rate schedule cannot drive --decoupled-lr parameter groups")
         step_count = len(payload["external_step_sizes"])
-        interval = job.parameters.get("save_interval") or step_count
+        interval = parameters.save_interval or step_count
         done = saved[-1].step if saved else 0
         runs = [(first, min(first + interval, step_count)) for first in range(done, step_count, interval)]
         metrics: dict[str, Any] = {**prepared.metrics, **rollout_metrics}
@@ -555,7 +555,7 @@ class SlimeJobRunner(SlimeJobs):
                 break
             # Only the job's last rollout has trained all the data that the objective's next state is for.
             if last == step_count:
-                objective, state = (method.objective if next_state else None), next_state
+                objective, state = (parameters.objective if next_state else None), next_state
             else:
                 objective, state = start.objective, dict(start.algorithm_state)
             # Optimizer steps advance only a recipe-selected schedule.
@@ -663,12 +663,14 @@ class SlimeJobRunner(SlimeJobs):
         self.storage.complete(job.job_id, rollout.rollout_id, reward=reward)
         self.record_rollout(directory, rollout, schedule_state, metrics)
 
-    def run_dataset(self, job: TrainingJob, directory: Path, settings: DatasetSettings) -> Mapping[str, Any]:
+    def run_dataset(
+        self, job: TrainingJob, directory: Path, settings: DatasetSettings, save_interval: int | None
+    ) -> Mapping[str, Any]:
         """Train a dataset job with Slime's own loop: rollouts that Slime generates, rewards and trains.
 
         The job trains ``epochs`` passes over the dataset, in rollouts of ``--rollout-batch-size`` prompts. Each
         rollout runs Slime's sequence: the engines take the workers' weights, generate the rollout and release
-        their memory, and the workers train it. Every ``save_interval`` rollouts and the last one save a
+        their memory, and the workers train it. Every ``save_interval`` rollouts (None: only the last) and the last save a
         checkpoint, whose step counts the job's rollouts. A resumed job continues after its last checkpoint.
         """
         if self.rollout_group is None:
@@ -693,7 +695,7 @@ class SlimeJobRunner(SlimeJobs):
         total = self.rollout_group.rollouts_per_epoch() * settings.epochs
         if total == 0:
             raise ValueError(f"the dataset {settings.path} holds fewer prompts than one rollout batch")
-        interval = job.parameters.get("save_interval") or total
+        interval = save_interval or total
         metrics: dict[str, Any] = {"dataset_rollouts": total}
         for index in range(done, total):
             if self.stopping(directory):
@@ -809,7 +811,7 @@ class SlimeSettings:
     """What the HTTP service's runtime factory builds the Slime component from.
 
     ``arguments`` are the native Slime arguments, with Reef's retention
-    options. ``loss_family`` is the recipe's startup loss family, by name or
+    options. ``loss_family`` is the startup loss family, by name or
     dotted reference. ``recipe`` names the recipe in error messages.
     ``execution`` holds the deployment's ``execution`` and ``executors``
     sections, which select the training workers' executor. ``ray_address``

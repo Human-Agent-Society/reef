@@ -262,10 +262,10 @@ The scenario list names it for every scenario. Every recipe declares
 ``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
 stages <#pipeline-stages>`__). Weight-training recipes add these members:
 
-- ``training_spec()`` binds the registered or dotted training objective.
-  The objective declares the backend loss family.
-- ``parameters_by_kind()`` returns the parameters of each training job by the
-  kind of its samples (see `Training objective`_).
+- ``default_parameters()`` gives the recipe's own parameters of each training
+  job by the kind of its samples, normally the ``objective``.
+- ``parameters_by_kind()`` returns them with the ``job_parameters`` config over
+  them (see `Training objective`_).
 
 Every recipe's ``activation_rule()`` returns the rule that decides whether an
 artifact that its trainers make serves; the deployment's ``activation``
@@ -282,8 +282,8 @@ section names it (`Activation rule`_).
            return MyMethodReport
 
        @classmethod
-       def training_spec(cls) -> WeightTrainingSpec:
-           return WeightTrainingSpec(objective="my_method.objective:MyObjective")
+       def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+           return {kind: {"objective": "my_method"} for kind in SAMPLE_KINDS}
 
        @classmethod
        def pipeline_spec(cls) -> PipelineSpec:
@@ -1662,21 +1662,26 @@ it. ``reef.core.chat_rendering`` holds the shared rendering:
 Training objective
 ------------------
 
-Each method defines a ``TrainingObjective`` in its own ``objective.py``. It
-owns signal preparation over a job's full data and declares the backend loss family.
-Recipes bind it with ``WeightTrainingSpec(objective="my_method.objective:MyObjective")``.
+Each training backend owns its objectives: ``SlimeObjective`` in
+``reef.train.slime_backend.objectives`` and ``TinkerObjective`` in
+``reef.train.tinker_backend.objectives``. An objective
+owns signal preparation over a job's full data and declares the backend's loss family.
+A job names it in its ``objective`` parameter, usually from the recipe's
+``default_parameters()``: a registered name, or a dotted
+``my_method.slime:MyObjective`` reference.
 The dotted reference names a class with a zero-argument
 constructor or an existing instance; its module must be importable in both the
 service and training processes.
 
 .. code:: python
 
-   from reef.train.algos import TrainingObjective, TrainingSignal
    from reef.train.algos.helpers import next_steps
+   from reef.train.algos.signals import TrainingSignal
+   from reef.train.slime_backend.objectives import SlimeObjective
    from reef.train.types import JobData, trajectories
    from reef.core.trajectories import trajectory_reward
 
-   class MyObjective(TrainingObjective):
+   class MyObjective(SlimeObjective):
        name = "my_method"
        loss_family = "my_method"
 
@@ -1690,11 +1695,12 @@ service and training processes.
                metrics={"steps": steps},
            )
 
-For a shared short name, decorate the class with ``@register_objective`` from
-``reef.train.algos.registry``; importing its package registers it. The same
-function accepts an explicit instance. Core never imports method packages.
-``WeightTrainingSpec.loss_family`` is derived from the objective, so neither
-the recipe nor the signal repeats that choice.
+For a shared short name, decorate the class with ``@register_slime_objective``
+(or ``@register_tinker_objective``). The same function accepts an explicit
+instance. So that the name resolves where the module is not yet imported, a method
+package's public half calls ``register_objective_ref(name, "my_method.slime:MyObjective")``
+from ``reef.train.algos.registry``. Core never imports method packages. A built-in
+``sft`` objective exists on each backend, and ``slime_dataset`` on Slime.
 
 The training component cuts each job's data into optimizer steps. The
 backend's batch size (Slime's ``--global-batch-size``, Tinker's
@@ -1726,13 +1732,16 @@ A job's optional ``scheduling`` parameter is a ``StepScheduling``
    ``packing_length`` : ``null``
        pack the rollouts into packs of at most this many tokens (``training["tokens"]`` of each trajectory) before the steps are cut; one step then trains batch-size packs. A pack never splits a rollout, and a longer rollout is a pack of its own. ``shuffle`` and ``remainder`` apply to the packs.
 
-A component reads a job's ``method`` and ``scheduling`` parameters with
-``reef.train.algos.registry.job_training(parameters)``. It raises
-``ValueError`` when ``method`` is missing or is not an object, when
-``scheduling`` has another key or a value out of range, and when the
+Each component parses a job's parameters into its own typed value:
+``reef.train.slime_backend.parameters.SlimeJobParameters`` and
+``reef.train.tinker_backend.parameters.TinkerJobParameters``. The parser raises
+``ValueError`` for an unknown key, when ``objective`` is missing or does not
+resolve, when ``scheduling`` has another key or a value out of range, and when the
 objective's ``validate_scheduling`` refuses the schedule: ``epochs > 1``
-without ``supports_multiple_epochs``. Slime and Tinker call it when they
+without ``supports_multiple_epochs``. Slime and Tinker parse when they
 accept a job and again when they run it.
+``TrainingComponent.parameters_schema(kind)`` returns the JSON Schema of those
+parameters for a sample kind, or None; the scenario contract serves it.
 
 ``reef.train.algos.schedule.pack_rollouts(token_counts, packing_length)`` is
 the packing: best-fit decreasing, which puts each rollout, longest first, into
@@ -1750,12 +1759,11 @@ nested objects merge key by key, and every other value of the request wins. It r
 both kinds, and a kind that the recipe does not name when no request gives
 parameters. A kind that the recipe does not name never trains in ``auto``. Reef reads none of the parameters; it submits
 them to the deployment's training component, whose name is the job's
-``backend``. ``TrainingMethod`` (``reef.train.method``) is an objective
-reference and an optional ``LearningRateSchedule``.
+``backend``.
 
-By default, the parameters of both kinds are ``method``
-(``TrainingMethod(objective).to_dict()``) and the recipe's ``job_parameters``
-config, such as ``scheduling`` or ``save_interval``.
+By default, the parameters of both kinds are the recipe's
+``default_parameters()`` with its ``job_parameters`` config over them, key by key,
+such as ``scheduling`` or ``save_interval``.
 
 The parameters are part of the job's ID, so ``parameters_by_kind()`` must
 return the same value at every call. See `Write a recipe
@@ -2091,7 +2099,6 @@ Neither inherits from the other, and no trainer holds a serving engine.
   opens the runtime, loads the published snapshot, and publishes routes when
   activation returns. Route publication and startup completion share one
   transaction. A superseded request cannot publish routes.
-  A standalone scenario keeps synchronous activation by default.
   ``train-from`` still imports the artifact into the trainer before it writes
   a ``train_from`` record.
 
@@ -2099,8 +2106,8 @@ Neither inherits from the other, and no trainer holds a serving engine.
 ``Scenario.served_artifact_id()`` reads the published route when a dispatcher
 owns the scenario. Training staleness checks use this served identity.
 Automatic weight training waits while the selected artifact has no matching
-served route. Standalone scenarios and deployments without inference keep
-their existing training behavior.
+served route. Deployments without inference keep their existing training
+behavior.
 Startup status is available through the inference service's
 ``GET /reef/scenarios/{scenario}/inference/status`` route.
 
@@ -2165,8 +2172,7 @@ root of ``reef.inference``: ``interfaces`` (inference contracts and runtime
 load IDs), ``deployment`` (the inference service contracts), ``registry``
 (runtime factories), ``serving`` (the saved-weight serving runtimes),
 ``residency`` (adapter residency) and ``recovery`` (engine supervision).
-``reef.train.component`` holds the training component contract, and
-``reef.train.method`` holds ``TrainingMethod``. Values that both sides read
+``reef.train.component`` holds the training component contract. Values that both sides read
 are in ``reef.core.weight_layout`` (``ArtifactFormat``, ``WeightFiles``,
 ``ArtifactWeights``). ``reef.execution.executor`` contains worker transports.
 Concrete integrations live with their owners:
@@ -2351,8 +2357,8 @@ Tinker integration
 ``tinker`` backend as an ``InProcessTrainingDeployment``. Its
 ``component_factory`` builds, from ``TinkerConfig`` and only after deployment
 selection, a ``TinkerTrainingComponent``. Each job
-trains remotely from the job's start manifest. Its parameters are ``method``,
-the optional ``scheduling``, optional ``batch_size``, ``kl_coef`` and
+trains remotely from the job's start manifest. Its parameters are ``objective``,
+the optional ``learning_rate_schedule`` and ``scheduling``, optional ``batch_size``, ``kl_coef`` and
 ``learning_rate`` overrides, and ``save_interval``, the optimizer steps between saved
 checkpoints (by default, one checkpoint when the job ends). A saved checkpoint
 is both the start of a later job and the snapshot Reef publishes. A job of

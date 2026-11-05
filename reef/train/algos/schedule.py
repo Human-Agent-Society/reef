@@ -1,8 +1,8 @@
 """How a training component cuts one job's data into optimizer steps.
 
-``StepScheduling`` is a job's optional ``scheduling`` parameter: the passes
-over the job data, the packing of its rollouts into steps by token count, and
-what happens to a partial last step. The objective's
+``StepScheduling`` is the passes over the job data, the packing of its rollouts
+into steps by token count, and what happens to a partial last step. A training
+component parses it from its own job parameters. The objective's
 ``rollout_unit`` says which rows one step keeps together. A component expands
 both into a row order and a step layout (``schedule_job_data``) and turns that
 order into its own wire rows. Reef's control plane reads none of it.
@@ -13,10 +13,10 @@ from __future__ import annotations
 import bisect
 import random
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import Any, Literal
+from typing import Literal
 
 from reef.core.job_data import JobData, trajectories
 from reef.core.trajectories import source_record_id
@@ -30,9 +30,7 @@ class StepScheduling:
     """The passes over one job's data, the packing of its rollouts, and the handling of a partial last step.
 
     ``epochs`` is a positive int: the job trains all of its data that many
-    times, each pass its own run of optimizer steps. Only an objective with
-    ``supports_multiple_epochs``, whose loss stays valid when it trains the
-    same rollouts again, accepts more than one.
+    times, each pass its own run of optimizer steps.
     ``shuffle`` reorders the rollouts in every pass, deterministically from the
     data's rows. ``remainder`` decides what happens when a pass's rollout
     count is not a multiple of the step size: ``"partial"`` trains the tail as
@@ -42,9 +40,9 @@ class StepScheduling:
     tokens, and one optimizer step trains step-size packs instead of
     step-size rollouts; ``shuffle`` and ``remainder`` then apply to packs (see
     ``pack_rollouts``). The packs decide only which rollouts share a step: the
-    loss and the micro-batches stay the component's. A job's ``scheduling``
-    parameter holds the value as a dict; a training component reads it with
-    ``from_parameters``.
+    loss and the micro-batches stay the component's. A training component
+    makes the value from its own job parameters, and ``schedule_job_data``
+    reads it.
     """
 
     epochs: int = 1
@@ -67,19 +65,6 @@ class StepScheduling:
             raise ValueError(
                 f"StepScheduling.packing_length must be None or a positive int, got {self.packing_length!r}"
             )
-
-    @classmethod
-    def from_parameters(cls, parameters: Mapping[str, Any]) -> StepScheduling:
-        """The ``scheduling`` parameter of a job, or the defaults when the job has none.
-
-        Raise ``ValueError`` for a value that is not an object of the fields above.
-        """
-        value = parameters.get("scheduling", {})
-        if not isinstance(value, Mapping) or set(value) - {"epochs", "shuffle", "remainder", "packing_length"}:
-            raise ValueError(
-                "the scheduling parameter must be an object of epochs, shuffle, remainder and packing_length"
-            )
-        return cls(**value)
 
 
 def rollout_ids(data: JobData, unit: RolloutUnit) -> list[int]:
