@@ -12,9 +12,9 @@ reduction is the per-sample mean, not the token sum. The truncated weight is
 what score centering corrects (``--score-centering``): the term is zero for the
 untruncated ratio, which Tinker's loss uses.
 
-Only samples with recorded rollout log-probs train: those of the component's own
-task rollouts. Reef computes the advantages, so Slime's advantage pass stays
-off (``--disable-compute-advantages-and-returns``).
+Only samples with recorded rollout log-probs train, which the method must provide:
+a Slime task job trains the ``slime`` family instead. Reef computes the advantages,
+so Slime's advantage pass stays off (``--disable-compute-advantages-and-returns``).
 """
 
 from __future__ import annotations

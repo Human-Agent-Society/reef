@@ -1,14 +1,14 @@
-"""A training component's own rollouts of a task job: Harbor rollouts sampled at the job's start weights.
+"""A training component's own Harbor rollouts of a task job's tasks.
 
-A task job holds ``TaskSample`` values. Before it trains, the component runs ``rollouts_per_task`` rollouts of
-each task with ``TaskRolloutRunner``: the agent works in the task's sandbox, the task's verifier scores the
-rollout, and each model call goes through the runner's capture proxy to a ``ChatEndpoint`` on this host. The
-endpoint answers each call with the component's ``RolloutChat``, which samples the weights that the job trains
-and returns the training capture. Each rollout that ran assembles into one sample; the samples of one task form
-its group, which trains only with at least two samples. Reef's serving takes no part.
+A task job holds ``TaskSample`` values. For each rollout, ``TaskRolloutRunner`` runs the agent in the task's
+sandbox, and the task's verifier scores the rollout. Each model call goes through the runner's capture proxy to a
+``ChatEndpoint`` on this host. The endpoint answers each call with the component's ``RolloutChat``, which samples
+the weights that the job trains and returns the training capture. Each rollout that ran assembles into one sample
+(``rollout_sample``). Reef's serving takes no part.
 
-Tinker answers on its sampler (``reef.train.tinker_backend.rollout``) and Slime on its own rollout engines
-(``reef.train.slime_backend.rollout_group``).
+Tinker runs ``rollouts_per_task`` rollouts of each task before it trains (``run_train_tasks``), and answers on its
+sampler (``reef.train.tinker_backend.rollout``). On Slime, each rollout is one generate step of Slime's own training
+loop (``reef.train.slime_backend.harbor_rollouts``).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -42,20 +42,19 @@ CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
 
 @dataclass(frozen=True)
-class RolloutSettings:
-    """How a training component samples the rollouts of a task job's tasks.
+class HarborSettings:
+    """How a training component runs Harbor rollouts of a task job's tasks.
 
-    Values: ``rollouts_per_task`` is an int of at least 2, the group of one task. ``agent`` is a Harbor agent config
-    with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders, or None for ``TaskRolloutRunner``'s default agent.
-    ``environment`` is a non-empty Harbor environment type, such as ``docker``, ``e2b`` or ``modal``. ``agent_host`` is
-    the host at which an agent in the sandbox reaches this host, or None for an agent on this host. ``concurrency`` is
-    a positive int, the rollouts in flight. ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed
-    out, or None to leave it unscored. ``scaffold_tolerance`` is a non-negative int, the most tokens at the end of a
-    prompt that the next prompt's history may drop (a thinking template's scaffold) while the response after them still
-    trains. Purpose: a training component makes it from its own job parameters; ``run_train_tasks`` runs it.
+    Values: ``agent`` is a Harbor agent config with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders, or None
+    for ``TaskRolloutRunner``'s default agent. ``environment`` is a non-empty Harbor environment type, such as
+    ``docker``, ``e2b`` or ``modal``. ``agent_host`` is the host at which an agent in the sandbox reaches the host that
+    runs the rollouts, or None for an agent on that host. ``concurrency`` is a positive int, the rollouts in flight.
+    ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed out, or None to leave it unscored.
+    ``scaffold_tolerance`` is a non-negative int, the most tokens at the end of a prompt that the next prompt's history
+    may drop (a thinking template's scaffold) while the response after them still trains. Purpose: a training component makes it from its own job parameters, and
+    reads it where it runs the rollouts.
     """
 
-    rollouts_per_task: int
     agent: Mapping[str, Any] | None = None
     environment: str = "docker"
     agent_host: str | None = None
@@ -65,7 +64,6 @@ class RolloutSettings:
 
     def __post_init__(self) -> None:
         for name, value, least in (
-            ("rollouts_per_task", self.rollouts_per_task, 2),
             ("concurrency", self.concurrency, 1),
             ("scaffold_tolerance", self.scaffold_tolerance, 0),
         ):
@@ -111,6 +109,23 @@ class RolloutTokens:
             raise ValueError("RolloutTokens.trained_tokens must be from 0 to response_tokens")
         if not isinstance(self.is_assembly_failure, bool) or (self.is_assembly_failure and self.trained_tokens):
             raise ValueError("a rollout that does not assemble trains no tokens")
+
+
+@dataclass(frozen=True)
+class RolloutSettings(HarborSettings):
+    """``HarborSettings`` of a component that runs a fixed number of rollouts of each task before it trains.
+
+    Values: every value of ``HarborSettings`` with ``rollouts_per_task``, an int of at least 2, the group of one task.
+    Purpose: Tinker makes it from its ``rollout`` job parameter; ``run_train_tasks`` runs it.
+    """
+
+    rollouts_per_task: int = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        count = self.rollouts_per_task
+        if isinstance(count, bool) or not isinstance(count, int) or count < 2:
+            raise ValueError(f"rollouts_per_task must be an int of at least 2, got {count!r}")
+        super().__post_init__()
 
 
 @dataclass(frozen=True)
@@ -286,6 +301,17 @@ def rollout_sample(
     return replace(sample, group_id=group, source_agent_record_ids=()), tokens
 
 
+def rollout_assembly(settings: HarborSettings) -> SampleAssembly:
+    """The assembly of a task rollout's model calls into one sample, as ``rollout_sample`` reads it."""
+    return SampleAssembly(
+        SampleAssemblySettings(
+            accept_multi_turn_policy_samples=True,
+            realign_threshold=REALIGN_THRESHOLD,
+            scaffold_tolerance=settings.scaffold_tolerance,
+        )
+    )
+
+
 def run_train_tasks(
     tasks: Sequence[TaskSample],
     settings: RolloutSettings,
@@ -303,13 +329,7 @@ def run_train_tasks(
     the job's ``start``, the weights that ``chat`` samples; each sample names it as its ``artifact_id``.
     ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``.
     """
-    assembly = SampleAssembly(
-        SampleAssemblySettings(
-            accept_multi_turn_policy_samples=True,
-            realign_threshold=REALIGN_THRESHOLD,
-            scaffold_tolerance=settings.scaffold_tolerance,
-        )
-    )
+    assembly = rollout_assembly(settings)
     with ChatEndpoint(chat) as endpoint:
         runner = TaskRolloutRunner(
             reef_url=endpoint.url,
