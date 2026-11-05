@@ -23,7 +23,7 @@ from reef.scenario import Scenario
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import Trainer, TrainStepResult
+from reef.train import Trainer, TrainingCommit
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop
 
@@ -128,20 +128,20 @@ def _queue_batch(scenario: Scenario, step: int) -> None:
 def _finish(scenario: Scenario) -> None:
     """Commit the end of the running job, when one runs: the job ended in ``submit``."""
     while scenario.trainer.job_running:
-        result = scenario.prepare_training_step()
+        result = scenario.next_commit()
         assert result is not None
         scenario.commit(result)
 
 
-def _prepare(scenario: Scenario) -> TrainStepResult:
+def _prepare(scenario: Scenario) -> TrainingCommit:
     """Commit the end of the last job and the submission of the next one; the next job's checkpoint, which publishes
     its artifact, not committed yet."""
     _finish(scenario)
     _queue_batch(scenario, scenario.scenario_step + 1)
-    submitted = scenario.prepare_training_step()
+    submitted = scenario.next_commit()
     assert submitted is not None
     scenario.commit(submitted)
-    result = scenario.prepare_training_step()
+    result = scenario.next_commit()
     assert result is not None and result.artifact is not None
     return result
 
@@ -170,7 +170,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
         return scenario.activate(scenario.repository.resolve(initial_ref).artifact_id)
 
     with ThreadPoolExecutor(max_workers=7) as executor:
-        training = executor.submit(scenario.prepare_training_step)
+        training = executor.submit(scenario.next_commit)
         try:
             assert backend.started.wait(2), "the job did not start"
             writer = executor.submit(write)
@@ -299,7 +299,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
             "error": "storage unavailable",
         }
         # The job's end is the next commit: it repairs the committed parent first, which fails.
-        ended = scenario.prepare_training_step()
+        ended = scenario.next_commit()
         assert ended is not None and ended.artifact is None
 
         def unexpected_publish(*args, **kwargs):

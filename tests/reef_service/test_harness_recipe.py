@@ -92,7 +92,7 @@ from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 #: The models a scorer receives in a run worker's tests: the deployment's served model alone.
@@ -120,7 +120,7 @@ def backend_of(recipe: HarnessEvolutionRecipe) -> HarnessBackend:
     return build_harness_backend(recipe)
 
 
-def step(backend: HarnessBackend, state=None, *samples) -> TrainStepResult:
+def step(backend: HarnessBackend, state=None, *samples) -> TrainingCommit:
     batch = JobData("demo:1", samples or (recorded_trajectory("a1", {"messages": []}, 0.0),))
     return backend_step(backend, batch, HarnessState().to_json() if state is None else state)
 
@@ -1284,12 +1284,12 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
 def test_changed_kinds_describe_published_bytes() -> None:
     """Only a step that publishes bytes changes node kinds, so a no-artifact step with kinds is refused where it is
     built."""
-    published = TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds=frozenset({"rules"}))
+    published = TrainingCommit({}, {}, artifact=Artifact.local(Path(".")), changed_kinds=frozenset({"rules"}))
     assert published.changed_kinds == {"rules"}
     with pytest.raises(ValueError, match="changed_kinds describe the artifact a step publishes"):
-        TrainStepResult({}, {}, changed_kinds=frozenset({"rules"}))
+        TrainingCommit({}, {}, changed_kinds=frozenset({"rules"}))
     with pytest.raises(ValueError, match="changed_kinds must be a frozenset"):
-        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), changed_kinds={"rules"})
+        TrainingCommit({}, {}, artifact=Artifact.local(Path(".")), changed_kinds={"rules"})
 
 
 # -- what a commit keeps --------------------------------------------------------------------------
