@@ -57,7 +57,7 @@ class _FileJobs(StubTrainingComponent):
     whatever component this recipe evolves."""
 
     def __init__(self, label: str, artifact_dir: Path) -> None:
-        super().__init__(artifact_dir, name=label, shares_scenarios=True, release_format=None)
+        super().__init__(artifact_dir, name=label, shares_scenarios=True, artifact_format=None)
         self.label = label
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:

@@ -50,7 +50,7 @@ class StubReefClient:
     before it waits for the step results see the seed and no further.
 
     ``reads`` is every route read the runner makes, in order, as ``("catalog", {"rows": n, "published": bool})``
-    for ``/reef/harness/releases`` and ``("manifest", artifact_id)`` for ``/reef/harness``. It says whether the
+    for ``/reef/harness/artifacts`` and ``("manifest", artifact_id)`` for ``/reef/harness``. It says whether the
     manifest was read because a step result was on the record, or polled before there was one to read.
 
     ``posts`` is every low-level ``post`` the run makes, in order, as ``(path, scenario, payload)``; the run uses it
@@ -91,7 +91,7 @@ class StubReefClient:
 
     def get(self, path: str, **kwargs: object) -> dict:
         self.requested.append(path)
-        if path == "/reef/harness/releases":
+        if path == "/reef/harness/artifacts":
             rows = self._step_rows()
             published = any(row["metrics"].get("selected") for row in rows)
             self.published_seen = self.published_seen or published

@@ -53,7 +53,7 @@ from reef.artifact.repository import DefaultStart, ModelDirectory
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
-from reef.core.weight_layout import ADAPTER_DIR, ReleaseFormat
+from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import resolve
 from reef.storage.durable_files import read_json, write_json
 from reef.storage.job_data import read_job_data
@@ -181,13 +181,13 @@ class SlimeJobs(LocalJobComponent):
         return "slime"
 
     @property
-    def release_format(self) -> ReleaseFormat:
+    def artifact_format(self) -> ArtifactFormat:
         """Full weights (the rollout's Hugging Face export), or with LoRA the PEFT adapter of the workers' rank."""
         if not self.lora:
-            return ReleaseFormat("full")
+            return ArtifactFormat("full")
         from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
 
-        return ReleaseFormat(
+        return ArtifactFormat(
             "adapter", int(self.args.megatron_lora_rank), tuple(sglang_lora_target_modules(self.args))
         )
 
@@ -230,7 +230,7 @@ class SlimeJobs(LocalJobComponent):
         return str(self.base_start_dir)
 
     @property
-    def starts_from_releases(self) -> bool:
+    def starts_from_artifacts(self) -> bool:
         return False
 
     def root_start(self, root: ScenarioRoot) -> str:

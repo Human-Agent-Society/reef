@@ -186,7 +186,7 @@ weights, or a PEFT adapter with its rank and target modules.
        ``engines``: Reef's engines on an inference component load each release (Slime's default); ``trainer``: the training backend serves its own releases (Tinker's sampler, Tinker's default); ``none``: nothing serves; ``module:Factory``: a serving ``RuntimeFactory``
 
    ``inference.serving-config`` : {}
-       the settings of a ``module:Factory`` serving runtime; it also receives the release format as ``release_format``, ``null`` when the releases hold no weight files
+       the settings of a ``module:Factory`` serving runtime; it also receives the release format as ``artifact_format``, ``null`` when the releases hold no weight files
 
    ``inference.max-loaded-adapters`` : 1
        adapters the engines keep resident when the releases are PEFT adapters. Each scenario keeps its served adapter resident, so set at least the number of training scenarios; one more lets a scenario's new adapter load beside its served one
