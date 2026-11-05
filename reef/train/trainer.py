@@ -406,6 +406,16 @@ class Trainer:
         with self._lock:
             return self._job_loop is not None and JobLoopState.from_dict(self._state).job is not None
 
+    def job_due(self) -> bool:
+        """Whether ``run_once`` submits a job now: no job runs, no result waits for its commit, and the job's data
+        is reserved or ready."""
+        with self._lock:
+            if self._job_loop is None or isinstance(self.pending_step, PendingTrainingResult):
+                return False
+            if JobLoopState.from_dict(self._state).job is not None:
+                return False
+            return self.pending_step is not None or self.pipeline_ready()
+
     def needs_polling(self) -> bool:
         """Whether the trainer's worker polls at a fixed interval: a job runs, or the pipeline's own work runs.
 
@@ -581,14 +591,17 @@ class Trainer:
                 self._data_offset += 1
                 self._data_sequence = sequence
 
-    def run_once(self, *, serving_artifact_id: str | None = None) -> TrainStepResult | None:
+    def run_once(
+        self, *, serving_artifact_id: str | None = None, train_from_artifact_id: str | None = None
+    ) -> TrainStepResult | None:
         """Consume available data and prepare the next commit, if any.
 
         Returns ``None`` when this trainer trains nothing (it only advances
         record consumption, because a non-training scenario still has to
         advance its record cursor), when no job data is ready, or while a job runs
         with nothing new to commit. ``serving_artifact_id`` is the artifact
-        that serves the scenario now, for the staleness check of the pipeline.
+        that serves the scenario now, for the staleness check of the pipeline. ``train_from_artifact_id`` is the
+        artifact of the training start, which a submitted job records for the job listing.
         """
         with self._lock:
             if not self.trains:
@@ -617,7 +630,14 @@ class Trainer:
             else:
                 parameters = self._pipeline.sample2job.job_parameters(data)
                 result = (
-                    self.job_loop_required().submit(JobLoopState.from_dict(observed_state), data, parameters).result
+                    self.job_loop_required()
+                    .submit(
+                        JobLoopState.from_dict(observed_state),
+                        data,
+                        parameters,
+                        train_from_artifact_id=train_from_artifact_id,
+                    )
+                    .result
                 )
         with self._lock:
             if data is None:
