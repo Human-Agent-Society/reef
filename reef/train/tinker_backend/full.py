@@ -15,7 +15,7 @@ from pathlib import Path
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, HuggingFaceRevisionFiles, read_reference
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
@@ -41,7 +41,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     With ``config.score_centering``, its policy-gradient jobs train with score centering on Spindle's ``cispo``
     (``TinkerJobComponent``).
 
-    So every release refers to its weights on the Hub (``release_format`` ``"full"``): Spindle's sampler serves a
+    So every release refers to its weights on the Hub (``artifact_format`` ``"full"``): Spindle's sampler serves a
     manifest's ``sampler_path``, and any other runtime loads the referenced weights. An import takes exactly these
     forms: a manifest that ``validated`` takes beside a reference that resolves to full weights, or files that are
     the base's files (equal content ID), whether Reef keeps them by reference or as a copy. Any other full weights
@@ -71,9 +71,9 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         return "spindle_full"
 
     @property
-    def release_format(self) -> ReleaseFormat:
+    def artifact_format(self) -> ArtifactFormat:
         """Full weights: each release refers to a commit on the Hub that holds them."""
-        return ReleaseFormat("full")
+        return ArtifactFormat("full")
 
     def complete_release(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
         """Export the checkpoint's weights to the release repo, and refer to the commit beside the manifest."""
@@ -112,7 +112,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         inputs = {"model": self._revision.uri, "service": str(self._config.base_url)}
         return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
 
-    def check_release(self, files: ArtifactFiles) -> None:
+    def check_artifact(self, files: ArtifactFiles) -> None:
         """A full-parameter manifest of this component's model and service whose state resolves, or the base's files."""
         if MANIFEST in files.paths():
             self.check_manifest(files)
@@ -130,7 +130,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     def import_start(self, release: Path) -> str:
         """A manifest's start, else the base start: every artifact of this component without a manifest has the base's
-        files, since its base holds them and ``check_release`` admits no other."""
+        files, since its base holds them and ``check_artifact`` admits no other."""
         if (release / MANIFEST).exists():
             return self.import_manifest(release)
         revision = read_reference(release)

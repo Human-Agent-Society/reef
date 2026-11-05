@@ -969,8 +969,8 @@ gives ``paths()``, and ``sha256(path)`` and ``read_bytes(path)`` for each path.
 Read only the files that the check needs: on an S3 prefix or a Hugging Face
 revision, each read downloads that file. The built-in recipes bind one:
 
-- A weight recipe binds ``ReleaseLayout(training_component)``, which calls
-  the component's ``check_release`` (see `Training jobs and components`_).
+- A weight recipe binds ``TrainingArtifactLayout(training_component)``, which calls
+  the component's ``check_artifact`` (see `Training jobs and components`_).
   For full weights and adapters it reads only file names and
   ``adapter/adapter_config.json``.
 - A harness recipe binds ``HarnessLayout``. Every file must be UTF-8 text,
@@ -1010,7 +1010,7 @@ of a scheme that it reads.
 ``HuggingFaceRevisionFiles`` has a reference when the URI names a full
 40-digit commit SHA. Reef stores the reference instead of a copy only when the
 component's layout says that its readers resolve one
-(``ArtifactLayout.resolves_references``; ``ReleaseLayout`` does for releases
+(``ArtifactLayout.resolves_references``; ``TrainingArtifactLayout`` does for releases
 that hold weight files). Then Reef stores only ``hf-reference.json``,
 ``{"uri": "hf://org/model", "version": "<commit>"}``, and
 ``reef.artifact.read_reference(directory)`` reads it back. The built-in
@@ -2157,7 +2157,7 @@ alone; a serving factory returns an ``InferenceRuntime``.
 ``RuntimeRegistry`` in ``reef.inference.registry`` define and build the second.
 The HTTP service builds the training component first, then the serving
 runtime that ``reef.service.deploy.serving.serving_runtime_config`` describes
-from the ``inference`` settings and the component's ``release_format``.
+from the ``inference`` settings and the component's ``artifact_format``.
 
 Each side owns its contracts. The inference contracts are the modules at the
 root of ``reef.inference``: ``interfaces`` (inference contracts and runtime
@@ -2166,8 +2166,8 @@ load IDs), ``deployment`` (the inference service contracts), ``registry``
 ``residency`` (adapter residency) and ``recovery`` (engine supervision).
 ``reef.train.component`` holds the training component contract, and
 ``reef.train.method`` holds ``TrainingMethod``. Values that both sides read
-are in ``reef.core.weight_layout`` (``ReleaseFormat``, ``WeightFiles``,
-``ReleaseWeights``). ``reef.execution.executor`` contains worker transports.
+are in ``reef.core.weight_layout`` (``ArtifactFormat``, ``WeightFiles``,
+``ArtifactWeights``). ``reef.execution.executor`` contains worker transports.
 Concrete integrations live with their owners:
 ``SlimeTrainingComponent`` in ``reef.train.slime_backend.component``,
 ``TinkerTrainingComponent`` in ``reef.train.tinker_backend.component``, and
@@ -2213,8 +2213,8 @@ loop:
      - Contract
    * - ``name``
      - The backend name that the component's jobs carry.
-   * - ``release_format``
-     - A ``ReleaseFormat``: the weight files that each saved checkpoint's
+   * - ``artifact_format``
+     - A ``ArtifactFormat``: the weight files that each saved checkpoint's
        release holds, ``layout`` ``full`` (a Hugging Face checkpoint) or
        ``adapter`` (a PEFT adapter in ``adapter/``, with ``adapter_rank`` and
        ``adapter_target_modules``). ``None`` when the releases hold no weight
@@ -2257,14 +2257,14 @@ loop:
      - Start running jobs in this process: the training service's job worker
        calls it once. Other processes use the component without running jobs.
        The default does nothing.
-   * - ``starts_from_releases``
+   * - ``starts_from_artifacts``
      - False when ``import_start`` refuses every release, as Slime's does;
        True, the default, otherwise. The scenario contract's
        ``capabilities`` read it.
-   * - ``check_release(directory)``
+   * - ``check_artifact(directory)``
      - Raise ``ValueError`` unless ``directory`` holds a release in the
        layout of this component's releases. An artifact import calls it.
-       The default reads ``release_format``: ``full`` needs ``config.json``
+       The default reads ``artifact_format``: ``full`` needs ``config.json``
        and weight files, ``adapter`` needs a PEFT adapter in ``adapter/``
        with a rank of at most ``adapter_rank`` and target modules within
        ``adapter_target_modules``. ``None`` refuses. Tinker checks its
@@ -2275,7 +2275,7 @@ loop:
      - Release the component's resources; safe to call repeatedly.
 
 A ``SavedCheckpoint`` has a ``step`` within its job, a ``path`` that a later
-job starts from, a ``release_path`` that Reef publishes and serving loads, and
+job starts from, a ``artifact_path`` that Reef publishes and serving loads, and
 the backend's ``metrics``. A finished job without checkpoints trained nothing,
 for example because its objective skipped the job's data.
 
@@ -2296,7 +2296,7 @@ commits:
    trainer commits the submission, which consumes the records of the job's
    data.
 2. While the job runs, the trainer commits each new saved checkpoint: its
-   ``release_path`` becomes a new artifact, with the checkpoint's training
+   ``artifact_path`` becomes a new artifact, with the checkpoint's training
    metrics. The scenario's activation rule decides whether it serves.
 3. When the job ends, the trainer commits its outcome.
 
@@ -2362,7 +2362,7 @@ Harbor tasks also takes ``rollout``, the rollouts of each task.
 (runtime kind ``tinker``), which reads each release's
 ``tinker-checkpoint.json`` manifest and samples from the immutable sampler it
 names. A release holds that manifest alone, so the component's
-``release_format`` is ``None``. Reef's engines can still serve the adapters
+``artifact_format`` is ``None``. Reef's engines can still serve the adapters
 (``inference.serving: engines``): ``TinkerDeployment.engine_weights`` names
 ``reef.tinker.weights.TinkerSamplerWeights``, which downloads the adapter at
 each release's ``sampler_path`` and converts it into a PEFT adapter.
@@ -2374,10 +2374,10 @@ says otherwise) is the serving of a deployment that names none and sets no
 engine setting, and ``trainer_serving_config(settings)`` the runtime config
 of the backend's own serving, or ``None`` without one.
 ``engine_weights(settings)`` is an ``EngineWeights`` for a backend whose
-releases hold no weight files: the ``ReleaseFormat`` that Reef's engines load
-and the ``ReleaseWeights`` plugin (``reef.core.weight_layout``) that gives each
+releases hold no weight files: the ``ArtifactFormat`` that Reef's engines load
+and the ``ArtifactWeights`` plugin (``reef.core.weight_layout``) that gives each
 release's files. The default is ``None``: engines cannot serve such
-releases. ``ReleaseFiles``, the default plugin, reads a release's own files. ``requires_local_model``
+releases. ``ArtifactWeightFiles``, the default plugin, reads a release's own files. ``requires_local_model``
 defaults to true; hosted integrations set it to false to preserve remote
 model identifiers during deployment resolution.
 
