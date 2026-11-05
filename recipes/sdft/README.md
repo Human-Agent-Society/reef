@@ -11,10 +11,9 @@ Reproduction of [Self-Distillation Fine-Tuning](https://arxiv.org/abs/2601.19897
 
 ```text
 sdft/
-  recipe.py          SDFTRecipe: training spec, pipeline spec, loss family "sdft"; its report contract is reef.core.reports.TeacherContextReport
+  recipe.py          SDFTRecipe: default objective, pipeline spec, loss family "sdft"; its report contract is reef.core.reports.TeacherContextReport
   processor.py       SDFTSamples: the shared DistillSamples with the demonstration appended to the recorded request
-  objective.py       selects the sdft loss; the recipe binds the per-sample step schedule
-  slime/             the loss family: SDFT's defaults and hook names on the Slime backend's distillation base
+  slime/             the Slime objective and the loss family: SDFT's defaults and hook names on the Slime backend's distillation base
   examples/
     skill_stream/    Tool Use, then Science Q&A, through reef-eval: the paper's Figure 3 against an SFT control
 ```

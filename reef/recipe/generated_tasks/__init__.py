@@ -18,11 +18,8 @@ generator's method:
   generation, validation, task publication and result delivery on the stage's worker.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
-- ``objective``: group relative advantages per task group on the
-  ``importance_sampling`` loss family: Tinker's built-in loss, or on Slime
-  ``reef.train.slime_backend.importance_sampling``, whose reference this
-  package registers.
-- ``recipe``: the objective and the report contract.
+- ``recipe``: the report contract. The deployment names the objective in the
+  recipe's ``job_parameters``, as a dotted reference to a method that it provides.
 
 The generator service (``reef.record2sample.generator``) writes and checks the tasks; the training component
 runs their training rollouts.
@@ -37,16 +34,8 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.objective import TaskGroupObjective
 from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
-from reef.train.algos.registry import register_loss_family_ref
-
-# Slime's implementation of the objective's loss family, by reference: only the training driver and the workers
-# import the Slime code.
-register_loss_family_ref(
-    "importance_sampling", "reef.train.slime_backend.importance_sampling:ImportanceSamplingAlgorithm"
-)
 
 __all__ = [
     "FailedTask",
@@ -59,6 +48,5 @@ __all__ = [
     "RejectedTask",
     "RolledOutTask",
     "TaskGenerator",
-    "TaskGroupObjective",
     "TaskValidationResult",
 ]

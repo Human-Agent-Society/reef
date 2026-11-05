@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.dataset.processor import DatasetJobData
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -23,9 +26,8 @@ class DatasetRecipe(WeightTrainingRecipe):
     name: str = "dataset"
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        # The Slime component does not import this recipe. A dotted reference imports the objective there.
-        return WeightTrainingSpec(objective="reef.recipe.dataset:SlimeDatasetObjective")
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "slime_dataset"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

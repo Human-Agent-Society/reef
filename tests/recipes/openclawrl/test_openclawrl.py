@@ -24,7 +24,6 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.algos.schedule import StepScheduling
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData
@@ -314,7 +313,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
         for index, reward in enumerate((1.0, -1.0, 0.0, 1.0))
     )
     batch = JobData("s:openclawrl:1", tuple(sample for sample in samples))
-    result = prepare_slime_job(batch, TrainingMethod("openclawrl"), {}, StepScheduling(), step_size=4)
+    result = prepare_slime_job(batch, "openclawrl", {}, StepScheduling(), step_size=4)
     assert result.payload is not None
     assert result.payload["advantages"] == [1.0, -1.0, 0.0, 1.0]
     assert result.payload["loss"] == "openclawrl"
@@ -328,7 +327,7 @@ def test_recipe_serves_loaded_weights_and_builds_a_trainer() -> None:
     assert components.loaded_component == "weights"
     trainer = recipe.build("s", SQLiteRecordStore(), root=STUB_ROOT)
     assert trainer.job_loop is not None
-    assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "openclawrl"
+    assert trainer.pipeline.context.job_parameters["trajectory"]["objective"] == "openclawrl"
     trainer.close()
 
 

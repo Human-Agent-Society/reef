@@ -32,10 +32,10 @@ from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import ExecutorFuture, base
 from reef.storage.durable_files import write_json
-from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.component import JobStatus, ScenarioRoot, TrainingJob
-from reef.train.method import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
+from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.component import (
@@ -49,6 +49,7 @@ from reef.train.slime_backend.component import (
     start_slime_runner,
 )
 from reef.train.slime_backend.loss_families import register_loss_family, resolve_loss_family, unregister_loss_family
+from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters import startup
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
@@ -68,7 +69,7 @@ CRITIC_WARMUP_OBJECTIVE = "tests.slime_backend.test_slime_component:CriticWarmup
 WARMUP = LearningRateSchedule("warmup", 1e-4, warmup_steps=4)
 
 
-class RewardObjective(TrainingObjective):
+class RewardObjective(SlimeObjective):
     """Every sample's reward as its advantage, over Slime's policy loss."""
 
     name = "test-reward-pg"
@@ -79,7 +80,7 @@ class RewardObjective(TrainingObjective):
         return TrainingSignal("train", {"steps": next_steps(state)}, {}, advantages)
 
 
-class SkipObjective(TrainingObjective):
+class SkipObjective(SlimeObjective):
     """Skips every job's data; the data of a job whose ID starts with ``count`` adds one to ``skips``."""
 
     name = "test-skip"
@@ -120,7 +121,7 @@ class CriticWarmupFamily(SlimeAlgorithm):
         return TrainResult([], actor_trained=False)
 
 
-class CriticWarmupObjective(TrainingObjective):
+class CriticWarmupObjective(SlimeObjective):
     """The objective that trains ``CriticWarmupFamily``."""
 
     name = "test-critic-warmup"
@@ -177,9 +178,11 @@ def submitted_data(data: JobData) -> dict[str, Any]:
     return {**ref.to_dict(), "path": str(ref.path)}
 
 
-def parameters(method: TrainingMethod) -> dict[str, Any]:
+def parameters(objective: str, schedule: LearningRateSchedule | None = None) -> dict[str, Any]:
     """A job's parameters with the default step schedule: one optimizer step per sample, two steps a batch."""
-    return {"method": method.to_dict()}
+    if schedule is None:
+        return {"objective": objective}
+    return {"objective": objective, "learning_rate_schedule": schedule.to_dict()}
 
 
 class Stack:
@@ -231,11 +234,18 @@ class Stack:
             else str(self.root / "reef-starts" / f"rollout_{start_rollout_id - 1}")
         )
 
-    def run(self, method: TrainingMethod, *, step: int, batch: JobData | None = None) -> JobStatus:
+    def run(
+        self,
+        objective: str,
+        *,
+        step: int,
+        batch: JobData | None = None,
+        schedule: LearningRateSchedule | None = None,
+    ) -> JobStatus:
         job_id = f"job-{step}"
         data = batch_for(step) if batch is None else batch
         self.component.submit(
-            TrainingJob(job_id, "slime", self.start, job_data_ref(data), parameters(method), scenario="s")
+            TrainingJob(job_id, "slime", self.start, job_data_ref(data), parameters(objective, schedule), scenario="s")
         )
         status = finished(self.component, job_id)
         if status.checkpoints:
@@ -270,7 +280,7 @@ def test_a_job_trains_one_rollout_and_saves_it_as_the_start_of_the_next_job(tmp_
     stack = stacks(tmp_path)
     assert stack.component.name == "slime"
 
-    first = stack.run(TrainingMethod("sft"), step=0)
+    first = stack.run("sft", step=0)
 
     assert (first.state, first.metrics["rollout_id"]) == ("finished", 0)
     (checkpoint,) = first.checkpoints
@@ -291,13 +301,13 @@ def test_a_job_trains_one_rollout_and_saves_it_as_the_start_of_the_next_job(tmp_
             "slime",
             stack.component.base_start,
             job_data_ref(batch_for(0)),
-            parameters(TrainingMethod("sft")),
+            parameters("sft"),
             scenario="s",
         )
     )
     assert stack.component.status("job-0") == first
 
-    second = stack.run(TrainingMethod("sft"), step=1)
+    second = stack.run("sft", step=1)
 
     assert second.checkpoints[0].path == str(tmp_path / "reef-starts" / "rollout_1")
     # The objective's state continues from the start the job named.
@@ -313,7 +323,7 @@ def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpo
         "slime",
         stack.component.base_start,
         job_data_ref(batch_for(0)),
-        {**parameters(TrainingMethod("sft")), "save_interval": 1},
+        {**parameters("sft"), "save_interval": 1},
         scenario="s",
     )
     stack.component.submit(job)
@@ -339,14 +349,13 @@ def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpo
 @pytest.mark.unit
 def test_each_rollout_of_a_job_records_the_schedule_progress_up_to_it(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    method = TrainingMethod("sft", WARMUP)
     stack.component.submit(
         TrainingJob(
             "job-0",
             "slime",
             stack.component.base_start,
             job_data_ref(batch_for(0)),
-            {**parameters(method), "save_interval": 1},
+            {**parameters("sft", WARMUP), "save_interval": 1},
             scenario="s",
         )
     )
@@ -359,7 +368,7 @@ def test_each_rollout_of_a_job_records_the_schedule_progress_up_to_it(tmp_path, 
 @pytest.mark.unit
 def test_a_restarted_job_continues_after_its_last_saved_rollout(tmp_path, stacks) -> None:
     jobs = tmp_path / "reef-jobs" / "job-0"
-    job_parameters = {**parameters(TrainingMethod("sft")), "save_interval": 1}
+    job_parameters = {**parameters("sft"), "save_interval": 1}
     write_json(
         jobs / "job.json",
         {
@@ -410,7 +419,7 @@ def test_a_packed_job_trains_global_batch_size_packs_per_step(tmp_path, stacks) 
         "slime",
         stack.component.base_start,
         job_data_ref(batch_for(0)),
-        {**parameters(TrainingMethod("sft")), "scheduling": scheduling},
+        {**parameters("sft"), "scheduling": scheduling},
         scenario="s",
     )
     stack.component.submit(job)
@@ -431,23 +440,19 @@ def test_a_job_starts_only_from_the_weights_the_workers_hold(tmp_path, stacks) -
         "slime",
         str(tmp_path / "other"),
         job_data_ref(batch_for(0)),
-        parameters(TrainingMethod("sft")),
+        parameters("sft"),
         scenario="s",
     )
     with pytest.raises(ValueError, match="other is not a Slime start"):
         stack.component.submit(job)
     other = tmp_path / "rollout_5"
     SlimeStart(5, None, {}, None).write(other)
-    job = TrainingJob(
-        "elsewhere", "slime", str(other), job_data_ref(batch_for(0)), parameters(TrainingMethod("sft")), scenario="s"
-    )
+    job = TrainingJob("elsewhere", "slime", str(other), job_data_ref(batch_for(0)), parameters("sft"), scenario="s")
     with pytest.raises(ValueError, match="continues the startup weights; a job cannot start from rollout 5"):
         stack.component.submit(job)
-    stack.run(TrainingMethod("sft"), step=0)
+    stack.run("sft", step=0)
     # After a job, the workers hold its rollout: a job from any other start is refused.
-    job = TrainingJob(
-        "other", "slime", str(other), job_data_ref(batch_for(1)), parameters(TrainingMethod("sft")), scenario="s"
-    )
+    job = TrainingJob("other", "slime", str(other), job_data_ref(batch_for(1)), parameters("sft"), scenario="s")
     with pytest.raises(ValueError, match="continues the weights of rollout 0"):
         stack.component.submit(job)
     # A start without a rollout names the startup weights, which the workers no longer hold.
@@ -456,7 +461,7 @@ def test_a_job_starts_only_from_the_weights_the_workers_hold(tmp_path, stacks) -
         "slime",
         stack.component.base_start,
         job_data_ref(batch_for(1)),
-        parameters(TrainingMethod("sft")),
+        parameters("sft"),
         scenario="s",
     )
     with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
@@ -476,15 +481,13 @@ def test_restarted_workers_continue_from_the_checkpoint_they_loaded_and_refuse_t
     other = tmp_path / "rollout_5"
     SlimeStart(5, None, {}, None).write(other)
     for start in (str(other), stack.component.base_start):
-        job = TrainingJob(
-            "other", "slime", start, job_data_ref(batch_for(0)), parameters(TrainingMethod("sft")), scenario="s"
-        )
+        job = TrainingJob("other", "slime", start, job_data_ref(batch_for(0)), parameters("sft"), scenario="s")
         with pytest.raises(ValueError, match="continues the weights of rollout 2"):
             stack.component.submit(job)
 
     assert stack.start == str(tmp_path / "reef-starts" / "rollout_2")
     SlimeStart(2, None, {}, None).write(Path(stack.start))
-    status = stack.run(TrainingMethod("sft"), step=3)
+    status = stack.run("sft", step=3)
 
     assert status.state == "finished" and status.metrics["rollout_id"] == 3
     assert status.checkpoints[0].path == str(tmp_path / "reef-starts" / "rollout_3")
@@ -495,13 +498,13 @@ def test_restarted_workers_continue_from_the_checkpoint_they_loaded_and_refuse_t
 def test_a_queued_job_whose_start_the_workers_left_fails_when_it_runs(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     # Both jobs named the startup weights when they were submitted; the first one moved the workers on.
-    stack.run(TrainingMethod("sft"), step=0)
+    stack.run("sft", step=0)
     late = TrainingJob(
         "late",
         "slime",
         stack.component.base_start,
         job_data_ref(batch_for(1)),
-        parameters(TrainingMethod("sft")),
+        parameters("sft"),
         scenario="s",
     )
     with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
@@ -524,7 +527,7 @@ def test_the_default_start_is_the_startup_model_and_the_base_start_names_the_sta
             "slime",
             stack.component.base_start,
             job_data_ref(batch_for(0)),
-            parameters(TrainingMethod("sft")),
+            parameters("sft"),
             scenario="s",
         )
     )
@@ -554,10 +557,10 @@ def test_a_trainer_starts_from_the_startup_weights_only_for_a_root_of_the_config
 @pytest.mark.unit
 def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    stack.run(TrainingMethod("sft"), step=0)
+    stack.run("sft", step=0)
     register_loss_family(CriticWarmupFamily())
     try:
-        second = stack.run(TrainingMethod(CRITIC_WARMUP_OBJECTIVE), step=1)
+        second = stack.run(CRITIC_WARMUP_OBJECTIVE, step=1)
     finally:
         unregister_loss_family("test-critic-warmup")
     state = SlimeStart.read(Path(second.checkpoints[0].path))
@@ -569,19 +572,20 @@ def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_pat
     ("job_parameters", "message"),
     [
         (
-            {**parameters(TrainingMethod("sft")), "learning_rate": 1e-5},
+            {**parameters("sft"), "learning_rate": 1e-5},
             r"accept no parameters \['learning_rate'\]",
         ),
-        ({"scheduling": {}}, "'method' parameter as an object"),
-        ({"method": "sft"}, "'method' parameter as an object"),
-        ({**parameters(TrainingMethod("sft")), "scheduling": None}, "scheduling parameter must be an object"),
-        ({**parameters(TrainingMethod(REWARD_OBJECTIVE)), "scheduling": {"epochs": 2}}, "does not support 2 epochs"),
-        ({**parameters(TrainingMethod("sft")), "save_interval": 0}, "save_interval must be a positive int"),
-        ({**parameters(TrainingMethod("sft")), "save_interval": True}, "save_interval must be a positive int"),
+        ({"scheduling": {}}, "needs the objective parameter"),
+        ({"method": "sft"}, r"accept no parameters \['method'\]"),
+        ({**parameters("sft"), "scheduling": None}, "scheduling parameter must be an object"),
+        ({**parameters(REWARD_OBJECTIVE), "scheduling": {"epochs": 2}}, "does not support 2 epochs"),
+        ({**parameters("sft"), "save_interval": 0}, "save_interval must be a positive int"),
+        ({**parameters("sft"), "save_interval": True}, "save_interval must be a positive int"),
         # A job of tasks, on a component without rollout engines.
-        ({**parameters(TrainingMethod("sft")), "rollout": {"rollouts_per_task": 2}}, "no rollout engines"),
-        # A job of trajectories takes no rollout parameter.
-        ({**parameters(TrainingMethod("sft")), "rollout": {"rollouts_per_task": 2}}, "only to a job of tasks"),
+        ({**parameters("sft"), "harbor": {"rollouts_per_task": 2}}, "no rollout engines"),
+        # A job of trajectories takes no harbor parameter.
+        ({**parameters("sft"), "harbor": {"rollouts_per_task": 2}}, "only to a job of tasks"),
+        ({**parameters("sft"), "rollout": {"rollouts_per_task": 2}}, r"accept no parameters \['rollout'\]"),
     ],
 )
 def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks, job_parameters, message) -> None:
@@ -601,7 +605,7 @@ def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks,
 def test_a_lora_release_holds_the_adapter_where_serving_loads_it(tmp_path, stacks) -> None:
     stack = stacks(tmp_path, lora=True)
 
-    status = stack.run(TrainingMethod("sft"), step=0)
+    status = stack.run("sft", step=0)
 
     (checkpoint,) = status.checkpoints
     release = Path(checkpoint.path) / "release"
@@ -638,7 +642,7 @@ def test_a_symlinked_checkpoint_fails_the_job(tmp_path, stacks, monkeypatch) -> 
 
     monkeypatch.setattr(stack.group, "save_model", save_model)
 
-    status = stack.run(TrainingMethod("sft"), step=0)
+    status = stack.run("sft", step=0)
 
     assert status.state == "failed" and "missing or unsafe" in status.error
     assert status.checkpoints == ()
@@ -657,7 +661,7 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
             "scenario": "s",
             "start": str(tmp_path / "reef-starts" / "base"),
             "data": submitted_data(data),
-            "parameters": parameters(TrainingMethod("sft")),
+            "parameters": parameters("sft"),
         },
     )
     # The job started training rollout 0 before the restart.
@@ -712,7 +716,7 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
 def test_a_skipped_job_saves_no_checkpoint_and_the_next_job_continues_the_start(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     for step, data_id in ((0, "plain"), (1, "count-1")):
-        status = stack.run(TrainingMethod(SKIP_OBJECTIVE), step=step, batch=JobData(data_id, batch_for(step).samples))
+        status = stack.run(SKIP_OBJECTIVE, step=step, batch=JobData(data_id, batch_for(step).samples))
         # A skip trains nothing and saves nothing, whatever state the objective proposed.
         assert (status.state, status.checkpoints, status.metrics) == ("finished", (), {"skipped": 1})
     assert (stack.group.train_calls, stack.group.saved) == ([], [])
@@ -725,7 +729,7 @@ def test_a_skipped_job_saves_no_checkpoint_and_the_next_job_continues_the_start(
 def test_a_job_of_another_family_switches_the_actor_workers_and_back(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     for step, method in enumerate(("sft", REWARD_OBJECTIVE, REWARD_OBJECTIVE, "sft")):
-        assert stack.run(TrainingMethod(method), step=step).state == "finished"
+        assert stack.run(method, step=step).state == "finished"
 
     # A job of the family the workers started with leaves them as they are.
     assert stack.worker_switch(0) is None
@@ -767,14 +771,14 @@ def test_a_family_the_workers_cannot_train_is_refused(tmp_path, stacks) -> None:
 @pytest.mark.unit
 def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    first = stack.run(TrainingMethod("sft", WARMUP), step=0)
+    first = stack.run("sft", step=0, schedule=WARMUP)
     worker_switch = stack.worker_switch(0)
     assert worker_switch is not None
     assert worker_switch["learning_rate_schedule_state"] == LearningRateScheduleState(WARMUP, 0).to_dict()
     # Two samples, one optimizer step each: the job's last step ran at the rate of step 1.
     assert first.checkpoints[0].metrics["learning_rate"] == pytest.approx(2.5e-5)
     assert first.checkpoints[0].metrics["learning_rate_schedule"] == {"name": "warmup", "completed_steps": 2}
-    second = stack.run(TrainingMethod("sft", WARMUP), step=1)
+    second = stack.run("sft", step=1, schedule=WARMUP)
     assert stack.worker_switch(1)["learning_rate_schedule_state"]["completed_steps"] == 2
     # The progress is saved with the rollout's start.
     assert SlimeStart.read(Path(second.checkpoints[0].path)).schedule_state == LearningRateScheduleState(WARMUP, 4)
@@ -783,17 +787,17 @@ def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tm
     # Workers that loaded the second checkpoint continue the warmup where it stopped.
     restarted = stacks(tmp_path, start_rollout_id=2)
     assert restarted.start == second.checkpoints[0].path
-    restarted.run(TrainingMethod("sft", WARMUP), step=2)
+    restarted.run("sft", step=2, schedule=WARMUP)
     assert restarted.worker_switch(0)["learning_rate_schedule_state"]["completed_steps"] == 4
     # A job that selects no schedule keeps the active one.
-    restarted.run(TrainingMethod("sft"), step=3)
+    restarted.run("sft", step=3)
     assert restarted.worker_switch(1)["learning_rate_schedule_state"]["completed_steps"] == 6
 
 
 @pytest.mark.unit
 def test_a_schedule_with_decoupled_lr_fails_the_job_before_training(tmp_path, stacks) -> None:
     stack = stacks(tmp_path, decoupled_lr=1e-5)
-    status = stack.run(TrainingMethod("sft", WARMUP), step=0)
+    status = stack.run("sft", step=0, schedule=WARMUP)
     assert status.state == "failed" and "decoupled-lr" in status.error
     assert stack.group.train_calls == []
     assert status.checkpoints == ()
@@ -804,11 +808,11 @@ def test_a_critic_only_step_leaves_the_actor_schedule_where_it_was(tmp_path, sta
     register_loss_family(CriticWarmupFamily())
     try:
         stack = stacks(tmp_path, loss_family="test-critic-warmup")
-        first = stack.run(TrainingMethod(CRITIC_WARMUP_OBJECTIVE, WARMUP), step=0)
+        first = stack.run(CRITIC_WARMUP_OBJECTIVE, step=0, schedule=WARMUP)
         assert "learning_rate" not in first.checkpoints[0].metrics
         assert SlimeStart.read(Path(first.checkpoints[0].path)).schedule_state == LearningRateScheduleState(WARMUP, 0)
         # The actor never fetched the job's data, so the next job carries the worker switch again.
-        stack.run(TrainingMethod(CRITIC_WARMUP_OBJECTIVE, WARMUP), step=1)
+        stack.run(CRITIC_WARMUP_OBJECTIVE, step=1, schedule=WARMUP)
         assert stack.worker_switch(1) == stack.worker_switch(0)
     finally:
         unregister_loss_family("test-critic-warmup")
@@ -861,7 +865,7 @@ def test_worker_results_wait_for_the_configured_timeout_and_metrics_come_from_ev
     stack.group.train_result = [TrainingResult()]
     monkeypatch.setattr(base, "monotonic", lambda: 100.0)
 
-    metrics = stack.run(TrainingMethod("sft"), step=0).checkpoints[0].metrics
+    metrics = stack.run("sft", step=0).checkpoints[0].metrics
 
     assert waits == [43200.0]
     assert (metrics["loss"], metrics["train/loss"], metrics["train/grad_norm"]) == (0.1, 1.25, 2.0)
@@ -873,7 +877,7 @@ def test_the_workers_receive_each_rows_producing_artifact(tmp_path, stacks) -> N
     stack = stacks(tmp_path)
     unknown = policy_trajectory("unknown", (10, 20, 21, 22), (1, 1, 1), (-0.1, -0.2, -0.3), 1.0)
     batch = JobData("mixed", (*batch_for(0).samples, unknown))
-    stack.run(TrainingMethod("sft"), step=0, batch=batch)
+    stack.run("sft", step=0, batch=batch)
     (data,) = stack.processor.calls
     # Training metadata, not a check: the artifact that produced each sample, or None when it is unknown.
     assert data["producing_artifact_ids"] == ["artifact-0", "artifact-1", None]
@@ -887,7 +891,7 @@ def test_a_recorded_trajectory_renders_with_the_models_chat_template(tmp_path, s
     recorded = TrajectorySample(
         {"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps, "extra": {"reef": {"reward": 1.0}}}
     )
-    stack.run(TrainingMethod("sft"), step=0, batch=JobData("recorded", (*batch_for(0).samples[:1], recorded)))
+    stack.run("sft", step=0, batch=JobData("recorded", (*batch_for(0).samples[:1], recorded)))
     (data,) = stack.processor.calls
     # user q | assistant ab in CharTemplate; the actor computes the log-probabilities, so the row ships none.
     assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["loss_masks"][1] == [1, 1]
@@ -899,7 +903,7 @@ def test_sft_trains_a_demonstration_that_records_no_reward(tmp_path, stacks) -> 
     stack.component.template = CharTemplate()
     steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": "ab"}]
     demonstration = TrajectorySample({"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps})
-    stack.run(TrainingMethod("sft"), step=0, batch=JobData("uploaded", (*batch_for(0).samples[:1], demonstration)))
+    stack.run("sft", step=0, batch=JobData("uploaded", (*batch_for(0).samples[:1], demonstration)))
     (data,) = stack.processor.calls
     # sft_loss reads no reward, so the row carries 0.
     assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["rewards"][1] == 0.0
@@ -930,13 +934,13 @@ def test_checkpoint_storage_records_each_rollout_and_refuses_a_job_it_cannot_hol
     )
     stack = stacks(tmp_path, save_hf=template, storage=storage)
 
-    first = stack.run(TrainingMethod("sft"), step=0, batch=batch_for(0, rewards=(1.0, 0.0)))
+    first = stack.run("sft", step=0, batch=batch_for(0, rewards=(1.0, 0.0)))
 
     assert first.state == "finished"
     stored = json.loads(storage._record_path(0).read_text())
     assert (stored["rollout_id"], stored["job_id"], stored["reward"]) == (0, "job-0", pytest.approx(0.5))
     # The next job's start is protected, so the cap leaves no room for another pair.
-    blocked = stack.run(TrainingMethod("sft"), step=1)
+    blocked = stack.run("sft", step=1)
     assert blocked.state == "failed" and "checkpoint storage is full" in blocked.error
     assert len(stack.group.train_calls) == len(stack.group.saved) == 1
 
@@ -1019,7 +1023,7 @@ def test_closing_releases_the_critic_then_the_actor_then_the_resources(tmp_path)
                 "slime",
                 component.base_start,
                 job_data_ref(batch_for(0)),
-                parameters(TrainingMethod("sft")),
+                parameters("sft"),
                 scenario="s",
             )
         )

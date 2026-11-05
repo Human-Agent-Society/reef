@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import UnknownScenario
@@ -74,6 +76,18 @@ def test_scenario_contract_returns_processor_and_request_types(tmp_path) -> None
     assert "recipe" not in contract
     assert contract["processor"] == "NoJobData"
     assert contract["required_request_types"] == ["inference", "report"]
+    assert contract["parameters_schema"] == {}, "a recipe without a training component declares no schema"
+
+
+def test_scenario_contract_serves_the_training_components_schema_by_sample_kind(tmp_path) -> None:
+    class Declaring(StubTrainingComponent):
+        def parameters_schema(self, kind):
+            return {"title": kind} if kind == "task" else None
+
+    dispatcher = _dispatcher(tmp_path)
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario._binding = replace(scenario._binding, training_component=Declaring())
+    assert dispatcher.scenario_contract("math")["parameters_schema"] == {"task": {"title": "task"}}
 
 
 def test_scenario_contract_raises_for_unknown_scenario(tmp_path) -> None:

@@ -8,10 +8,16 @@ sets the reference implementation's defaults and forwards the worker hooks
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
+from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.algorithm import register_loss_family
 from reef.train.slime_backend.distill import DistillAlgorithm, DistillSettings
+from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.types import JobData, trajectories
 
 
 @dataclass(frozen=True)
@@ -49,4 +55,18 @@ class SdftAlgorithm(DistillAlgorithm):
     settings_type = SdftSettings
 
 
-__all__ = ["SdftAlgorithm", "SdftSettings"]
+@register_slime_objective
+class SdftObjective(SlimeObjective):
+    name = "sdft"
+    loss_family = "sdft"
+    # The teacher is the policy at the start of the step; a second pass over
+    # the data would distil a teacher the first pass already moved away from.
+    supports_multiple_epochs = False
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
+        steps = next_steps(state)
+        return TrainingSignal("train", {"steps": steps}, {"steps": steps, "samples": len(samples)})
+
+
+__all__ = ["SdftAlgorithm", "SdftObjective", "SdftSettings"]

@@ -17,9 +17,9 @@ import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.runtime_stubs import runtime_bindings
 
-from recipes.sdft import SdftObjective, SDFTRecipe
+from recipes.sdft import SDFTRecipe
 from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSamples, SDFTSettings
-from recipes.sdft.slime import SdftSettings
+from recipes.sdft.slime import SdftObjective, SdftSettings
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TeacherRequest, rendered_job_data
 from reef.core.reports import TeacherContextReport
@@ -30,7 +30,6 @@ from reef.record2sample.distill import student_call
 from reef.sample2job import DistillJobData
 from reef.train import PipelineContext
 from reef.train.algos.schedule import StepScheduling
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -196,8 +195,8 @@ def test_sdft_recipe_resolves_by_dotted_reference() -> None:
     assert isinstance(recipe, SDFTRecipe)
     assert recipe.name == "sdft"
     assert recipe.report_type is TeacherContextReport
-    spec = SDFTRecipe.training_spec()
-    assert (spec.objective, spec.loss_family) == ("sdft", "sdft")
+    assert SDFTRecipe.default_parameters()["trajectory"] == {"objective": "sdft"}
+    assert SdftObjective.loss_family == "sdft"
     assert SdftObjective.rollout_unit == "sample"
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SDFTSamples)
@@ -280,7 +279,7 @@ def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row() -> N
     (sample,) = rendered.samples
     tokens, loss_mask, teacher_tokens = (sample.training[key] for key in ("tokens", "loss_mask", "teacher_tokens"))
 
-    prepared = prepare_slime_job(rendered, TrainingMethod("sdft"), {}, StepScheduling(), step_size=1)
+    prepared = prepare_slime_job(rendered, "sdft", {}, StepScheduling(), step_size=1)
     payload = prepared.payload
     assert payload is not None
     assert payload["loss"] == "sdft"
