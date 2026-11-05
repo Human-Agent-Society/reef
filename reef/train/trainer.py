@@ -14,7 +14,7 @@ import logging
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any
 
@@ -76,18 +76,19 @@ class PendingTrainingResult:
     job update. ``ended`` is a JobOutcome only for a polled job end, otherwise None. When set,
     ``ended.job_id == result.training_job_id``. ``consumed_ids`` is None,
     or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped request.
-    ``earlier_results`` is an
-    ordered, possibly empty tuple of TrainStepResult values replaced by metric annotation; duplicates are allowed.
-    Each earlier result equals ``result`` in every field except ``metrics``.
-    Purpose: Trainer.run_once makes this phase. prepare_commit acknowledges its data once and creates
-    PreparedTrainingResult. Annotation replaces the result while retaining its earlier identities.
+    ``prepared_commit`` is None until Trainer.prepare_commit prepares the commit. When set,
+    ``result.state`` is a mapping, ``prepared_commit.algorithm_state == result.state`` and
+    ``prepared_commit.training_job_id == result.training_job_id``.
+    Purpose: Trainer.run_once makes this phase. prepare_commit acknowledges its data once and records the snapshot,
+    which a retry of the preparation returns. Trainer.commit reads it only after scenario settlement and then clears
+    the pending phase.
     """
 
     data: JobData | None
     result: TrainStepResult
     ended: JobOutcome | None = None
     consumed_ids: frozenset[str] | None = None
-    earlier_results: tuple[TrainStepResult, ...] = ()
+    prepared_commit: PreparedCommit | None = None
 
     def __post_init__(self) -> None:
         if self.data is not None and not isinstance(self.data, JobData):
@@ -105,43 +106,18 @@ class PendingTrainingResult:
             or self.consumed_ids != frozenset({self.data.request.id})
         ):
             raise ValueError("consumed_ids must name only the reserved request, or be None")
-        if not isinstance(self.earlier_results, tuple) or not all(
-            isinstance(result, TrainStepResult) for result in self.earlier_results
-        ):
-            raise TypeError("earlier_results must be a tuple of TrainStepResult values")
-        if any(replace(earlier, metrics=self.result.metrics) != self.result for earlier in self.earlier_results):
-            raise ValueError("earlier results must differ from the result only in metrics")
+        if self.prepared_commit is not None:
+            if not isinstance(self.result.state, Mapping):
+                raise TypeError("a prepared training result needs a state mapping")
+            if self.prepared_commit.algorithm_state != self.result.state:
+                raise ValueError("prepared state must match the training result state")
+            if self.prepared_commit.training_job_id != self.result.training_job_id:
+                raise ValueError("prepared job ID must match the training result job ID")
 
     @property
     def data_id(self) -> str | None:
         """The ID of the submission's data, or None for a polled job update."""
         return None if self.data is None else self.data.data_id
-
-
-@dataclass(frozen=True)
-class PreparedTrainingResult(PendingTrainingResult):
-    """A pending result whose commit snapshot has been prepared.
-
-    Values: every PendingTrainingResult invariant holds. ``prepared_commit`` is PreparedCommit and
-    ``result.state`` is a mapping. ``prepared_commit.algorithm_state == result.state`` and
-    ``prepared_commit.training_job_id == result.training_job_id``. The snapshot's metrics remain cached across
-    annotations and need not equal ``result.metrics``.
-    Purpose: Trainer.prepare_commit makes it after acknowledgment. Retrying preparation returns that exact
-    snapshot; Trainer.commit reads it only after scenario settlement and then clears the pending phase.
-    """
-
-    prepared_commit: PreparedCommit = field(kw_only=True)
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if not isinstance(self.prepared_commit, PreparedCommit):
-            raise TypeError("prepared_commit must be PreparedCommit")
-        if not isinstance(self.result.state, Mapping):
-            raise TypeError("a prepared training result needs a state mapping")
-        if self.prepared_commit.algorithm_state != self.result.state:
-            raise ValueError("prepared state must match the training result state")
-        if self.prepared_commit.training_job_id != self.result.training_job_id:
-            raise ValueError("prepared job ID must match the training result job ID")
 
 
 @dataclass(frozen=True)
@@ -284,8 +260,8 @@ class Trainer:
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         self.pending_step: JobDataReservation | PendingTrainingResult | None = None
-        # The result values of the last pending step a commit put on record: committing one again is a second step.
-        self.recorded_results: tuple[TrainStepResult, ...] = ()
+        # The result of the last pending step a commit put on record: committing it again is a second step.
+        self.recorded_result: TrainStepResult | None = None
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -683,8 +659,12 @@ class Trainer:
         self.pending_step = JobDataReservation(data)
         return data
 
-    def prepare_commit(self, result: TrainStepResult | None) -> PreparedCommit:
+    def prepare_commit(
+        self, result: TrainStepResult | None, correlation_metrics: Mapping[str, Any] | None = None
+    ) -> PreparedCommit:
         """Prepare the pending result without exposing its state as committed.
+
+        ``correlation_metrics`` are the experiment tracker's fields, which join the result's metrics in the commit.
 
         Acknowledging a pipeline mutates its in-memory job data bookkeeping, so
         the prepared value is cached and reused after a publication retry. The
@@ -694,7 +674,7 @@ class Trainer:
         """
         with self._lock:
             if self.pending_step is None:
-                if any(result is recorded for recorded in self.recorded_results):
+                if result is not None and result is self.recorded_result:
                     raise RuntimeError("training result is on record already: committing it again is a second step")
                 return PreparedCommit(
                     algorithm_state=self.algorithm_state_dict(),
@@ -708,7 +688,7 @@ class Trainer:
                 raise RuntimeError("trainer pending job data has no result")
             if pending.result is not result:
                 raise RuntimeError("training result does not match the pending step")
-            if isinstance(pending, PreparedTrainingResult):
+            if pending.prepared_commit is not None:
                 return pending.prepared_commit
             data_id, result = pending.data_id, pending.result
             if not isinstance(result.state, Mapping):
@@ -719,7 +699,7 @@ class Trainer:
                 consumed = frozenset() if data_id is None else self._pipeline.acknowledge(data_id)
             released = self._pipeline.releasable_record_ids()
             loss = self._records.loss(self.scenario)
-            metrics = dict(result.metrics)
+            metrics = {**dict(result.metrics), **dict(correlation_metrics or {})}
             if loss.record_count > 0:
                 metrics.update({"records/evicted_count": loss.record_count, "records/data_incomplete": 1})
             request = None if pending.data is None else pending.data.request
@@ -735,14 +715,7 @@ class Trainer:
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
             )
-            self.pending_step = PreparedTrainingResult(
-                data=pending.data,
-                result=pending.result,
-                ended=pending.ended,
-                consumed_ids=pending.consumed_ids,
-                earlier_results=pending.earlier_results,
-                prepared_commit=prepared,
-            )
+            self.pending_step = replace(pending, prepared_commit=prepared)
             return prepared
 
     def commit(self, prepared: PreparedCommit) -> None:
@@ -751,7 +724,7 @@ class Trainer:
             if self.pending_step is None:
                 return
             if (
-                not isinstance(self.pending_step, PreparedTrainingResult)
+                not isinstance(self.pending_step, PendingTrainingResult)
                 or self.pending_step.prepared_commit is not prepared
             ):
                 raise RuntimeError("prepared commit does not match the pending training step")
@@ -762,28 +735,8 @@ class Trainer:
             self._state = dict(prepared.algorithm_state)
             self.consumed_record_ids.update(prepared.consumed_ids)
             self.skipped_record_ids.difference_update(prepared.consumed_ids)
-            self.recorded_results = (*self.pending_step.earlier_results, self.pending_step.result)
+            self.recorded_result = self.pending_step.result
             self.pending_step = None
-
-    def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
-        """Attach provider correlation fields to the exact pending result.
-
-        The committer calls this before preparing the durable commit. Updating
-        the pending value under the trainer lock keeps the commit record and
-        the storage-observed experiment event on one immutable result snapshot.
-        """
-        if not metrics:
-            return result
-        with self._lock:
-            if not isinstance(self.pending_step, PendingTrainingResult):
-                raise RuntimeError("cannot annotate a training result without a pending step")
-            if self.pending_step.result is not result:
-                raise RuntimeError("cannot annotate a result that is not the pending training step")
-            annotated = replace(result, metrics={**dict(result.metrics), **dict(metrics)})
-            self.pending_step = replace(
-                self.pending_step, result=annotated, earlier_results=(*self.pending_step.earlier_results, result)
-            )
-            return annotated
 
     def cancel_job(self) -> None:
         """Cancel the running training job at its component; nothing for a trainer without one."""
