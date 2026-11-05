@@ -83,9 +83,12 @@ The publication head orders new snapshots independently of the active
 selection. Publication checks its expected parent and uses a Git push lease;
 a stale writer conflicts instead of overwriting another publication.
 
-Old commit records remain readable. Recovery resolves their stored release
-references to component artifact selections. New selection records retain
-storage locators privately so recovery can load the same immutable bytes.
+Old commit records remain readable, with their stored locations. A new commit
+record stores only its component artifact selection. Recovery reads each
+location from the repository's binding of an artifact ID. A binding never
+changes and Reef never removes one, so a committed record always resolves. A
+retry of a failed commit publishes nothing new: one artifact ID names one
+stored snapshot.
 
 Commit ordering
 ---------------

@@ -42,7 +42,7 @@ upstream's `--iterations` is the same count.
 curl -f http://127.0.0.1:8901/reef/train \
   -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: <scenario>" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Propose the next candidate of the search.", "session": "", "release_id": ""}'
+  -d '{"text": "Propose the next candidate of the search.", "session": "", "artifact_id": ""}'
 ```
 
 The steps of the queued requests run one after another. See [Manual
