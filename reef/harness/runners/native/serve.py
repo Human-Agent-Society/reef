@@ -7,7 +7,7 @@ snapshot file), else on the head's, read through
 ``GET /reef/harness?form=source``. It starts the capture proxy in process
 and listens on a Unix socket for turns and control requests. A session holds
 one ``Run`` across turns. A new head reaches the process through the artifact
-poll or a resolved legacy harness header, and its host
+poll, and its host
 replaces the current one between two steps of the open turn, or at once when
 no turn is open. A tree that does not render or load leaves the current host
 in place. Every mount, unmount and failed mount is an event in the open
@@ -250,51 +250,26 @@ class _Conversation:
 class _Pending:
     """One queued harness mount and the answer whoever queued it waits for; the manifest is fetched when it lands.
 
-    Values: exactly one of ``artifact_id`` and ``revision`` is set when the mount is queued. ``revision`` is a
-    legacy harness revision that an older Reef service named; ``fetch`` resolves it and sets ``artifact_id``.
-    ``identity`` names the mount in status and logs with whichever of the two is known.
+    Values: ``artifact_id`` is the artifact to mount. ``identity`` names the mount in status and logs.
     """
 
-    def __init__(
-        self,
-        artifact_id: str | None,
-        source: str,
-        manifest: Mapping[str, Any] | None = None,
-        *,
-        revision: str | None = None,
-    ) -> None:
-        if (artifact_id is None) == (revision is None):
-            raise ValueError("a pending mount names exactly one of artifact_id and revision")
+    def __init__(self, artifact_id: str, source: str, manifest: Mapping[str, Any] | None = None) -> None:
         self.manifest: dict[str, Any] | None = None if manifest is None else dict(manifest)
         self.source = source
         self.artifact_id = artifact_id
-        self.revision = revision
         self.result: dict[str, Any] = {}
         self._done = threading.Event()
 
     @property
     def identity(self) -> dict[str, str]:
-        """``{"artifact_id": ...}`` once known, else ``{"release_id": revision}``."""
-        if self.artifact_id is not None:
-            return {"artifact_id": self.artifact_id}
-        return {"release_id": str(self.revision)}
+        """``{"artifact_id": ...}``."""
+        return {"artifact_id": self.artifact_id}
 
     def fetch(self, client: ArtifactClient) -> dict[str, Any]:
-        """The manifest to mount: the queued one, or the one Reef answers for ``artifact_id`` or ``revision``."""
+        """The manifest to mount: the queued one, or the one Reef answers for ``artifact_id``."""
         if self.manifest is not None:
             return self.manifest
-        if self.artifact_id is not None:
-            return client.fetch(self.artifact_id)
-        manifest = client.fetch_legacy(str(self.revision))
-        self.artifact_id = str(manifest["artifact_id"])
-        return manifest
-
-    def changes_nothing(self, mounted: str | None) -> bool:
-        """True for a mount named by ``revision`` that resolved to the ``mounted`` artifact.
-
-        A mount named by its artifact ID always runs, so an operator can mount the same artifact again.
-        """
-        return self.revision is not None and self.artifact_id == mounted
+        return client.fetch(self.artifact_id)
 
     def settle(self, result: Mapping[str, Any]) -> None:
         self.result = dict(result)
@@ -420,19 +395,10 @@ class Server(ServeState, ArtifactUpdateListener):
         except ValueError as exc:
             raise ServeError(str(exc)) from exc
         artifact_info = read_artifact_info(self.dest)
-        legacy_manifest: Mapping[str, Any] | None = None
-        if not artifact_info.get("artifact_id") and artifact_info.get("release_id"):
-            try:
-                legacy_manifest = self.client.fetch_legacy(str(artifact_info["release_id"]))
-            except ArtifactClientError as exc:
-                raise ServeError(
-                    f"Reef answered no artifact for installed artifact {artifact_info['release_id']!r}: {exc}"
-                ) from exc
-            artifact_info = dict(legacy_manifest)
         artifact_id = str(artifact_info["artifact_id"]) if artifact_info.get("artifact_id") else None
         parent = str(artifact_info["parent_artifact_id"]) if artifact_info.get("parent_artifact_id") else None
         stored = read_source(self.dest) if artifact_id is not None else None
-        manifest = legacy_manifest
+        manifest: Mapping[str, Any] | None = None
         if stored is None:
             # Nothing mounted here yet: the head's source tree, which the boot mount stores for the next start.
             try:
@@ -538,11 +504,6 @@ class Server(ServeState, ArtifactUpdateListener):
                 return {"type": "control/result", "data": self.status()}
             if control == "mount":
                 artifact_id = request.get("artifact_id")
-                if artifact_id is None and isinstance(request.get("release_id"), str):
-                    try:
-                        artifact_id = self.client.fetch_legacy(request["release_id"])["artifact_id"]
-                    except ArtifactClientError as exc:
-                        return _error(str(exc))
                 if not isinstance(artifact_id, str) or not artifact_id:
                     return _error("mount needs an artifact_id")
                 return {"type": "control/result", "data": self.mount(artifact_id)}
@@ -611,8 +572,6 @@ class Server(ServeState, ArtifactUpdateListener):
                 # that names this head announces it again, so the mount is retried at the interval, not forgotten.
                 self._watch.forget(pending.artifact_id)
             return {"mounted": False, **pending.identity, "error": str(exc)}
-        if pending.changes_nothing(self._artifact_id):
-            return {"mounted": True, "artifact_id": pending.artifact_id, "error": None}
         parent = manifest.get("parent_artifact_id")
         failure = self._mount(
             tree,

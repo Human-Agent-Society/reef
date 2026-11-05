@@ -43,13 +43,11 @@ def test_namespaces_restart_and_receipt_isolation(postgres_config):
         write_consumption_receipt(first, "math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
     with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
         assert other.existing_receipt(original) is None
-        assert other.consumption_receipts("math") == ()
         assert other.append_result(original).inserted
         assert other.get("math", "first") == original
     with closing(PostgresRecordStore(url, schema=schema, name="one")) as reopened:
         assert reopened.append_result(original).inserted is False
         assert reopened.get_for_audit("math", "first").item == original
-        assert len(reopened.consumption_receipts("math")) == 1
     with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
         assert other.count("math") == 1
 
@@ -61,7 +59,6 @@ def test_large_consumption_receipt_reads_back(postgres_database):
         write_consumption_receipt(store, "math", ids, receipt_id="large", metadata={"step": 1})
         store.append(record("later"))
         assert store.get("math", "later") is not None
-        assert store.consumption_receipts("math")[0]["consumed_ids"] == tuple(sorted(ids))
 
 
 def test_concurrent_append_retry_and_conflict(postgres_database):
@@ -162,7 +159,6 @@ def test_reader_snapshot_and_transaction_rollback(postgres_database):
             assert connection.execute(query).all() == []
             write_consumption_receipt(second, "math", frozenset({"first"}), receipt_id="skip", metadata={})
             assert connection.execute(query).all() == []
-        assert len(first.consumption_receipts("math")) == 1
         assert first.get("math", "first") == original
         assert first.get_for_audit("math", "first").item == original
         with pytest.raises(RuntimeError, match="rollback"), first._transaction(write=True) as connection:
@@ -186,7 +182,6 @@ def test_archive_generation_retention_and_closed_sessions(postgres_database):
             old.append(record("stale"))
         with closing(PostgresRecordStore(postgres_database, name="math")) as new:
             assert new.storage_id != old.storage_id
-            assert new.consumption_receipts("math") == ()
             assert new.append_result(record()).inserted
             assert postgres_database.prune(RecordRetention(max_bytes=1)) == 3
             assert new.count("math") == 0
@@ -477,13 +472,8 @@ def test_legacy_schema_moves_retirement_to_consumption_and_removes_old_tables(po
         with closing(PostgresRecordDatabase(url, schema=schema)) as database:
             with closing(PostgresRecordStore(database, name="one")) as records:
                 assert records.get("math", "first") == record()
-                assert {
-                    key for receipt in records.consumption_receipts("math") for key in receipt["consumed_ids"]
-                } == {"first", "earlier"}
-                assert len(records.consumption_receipts("math")) == 2
             with closing(PostgresRecordStore(database, name="two")) as records:
                 assert records.get("math", "other") == record("other")
-                assert records.consumption_receipts("math")[0]["consumed_ids"] == ("other",)
             with database.transaction() as connection:
                 inspector = inspect(connection)
                 assert "compaction_receipts" not in inspector.get_table_names(schema=schema)

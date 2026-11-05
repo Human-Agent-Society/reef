@@ -58,13 +58,10 @@ def encode_snapshot_ref(ref: SnapshotRef) -> dict[str, object]:
 
 
 def decode_snapshot_ref(value: Mapping[str, object]) -> SnapshotRef:
-    """Decode current locators or the former artifact-ref wire format."""
-    if value.get("kind") == "snapshot":
-        revision, parent = value.get("revision"), value.get("parent_revision")
-    elif value.get("kind") == "artifact":
-        revision, parent = value.get("release_id"), value.get("parent_release_id")
-    else:
-        raise ValueError("snapshot ref kind must be 'snapshot' or legacy 'artifact'")
+    """Decode a locator that ``encode_snapshot_ref`` wrote."""
+    if value.get("kind") != "snapshot":
+        raise ValueError("snapshot ref kind must be 'snapshot'")
+    revision, parent = value.get("revision"), value.get("parent_revision")
     if not isinstance(revision, str) or (parent is not None and not isinstance(parent, str)):
         raise ValueError("snapshot ref revision and parent_revision must be strings")
     if "runtime_load_id" in value:

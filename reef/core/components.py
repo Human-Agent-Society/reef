@@ -6,8 +6,7 @@ has no content identity of its own.
 
 Each component is one artifact. New components receive independent artifact
 IDs before publication. A snapshot records those IDs explicitly, and carrying
-a component into another snapshot preserves its ID. Legacy entries without an
-explicit ID retain their original revision-based identity.
+a component into another snapshot preserves its ID.
 
 The manifest travels in artifact metadata under ``COMPONENTS_METADATA_KEY``.
 A snapshot without a manifest is read as one component at the root, which the
@@ -37,36 +36,24 @@ def validate_component_name(name: object) -> str:
     return name
 
 
-def legacy_artifact_id(revision: str, component: str | None) -> str:
-    """The artifact ID that an older snapshot ``revision`` gave a component without an explicit ID.
-
-    It is ``revision`` for a flat snapshot or a snapshot of one component (``component`` is None), and
-    ``<revision>:<component>`` for a component of a multi-component snapshot. New artifacts store explicit IDs.
-    """
-    return revision if component is None else f"{revision}:{component}"
-
-
 @dataclass(frozen=True)
 class ComponentEntry:
     """One component's artifact in a snapshot manifest: its content, its identity and its metadata.
 
-    Values: ``artifact_id`` is a non-empty string for a current entry, or
-    None for a legacy entry whose snapshot revision determines its identity.
-    ``metadata`` is a mapping of that component's metadata, copied and frozen
-    at construction. The legacy identity is the snapshot revision for one
-    component, or ``<revision>:<component>`` for a multi-component snapshot.
+    Values: ``artifact_id`` is a non-empty string. ``metadata`` is a mapping of that component's metadata, copied
+    and frozen at construction.
 
     Purpose: the committer and the scenario factory make entries when a
     snapshot is published or a scenario is created; readers resolve a
     component's artifact and content from them.
     """
 
-    artifact_id: str | None = None
+    artifact_id: str
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
-            raise ValueError("component artifact_id must be a non-empty string or null")
+        if not isinstance(self.artifact_id, str) or not self.artifact_id:
+            raise ValueError("component artifact_id must be a non-empty string")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("component metadata must be a mapping")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
@@ -103,10 +90,9 @@ class SnapshotComponents:
     def artifact_id(self, name: str, revision: str) -> str:
         """The artifact ID of component ``name`` in the snapshot ``revision``.
 
-        It is the entry's explicit ID, or the revision-based ID of a legacy entry. Raise ``KeyError`` for an
-        unknown ``name``.
+        Raise ``KeyError`` for an unknown ``name``.
         """
-        return self.entries[name].artifact_id or legacy_artifact_id(revision, None if self.single else name)
+        return self.entries[name].artifact_id
 
     def artifact_ids(self, revision: str) -> dict[str, str]:
         """The artifact ID of each component in the snapshot ``revision`` (``artifact_id``), in declaration order."""
@@ -134,7 +120,7 @@ class SnapshotComponents:
         return {
             name: {
                 "metadata": dict(entry.metadata),
-                **({} if entry.artifact_id is None else {"artifact_id": entry.artifact_id}),
+                "artifact_id": entry.artifact_id,
             }
             for name, entry in self.entries.items()
         }
@@ -150,7 +136,10 @@ class SnapshotComponents:
             metadata = raw.get("metadata", {})
             if not isinstance(metadata, Mapping):
                 raise ValueError(f"components manifest entry {name!r} metadata must be an object")
-            entries[str(name)] = ComponentEntry(metadata=metadata, artifact_id=raw.get("artifact_id"))
+            artifact_id = raw.get("artifact_id")
+            if not isinstance(artifact_id, str):
+                raise ValueError(f"components manifest entry {name!r} requires artifact_id")
+            entries[str(name)] = ComponentEntry(metadata=metadata, artifact_id=artifact_id)
         return cls(entries)
 
 
@@ -169,7 +158,6 @@ __all__ = [
     "RECORDS_COMPONENT",
     "ComponentEntry",
     "SnapshotComponents",
-    "legacy_artifact_id",
     "snapshot_components",
     "validate_component_name",
 ]

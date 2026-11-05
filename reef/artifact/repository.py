@@ -128,14 +128,6 @@ class RepositoryBackend(ArtifactRepository):
             ):
                 raise ArtifactConflict(f"artifact {artifact_id!r} already names different files or metadata")
 
-    @abstractmethod
-    def index_snapshot(self, ref: SnapshotRef) -> None:
-        """Bind the component IDs in an older snapshot for lookup by artifact ID.
-
-        Repeated calls preserve existing bindings. Conflicting files or metadata
-        raise ``ArtifactConflict`` without changing an existing binding.
-        """
-
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
         """Every file of the snapshot ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
         seconds; the backend lists and signs them without materializing the snapshot.
