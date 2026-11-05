@@ -655,7 +655,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_snapshot().revision
         source = service.harness_manifest(headers, form="source")
-        assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
+        assert source["files"] == {"rules.md": "evolved"}
         artifact_id = source["artifact_id"]
         assert artifact_id != head
         assert scenario.artifact_selection().components["harness"] == artifact_id

@@ -305,7 +305,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         # The record names the harness trainer, but the tree did not change: no new harness head.
         service = RequestService(dispatcher)
         headers = {"x-reef-scenario": "agent"}
-        assert service.harness_manifest(headers)["release_id"] == after_harness.ref.revision
+        assert service.harness_manifest(headers)["artifact_id"] == after_harness.component(HARNESS).artifact_id
         assert [row["artifact_id"] for row in service.harness_artifacts(headers)["artifacts"]] == [
             base.component(HARNESS).artifact_id,
             after_harness.component(HARNESS).artifact_id,
@@ -332,7 +332,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert components.read_files(served) == {"AGENTS.md": "evolved"}
         wait_for_serving(dispatcher, "agent")
         assert runtime.activated_ids[served_before:] == []
-        assert service.harness_manifest(headers)["release_id"] == after_harness.ref.revision
+        assert service.harness_manifest(headers)["artifact_id"] == after_harness.component(HARNESS).artifact_id
 
         # Activating the root's weights loads them and keeps the served harness; the chain tip stays. The root
         # release made its artifacts, so their artifact_id is the root release's.
@@ -369,7 +369,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert served.components is not None
         assert served.components.entries[WEIGHTS].artifact_id == base_weights
         assert components.read_files(served) == {"AGENTS.md": "held"}
-        assert service.harness_manifest(headers)["release_id"] == held_ref.revision
+        assert service.harness_manifest(headers)["artifact_id"] == held.artifact_id
 
         # Weights held for review are activated as weights, under the tree served by then.
         held_weights = Artifact.local(
@@ -379,7 +379,6 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         held_weights_release = scenario.store.history()[-1].snapshot.revision
         newest = Artifact.local(_tree(tmp_path / "h4", {"AGENTS.md": "newest"}))
         scenario.commit(TrainStepResult(state={}, artifact=newest, component=HARNESS))
-        newest_release = scenario.current_snapshot().revision
         scenario.activate(held_weights.artifact_id, WEIGHTS)
         served = scenario.repository.materialize(scenario.current_snapshot())
         assert served.components is not None
@@ -388,7 +387,6 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         wait_for_serving(dispatcher, "agent")
         assert runtime.activated_ids[-1] == held_weights.artifact_id
         # That activation changed no tree: the harness head and catalog stay at the newest harness step.
-        assert service.harness_manifest(headers)["release_id"] == newest_release
         assert service.harness_manifest(headers)["artifact_id"] == newest.artifact_id
         catalog = service.harness_artifacts(headers)["artifacts"]
         assert catalog[-1]["artifact_id"] == newest.artifact_id
