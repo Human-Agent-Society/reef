@@ -778,11 +778,13 @@ rollouts.
    ``TaskSample`` values. A job takes at least ``job_samples`` tasks, 1 by
    default, and at most ``buffer_size``, 4 by default.
 2. The trainer submits the job. Its rollouts parameter (``rollout`` on Tinker, ``harbor`` on Slime, in ``recipe.config.job_parameters``)
-   tells the component how many rollouts of each task to run, and with which
-   agent and sandbox. The Tinker component runs them, assembles one sample
-   from each rollout that ran, scored with the task's verifier reward, and
-   trains on the groups of at least two samples. It reports each task's
-   rollout rewards in the job's metrics (``rollout_rewards``).
+   tells the component with which agent and sandbox to run the rollouts of
+   each task. Their count is ``rollout.rollouts_per_task`` on Tinker and Slime's
+   ``n-samples-per-prompt`` on Slime. The component assembles one sample from each
+   rollout that ran, scored with the task's verifier reward. Tinker trains on the
+   groups of at least two samples, and Slime on the samples that its own loop
+   generates. It reports each task's rollout rewards in the job's metrics
+   (``rollout_rewards``).
 3. The commit of the submission counts the tasks trained in the sample
    store, as it does for every sample.
 4. When the commit of the job's end is durable, the samples service reads it

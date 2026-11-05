@@ -5,15 +5,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_reef_never_wires_the_internal_rollout_stack() -> None:
-    # Reef supplies the batches of trajectory and task jobs externally and never
-    # calls the runtime's rollout generation package. A dataset job's rollouts
-    # are Slime's own, through its rollout manager (RFC #1041).
+    # Reef supplies the batches of trajectory jobs externally and never calls the
+    # runtime's rollout generation package. The rollouts of a dataset job and a
+    # task job are Slime's own, through its rollout manager (RFC #1041). The task
+    # job's check names Slime's default rollout function, to refuse another one.
     offenders = [
         str(path.relative_to(ROOT))
         for path in (ROOT / "reef").rglob("*.py")
         if "slime.rollout" in path.read_text(encoding="utf-8")
     ]
-    assert not offenders, offenders
+    assert offenders in ([], ["reef/train/slime_backend/harbor_rollouts.py"]), offenders
+    source = (ROOT / "reef/train/slime_backend/harbor_rollouts.py").read_text(encoding="utf-8")
+    assert source.count("slime.rollout") == 1 and "import slime" not in source and "from slime" not in source
 
 
 def test_batch_processor_only_accepts_external_training_batches() -> None:

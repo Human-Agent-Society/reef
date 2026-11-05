@@ -17,11 +17,10 @@ from reef.train.learning_rate import LearningRateSchedule
 from reef.train.slime_backend.dataset import DatasetSettings
 from reef.train.slime_backend.launch import SlimeComponentFactory, SlimeDeployment
 from reef.train.slime_backend.parameters import SlimeJobParameters, slime_parameters_schema
-from reef.train.task_rollouts import RolloutSettings
+from reef.train.task_rollouts import HarborSettings
 
 SCHEDULE = {"name": "warmup", "peak_learning_rate": 1e-5, "warmup_steps": 2}
 HARBOR = {
-    "rollouts_per_task": 4,
     "environment": "docker",
     "concurrency": 3,
     "agent": {"name": "pi"},
@@ -47,7 +46,7 @@ def test_the_parameters_of_a_task_job_parse_into_their_typed_value() -> None:
         StepScheduling(shuffle=True),
         2,
         None,
-        RolloutSettings(**HARBOR),
+        HarborSettings(**HARBOR),
     )
 
 
@@ -72,8 +71,8 @@ def test_the_parameters_of_a_dataset_job_parse_into_their_typed_value() -> None:
         ({"dataset": {"path": "/d.jsonl", "shuffle": True}}, "dataset parameter is an object"),
         ({"harbor": None}, "needs the harbor parameter as an object"),
         ({"harbor": {"n_samples_per_prompt": 4}}, r"harbor parameter takes no \['n_samples_per_prompt'\]"),
-        ({"harbor": {"environment": "docker"}}, "harbor parameter is incomplete"),
-        ({"harbor": {"rollouts_per_task": 1}}, "rollouts_per_task must be an int of at least 2"),
+        ({"harbor": {"rollouts_per_task": 4}}, r"harbor parameter takes no \['rollouts_per_task'\]"),
+        ({"harbor": {"concurrency": 0}}, "concurrency must be an int of at least 1"),
     ],
 )
 def test_a_malformed_parameter_is_refused(overrides: dict[str, Any], message: str) -> None:
@@ -99,6 +98,8 @@ def test_the_schema_of_a_kind_says_what_the_parser_takes() -> None:
     assert not task.is_valid({**complete, "dataset": {"path": "/d.jsonl"}}), "a task job has its samples"
     assert not trajectory.is_valid({"objective": "sft", "method": {}}), "no key but the backend's"
     assert not task.is_valid({**complete, "harbor": {**HARBOR, "unknown": 1}})
+    assert not task.is_valid({**complete, "harbor": {"rollouts_per_task": 4}}), "n-samples-per-prompt gives the count"
+    assert task.is_valid({"objective": "slime_dataset", "harbor": {}}), "every harbor key has a default"
     assert not trajectory.is_valid({"save_interval": 2}), "a job needs its objective"
 
 
@@ -130,7 +131,7 @@ def test_the_backend_reads_the_startup_loss_family_from_the_recipes_parameters(p
 def test_harbor_and_the_objective_are_independent() -> None:
     for objective in ("sft", "slime_dataset"):
         harbor = SlimeJobParameters.from_parameters({"objective": objective, "harbor": HARBOR}).harbor
-        assert harbor == RolloutSettings(**HARBOR)
+        assert harbor == HarborSettings(**HARBOR)
 
 
 def test_a_recipe_without_a_default_objective_cannot_start_slime() -> None:
