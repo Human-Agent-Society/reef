@@ -309,12 +309,19 @@ The scenario storage and the repository live under ``.reef/`` by default (``agen
 Run the services in separate processes
 --------------------------------------
 
-A deployment has six services. By default, ``reef serve`` runs all of them in
+A deployment has seven services. By default, ``reef serve`` runs all of them in
 one process. Run them in separate processes when inference must stay up while
 control restarts or deploys a new version, or when one service needs more
 replicas than the others. The services do not send work to each other: each one
-reads and writes the deployment's shared store. The one call between services
-goes from evaluation to control, for the candidate that a rollout evaluates.
+reads and writes the deployment's shared store, and takes its work from a queue
+there. No service calls another, and control calls no engine: it queues serving
+work, and inference starts the artifact.
+
+.. figure:: ../assets/services-light.svg
+   :alt: The seven services of a deployment around the shared store. Inference reads served_models and appends records, and one inference worker owns the engines. Control commits and queues work for the other services. Data, harness, samples, training and evaluation take work from their queues and write their results back to the store.
+
+   The services and the shared store. Each edge reads or writes the store;
+   ``python3 docs/assets/render_service_architecture.py`` rebuilds the drawing.
 
 .. list-table::
    :header-rows: 1
