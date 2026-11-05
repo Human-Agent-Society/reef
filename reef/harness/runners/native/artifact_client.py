@@ -16,7 +16,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-
 #: The poll backoff never waits longer than this between attempts.
 MAX_BACKOFF_S = 600.0
 
@@ -102,19 +101,11 @@ class ArtifactClient:
             query["artifact_id"] = artifact_id
         return self.manifest(query)
 
-    def fetch_legacy(self, revision: str) -> dict[str, Any]:
-        """Resolve an installed legacy revision into a component artifact manifest."""
-        return self.manifest({"form": "source", "release_id": revision})
-
     def manifest(self, query: Mapping[str, str]) -> dict[str, Any]:
         _, manifest = self._request("GET", f"/reef/harness?{urllib.parse.urlencode(query)}")
         if not isinstance(manifest, Mapping) or "files" not in manifest or not manifest.get("artifact_id"):
             raise ArtifactClientError("the harness answered no artifact manifest")
-        return {
-            key: value
-            for key, value in manifest.items()
-            if key not in ("release_id", "parent_release_id", "content_id")
-        }
+        return {key: value for key, value in manifest.items() if key != "content_id"}
 
 
 class HeadWatch:
