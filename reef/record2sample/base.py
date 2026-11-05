@@ -109,7 +109,7 @@ class Record2Sample(ABC, Plugin):
 
     A record that the stage ends, for example a record that can no longer train, appears in
     ``releasable_record_ids``. The trainer adds those IDs to the next commit, so the record never trains after a
-    restart. The default bookkeeping keeps the ended records in ``terminal`` until their release; a stage with its
+    restart. The default bookkeeping keeps the ended records in ``terminal`` until their snapshot; a stage with its
     own record lifecycle overrides the lifecycle methods.
 
     ``push``, ``advance``, and ``make_samples`` run on the trainer thread and must not block on network or model
@@ -145,7 +145,7 @@ class Record2Sample(ABC, Plugin):
         self.ready_units: dict[Hashable, RecordSetUnit] = {}
         #: The samples of each set that has samples and has not ended, by set ID.
         self.set_samples: dict[Hashable, tuple[Sample, ...]] = {}
-        #: Records that ended and that no live set references, until their release.
+        #: Records that ended and that no live set references, until their snapshot.
         self.terminal: set[str] = set()
         #: The set ID of each record that a formed set holds, until the record's release.
         self.set_of_record: dict[str, Hashable] = {}

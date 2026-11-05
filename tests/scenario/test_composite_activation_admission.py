@@ -42,7 +42,7 @@ class _LoadedRecipe(_TwoTrainerRecipe):
 
 
 class RefusingImports(WeightsJobComponent):
-    """A training component that cannot start a job from the weights of a published release."""
+    """A training component that cannot start a job from the weights of a published snapshot."""
 
     def import_start(self, release: Path) -> str | None:
         raise ValueError("cannot train from these weights")
@@ -209,7 +209,7 @@ def test_a_failed_activation_record_leaves_the_active_artifact_and_a_retry_compl
 
 @pytest.mark.unit
 def test_a_weights_start_the_training_component_refuses_is_refused_before_anything_changes(tmp_path: Path) -> None:
-    """The training component imports the release as the next job's start; one it cannot train from refuses the
+    """The training component imports the snapshot as the next job's start; one it cannot train from refuses the
     new start before any record lands, and serving stays as it was."""
     dispatcher, _ = two_trainer_dispatcher(
         tmp_path, training=RefusingImports(tmp_path / "checkpoints"), hold_local_cycles=True
@@ -405,7 +405,7 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         active = scenario.current_snapshot()
         tip = scenario.repository.checkpoint_artifact
         artifact_id = component_id(scenario, first, HARNESS)
-        with pytest.raises(ReefError, match="answers only from the release it has loaded"):
+        with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
             scenario.serve(artifact_id, HARNESS)
 
         runtime.answers_each_artifact = True

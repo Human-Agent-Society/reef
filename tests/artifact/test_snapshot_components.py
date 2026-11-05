@@ -121,7 +121,7 @@ def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
     with pytest.raises(ArtifactNotFound):
         composed.component("config")
 
-    # A release without a manifest is its own only component, whatever the caller names.
+    # A snapshot without a manifest is its own only component, whatever the caller names.
     assert harness.component(HARNESS) is harness
     with pytest.raises(ArtifactPublicationError, match="at least two"):
         compose_snapshot({HARNESS: harness}, directory=tmp_path / "single")
@@ -183,14 +183,14 @@ def test_components_route_each_capability_to_its_component(tmp_path: Path) -> No
     activate_snapshot(components, first, runtime, "agent")
     assert runtime.activated_ids == [weights.artifact_id]
 
-    # A release that keeps the served weights does not activate them again.
+    # A snapshot that keeps the served weights does not activate them again.
     evolved = Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "evolved"}))
     second = compose_snapshot({WEIGHTS: weights, HARNESS: evolved}, directory=tmp_path / "r2")
     assert components.component_changed(second, first, HARNESS)
     assert not components.component_changed(second, first, WEIGHTS)
     activate_snapshot(components, second, runtime, "agent", previous=first)
     assert runtime.activated_ids == [weights.artifact_id]
-    # A release without a manifest counts as changed.
+    # A snapshot without a manifest counts as changed.
     assert components.component_changed(second, harness, WEIGHTS)
     activate_snapshot(components, second, runtime, "agent", previous=harness)
     assert runtime.activated_ids == [weights.artifact_id, weights.artifact_id]
@@ -335,7 +335,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert service.harness_manifest(headers)["artifact_id"] == after_harness.component(HARNESS).artifact_id
 
         # Activating the root's weights loads them and keeps the served harness; the chain tip stays. The root
-        # release made its artifacts, so their artifact_id is the root release's.
+        # release made its artifacts, so their artifact_id is the root snapshot's.
         base_weights_id = base.components.artifact_ids(base.ref.revision)[WEIGHTS]
         assert base_weights_id == base.component(WEIGHTS).artifact_id
         assert base_weights_id != scenario.repository.start_artifact.revision
@@ -636,7 +636,7 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
 
 @pytest.mark.unit
 def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: Path) -> None:
-    """An activation reads the active release and the artifact's release only: the creation's bytes may be gone."""
+    """An activation reads the active selection and the artifact's release only: the creation's bytes may be gone."""
     dispatcher = Dispatcher(
         _TwoComponentRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
@@ -699,7 +699,7 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         rows = scenario.harness_rows()
         assert next(row["artifact_id"] for row in rows if row["active"]) == first_harness_id
         assert all("release_id" not in row and "snapshot" not in row for row in rows)
-        # Newest first: the rejected step's row (named by the first harness release), that release, the creation.
+        # Newest first: the rejected step's row (named by the first harness artifact), that snapshot, the creation.
         assert [row["operation"] for row in rows] == ["training", "training", "creation"]
     finally:
         dispatcher.close()
@@ -726,7 +726,7 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         def refuse(self: ArtifactValidator, artifact: Artifact) -> None:
             raise ReefError("refused by the validator")
 
-        # An activation runs the release's own check, as its publication did.
+        # An activation runs the snapshot's own check, as its publication did.
         monkeypatch.setattr(AcceptAnyArtifact, "validate", refuse)
         with pytest.raises(ReefError, match="refused by the validator"):
             scenario.activate(held.artifact_id, HARNESS)
@@ -755,7 +755,7 @@ def _seedless_snapshot(tmp_path: Path) -> Artifact:
 
 @pytest.mark.unit
 def test_two_readers_of_a_seedless_component_both_get_its_directory(tmp_path: Path, monkeypatch: Any) -> None:
-    """Two inference threads read one release after a harness commit: both find the weights leaf missing and
+    """Two inference threads read one snapshot after a harness commit: both find the weights leaf missing and
     the second must not fail on the directory the first made."""
     artifact = _seedless_snapshot(tmp_path)
     barrier = threading.Barrier(2)

@@ -117,7 +117,7 @@ def main():
     # The step's patch maps each tree path it changed to the new text, or to null for a removed file.
     evaluation = dict(manifest["evaluation"])
     patch = evaluation.pop("patch", {})
-    print("evaluation metrics (the evolve step that published this release):")
+    print("evaluation metrics (the evolve step that published this snapshot):")
     print(json.dumps(evaluation, indent=2, sort_keys=True))
     print("changed files:")
     for path, text in sorted(patch.items()):
@@ -187,10 +187,10 @@ def head_manifest(client):
 def pull():
     """Name the scenario and write the model binding the serve process runs with under work/tree.
 
-    The serve process pulls the served source tree itself and writes the release file beside it.
+    The serve process pulls the served source tree itself and writes the snapshot file beside it.
     """
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
-    # Create the scenario if it does not exist yet: its base release is the seed tree.
+    # Create the scenario if it does not exist yet: its base snapshot is the seed tree.
     client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     manifest = head_manifest(client)
     shutil.rmtree(TREE_DIR, ignore_errors=True)
@@ -265,7 +265,7 @@ def native_main():
         "each triggers one evolve step (runs take minutes)"
     )
 
-    # Only a win moves the head off the seed release, and a step that is rejected or skipped never does: wait for
+    # Only a win moves the head off the seed snapshot, and a step that is rejected or skipped never does: wait for
     # every result this run triggered, so an all-passing run that publishes nothing ends here instead of sitting
     # out the whole publication deadline, then read the head a win left behind.
     deadline = time.monotonic() + PULL_TIMEOUT_S
@@ -286,7 +286,7 @@ def native_main():
         )
         return
     print(f"published: artifact {artifact_id} (parent {manifest['parent_artifact_id']})")
-    print("evaluation metrics (the evolve step that published this release):")
+    print("evaluation metrics (the evolve step that published this snapshot):")
     print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
 
     # The process follows the head: no reinstall, no restart, one harness/mount line in its log. Every step this

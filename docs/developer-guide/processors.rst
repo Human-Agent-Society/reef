@@ -409,7 +409,7 @@ records that can no longer train.
 A record that the stage ends, for example a report in a taken slot, appears
 in ``releasable_record_ids()``. The next commit
 names it, so the record never trains after a restart. The default bookkeeping
-keeps ended records until their release; a stage with its own record
+keeps ended records until their snapshot; a stage with its own record
 lifecycle overrides the lifecycle methods.
 
 Staleness
@@ -483,7 +483,7 @@ A recipe's stage extends one of these classes of the ``reef.record2sample`` pack
    * - ``NoSamples``
      - nothing; it makes no sample. The default of a pipeline that trains no weights
    * - ``ReportSamples``
-     - report validation, groups and slots, source release; one sample per report (``make_sample``). With
+     - report validation, groups and slots, source snapshot; one sample per report (``make_sample``). With
        ``exclusive_sources=True``, a report that ends owns its inference records
    * - ``TrajectorySamples``
      - one sample per trajectory that ended without a report, after ``trajectory_idle_seconds`` without a

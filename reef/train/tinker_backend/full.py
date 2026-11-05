@@ -2,9 +2,9 @@
 
 Spindle, the Tinker-compatible server, trains all the parameters of a model on a deployment's full-parameter engine.
 The engine's base is a Hugging Face revision; a job starts from those weights or from a saved checkpoint of them.
-Each saved checkpoint's weights are exported to a Hugging Face repo, so every release refers to weights on the Hub,
+Each saved checkpoint's weights are exported to a Hugging Face repo, so every snapshot refers to weights on the Hub,
 which any serving runtime loads. The component shares Tinker's job loop (``TinkerJobComponent``); its
-parameterization, its base and its releases differ.
+parameterization, its base and its snapshots differ.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     - the base: a reference to the base revision (``REFERENCE_FILE``), which ``base/`` holds; a job from it starts a
       new model with the base's own weights (``FreshStart``). ``base/`` is written on first use: before the training
-      process runs jobs, or when a new scenario's root release holds the default start (``prepared_base``);
+      process runs jobs, or when a new scenario's root snapshot holds the default start (``prepared_base``);
     - a saved checkpoint: a manifest of all the parameters (``lora_rank`` null) of the base model on the
       configured service, whose ``state_path`` a job restores, beside a reference to the commit of
       ``config.release_repo`` that holds the checkpoint's weights, which ``exporter`` made.
@@ -41,7 +41,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     With ``config.score_centering``, its policy-gradient jobs train with score centering on Spindle's ``cispo``
     (``TinkerJobComponent``).
 
-    So every release refers to its weights on the Hub (``artifact_format`` ``"full"``): Spindle's sampler serves a
+    So every snapshot refers to its weights on the Hub (``artifact_format`` ``"full"``): Spindle's sampler serves a
     manifest's ``sampler_path``, and any other runtime loads the referenced weights. An import takes exactly these
     forms: a manifest that ``validated`` takes beside a reference that resolves to full weights, or files that are
     the base's files (equal content ID), whether Reef keeps them by reference or as a copy. Any other full weights
@@ -72,18 +72,18 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     @property
     def artifact_format(self) -> ArtifactFormat:
-        """Full weights: each release refers to a commit on the Hub that holds them."""
+        """Full weights: each snapshot refers to a commit on the Hub that holds them."""
         return ArtifactFormat("full")
 
     def complete_artifact(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
-        """Export the checkpoint's weights to the release repo, and refer to the commit beside the manifest."""
+        """Export the checkpoint's weights to the snapshot repo, and refer to the commit beside the manifest."""
         revision = self._exporter.export(checkpoint.state_path, self._revision)
         (directory / REFERENCE_FILE).write_text(json.dumps(revision.to_dict()) + "\n", encoding="utf-8")
 
     def prepare_base(self) -> None:
         """Write the reference to the configured base when ``base/`` holds no reference or another one.
 
-        The base start is a function of ``base`` alone, so it follows the configuration. A scenario whose root release
+        The base start is a function of ``base`` alone, so it follows the configuration. A scenario whose root snapshot
         refers to another base cannot train: ``import_start`` refuses that reference.
         """
         if read_reference(self._base) != self._revision:

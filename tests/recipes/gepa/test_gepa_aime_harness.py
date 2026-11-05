@@ -64,7 +64,7 @@ def load(monkeypatch, tmp_path):
 
 
 def artifacts_of(recipe) -> ComponentArtifacts:
-    """A commit history whose head is the recipe's seed, as a new scenario's root release is."""
+    """A commit history whose head is the recipe's seed, as a new scenario's root snapshot is."""
     return ComponentArtifacts(TreeArtifacts(recipe.seed), "harness")
 
 

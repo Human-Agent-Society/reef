@@ -5,7 +5,7 @@ pi follows the Agent Skills spec: a ``SKILL.md`` needs ``name`` and
 and never offered. ``process_skill`` gives a skill node whose
 text carries none both, the description being the text's first line.
 
-A release is a pi package in ``plugin/``. A package carries skills, prompts and
+A snapshot is a pi package in ``plugin/``. A package carries skills, prompts and
 extensions, but no rules file and no settings, so ``finalize_render`` adds
 Reef's extension, which adds ``plugin/rules.md`` to the system prompt and
 applies ``plugin/settings.json``. The package's manifest loads that extension
@@ -21,8 +21,8 @@ from __future__ import annotations
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 
-#: Reef's extension in every package: the release's rules after pi's system prompt, unless the prompt already
-#: holds them, and the release's defaultTools, which turns off pi's built-in tools and keeps the extensions' own.
+#: Reef's extension in every package: the snapshot's rules after pi's system prompt, unless the prompt already
+#: holds them, and the snapshot's defaultTools, which turns off pi's built-in tools and keeps the extensions' own.
 REEF_EXTENSION = """\
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

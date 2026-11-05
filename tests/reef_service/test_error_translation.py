@@ -43,7 +43,7 @@ from reef.storage.records import RecordConflict
         (UnknownScenario("no such scenario"), 404),
         (SnapshotNotRestorable("release has no durable bytes"), 400),
         (CommitPending("a training result waits for its commit"), 409),
-        (TrainingStartRefused("the trainer cannot start from this release"), 400),
+        (TrainingStartRefused("the trainer cannot start from this snapshot"), 400),
         (RecordConflict("record id already used"), 409),
         (InferenceUnavailable("this deployment serves no inference requests"), 503),
         (ReefError("generic reef failure"), 400),

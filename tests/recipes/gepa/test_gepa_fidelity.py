@@ -197,7 +197,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
             )
             result = backend_step(backend, JobData(f"fidelity:{step}", samples), state, policy)
             if result.artifact is not None:
-                # What the committer does with a selected candidate: it becomes the head release.
+                # What the committer does with a selected candidate: it becomes the head snapshot.
                 releases.publish(f"r{step}", HarnessTree.read(result.artifact.local_path))
                 backend.discard_kept_tree()
             state = dict(result.state)

@@ -33,7 +33,7 @@ def test_artifact_ref_can_carry_ephemeral_local_path_without_changing_identity(t
 
 
 def root_tree(directory: Path, text: str = "base") -> Artifact:
-    """An unpublished root release in ``directory`` that holds ``model.txt`` = ``text``."""
+    """An unpublished root snapshot in ``directory`` that holds ``model.txt`` = ``text``."""
     directory.mkdir()
     (directory / "model.txt").write_text(text)
     return Artifact.local(directory)
@@ -83,7 +83,7 @@ def test_in_memory_repository_registers_materializes_and_publishes(tmp_path: Pat
     math = math_backend.register(root_tree(tmp_path / "math-root"), metadata={"scenario": "math"})
     code = code_backend.register(root_tree(tmp_path / "code-root"), metadata={"scenario": "code"})
 
-    # Two scenarios get distinct roots, each a release with no parent and the root's content id.
+    # Two scenarios get distinct roots, each a snapshot with no parent and the root's content id.
     assert math.revision != code.revision
     assert math.parent_revision is None
     assert math_backend.metadata() == {"scenario": "math"}

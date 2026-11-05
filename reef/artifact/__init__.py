@@ -1,4 +1,4 @@
-"""Storage for the release chain: every publication as an immutable release.
+"""Storage for the snapshot chain: every publication as an immutable release.
 
 The package owns bytes and heads — persisted, staged, materialized on
 demand. *When* a head moves is the scenario committer's decision, one
@@ -11,7 +11,7 @@ level up. Boundaries this package holds:
 - Releases are immutable and heads move only by compare-and-swap
   (``activate`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
-  (``ArtifactConflict``) instead of losing a release.
+  (``ArtifactConflict``) instead of losing a snapshot.
 - A ``local:`` release has identity but no durable bytes; activation and
   a new training start refuse it as a source (``SnapshotNotRestorable``).
 
@@ -22,10 +22,10 @@ inherits ``ConfigurableRepositoryBackendFactory`` in ``storage.artifact_backend`
 Git LFS is the built-in one. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
-Every scenario owns its root release, a release with no parent.
+Every scenario owns its root snapshot, a snapshot with no parent.
 ``RepositoryBackend.register`` stores it and makes it the scenario's head in
 one atomic step; a second caller gets the winner's head. Scenarios share no
-release. A root that holds the recipe's ``DefaultStart`` reads its model
+snapshot. A root that holds the recipe's ``DefaultStart`` reads its model
 files (a ``BaseModelFiles``, for example a ``ModelDirectory``) only when the
 scenario is created, so a process that only opens scenarios makes none.
 

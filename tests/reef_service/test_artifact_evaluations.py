@@ -1,4 +1,4 @@
-"""A client evaluates an artifact of a release: Reef runs the rollouts and stores their policy evaluation."""
+"""A client evaluates an artifact of a snapshot: Reef runs the rollouts and stores their policy evaluation."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class ArtifactHandler(InferenceHandler):
 
 
 class ArtifactRuntime(InferenceRuntime):
-    """A runtime that answers each call from the release that the call names, as a sampler for each checkpoint.
+    """A runtime that answers each call from the snapshot that the call names, as a sampler for each checkpoint.
 
     Its engine serves every scenario under one model name, so control writes the ``served_models`` rows that the
     inference routes answer from."""
@@ -546,7 +546,7 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
         session.commit_step(expected_step=1, commit=kept)
         assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None, "a1")
         assert new_artifacts.queue.empty(), "a step that publishes nothing reports no artifact"
-        # An activation, even one that publishes a composed release, and a new training start make no artifact.
+        # An activation, even one that publishes a composed snapshot, and a new training start make no artifact.
         operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
         activation = CommitRecord(
             step=3,

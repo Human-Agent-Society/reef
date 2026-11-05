@@ -524,7 +524,7 @@ def test_a_new_trainer_starts_from_its_root_and_a_refused_root_refuses_the_train
     assert JobLoopState.from_dict(trainer.state).start == "recording:base"
     with pytest.raises(ValueError, match="starts from the scenario's root: give root"):
         preparing_trainer(SQLiteRecordStore(), root=None)
-    with pytest.raises(TrainingStartRefused, match=r"from its root release local:.*: the root holds other weights"):
+    with pytest.raises(TrainingStartRefused, match=r"from its root snapshot local:.*: the root holds other weights"):
         preparing_trainer(SQLiteRecordStore(), job_loop=JobLoop(_RefusingRoots(), scenario="math"))
     # Committed state wins: the root is not read.
     committed = JobLoopState("committed").to_dict()
@@ -726,7 +726,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     )
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
-    # After the root release, the job's checkpoint is what the scenario serves.
+    # After the root snapshot, the job's checkpoint is what the scenario serves.
     wait_for_serving(dispatcher)
     assert inference_runtime.activated[1:] == ["w1"]
     assert scenario.served_artifact_id() == scenario.repository.resolve(scenario.current_snapshot()).artifact_id

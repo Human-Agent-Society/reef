@@ -48,7 +48,7 @@ def test_scenario_owns_recipe_derived_policy_and_its_root_release() -> None:
     ).get_or_create_scenario("math")
 
     assert not hasattr(scenario, "recipe")
-    # A new scenario is at its root release: a release with no parent, made from the recipe's default start.
+    # A new scenario is at its root snapshot: a snapshot with no parent, made from the recipe's default start.
     root = scenario.repository.start_artifact
     assert root.parent_revision is None
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact == root
@@ -93,7 +93,7 @@ def test_scenario_metadata_round_trips() -> None:
     metadata = scenario_metadata_for(name=scenario.name, source=source, scenario_step=scenario.scenario_step)
 
     assert metadata["format"] == "reef-scenario/7"
-    # The registration is carried by the root release, so it names no start_artifact.
+    # The registration is carried by the root snapshot, so it names no start_artifact.
     assert "start_artifact" not in metadata
     assert metadata["source"] == {"kind": "default", "inputs": {"seed": "s"}}
     assert metadata["scenario_step"] == 0
@@ -521,7 +521,7 @@ def test_concurrent_creations_of_one_name_register_one_root(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> None:
-    """A registration in ``reef-scenario/4`` named a shared base release; this Reef refuses it with a clear error."""
+    """A registration in ``reef-scenario/4`` named a shared base snapshot; this Reef refuses it with a clear error."""
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     (tmp_path / "old-root").mkdir()
     stored = {"format": "reef-scenario/4", "scenario": "math", "base_artifact": {}, "scenario_step": 0}
@@ -613,7 +613,7 @@ def test_composite_item_roots_are_checked_before_registration(
 
 @pytest.mark.unit
 def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_is_registered(tmp_path) -> None:
-    """A creation from an item writes the item as the root release; an item that the layout or the training
+    """A creation from an item writes the item as the root snapshot; an item that the layout or the training
     component refuses registers nothing."""
     weights = tmp_path / "weights"
     weights.mkdir()

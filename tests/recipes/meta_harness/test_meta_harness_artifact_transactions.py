@@ -22,7 +22,7 @@ __all__ = ["fake_git_lfs"]
 def publication_case(tmp_path, request):
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
     recipe = meta_harness_recipe(tmp_path, chat)
-    # A new scenario's root release holds the recipe's seed, as a deployment's does.
+    # A new scenario's root snapshot holds the recipe's seed, as a deployment's does.
     memory = InMemoryRepositoryBackend.factory(directory=tmp_path / "memory")
 
     if request.param == "git":

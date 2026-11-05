@@ -33,7 +33,7 @@ DATA = "/reef/namespaces/acme/data"
 
 
 class UriBackend(InMemoryRepositoryBackend):
-    """An in-memory repository that names each release's directory with a ``file`` URI, as an object store names it
+    """An in-memory repository that names each snapshot's directory with a ``file`` URI, as an object store names it
     with an ``s3`` URI."""
 
     def snapshot_uri(self, ref: SnapshotRef) -> str:
@@ -41,7 +41,7 @@ class UriBackend(InMemoryRepositoryBackend):
 
 
 def weights(directory: Path, content: bytes) -> Path:
-    """A full-weight release: the layout of the test policy's releases."""
+    """A full-weight artifact: the layout of the test policy's releases."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -166,7 +166,7 @@ def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
 
 @pytest.mark.integration
 def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path) -> None:
-    """RFC #1062, RFC #1070: the item is the scenario's root release, so it is the active artifact and the training
+    """RFC #1062, RFC #1070: the item is the scenario's root snapshot, so it is the active artifact and the training
     start, and the creation row names the item as its source.
 
     A process trains one scenario, so each new scenario has a Cell of its own; the Cells share the data store.

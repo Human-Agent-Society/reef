@@ -1,4 +1,4 @@
-"""One trainer per release component: independent workers that meet at the commit boundary."""
+"""One trainer per snapshot component: independent workers that meet at the commit boundary."""
 
 from __future__ import annotations
 
@@ -702,7 +702,7 @@ class _NamedComponentsRecipe(Recipe):
 def test_a_recipe_serving_fewer_components_than_registered_is_refused(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """A step carries forward only the components the recipe serves; one it does not serve would leave every release."""
+    """A step carries forward only the components the recipe serves; one it does not serve would leave every snapshot."""
     names = ("weights", "harness", "config")
     factory = _repository(tmp_path)
     first, _ = dispatchers.open(
@@ -1185,7 +1185,7 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
 
 @pytest.mark.unit
 def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> None:
-    """Clients pull the tree: a step that carried it forward unchanged is not announced or listed as a release."""
+    """Clients pull the tree: a step that carried it forward unchanged is not announced or listed as a snapshot."""
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     service = RequestService(dispatcher)
@@ -1200,7 +1200,7 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     assert manifest["files"] == {"harness.txt": "harness step 1"}
     catalog = service.harness_artifacts(headers)["artifacts"]
     assert [row["operation"] for row in catalog] == ["creation", "training"]
-    # The root release made the creation's artifacts; the harness step made its own.
+    # The root snapshot made the creation's artifacts; the harness step made its own.
     base = scenario.repository.start_artifact.revision
     assert [row["artifact_id"] for row in catalog] == [
         component_id(scenario, base, HARNESS),
@@ -1250,14 +1250,14 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert scenario.current_snapshot().revision == w1
     assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, h1, HARNESS)
     catalog = service.harness_artifacts(headers)["artifacts"]
-    # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head;
+    # The rejected row is named by the listed snapshot it ran on, so a client's poll agrees with the head;
     # like a flat scenario's rejected row, it lists the head's parent, not itself.
     assert listed_revisions(scenario) == [creation, h1, h1]
     assert catalog[-1]["metrics"]["selected"] is False
     assert "ran on" in service.harness_artifact_page(headers, 2).lower()
     assert service.harness_manifest(headers, form="source")["artifact_id"] == component_id(scenario, h1, HARNESS)
 
-    # The next harness release descends from h1 in the listed chain; the weights release it was published
+    # The next harness artifact descends from h1 in the listed chain; the weights artifact it was published
     # on stays under another name, and the requires chain walks the listed rows.
     assert _commit_step(scenario, WEIGHTS) is not None
     _append_records(scenario, 3)
@@ -1272,7 +1272,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert h2 not in page
 
     # Activating h1's harness serves h1's tree again on the weights served now: the activation publishes that
-    # combination, which the catalog does not list, and the head is the listed release h1.
+    # combination, which the catalog does not list, and the head is the listed snapshot h1.
     scenario.activate(component_id(scenario, h1, HARNESS), HARNESS)
     activated_view = scenario.current_snapshot().revision
     assert activated_view not in (h1, h2)
@@ -1282,7 +1282,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert required_by(catalog, component_id(scenario, h1, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
     # Weights held for review are activated as weights: the served tree stays, so the head stays a listed
-    # release and names no weights release or combination.
+    # release and names no weights artifact or combination.
     _append_records(scenario, 4)
     backends[WEIGHTS].hold_next = True
     assert _commit_step(scenario, WEIGHTS) is not None
@@ -1407,7 +1407,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatc
 
 @pytest.mark.unit
 def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _Dispatchers) -> None:
-    """An activation that changes only the weights names the same harness release; none adds a row."""
+    """An activation that changes only the weights names the same harness artifact; none adds a row."""
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     service = RequestService(dispatcher)
@@ -1427,7 +1427,7 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
     assert listed_revisions(scenario) == [base, harness_snapshot]
 
-    # Back to the root's harness: the seed tree is served again, named by the root release.
+    # Back to the root's harness: the seed tree is served again, named by the root snapshot.
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, HARNESS), HARNESS)
     assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, base, HARNESS)
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
@@ -1731,8 +1731,8 @@ def test_a_restarted_training_worker_runs_again_the_job_that_the_stopped_one_gav
 def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """A new start imports the release into the training component and cancels the running job. The next job
-    starts from the imported release, not from the last checkpoint, and serving does not change."""
+    """A new start imports the snapshot into the training component and cancels the running job. The next job
+    starts from the imported snapshot, not from the last checkpoint, and serving does not change."""
     training = HeldJobs(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
@@ -1765,7 +1765,7 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
     """The process stops after the ``train_from`` record and before the trainer's next commit records the start.
-    The trainer's state recovers from its earlier commit, so the restarted scenario imports the release again."""
+    The trainer's state recovers from its earlier commit, so the restarted scenario imports the snapshot again."""
     training = HeldJobs(tmp_path / "checkpoints")
     factory = _repository(tmp_path)
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)

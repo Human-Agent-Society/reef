@@ -58,7 +58,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             served = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert served["files"] == dict(PI_SEED.files)
             base = served["artifact_id"]
-            # An older client names the release that it installed.
+            # An older client names the snapshot that it installed.
             revision = control.get_or_create_scenario("demo").current_snapshot().revision
             legacy = await client.get("/reef/harness", params={"release_id": revision}, headers=HEADERS)
             assert (await legacy.json())["artifact_id"] == base
@@ -70,14 +70,14 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             )
             text = "".join((await layer.json())["files"].values())
             assert f"{INFERENCE_URL}/reef/scenarios/demo" in text and "harness.example" not in text
-            # An import goes to control, which commits it as the active release.
+            # An import goes to control, which commits it as the active selection.
             response = await client.post(
                 "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_release_id": revision}
             )
             assert response.status == 200, await response.text()
             imported = await response.json()
             assert imported["changed"] is True and imported["parent_artifact_id"] == base
-            # The harness service reads the release that control committed.
+            # The harness service reads the snapshot that control committed.
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert source["artifact_id"] == imported["artifact_id"] and source["files"]["rules.md"] == "Mine.\n"
             releases = await (await client.get("/reef/harness/artifacts", headers=HEADERS)).json()

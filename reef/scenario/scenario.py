@@ -46,7 +46,7 @@ class ScenarioCapabilities:
 
     Values:
 
-    - ``serve_beside`` is True exactly when ``Scenario.serve`` can serve an artifact beside the active release: the
+    - ``serve_beside`` is True exactly when ``Scenario.serve`` can serve an artifact beside the active selection: the
       store keeps a durable commit history, and the scenario has no runtime-loaded component, no runtime, or a
       runtime that serves artifacts on request (``InferenceRuntime.serves_artifacts_on_request``).
     - ``evaluate`` holds the components whose artifacts an artifact evaluation can run, in declaration order: each
@@ -59,7 +59,7 @@ class ScenarioCapabilities:
 
     Purpose: ``Scenario.capabilities`` makes it, and the contract route reports it, so that a client offers only the
     operations that the scenario can run. An operation that it allows can still refuse one artifact, for example a
-    release whose weights the training component cannot import.
+    snapshot whose weights the training component cannot import.
     """
 
     serve_beside: bool
@@ -85,7 +85,7 @@ class ScenarioCapabilities:
 
 
 class Scenario:
-    """Scenario aggregate owning one runtime binding, one release chain, and one trainer per component."""
+    """Scenario aggregate owning one runtime binding, one snapshot chain, and one trainer per component."""
 
     def __init__(
         self,
@@ -134,7 +134,7 @@ class Scenario:
             recovered_head_record=recovered_head_record,
             experiment_observer=experiment_observer,
         )
-        #: Read-only queries of committed releases and their content. They take only the publication lock.
+        #: Read-only queries of committed snapshots and their content. They take only the publication lock.
         self.snapshot_queries = self._committer.snapshot_queries
 
     @property
@@ -203,9 +203,9 @@ class Scenario:
 
     @property
     def repository(self) -> Repository:
-        """The release chain's scenario-scoped artifact repository.
+        """The snapshot chain's scenario-scoped artifact repository.
 
-        The public read path to the root release (``start_artifact``), the active release (``current``) and the
+        The public read path to the root snapshot (``start_artifact``), the active selection (``current``) and the
         chain tip (``checkpoint``); mutation goes through Scenario methods so it stays serialized with activation
         and commit.
         """
@@ -247,7 +247,7 @@ class Scenario:
 
     @property
     def components(self) -> ScenarioComponents:
-        """The components that every release of this scenario binds (``Recipe.build_components``)."""
+        """The components that every snapshot of this scenario binds (``Recipe.build_components``)."""
         return self._components
 
     @property
@@ -533,15 +533,15 @@ class Scenario:
         return self._committer.restore(step)
 
     def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
-        """Serve ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.serve`."""
+        """Serve ``artifact_id`` beside the active selection; see :meth:`ScenarioCommitter.serve`."""
         return self._committer.serve(artifact_id, component)
 
     def stop_serving(self, artifact_id: str) -> ServedBesideArtifact:
-        """Stop serving ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.stop_serving`."""
+        """Stop serving ``artifact_id`` beside the active selection; see :meth:`ScenarioCommitter.stop_serving`."""
         return self._committer.stop_serving(artifact_id)
 
     def served_beside(self) -> Mapping[str, ServedBesideArtifact]:
-        """The artifacts that the scenario serves beside its active release, by ``artifact_id``; see
+        """The artifacts that the scenario serves beside its active selection, by ``artifact_id``; see
         :meth:`ScenarioSnapshots.served_beside`."""
         with self.snapshot_queries.publication_lock:
             return self.snapshot_queries.served_beside(self._committer.step, self._committer.component_names())
@@ -566,13 +566,13 @@ class Scenario:
             return self._committer.artifact_status()
 
     def artifact_snapshot(self, artifact_id: str, component: str | None = None) -> tuple[str, SnapshotRef]:
-        """The component that ``artifact_id`` names and the ref of the release that minted it, without materializing
-        the release; see :meth:`ScenarioCommitter.artifact_snapshot`."""
+        """The component that ``artifact_id`` names and the ref of the snapshot that minted it, without materializing
+        the snapshot; see :meth:`ScenarioCommitter.artifact_snapshot`."""
         with self.snapshot_queries.publication_lock:
             return self._committer.artifact_snapshot(artifact_id, component)
 
     def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
-        """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
+        """The artifact ``artifact_id`` names and a snapshot that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
         with self.snapshot_queries.publication_lock:
             return self._committer.resolve_artifact(artifact_id, component)
 

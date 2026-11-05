@@ -54,7 +54,7 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
             _, artifact = current.resolve_artifact(row["artifact_id"], row["component"])
             uri = current.repository.snapshot_uri(artifact.ref)
             if uri is not None and not components.single:
-                # A release of several components keeps each one in a directory named after it.
+                # A snapshot of several components keeps each one in a directory named after it.
                 uri = f"{uri}{row['component']}/"
             # A component that the scenario does not declare, such as the records of a trainer that serves nothing,
             # has no kind.

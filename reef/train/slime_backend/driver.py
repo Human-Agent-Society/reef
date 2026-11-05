@@ -70,7 +70,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     def stop(signum: int, frame: FrameType | None) -> None:
         raise SystemExit(f"the Slime driver of job {job.job_id} stopped on signal {signum}")
 
-    # SIGTERM unwinds through ``close``, which releases the workers, the engines and the GPUs.
+    # SIGTERM unwinds through ``close``, which snapshots the workers, the engines and the GPUs.
     signal.signal(signal.SIGTERM, stop)
     runner = start_slime_runner(settings, serving=serving)
     try:

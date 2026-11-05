@@ -1,6 +1,6 @@
-"""The weight files of a Tinker release for Reef's own serving engines.
+"""The weight files of a Tinker artifact for Reef's own serving engines.
 
-A Tinker release holds only its manifest (``reef.tinker.checkpoint``); the weights stay on the Tinker-compatible
+A Tinker artifact holds only its manifest (``reef.tinker.checkpoint``); the weights stay on the Tinker-compatible
 service. ``TinkerSamplerWeights`` downloads the LoRA adapter that the manifest's ``sampler_path`` names and converts
 it into a PEFT adapter in the base model's parameter names, which SGLang and vLLM load. This is tinker-cookbook's
 own flow: ``weights.download`` of a ``sampler_weights`` path, then ``weights.build_lora_adapter``.
@@ -45,7 +45,7 @@ class TinkerSamplerWeightsSettings(PluginSettings):
 
 
 class TinkerSamplerWeights(ArtifactWeights):
-    """The adapter at a Tinker release's ``sampler_path``, downloaded from ``base_url`` and converted to PEFT.
+    """The adapter at a Tinker artifact's ``sampler_path``, downloaded from ``base_url`` and converted to PEFT.
 
     Values: ``cache_dir`` holds ``<sha256 of the sampler path>/adapter/`` for each adapter downloaded so far;
     ``api_key`` is a non-empty key of the service at ``base_url`` (``None`` is hosted Tinker). ``weight_files``
@@ -89,14 +89,14 @@ class TinkerSamplerWeights(ArtifactWeights):
 
     def weight_files(self, artifact_dir: Path, layout: WeightLayout) -> WeightFiles:
         if layout != "adapter":
-            raise ReefError(f"a Tinker release serves as an adapter, not as {layout} weights")
+            raise ReefError(f"a Tinker artifact serves as an adapter, not as {layout} weights")
         try:
             manifest = TinkerArtifact.read(artifact_dir)
         except (OSError, TypeError, ValueError) as exc:
-            raise ReefError(f"the release in {artifact_dir} holds no Tinker checkpoint manifest: {exc}") from exc
+            raise ReefError(f"the snapshot in {artifact_dir} holds no Tinker checkpoint manifest: {exc}") from exc
         if manifest.service != self.base_url:
             raise ReefError(
-                f"the release's weights are held by {manifest.service or 'hosted Tinker'}, "
+                f"the snapshot's weights are held by {manifest.service or 'hosted Tinker'}, "
                 f"not by {self.base_url or 'hosted Tinker'}"
             )
         try:

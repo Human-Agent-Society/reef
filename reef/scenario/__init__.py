@@ -9,7 +9,7 @@ The modules follow these responsibilities:
   archival coordination. It keeps each scenario's settings through the
   injected storage. It asks its ``admission.ScenarioAdmission`` before it
   creates or loads a scenario; the dispatcher unloads an idle scenario to free a load slot.
-- ``factory`` writes a new scenario's root release (the recipe's default
+- ``factory`` writes a new scenario's root snapshot (the recipe's default
   start, or an artifact item), opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.
   It returns a complete ``Scenario`` and closes owned resources on failure.

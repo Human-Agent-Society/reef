@@ -342,7 +342,7 @@ def _another_roles_report(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
         scenario = dispatcher.get_or_create_scenario("agent")
         _append(scenario, _step_nine())
         assert _step(scenario, HARNESS) == [("iA", "rA"), ("iB", "rB")]
-        # These rows arrive after the first commit, so no commit records the release of r3 and i3.
+        # These rows arrive after the first commit, so no commit records the snapshot of r3 and i3.
         _append(scenario, (_turn("i3", "s", 1), _report("r3", "i3"), _turn("X", "u", 1), _turn("X2", "u", 2)))
         assert _step(scenario, HARNESS) is None  # r3 is another role's: released with i3
         assert _step(scenario, WEIGHTS) == [("X",)]
@@ -359,7 +359,7 @@ def _another_roles_report(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
 
 @pytest.mark.unit
 def test_an_inference_released_with_another_roles_report_stays_released_after_a_reload(tmp_path: Path) -> None:
-    """The harness releases r3 and i3 with it (exclusive sources, a report of another role) with no commit to
+    """The harness artifacts r3 and i3 with it (exclusive sources, a report of another role) with no commit to
     record it. Rebuilt, the harness does not read i3 as an inference waiting for a report: it releases it again,
     as live."""
     live = _another_roles_report(tmp_path / "live", reload=False)
@@ -445,7 +445,7 @@ def _tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
     dispatcher = _dispatcher(tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: tttd_pipeline})
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
-        # Step 0 spans two releases: TTTD fails it.
+        # Step 0 spans two snapshots: TTTD fails it.
         for record in (
             _tttd_inference("i0", "rel-1"),
             _tttd_report("r0", "i0", 0, 1.0),
@@ -456,7 +456,7 @@ def _tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
         first = _step(scenario, HARNESS)
         if reload:
             scenario = dispatcher.registry.reload("agent")
-        # The controller samples step 0 again, on one release.
+        # The controller samples step 0 again, on one snapshot.
         for record in (
             _tttd_inference("j0", "rel-2"),
             _tttd_report("s0", "j0", 0, 1.0),
@@ -472,7 +472,7 @@ def _tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
 
 @pytest.mark.unit
 def test_a_tttd_step_failed_on_two_releases_stays_failed_after_a_reload(tmp_path: Path) -> None:
-    """A rebuilt TTTD harness reads step 0 again, reports it failed with its releases, and never trains a resample
+    """A rebuilt TTTD harness reads step 0 again, reports it failed with its snapshots, and never trains a resample
     of it."""
     live = _tttd_failed_step(tmp_path / "live", reload=False)
     rebuilt = _tttd_failed_step(tmp_path / "rebuilt", reload=True)

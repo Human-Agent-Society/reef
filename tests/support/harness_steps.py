@@ -91,9 +91,9 @@ def marker_score(task: str, result: TaskResult) -> float:
 
 
 class TreeArtifacts(CommittedArtifacts):
-    """An in-memory commit history of one component: its releases by id, the head the latest one.
+    """An in-memory commit history of one component: its snapshots by id, the head the latest one.
 
-    ``base`` is the root release; ``publish`` appends one, as a commit that publishes for the component does.
+    ``base`` is the root snapshot; ``publish`` appends one, as a commit that publishes for the component does.
     """
 
     def __init__(self, base: HarnessTree) -> None:
@@ -109,7 +109,7 @@ class TreeArtifacts(CommittedArtifacts):
 
     def artifact(self, release_id: str, component: str) -> ArtifactTextFiles:
         if release_id not in self.trees:
-            raise ArtifactNotFound(f"no release {release_id!r}")
+            raise ArtifactNotFound(f"no snapshot {release_id!r}")
         return ArtifactTextFiles(release_id, dict(self.trees[release_id].files))
 
 
@@ -161,7 +161,7 @@ def harness_recipe(
     )
 
 
-#: The releases whose head each test backend steps on, as a job names its start.
+#: The snapshots whose head each test backend steps on, as a job names its start.
 BACKEND_RELEASES: WeakKeyDictionary[HarnessBackend, TreeArtifacts] = WeakKeyDictionary()
 
 
@@ -176,7 +176,7 @@ def build_harness_backend(
 
 
 def head_of(backend: HarnessBackend) -> ArtifactTextFiles:
-    """The head that ``backend``'s next step runs on: the latest release of its ``build_harness_backend`` history."""
+    """The head that ``backend``'s next step runs on: the latest snapshot of its ``build_harness_backend`` history."""
     return BACKEND_RELEASES[backend].head(COMPONENT)
 
 

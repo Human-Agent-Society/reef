@@ -50,7 +50,7 @@ def local_model_required(config: dict[str, Any]) -> bool:
     """Whether this host loads the model: for local serving engines, or for a training backend that runs it here.
 
     Provider deployments and local engines need the resolved snapshot on disk.
-    A hosted backend whose releases engines on a remote component serve, or
+    A hosted backend whose snapshots engines on a remote component serve, or
     that serves them itself, keeps the model identifier as written.
     """
     backend_name = config.get("reef", {}).get("training_backend")

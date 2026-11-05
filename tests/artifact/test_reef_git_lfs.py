@@ -34,7 +34,7 @@ from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
 
 
 def root_tree(directory: Path, files: dict[str, str] | None = None) -> Artifact:
-    """An unpublished root release in ``directory`` that holds ``files``."""
+    """An unpublished root snapshot in ``directory`` that holds ``files``."""
     directory.mkdir(parents=True)
     for relative, text in (files or {}).items():
         (directory / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -411,7 +411,7 @@ def trained_weights(directory: Path, contents: bytes) -> Artifact:
 def test_a_fresh_workspace_publishes_with_real_lfs_over_objects_it_never_fetched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A restarted service's fresh workspace fetches no LFS objects, so neither a pending release nor a publish from
+    """A restarted service's fresh workspace fetches no LFS objects, so neither a pending snapshot nor a publish from
     it may ask Git LFS to upload the trained version, which the remote already holds.
 
     A global ``core.hooksPath`` and a Git template both install user hooks that fail; Reef's clones must run their own
@@ -437,13 +437,13 @@ def test_a_fresh_workspace_publishes_with_real_lfs_over_objects_it_never_fetched
     assert trained.parent_revision == root.revision
     assert run_git("--git-dir", str(remote), "rev-parse", first.ref_name) == trained.revision
 
-    # A restarted service materializes, saves a pending release and publishes from a fresh workspace.
+    # A restarted service materializes, saves a pending snapshot and publishes from a fresh workspace.
     fresh = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "fresh-work", cache_dir=tmp_path / "c2")
     materialized = fresh.materialize(trained).local_path
     assert materialized is not None
     assert (materialized / "weights" / "adapter_model.safetensors").read_bytes() == b"adapter v1" * 100
     assert not (materialized / ".git").exists()
-    # A pending release pushes to a new ref and leaves the head alone: the LFS check still stops at history the
+    # A pending snapshot pushes to a new ref and leaves the head alone: the LFS check still stops at history the
     # remote already holds.
     pending = fresh.publish(
         trained_weights(tmp_path / "trained-2", b"adapter v2" * 100), expected_parent=trained, advance_head=False
@@ -523,7 +523,7 @@ def test_a_model_directory_exists_and_a_model_component_needs_model_files(tmp_pa
 
 @pytest.mark.integration
 def test_a_published_file_is_linked_into_the_release_cache_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
-    """Released files are immutable, so a publish links them into the release's cache entry instead of cloning it."""
+    """Stored files are immutable, so a publish links them into the snapshot's cache entry instead of cloning it."""
     remote = tmp_path / "artifacts.git"
     backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
     head = backend.register(root_tree(tmp_path / "root"), metadata={})
@@ -553,7 +553,7 @@ def test_same_file_names_one_inode_and_a_missing_path_names_none(tmp_path: Path)
 def test_a_carried_component_is_neither_hashed_nor_copied_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A release that carries the parent's files forward as links reuses their blobs; only the changed files are read."""
+    """A snapshot that carries the parent's files forward as links reuses their blobs; only the changed files are read."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     remote = tmp_path / "artifacts.git"
@@ -591,7 +591,7 @@ def test_a_carried_component_is_neither_hashed_nor_copied_again(
     cached = backend.materialize(published).local_path
     assert cached is not None
     assert (cached / "weights" / "model.safetensors").samefile(parent_tree / "weights" / "model.safetensors")
-    # The linked cache entry holds what a clone of the release holds.
+    # The linked cache entry holds what a clone of the snapshot holds.
     cloned = GitLFSRepositoryBackend(
         "agent", remote, work_dir=tmp_path / "fresh-work", cache_dir=tmp_path / "fresh-cache"
     ).materialize(published)
@@ -690,11 +690,11 @@ def test_the_hub_layout_keeps_releases_on_tags_and_moving_refs_on_branches(tmp_p
         f"refs/tags/reef/releases/{pending.revision}",
     }
     assert refs[f"refs/heads/reef/scenarios/{encoded}"] == published.revision
-    # A release's ID is its commit, so a release on the Hub is the revision of that commit.
+    # A snapshot's ID is its commit, so a snapshot on the Hub is the revision of that commit.
     assert backend.resolve_snapshot(pending.revision) == pending
     assert factory.has_registration("math") and factory.list_registrations() == ("math",)
 
-    # A repository keeps one layout: the other is refused instead of hiding the releases.
+    # A repository keeps one layout: the other is refused instead of hiding the snapshots.
     with pytest.raises(ArtifactSourceError, match="keeps its refs under refs/heads/reef/ and refs/tags/reef/"):
         GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "reef-work", cache_dir=tmp_path / "reef-cache")
 

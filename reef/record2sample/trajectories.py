@@ -74,7 +74,7 @@ class TrajectorySettings(Record2SampleSettings):
 class TrajectorySamples(Record2Sample):
     """Make one sample per trajectory whose last call had no continuing call for ``trajectory_idle_seconds``.
 
-    The stage keeps each inference record, with the time of its call, until its release. That time is the record's
+    The stage keeps each inference record, with the time of its call, until its snapshot. That time is the record's
     ``created_at`` on the monotonic clock, and never later than the push, so a stage that reads old records again,
     such as after a restart, does not wait again. At each ``advance``, a record that ends its trajectory
     (``TrajectoryIndex.is_end``) and whose call is at least ``trajectory_idle_seconds`` old forms the set of its
@@ -92,7 +92,7 @@ class TrajectorySamples(Record2Sample):
         super().__init__(max_staleness=max_staleness)
         self.scenario = context.scenario
         self.trajectory_idle_seconds = trajectory_idle_seconds
-        #: The inference records, by ID, until their release.
+        #: The inference records, by ID, until their snapshot.
         self.inferences: dict[str, AgentRecord] = {}
         #: The monotonic time of the call of each inference record that no set holds yet.
         self.called_at: dict[str, float] = {}

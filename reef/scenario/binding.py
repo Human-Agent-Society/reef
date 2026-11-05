@@ -17,7 +17,7 @@ from reef.train.component import TrainingComponent
 class ScenarioBinding:
     """Runtime-facing capabilities selected by a recipe at construction."""
 
-    #: The components every release binds, with each one's admission check, run before that component is
+    #: The components every snapshot binds, with each one's admission check, run before that component is
     #: published or restored.
     components: ScenarioComponents
     runtime: InferenceRuntime | None
@@ -45,10 +45,10 @@ def activate_snapshot(
     *,
     previous: Artifact | None = None,
 ) -> None:
-    """Load the release ``artifact`` of ``scenario`` into ``runtime`` before traffic routes to it.
+    """Load the snapshot ``artifact`` of ``scenario`` into ``runtime`` before traffic routes to it.
 
     Only the loaded component (``ScenarioComponents.loaded_component``) loads. Nothing loads without a runtime or
-    such a component, or when ``previous``, the release served before, already selects the same artifact for it.
+    such a component, or when ``previous``, the snapshot served before, already selects the same artifact for it.
     """
     name = components.loaded_component
     if name is None or runtime is None:

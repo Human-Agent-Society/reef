@@ -442,9 +442,9 @@ def test_a_weight_stage_in_manual_trains_the_samples_that_a_request_names():
 def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
     """A batch that will never fill has to look different from one that is still filling.
 
-    An on-policy producer waits on the release its batch makes. If the record stream picks up rows the
+    An on-policy producer waits on the snapshot its batch makes. If the record stream picks up rows the
     producer did not send, the batch boundary shifts and the scenario settles below the batch size with the
-    producer waiting for a release that cannot come. Nothing else in the status distinguishes that from
+    producer waiting for a snapshot that cannot come. Nothing else in the status distinguishes that from
     training that is merely slow.
     """
 
@@ -1036,7 +1036,7 @@ def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop
         row["metrics"] for row in artifacts if row.get("metrics", {}).get("training_job", {}).get("event") == "failed"
     )
     assert failed["training_job"]["error"] == "RuntimeError: job failed"
-    # Only the second job saved a checkpoint, and its release now serves.
+    # Only the second job saved a checkpoint, and its snapshot now serves.
     wait_for_serving(dispatcher, "s")
     scenario = dispatcher.get_or_create_scenario("s")
     assert runtime.served == "w2"

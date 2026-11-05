@@ -1,4 +1,4 @@
-"""Loading a scenario's release into the inference runtime."""
+"""Loading a scenario's snapshot into the inference runtime."""
 
 from __future__ import annotations
 

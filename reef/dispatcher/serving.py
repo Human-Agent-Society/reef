@@ -63,8 +63,8 @@ def serving_config_of(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
 class ServingWorker(QueueWorker):
     """Start queued releases and retire unused endpoints in the inference service.
 
-    ``recipe`` supplies the runtime and each scenario's components. ``backends`` resolves durable releases.
-    ``coordination`` owns requests and routes. ``local_artifact_dir`` holds materialized releases, or uses the repository default.
+    ``recipe`` supplies the runtime and each scenario's components. ``backends`` resolves durable snapshots.
+    ``coordination`` owns requests and routes. ``local_artifact_dir`` holds materialized snapshots, or uses the repository default.
     A long-lived work lease gives one worker runtime ownership, including health checks and idle periods.
     Other replicas only read routes. The owner recovers completed selections before it takes new work: it opens the
     runtime, offers it the routes from before (``InferenceRuntime.adopt``), keeps the routes that it took over, and
@@ -242,7 +242,7 @@ class ServingWorker(QueueWorker):
             models[require_text(name, "model name")] = active
         for name, value in beside.items():
             if not isinstance(value, dict):
-                raise ValueError("a beside artifact needs its release and component")
+                raise ValueError("a beside artifact needs its snapshot and component")
             component = require_text(value.get("component"), "component")
             if component == components.loaded_component:
                 beside_model = runtime.served_artifact_on_request(

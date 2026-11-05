@@ -233,9 +233,9 @@ def test_activations_and_training_starts_carry_no_trainer_state(operation, chang
 
 @pytest.mark.unit
 def test_each_operation_names_its_artifact_exactly() -> None:
-    # A one-component activation names the release that made the artifact; a composed one names the release it
+    # A one-component activation names the snapshot that made the artifact; a composed one names the snapshot it
     # published, with the component and the manifest.
-    # A serve and its stop name the release that serves the artifact in the same way.
+    # A serve and its stop name the snapshot that serves the artifact in the same way.
     for operation in ("activate", "serve", "stop_serving"):
         operation_record(operation, 1, "r1")
         operation_record(operation, 1, "r1", component="harness", components={"harness": "c", "weights": "w"})
@@ -251,7 +251,7 @@ def test_each_operation_names_its_artifact_exactly() -> None:
             operation_record(operation, 1, "r1", checkpoint=True)
     # A new start names a trainer's component and publishes nothing.
     operation_record("train_from", 1, "r1", component="weights")
-    with pytest.raises(CommitHistoryError, match="publishes no release"):
+    with pytest.raises(CommitHistoryError, match="publishes no snapshot"):
         operation_record("train_from", 1, "r1", components={"weights": "c"})
     for operation in ("rollback", "promote", "creation"):
         with pytest.raises(CommitHistoryError, match="operation must be"):
@@ -572,7 +572,7 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     assert metadata["record_progress"] == {"high_water_sequence": 4, "high_water_offset": 4, "consumed_ids": []}
 
     # A fresh dispatcher over the same dirs is a process restart: nothing is
-    # durable except the release chain, the record store, and the commit history.
+    # durable except the snapshot chain, the record store, and the commit history.
     second = build_training_dispatcher(
         RecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
@@ -685,7 +685,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     """
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
-    # The components save no checkpoint, so the root release serves both inferences and neither is stale.
+    # The components save no checkpoint, so the root snapshot serves both inferences and neither is stale.
     first_component = RecordingComponent()
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     base_artifact_id = served_artifact_id(first)
@@ -753,7 +753,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
 
 @pytest.mark.unit
 def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
-    """Crash window: checkpoint published to the release chain, record never appended.
+    """Crash window: checkpoint published to the snapshot chain, record never appended.
 
     The checkpoint head is then ahead of the commit history. Its metadata carries
     the same record fields, so recovery adopts it and heals the history.
@@ -838,12 +838,12 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     assert [record.step for record in store.history()] == [1, 2]
     committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 2
-    # The component saved no checkpoint, so the job failed and published no release.
+    # The component saved no checkpoint, so the job failed and published no snapshot.
     assert component.submitted[0].parameters == {"method": {"objective": "sft"}}
     assert committed["metrics"]["training_job"]["event"] == "failed"
     assert not list(tmp_path.rglob("*.sqlite3"))
 
-    # Recovery still works from the release chain, as before the commit history
+    # Recovery still works from the snapshot chain, as before the commit history
     # existed: the step reverts to the checkpointed 0.
     second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math")
@@ -865,7 +865,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory, hold_local_cycles=True)
     recovered = second.get_or_create_scenario("math")
 
-    # The release chain ends at the checkpoint, so recovery returns to its step and metrics.
+    # The snapshot chain ends at the checkpoint, so recovery returns to its step and metrics.
     assert recovered.scenario_step == 2
     assert not recovered.store.durable
     recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
@@ -1065,7 +1065,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
         scenario.commit(result)
 
-    # The active release moves only after the runtime serves the new one and its record lands.
+    # The active selection moves only after the runtime serves the new one and its record lands.
     assert scenario.current_snapshot() == active
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == submitted_state
@@ -1204,7 +1204,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     )
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
-    # The creation's artifact is the scenario's root release.
+    # The creation's artifact is the scenario's root snapshot.
     activation_target = original.repository.resolve(original.repository.start_artifact).artifact_id
     release_failed = Event()
     reload_started = Event()

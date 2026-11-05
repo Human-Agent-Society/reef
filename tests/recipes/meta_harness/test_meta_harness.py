@@ -73,7 +73,7 @@ def run(
     request: TrainingRequest | None = None,
 ) -> TrainStepResult:
     """Step ``number``, which answers ``request`` (else a request of its own), decided on means; a selected tree
-    becomes the next release."""
+    becomes the next snapshot."""
     request = TrainingRequest("Propose the next candidate.", "", "", f"ask-{number}") if request is None else request
     data = JobData(f"demo:request:{request.id}", (), request=request)
     result = backend_step(backend, data, state, ComparePolicy(backend, statistic="mean") if policy is None else policy)

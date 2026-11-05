@@ -35,7 +35,7 @@ __all__ = [
     "encode_snapshot_ref",
 ]
 
-#: Files a repository adds to a materialized release; a release with nothing else holds no weights.
+#: Files a repository adds to a materialized snapshot; a snapshot with nothing else holds no weights.
 REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 #: The stored metadata key of a flat artifact's ID; ``Artifact`` reads it into ``artifact_id`` and writes it back.
 ARTIFACT_ID_METADATA_KEY = "artifact_id"
@@ -135,7 +135,7 @@ class Artifact:
 
     @property
     def artifact_id(self) -> str:
-        """The artifact that this value holds: the artifact of a component view, or the only component of a release.
+        """The artifact that this value holds: the artifact of a component view, or the only component of a snapshot.
 
         New artifacts record an independent ID before publication. A component
         view keeps that ID when another snapshot carries it. Legacy snapshots
@@ -160,13 +160,13 @@ class Artifact:
 
     @property
     def components(self) -> SnapshotComponents | None:
-        """The release's component manifest; ``None`` for a release published without one."""
+        """The snapshot's component manifest; ``None`` for a snapshot published without one."""
         return snapshot_components(self._metadata)
 
     def component(self, name: str) -> Artifact:
-        """The named component of this release, materialized.
+        """The named component of this snapshot, materialized.
 
-        A release without a manifest, or with one component, is that component
+        A snapshot without a manifest, or with one component, is that component
         itself. A multi-component release keeps each component in a directory
         named after it; the view carries the component's own artifact ID and metadata.
         """
@@ -184,10 +184,10 @@ class Artifact:
         directory = materialized.local_path / manifest.relative_path(name)
         # A component the base seeded nothing for has no directory in the
         # release (git keeps none for an empty tree); it is empty, not missing.
-        # Only the leaf is created, and only inside a release tree that is
-        # there: a release directory that is gone must not come back empty.
+        # Only the leaf is created, and only inside a snapshot tree that is
+        # there: a snapshot directory that is gone must not come back empty.
         if materialized.local_path.is_dir() and not directory.exists():
-            # Two readers of one release race here; the second finds the leaf made.
+            # Two readers of one snapshot race here; the second finds the leaf made.
             directory.mkdir(exist_ok=True)
         return Artifact(
             SnapshotRef(self.ref.revision, self.ref.parent_revision),

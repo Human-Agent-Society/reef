@@ -121,7 +121,7 @@ Implementation
   ``rollout_unit``. Write each
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
-- Implement ``import_start`` to load a published release as the start of the
+- Implement ``import_start`` to load a published snapshot as the start of the
   next job. Raise ``ValueError`` when the framework cannot do this; Reef then
   refuses a ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
@@ -176,7 +176,7 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   they must not import a concrete integration or ``reef.train``. Implement
   ``InferenceBackend`` from ``reef/inference/interfaces.py``, including
   ``load_weight_files``, so that the serving runtimes in
-  ``reef/inference/serving.py`` can load published releases. Expose an inference
+  ``reef/inference/serving.py`` can load published snapshots. Expose an inference
   service factory through a dotted reference or the
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. Shared monitoring and engine recovery belong in

@@ -653,7 +653,7 @@ class TrainingPipeline:
         ``ready_samples`` against the trainer's ``job_samples`` says how close
         the next job's data is; ``buffer_size`` is the most samples of one
         automatic job, beside the rest of a group, or None for every sample. A caller waiting on a
-        release needs it to tell job data that is still filling from data
+        snapshot needs it to tell job data that is still filling from data
         that never will be: a scenario whose producer stopped short sits
         below ``job_samples`` with nothing else to report.
         The stages add terminal outcomes that can never train, so a bounded

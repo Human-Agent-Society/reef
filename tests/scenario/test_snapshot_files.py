@@ -1,7 +1,7 @@
-"""A scenario's committed releases as files: the head a harness backend builds on, and a release by id.
+"""A scenario's committed snapshots as files: the head a harness backend builds on, and a snapshot by id.
 
 The scenarios are real: a dispatcher over a pi harness recipe whose base
-release is the seed, steps committed through the scenario, and activations and
+snapshot is the seed, steps committed through the scenario, and activations and
 training starts through the dispatcher.
 """
 
@@ -55,9 +55,9 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
     releases = snapshot_files(scenario)
     created = scenario.artifact_status()[COMPONENT]["active"]
     try:
-        # The release the scenario was created on is its root release.
+        # The snapshot the scenario was created on is its root snapshot.
         assert scenario.repository.resolve(scenario.repository.start_artifact).artifact_id == created
-        # Before a publish the head is the release the scenario was created on, the one the catalog lists.
+        # Before a publish the head is the snapshot the scenario was created on, the one the catalog lists.
         assert releases.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
         assert releases.artifact(created, COMPONENT).files == PI_SEED.files
         run_step(scenario, "1")
@@ -66,7 +66,7 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
         assert releases.head(COMPONENT) == ArtifactTextFiles(published, dict(MARKED.files))
         assert run_step(scenario, "2").metrics["skipped"] == "the method left the head tree unchanged"
         assert releases.head(COMPONENT).artifact_id == published
-        # Every committed release reads by id, the root included; an id the scenario never committed is not found.
+        # Every committed snapshot reads by id, the root included; an id the scenario never committed is not found.
         assert releases.artifact(created, COMPONENT).files == PI_SEED.files
         assert releases.artifact(published, COMPONENT).files == MARKED.files
         with pytest.raises(ArtifactNotFound, match="has no artifact 'nope'"):
@@ -85,7 +85,7 @@ def test_an_inactive_release_is_the_head_the_next_step_builds_on(tmp_path: Path)
     created = scenario.artifact_status()[COMPONENT]["active"]
     try:
         run_step(scenario, "1")
-        # The activation rule kept the release inactive, but it is the head: steps build on what training made.
+        # The activation rule kept the snapshot inactive, but it is the head: steps build on what training made.
         assert scenario.artifact_status()[COMPONENT]["active"] == created
         inactive = snapshot_files(scenario).head(COMPONENT)
         assert inactive.artifact_id != created and inactive.files == MARKED.files

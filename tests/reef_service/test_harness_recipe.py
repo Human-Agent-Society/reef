@@ -305,7 +305,7 @@ def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committe
     assert built.job_components() == (built.harness_component,)
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
     trainer.close()
-    with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed releases"):
+    with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed snapshots"):
         built.build("demo", SQLiteRecordStore(), root=seed_root(built))
 
 
@@ -364,7 +364,7 @@ def test_the_seed_is_a_directory_whose_tree_is_the_root_release(tmp_path: Path) 
 def test_a_seed_that_fails_validation_refuses_boot_naming_the_problem(
     tmp_path: Path, files: dict, problem: str
 ) -> None:
-    """A tree persists into every release, so a seed the checks refuse never boots; a credential's refusal
+    """A tree persists into every snapshot, so a seed the checks refuse never boots; a credential's refusal
     names the channels a key goes through instead."""
     with pytest.raises(RecipeConfigError, match=rf"evolution\.seed fails validation: .*{problem}"):
         harness_recipe(tmp_path, lambda workspace, services: None, seed=HarnessTree(files))
@@ -593,7 +593,7 @@ def test_a_winning_step_binds_only_its_runs_records_its_context_and_names_its_ki
     tmp_path: Path, monkeypatch
 ) -> None:
     """One winning step. The deployment's endpoint renders into each evaluation run through the adapter's
-    model_binding template; the published release is the source tree, which carries no provider. The settle records
+    model_binding template; the published snapshot is the source tree, which carries no provider. The settle records
     the context the evaluation ran in. A kept tree names the kinds it changes; the always rule holds it only when one
     of them is reviewed."""
     seen: list[dict[str, str]] = []
@@ -649,7 +649,7 @@ def test_the_method_receives_the_served_model_binding(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
-    """Told where Reef answers inference, runs sample the release the scenario serves through it."""
+    """Told where Reef answers inference, runs sample the snapshot the scenario serves through it."""
     config = {"model": {"path": "qwen3-8b"}, **evolution_config()}
     recipe = HarnessEvolutionRecipe.from_environment({"REEF_UPSTREAM_URL": "http://upstream.test"}, config=config)
     assert recipe.model_binding().base_url == "http://upstream.test"
@@ -1065,7 +1065,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
 
 def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path: Path) -> None:
     """Under the never rule a kept tree is minted into the catalog but not served; an activation over HTTP serves
-    that release itself, and an unknown artifact is a 404."""
+    that snapshot itself, and an unknown artifact is a 404."""
     patches = iter((MARKER,))
     dispatcher = harness_dispatcher(
         tmp_path,
@@ -1186,7 +1186,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         scenario = restarted.get_or_create_scenario("start")
         assert scenario is not None
         assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
-        # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
+        # The next step evolves the first snapshot's tree: r3 joins r1, and r2 is not there. It publishes on the
         # chain tip, the second release.
         result = run_step(scenario, "3")
         assert result.artifact is not None
@@ -1202,7 +1202,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
 
 
 def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_path: Path) -> None:
-    """A sync commits a person's tree as a release that serves at once and that the next step evolves; a restart
+    """A sync commits a person's tree as a snapshot that serves at once and that the next step evolves; a restart
     reads both from the sync record."""
 
     def markers(task: str, result: TaskResult) -> float:
@@ -1267,7 +1267,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
         assert scenario.artifact_selection().components[COMPONENT] == synced.artifact_id
         assert scenario.artifact_status()[COMPONENT]["training_start"] == synced.artifact_id
         # The next step evolves the synced tree: r2 joins the person's line, and r1 is not there. A sync is
-        # published beside the chain, so the step publishes on the chain tip, the trained release.
+        # published beside the chain, so the step publishes on the chain tip, the trained snapshot.
         result = run_step(scenario, "2")
         assert result.artifact is not None
         newest = last_made(scenario)

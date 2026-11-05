@@ -36,8 +36,8 @@ def artifact_files(
     path order.
 
     When the repository backend signs URLs (``RepositoryBackend.file_downloads``), ``url`` opens the file in its
-    storage until ``url_expires_at``, ``expires_in_seconds`` from now, and the release is not materialized. Otherwise
-    both are null, and the files are those of the materialized release. Raise ``ValueError`` for an
+    storage until ``url_expires_at``, ``expires_in_seconds`` from now, and the snapshot is not materialized. Otherwise
+    both are null, and the files are those of the materialized snapshot. Raise ``ValueError`` for an
     ``expires_in_seconds`` outside 1 to ``MAX_DOWNLOAD_URL_SECONDS``, and as ``Scenario.resolve_artifact`` does.
     """
     if not 1 <= expires_in_seconds <= MAX_DOWNLOAD_URL_SECONDS:
@@ -45,7 +45,7 @@ def artifact_files(
     with dispatcher.locked_scenario(scenario) as current:
         selected, ref = current.artifact_snapshot(artifact_id, component)
         downloads = current.repository.file_downloads(ref, expires_in_seconds)
-        # A release of several components keeps each one in a directory named after it.
+        # A snapshot of several components keeps each one in a directory named after it.
         prefix = "" if current.components.single else f"{selected}/"
     if downloads is not None:
         files = [

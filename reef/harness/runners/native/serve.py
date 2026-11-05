@@ -3,7 +3,7 @@
 A mount renders a source tree for the native adapter into a fresh directory
 under ``native/mounts/`` and builds a ``NativeHost`` from the rendered files.
 The process boots on the source tree it mounted last (``source/`` beside the
-release file), else on the head's, read through
+snapshot file), else on the head's, read through
 ``GET /reef/harness?form=source``. It starts the capture proxy in process
 and listens on a Unix socket for turns and control requests. A session holds
 one ``Run`` across turns. A new head reaches the process through the artifact
@@ -59,9 +59,9 @@ SERVE_LOG = "serve.jsonl"
 SOCKET_NAME = "serve.sock"
 #: The directory under ``native/`` that holds one rendered directory per mount; only the current one stays.
 MOUNTS_DIR = "mounts"
-#: The release file the serve process writes at the tree root: the release it mounted, so a restart resumes it.
+#: The snapshot file the serve process writes at the tree root: the snapshot it mounted, so a restart resumes it.
 HARNESS_RELEASE_FILE = ".reef-harness-release"
-#: The directory beside the release file that holds the mounted release's source tree.
+#: The directory beside the snapshot file that holds the mounted artifact's source tree.
 SOURCE_DIR = "source"
 FOLLOW_MODES = ("head", "pinned")
 DEFAULT_POLL_INTERVAL_S = 60.0
@@ -86,7 +86,7 @@ class EventSink(ABC):
 
 
 def tree_layout(tree: Path) -> tuple[Path, Path]:
-    """(the pulled tree root, where the release file sits; its ``native/`` directory); the native directory itself is accepted."""
+    """(the pulled tree root, where the snapshot file sits; its ``native/`` directory); the native directory itself is accepted."""
     tree = tree.resolve()
     if (tree / "native" / "models.json").is_file():
         return tree, tree / "native"
@@ -109,7 +109,7 @@ def socket_path(tree: Path, override: Path | None = None) -> Path:
 
 
 def read_source(dest: Path) -> HarnessTree | None:
-    """The source tree of the release the process mounted last; ``None`` before the first mount."""
+    """The source tree of the snapshot the process mounted last; ``None`` before the first mount."""
     directory = dest / SOURCE_DIR
     if not directory.is_dir():
         return None
@@ -128,7 +128,7 @@ def tree_of(manifest: Mapping[str, Any]) -> HarnessTree:
 
 
 def read_artifact_info(dest: Path) -> dict[str, Any]:
-    """The release file beside the tree, or an empty record when there is none or it is unreadable."""
+    """The snapshot file beside the tree, or an empty record when there is none or it is unreadable."""
     try:
         record = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -310,7 +310,7 @@ class _Pending:
 
 
 class Server(ServeState, ArtifactUpdateListener):
-    """The resident process: the mounted host, the sessions, the proxy, the release watch and the socket."""
+    """The resident process: the mounted host, the sessions, the proxy, the snapshot watch and the socket."""
 
     @property
     def client(self) -> ArtifactClient:
@@ -356,7 +356,7 @@ class Server(ServeState, ArtifactUpdateListener):
         )
         self.binding: ModelBinding = self._installed_binding
         self._client = ArtifactClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
-        #: The served release's source tree, and the tree the current host runs: the served one, or a trial's.
+        #: The served artifact's source tree, and the tree the current host runs: the served one, or a trial's.
         self._tree = HarnessTree({})
         self._artifact_id: str | None = None
         self._parent_artifact_id: str | None = None
@@ -410,7 +410,7 @@ class Server(ServeState, ArtifactUpdateListener):
     # -- lifecycle ---------------------------------------------------------------------------------------------
 
     def start(self) -> None:
-        """Boot: the proxy, the boot tree as a mount with source ``boot``, the release watch, the socket."""
+        """Boot: the proxy, the boot tree as a mount with source ``boot``, the snapshot watch, the socket."""
         self._refuse_second_process()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._log = EventLog(self.sessions_dir / SERVE_LOG)
@@ -426,7 +426,7 @@ class Server(ServeState, ArtifactUpdateListener):
                 legacy_manifest = self.client.fetch_legacy(str(artifact_info["release_id"]))
             except ArtifactClientError as exc:
                 raise ServeError(
-                    f"Reef answered no artifact for installed release {artifact_info['release_id']!r}: {exc}"
+                    f"Reef answered no artifact for installed artifact {artifact_info['release_id']!r}: {exc}"
                 ) from exc
             artifact_info = dict(legacy_manifest)
         artifact_id = str(artifact_info["artifact_id"]) if artifact_info.get("artifact_id") else None
@@ -550,7 +550,7 @@ class Server(ServeState, ArtifactUpdateListener):
         return _error("request must carry turn or control")
 
     def mount(self, artifact_id: str) -> dict[str, Any]:
-        """A manual mount: queue the release and answer once it landed or failed."""
+        """A manual mount: queue the snapshot and answer once it landed or failed."""
         pending = self._enqueue(_Pending(artifact_id, "release"))
         self._drain_if_idle()
         return pending.wait(self.turn_timeout_s + 5.0)
@@ -639,9 +639,9 @@ class Server(ServeState, ArtifactUpdateListener):
     ) -> dict[str, Any] | None:
         """Make ``tree`` the current host's tree; None on success, else the failure, with the current host kept.
 
-        ``source`` is ``boot`` or ``release`` for a served release, ``try`` for
+        ``source`` is ``boot`` or ``release`` for a served artifact, ``try`` for
         a trial and ``rollback`` for the served tree back after one. A served
-        release with its ``manifest`` is stored for the next start.
+        artifact with its ``manifest`` is stored for the next start.
         """
         try:
             host, directory = self.build_host(tree)
@@ -678,7 +678,7 @@ class Server(ServeState, ArtifactUpdateListener):
         return self.mounts.build(tree, self._builtin_tools)
 
     def _install(self, tree: HarnessTree, manifest: Mapping[str, Any]) -> None:
-        """What a restart boots from: the release's source tree under ``source/`` and the release file naming it."""
+        """What a restart boots from: the snapshot's source tree under ``source/`` and the snapshot file naming it."""
         staging = self.dest / f".{SOURCE_DIR}.part"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
@@ -693,7 +693,7 @@ class Server(ServeState, ArtifactUpdateListener):
         (self.dest / HARNESS_RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
     def try_patch(self, patch: TreePatch, try_id: str) -> dict[str, Any]:
-        """Mount the served tree with ``patch`` applied for the rest of the open turn; the release file stays."""
+        """Mount the served tree with ``patch`` applied for the rest of the open turn; the snapshot file stays."""
         if self._current is None:
             return {"error": "no turn is open"}
         if self._trial is not None:

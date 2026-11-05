@@ -6,7 +6,7 @@ frontmatter. ``process_skill`` adds it when an evolved skill omits it. A
 command is a skill in the same root (its ``parts``), so it gets the same
 frontmatter.
 
-A release is the plugin ``reef`` in ``plugin/``, in the local marketplace
+A snapshot is the plugin ``reef`` in ``plugin/``, in the local marketplace
 ``reef`` at the root. Codex loads skills only from a plugin it installed,
 and it reads the plugin from a copy in its cache. So ``finalize_render``
 writes the plugin's manifest and the marketplace, and, for a run, what

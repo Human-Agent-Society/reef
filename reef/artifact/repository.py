@@ -33,9 +33,9 @@ from reef.core.snapshot import SELECTION_VIEW_PREFIX
 
 @dataclass(frozen=True)
 class FileDownload:
-    """One file of a release that a client downloads straight from a repository backend's storage.
+    """One file of a snapshot that a client downloads straight from a repository backend's storage.
 
-    Values: ``path`` is the file's path in the release, as the materialized release names it: a relative POSIX
+    Values: ``path`` is the file's path in the snapshot, as the materialized snapshot names it: a relative POSIX
     path, not empty, with no ``.`` or ``..`` part. ``byte_count`` is the file's size, at least 0. ``url`` is an
     absolute ``https`` or ``http`` URL that opens the file with a GET and no Reef credential until ``expires_at``
     (Unix seconds, positive).
@@ -52,7 +52,7 @@ class FileDownload:
     def __post_init__(self) -> None:
         parts = PurePosixPath(self.path).parts if isinstance(self.path, str) else ()
         if not parts or PurePosixPath(self.path).is_absolute() or any(part in (".", "..") for part in parts):
-            raise ValueError(f"a file download's path is a relative path in the release, got {self.path!r}")
+            raise ValueError(f"a file download's path is a relative path in the snapshot, got {self.path!r}")
         if isinstance(self.byte_count, bool) or not isinstance(self.byte_count, int) or self.byte_count < 0:
             raise ValueError("a file download's byte_count is an int of at least 0")
         if not isinstance(self.url, str) or not self.url.startswith(("https://", "http://")):
@@ -123,21 +123,21 @@ class RepositoryBackend(ArtifactRepository):
         """
 
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
-        """Every file of the release ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
-        seconds; the backend lists and signs them without materializing the release.
+        """Every file of the snapshot ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
+        seconds; the backend lists and signs them without materializing the snapshot.
 
-        None, the default, when this backend keeps no copy of its releases that a client can open; Reef then lists
-        the files of the materialized release, and serves them itself. Raise ``ArtifactNotFound`` when the backend
-        holds no release ``ref``.
+        None, the default, when this backend keeps no copy of its snapshots that a client can open; Reef then lists
+        the files of the materialized snapshot, and serves them itself. Raise ``ArtifactNotFound`` when the backend
+        holds no snapshot ``ref``.
         """
         return None
 
     def snapshot_uri(self, ref: SnapshotRef) -> str | None:
-        """The URI of the directory of the release ``ref``, as ``ArtifactSources`` reads it, ending with ``/``.
+        """The URI of the directory of the snapshot ``ref``, as ``ArtifactSources`` reads it, ending with ``/``.
 
-        Another scenario imports the release from this URI, also in another deployment that can read the backend's
+        Another scenario imports the snapshot from this URI, also in another deployment that can read the backend's
         storage. None, the default, when the backend keeps no copy that a URI names. Raise ``ArtifactNotFound``
-        when the backend holds no release ``ref``.
+        when the backend holds no snapshot ``ref``.
         """
         return None
 
@@ -145,15 +145,15 @@ class RepositoryBackend(ArtifactRepository):
     def resolve_snapshot(self, revision: str) -> SnapshotRef:
         """The stored snapshot that the backend revision ``revision`` names in this repository.
 
-        Raise ``ArtifactNotFound`` for a release the repository does not hold.
+        Raise ``ArtifactNotFound`` for a snapshot the repository does not hold.
         """
 
     @abstractmethod
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
-        """Register the scenario with ``root`` as its root release, and return the scenario's head.
+        """Register the scenario with ``root`` as its root snapshot, and return the scenario's head.
 
         ``root`` is an unpublished artifact whose ``local_path`` is a directory. When the scenario has no head, the
-        backend stores the files of ``root`` as a release with no parent, with its artifact IDs and ``metadata``, and makes that release the head in one atomic step. When the scenario has a head, also one
+        backend stores the files of ``root`` as a snapshot with no parent, with its artifact IDs and ``metadata``, and makes that snapshot the head in one atomic step. When the scenario has a head, also one
         that another caller registered first, the backend stores nothing and returns that head. Raise
         ``ArtifactPublicationError`` when the files cannot be stored.
         """
@@ -182,12 +182,12 @@ class StagedSnapshotRepositoryBackend(RepositoryBackend):
 
     ``publish(advance_head=False)`` must store resolvable release bytes and
     metadata without moving the head. ``commit_snapshot`` then promotes that
-    release without publishing its bytes again.
+    snapshot without publishing its bytes again.
     """
 
     @abstractmethod
     def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
-        """Advance a staged durable release after the scenario commits it.
+        """Advance a staged durable snapshot after the scenario commits it.
 
         Implementations must accept an already-current release so recovery can
         repeat an interrupted post-commit mirror update without publishing new
@@ -212,7 +212,7 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
 
 
 class BaseModelFiles(ABC):
-    """The model files of a default start, which a process makes only when a scenario's root release holds them.
+    """The model files of a default start, which a process makes only when a scenario's root snapshot holds them.
 
     Purpose: a training component gives a value in ``DefaultStart.model_files``. ``ScenarioFactory`` calls
     ``directory`` only when it creates a scenario from the default start. Thus a process that only opens scenarios
@@ -244,20 +244,20 @@ class ModelDirectory(BaseModelFiles):
 
 @dataclass(frozen=True)
 class DefaultStart:
-    """The content of a new scenario's root release when the scenario starts from the deployment's configuration.
+    """The content of a new scenario's root snapshot when the scenario starts from the deployment's configuration.
 
     Values:
 
-    - ``files`` maps relative POSIX paths inside the release to the text of each file.
+    - ``files`` maps relative POSIX paths inside the snapshot to the text of each file.
     - ``model_files`` gives the directory of model files, or is ``None`` for no model files.
-    - ``model_component`` is the component directory that the model files go into. ``None`` is the release root.
+    - ``model_component`` is the component directory that the model files go into. ``None`` is the snapshot root.
       It is ``None`` when ``model_files`` is ``None``.
     - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
       configured model and the checksum of the configured seed.
 
-    Purpose: a recipe makes the value (``Recipe.default_start``). ``ScenarioFactory`` writes it as the root release
+    Purpose: a recipe makes the value (``Recipe.default_start``). ``ScenarioFactory`` writes it as the root snapshot
     of a scenario that it creates without an artifact item; only that write reads the model files. The root records
-    ``inputs`` in its ``RootSource``, so a training component that cannot import a release (Slime) can compare
+    ``inputs`` in its ``RootSource``, so a training component that cannot import a snapshot (Slime) can compare
     them with its own configuration.
     """
 
@@ -270,7 +270,7 @@ class DefaultStart:
         for relative in self.files:
             path = PurePosixPath(relative)
             if not relative or path.is_absolute() or ".." in path.parts:
-                raise ValueError(f"default start file {relative!r} must be a relative path inside the release")
+                raise ValueError(f"default start file {relative!r} must be a relative path inside the snapshot")
         if self.model_files is None and self.model_component is not None:
             raise ValueError("model_component names where model files go, so it requires model_files")
         if self.model_component is not None:
@@ -379,7 +379,7 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
 
         After this the factory answers ``has_registration`` false and
         ``list_registrations`` without the name, so a later create under the
-        same name registers a new root release. Content-addressed storage
+        same name registers a new root snapshot. Content-addressed storage
         the scenario shared with others stays.
         """
         with self._lock:
@@ -407,9 +407,9 @@ def selection_digest(selection: ArtifactSelection) -> str:
 
 
 class Repository(ArtifactRepository):
-    """Scenario-scoped release chain and persistence facade.
+    """Scenario-scoped snapshot chain and persistence facade.
 
-    ``start_artifact`` is the scenario's root release, the release that the scenario was created with.
+    ``start_artifact`` is the scenario's root snapshot, the snapshot that the scenario was created with.
     """
 
     def __init__(
@@ -433,7 +433,7 @@ class Repository(ArtifactRepository):
         # Non-checkpointed releases of pulled files remain process-local. Keep
         # every staged artifact addressable for snapshot and activation reads; a
         # single "latest local" slot would make an older snapshot dangle as
-        # soon as the next release is staged.
+        # soon as the next snapshot is staged.
         self._local_artifacts: dict[str, Artifact] = {}
         self.selections: dict[str, ArtifactSelection] = {}
         self.selection_lock = Lock()
@@ -455,14 +455,14 @@ class Repository(ArtifactRepository):
         return self._backend
 
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
-        """The backend's ``file_downloads`` of the durable release ``ref``; None for a release staged on this host,
+        """The backend's ``file_downloads`` of the durable snapshot ``ref``; None for a snapshot staged on this host,
         which only the local copy holds."""
         if ref.revision in self._local_artifacts:
             return None
         return self.backend.file_downloads(ref, expires_in_seconds)
 
     def snapshot_uri(self, ref: SnapshotRef) -> str | None:
-        """The backend's ``snapshot_uri`` of the durable release ``ref``; None for a release staged on this host.
+        """The backend's ``snapshot_uri`` of the durable snapshot ``ref``; None for a snapshot staged on this host.
 
         Raise ``ValueError`` when the backend gives a URI that does not end with ``/``.
         """
@@ -519,7 +519,7 @@ class Repository(ArtifactRepository):
         ``activate`` is true, also make it the active artifact (``current``)."""
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
-                raise ArtifactConflict("repository heads changed before the committed release was installed")
+                raise ArtifactConflict("repository heads changed before the committed snapshot was installed")
             if activate:
                 self._current_artifact = ref
             self._checkpoint_artifact = ref
@@ -662,12 +662,12 @@ class Repository(ArtifactRepository):
         advance_heads: bool = True,
         activate: bool = True,
     ) -> SnapshotRef:
-        """Publish ``artifact`` as the next release.
+        """Publish ``artifact`` as the next snapshot.
 
         ``advance_heads`` moves the chain tip, the checkpoint ref, and the one
         storage head the backend owns (``RepositoryBackend.publish``'s
-        ``advance_head``); ``activate`` then also makes the release the active
-        artifact (``current``). ``advance_heads=False`` mints a release beside
+        ``advance_head``); ``activate`` then also makes the snapshot the active
+        artifact (``current``). ``advance_heads=False`` mints a snapshot beside
         the chain that no head moves to.
         """
         ref = self._backend.publish(

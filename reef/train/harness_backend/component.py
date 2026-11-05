@@ -68,7 +68,7 @@ class HarnessSteps(ABC):
 
     Values: ``seed`` is the tree of a new scenario. ``state_root(scenario, component)`` is the directory of the
     component's state. ``backend(scenario, component)`` makes the backend of its steps on the recipe's models; it
-    reads no releases (each job names its head). ``policy(backend)`` is the selection policy that measures through
+    reads no snapshots (each job names its head). ``policy(backend)`` is the selection policy that measures through
     ``backend``.
     ``check_tree(tree)`` raises ``ValueError`` for a tree that fails validation for the recipe's adapter.
     ``layout`` is the adapter's tree layout, which names the parts of a tree.
@@ -164,7 +164,7 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     Values: ``steps`` is the recipe's view (``HarnessSteps``). ``root`` holds ``jobs/``, one directory per job
     (``LocalJobComponent``), and ``starts/``, the trees that ``import_start`` took. A job's weights never exist:
-    its releases are trees, so ``artifact_format`` is ``None``. A job depends only on its start, data and
+    its snapshots are trees, so ``artifact_format`` is ``None``. A job depends only on its start, data and
     parameters, and on the state of its scenario component, which this component keeps per scenario; so scenarios
     share it. ``status`` of a job whose step raised carries the step's metrics and error.
 
@@ -220,7 +220,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
         tree fails validation.
 
-        The tree is the release's text files without the repository's own files (``TextFileTree``), as a client
+        The tree is the snapshot's text files without the repository's own files (``TextFileTree``), as a client
         pulls it: a Git LFS release directory also holds ``.gitattributes``.
         """
         tree = HarnessTree(dict(TextFileTree().read_files(Artifact.local(artifact_dir)) or {}))

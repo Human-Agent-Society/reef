@@ -315,7 +315,7 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
         "native/graphs/main.json",
         "skills/answer-style/SKILL.md",
     } == set(NATIVE_SEED.files)
-    # A fresh scenario's root release is the seed's source tree, which names no endpoint.
+    # A fresh scenario's root snapshot is the seed's source tree, which names no endpoint.
     assert built.default_start().files == dict(NATIVE_SEED.files)
     assert not any("upstream" in text for text in NATIVE_SEED.files.values())
     empty = tmp_path / "empty-seed"
@@ -654,7 +654,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         (1, "published", "r2"),
     ]
     seed_snapshot, published = data["releases"]
-    # The native run's seed is the native seed directory; a published release is it with the step's patch applied.
+    # The native run's seed is the native seed directory; a published snapshot is it with the step's patch applied.
     assert seed_snapshot["files"] == dict(NATIVE_SEED.files) == data["seed_files"]
     assert published["files"] == {**NATIVE_SEED.files, "rules.md": "one line\n"}
     assert published["diff"] == {"added": ["rules.md"], "updated": [], "removed": []}
@@ -692,7 +692,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "removed": [],
     }
 
-    # An activation row is not a step: it is shown as its own kind, with no result, over the files of the release it
+    # An activation row is not a step: it is shown as its own kind, with no result, over the files of the snapshot it
     # activated, here the seed.
     activation = {
         "recorded_at": 1060.0,

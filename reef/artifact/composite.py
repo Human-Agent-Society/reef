@@ -27,7 +27,7 @@ def link_or_copy(source: str, destination: str) -> None:
 def compose_snapshot(components: Mapping[str, Artifact], *, directory: Path) -> Artifact:
     """Place each component's files under ``directory/<name>`` and describe them in a manifest.
 
-    Released files are immutable, so a carried-forward component is
+    Stored files are immutable, so a carried-forward component is
     hard-linked rather than copied where the filesystem allows; a component
     whose source has no directory yet (a default start that seeded nothing for
     it) composes as an empty directory. The result is a process-local
@@ -35,10 +35,10 @@ def compose_snapshot(components: Mapping[str, Artifact], *, directory: Path) -> 
     Every component keeps its independently allocated ``artifact_id``, including
     an unpublished component. Each
     component keeps its own metadata in the manifest; a component's
-    release-level manifest key, if it was itself a flat release, is not nested.
+    release-level manifest key, if it was itself a flat snapshot, is not nested.
     """
     if len(components) < 2:
-        raise ArtifactPublicationError("a composed release binds at least two components")
+        raise ArtifactPublicationError("a composed snapshot binds at least two components")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     entries: dict[str, ComponentEntry] = {}

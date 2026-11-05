@@ -181,23 +181,23 @@ class RequestService:
         *,
         artifact_id: str | None = None,
     ) -> dict[str, Any]:
-        """The served tree plus its parent release and evaluation metrics.
+        """The served tree plus its parent snapshot and evaluation metrics.
 
         ``artifact_id`` addresses a harness artifact. ``release_id`` remains a legacy selector for older clients.
         It addresses one catalog release instead of the
-        active release, so a consumer can pin or go back by pulling an older
+        active selection, so a consumer can pin or go back by pulling an older
         tree; an unknown or unrestorable release raises ArtifactNotFound
         naming it. ``form`` chooses the ``files``: ``rendered`` (the default)
-        is the release rendered for the scenario's adapter, ``source`` is
+        is the snapshot rendered for the scenario's adapter, ``source`` is
         its source tree, the paths a patch names, and ``client`` is the
-        release as a layer for a client that installs it at ``root``, bound
+        snapshot as a layer for a client that installs it at ``root``, bound
         to the scenario's route at ``inference_url``, else at ``service_url``
         (``reef.harness.sync.layer_install``). The client form adds ``run``,
         the command that runs the agent on the files (``binary``, ``args``,
         ``env``), the agent's commands that record and remove the install
         (``register``, ``unregister``) and the agent's pinned ``install``, and ``synced``, the render templates of the files a client
         sends back. The ``evaluation`` field carries the metrics of the
-        training step that published the release, so a consumer can audit
+        training step that published the snapshot, so a consumer can audit
         what a pulled tree changed and why it was admitted before running
         it. Read-only: never creates a scenario.
         """
@@ -251,10 +251,10 @@ class RequestService:
         raises ``ArtifactConflict`` naming it. A merged tree that fails
         validation raises ``ValueError`` naming every problem. A sync that
         changes nothing publishes nothing. Otherwise the merged tree becomes
-        the active release and the harness trainer's training start in one
+        the active selection and the harness trainer's training start in one
         ``"sync"`` commit (``ScenarioCommitter.sync_artifact``). The answer
-        names the active release after the sync, the release it was merged
-        onto, whether it changed, whether it merged onto a newer release than
+        names the active selection after the sync, the snapshot it was merged
+        onto, whether it changed, whether it merged onto a newer snapshot than
         the base, the tree's paths, and the client's paths no part takes.
         """
         files = payload.get("files")
@@ -371,7 +371,7 @@ class RequestService:
 
     @staticmethod
     def harness_artifact(scenario: Scenario, artifact_id: object, legacy_revision: object) -> Artifact:
-        """The release that holds the harness a client names.
+        """The snapshot that holds the harness a client names.
 
         A client names it by ``artifact_id``, or by ``legacy_revision``, the
         release ID of an older client. When both are None, it is the active
@@ -412,7 +412,7 @@ class RequestService:
         if files is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} serves no files: snapshot {artifact.ref.revision!r} holds no "
-                "harness tree. A root release made from the default start holds the recipe's evolution.seed, so an empty seed serves "
+                "harness tree. A root snapshot made from the default start holds the recipe's evolution.seed, so an empty seed serves "
                 "nothing until a step publishes a tree."
             )
         artifact_id = scenario.components.component_artifact(artifact, component).artifact_id
@@ -423,7 +423,7 @@ class RequestService:
             "parent_artifact_id": None if row is None else row["parent_artifact_id"],
             "files": dict(files),
             "evaluation": None if row is None or row["operation"] != "training" else row.get("metrics"),
-            # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
+            # The union over the chain, not this evaluation's list: a snapshot whose request named nothing still installs an earlier extension.
             "requires": required_by(list(reversed(catalog)), artifact_id),
         }
         components = artifact.materialize().components
@@ -461,7 +461,7 @@ class RequestService:
         """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
 
         The rows are the ones ``harness_artifacts`` answers, so the step a
-        client counts there is the step this page names. The release the
+        client counts there is the step this page names. The snapshot the
         step ran on (the parent of a win, the head a rejected or skipped
         step ran on) comes through the artifact snapshot when it is
         restorable, so an updated file shows as a diff, else as its new text.
@@ -516,7 +516,7 @@ class RequestService:
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
-        # The step a request settled as counts the catalog rows, the ones the release page opens.
+        # The step a request settled as counts the catalog rows, the ones the snapshot page opens.
         rows = list(reversed(scenario.harness_rows()))
         record = request_view(scenario, record_id, rows)
         progress = self.step_progress(scenario)
@@ -587,7 +587,7 @@ class RequestService:
                 "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
         if not self._dispatcher.services.runs_control:
-            # Control commits in another process: serve the release of its newest commit.
+            # Control commits in another process: serve the snapshot of its newest commit.
             return self._dispatcher.follow_commits(scenario)
         return scenario
 

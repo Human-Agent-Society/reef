@@ -159,7 +159,7 @@ class HarnessLayout(ArtifactLayout):
 
     A directory meets it when its files, read as UTF-8 text, form a
     ``HarnessTree`` that passes ``validate_tree`` for ``descriptor``: the
-    files a release of the harness component stores.
+    files a snapshot of the harness component stores.
     Purpose: ``HarnessEvolutionRecipe.build_components`` binds it on the harness
     component; the committer checks an imported harness with it.
     """
@@ -244,7 +244,7 @@ class HarnessEvolutionRecipe(Recipe):
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     agent: AgentSettings | None = None
     model_name: str | None = None
-    #: Where this Reef answers inference: evaluation runs sample the release it serves through it.
+    #: Where this Reef answers inference: evaluation runs sample the snapshot it serves through it.
     served_endpoint: ServedEndpoint | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
@@ -446,7 +446,7 @@ class HarnessEvolutionRecipe(Recipe):
 
         With the service known and a scenario named, this Reef's own
         evaluation route for that scenario: a run then samples the
-        release the scenario serves, weights, request defaults and all, and
+        snapshot the scenario serves, weights, request defaults and all, and
         its calls are kept by nobody. Otherwise the runtime's own endpoint.
         """
         if self.runtime is None:
@@ -469,8 +469,8 @@ class HarnessEvolutionRecipe(Recipe):
     def served_through_service(self, binding: ModelBinding, scenario: str | None) -> ModelBinding:
         """``binding`` routed through this Reef's evaluation route for ``scenario``, when the service is known.
 
-        A component of a composed release names itself in the route, so the
-        release's hooks for the component a candidate replaces stay out.
+        A component of a composed snapshot names itself in the route, so the
+        snapshot's hooks for the component a candidate replaces stay out.
         """
         if self.served_endpoint is None or scenario is None:
             return binding
@@ -512,7 +512,7 @@ class HarnessEvolutionRecipe(Recipe):
         return ScenarioComponents({HARNESS_COMPONENT: harness})
 
     def default_start(self) -> DefaultStart:
-        """The seed tree, which a new scenario's root release holds unless an artifact item starts it.
+        """The seed tree, which a new scenario's root snapshot holds unless an artifact item starts it.
 
         The files are the seed tree's files; the empty seed makes a root with no files. The input is the seed
         tree's checksum.
@@ -546,9 +546,9 @@ class HarnessEvolutionRecipe(Recipe):
         root: ScenarioRoot | None = None,
     ) -> Trainer:
         """The scenario's trainer: it submits each step as a job of ``harness_component``, whose start is the
-        component's head release in ``releases``."""
+        component's head snapshot in ``releases``."""
         if artifacts is None:
-            raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
+            raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed snapshots")
         if self.evaluation.imported_tasks and samples is None:
             raise RecipeConfigError("evolution.evaluation.imported_tasks needs the samples of a scenario session")
         if self.harness_component is None:

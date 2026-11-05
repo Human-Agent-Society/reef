@@ -27,7 +27,7 @@ Environment:
   SAO_RECORDS_PATH  where one JSON line per scored rollout is appended
   SAO_SEED          sampling seed for the problem order (default 0)
   SAO_BATCH         rollouts per optimizer step (the global batch size); the
-                    driver waits for BUDGET // SAO_BATCH training releases
+                    driver waits for BUDGET // SAO_BATCH training snapshots
                     before exiting, so the stack is not torn down mid-step
   SAO_TRAIN_DRAIN_TIMEOUT_S  how long to wait for that drain (default 14400)
   SAO_PROGRESS_FILE  optional file holding the number of optimizer steps done

@@ -42,7 +42,7 @@ class ServedBesideArtifact:
 
 
 class ScenarioSnapshots:
-    """Query committed releases against one scenario's artifact chain."""
+    """Query committed snapshots against one scenario's artifact chain."""
 
     def __init__(
         self,
@@ -57,7 +57,7 @@ class ScenarioSnapshots:
         self._artifacts = artifacts
         self._store = store
         self.publication_lock = publication_lock
-        #: Where the creation artifact, the scenario's root release, came from; its row lists it as ``source``.
+        #: Where the creation artifact, the scenario's root snapshot, came from; its row lists it as ``source``.
         self.root_source = root_source
         self.recorded_creation_components: Mapping[str, str] | None = None
         self.creation_components_read = False
@@ -69,14 +69,14 @@ class ScenarioSnapshots:
 
     @property
     def creation_artifact(self) -> SnapshotRef:
-        """The scenario's root release, which the scenario was created with."""
+        """The scenario's root snapshot, which the scenario was created with."""
         return self._artifacts.start
 
     def creation_components(self, scenario_step: int, *, retry: bool = False) -> Mapping[str, str] | None:
         """The ``artifact_id`` of each component the creation artifact binds; ``None`` without a manifest or when it cannot be read.
 
         The creation artifact has no commit record to carry its manifest, so
-        it is read from the release once and kept. A read that failed is
+        it is read from the snapshot once and kept. A read that failed is
         asked again after the next commit, or at once when ``retry`` says so:
         on a remote backend a read is a fetch, which a page polled every few
         seconds must not repeat while the remote is away.
@@ -100,18 +100,18 @@ class ScenarioSnapshots:
 
     def snapshot_rows(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
         """List the creation, every training step, every import and every sync, newest first; activations and new
-        training starts are not listed. The creation row is the scenario's root release, with its ``source``.
+        training starts are not listed. The creation row is the scenario's root snapshot, with its ``source``.
 
-        ``active`` is true on the row that made the active release (see
-        :func:`active_record`), and ``activated`` on each row whose release
+        ``active`` is true on the row that made the active selection (see
+        :func:`active_record`), and ``activated`` on each row whose snapshot
         has been active at some point; the creation always has been. A step
-        that made no artifact names the release it ran on. Without a durable
+        that made no artifact names the snapshot it ran on. Without a durable
         log a scenario past step zero lists its creation and a ``recovery``
-        row for the active release.
+        row for the active selection.
         """
         with self.publication_lock:
             records = self.records()
-            # Without a durable log nothing names the active release but the chain: a recovery row stands for it.
+            # Without a durable log nothing names the active selection but the chain: a recovery row stands for it.
             recovered = not records and scenario_step > 0
             activating = [record for record in records if record.activates]
             active_id = activating[-1].snapshot.revision if activating else self._artifacts.current.revision
@@ -161,11 +161,11 @@ class ScenarioSnapshots:
             return tuple(reversed(rows))
 
     def manifests(self, scenario_step: int) -> dict[str, Mapping[str, str]]:
-        """The ``artifact_id`` of each component, by release, for every release whose manifest is known.
+        """The ``artifact_id`` of each component, by release, for every snapshot whose manifest is known.
 
-        A training record that made a release and an activation that
+        A training record that made a snapshot and an activation that
         published one carry their manifest; the creation's is read from the
-        release. Without a durable journal, the current snapshot supplies its own manifest.
+        snapshot. Without a durable journal, the current snapshot supplies its own manifest.
         Each ``scenario_step`` and current revision is read once.
         """
         current_revision = self._artifacts.current.revision
@@ -186,7 +186,7 @@ class ScenarioSnapshots:
         return known
 
     def active_components(self, scenario_step: int) -> Mapping[str, str] | None:
-        """The ``artifact_id`` of each component the active release binds; ``None`` for a flat release or when unknown."""
+        """The ``artifact_id`` of each component the active selection binds; ``None`` for a flat snapshot or when unknown."""
         record = active_record(self.records())
         if record is None:
             if self._artifacts.current != self.creation_artifact:
@@ -235,7 +235,7 @@ class ScenarioSnapshots:
         row. Creation and import rows retain their source information.
 
         ``activated`` marks an artifact that has been active at some time, and
-        ``served`` one that the scenario serves beside its active release. An
+        ``served`` one that the scenario serves beside its active selection. An
         import's row has ``source``: where its content was read from.
         """
         with self.publication_lock:
@@ -281,11 +281,11 @@ class ScenarioSnapshots:
         return {}
 
     def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedBesideArtifact]:
-        """The artifacts that the scenario serves beside its active release, by ``artifact_id``.
+        """The artifacts that the scenario serves beside its active selection, by ``artifact_id``.
 
         The result is the fold of the commit history. A ``"serve"`` record adds its artifact, and a
         ``"stop_serving"`` record removes it. An activation changes nothing here, so the result can hold an
-        artifact of the active release. A store without a durable history serves none. Each ``scenario_step``
+        artifact of the active selection. A store without a durable history serves none. Each ``scenario_step``
         is read once.
         """
         if self.served_read is not None and self.served_read[0] == scenario_step:
@@ -333,9 +333,9 @@ class ScenarioSnapshots:
         activated: bool,
         served: bool,
     ) -> dict[str, Any]:
-        """One artifact row: the release row's fields that describe the step that made it, under its own identity.
+        """One artifact row: the snapshot row's fields that describe the step that made it, under its own identity.
 
-        ``served`` is true when the scenario serves the artifact beside its active release (``served_beside``).
+        ``served`` is true when the scenario serves the artifact beside its active selection (``served_beside``).
         """
         listed: dict[str, Any] = {
             "artifact_id": artifact_id,
@@ -388,7 +388,7 @@ class ScenarioSnapshots:
     def artifact_for_version(self, revision: str) -> Artifact:
         """Materialize a scenario release for a read-only content serve.
 
-        The read-side counterpart of ``activate``: the same release lookup,
+        The read-side counterpart of ``activate``: the same snapshot lookup,
         but no head moves and no commit is written; the caller only wants the
         version's file tree. Every failure is ``ArtifactNotFound`` naming the
         version (not ``SnapshotNotRestorable``, which answers a rejected
@@ -401,7 +401,7 @@ class ScenarioSnapshots:
         with self.publication_lock:
             found = self.find_snapshot(revision)
         if found is None:
-            raise ArtifactNotFound(f"scenario {self._name!r} has no release {revision!r}")
+            raise ArtifactNotFound(f"scenario {self._name!r} has no snapshot {revision!r}")
         ref, _ = found
         try:
             return self._artifacts.resolve(ref)

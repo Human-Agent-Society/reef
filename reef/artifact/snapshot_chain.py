@@ -10,7 +10,7 @@ from reef.core.errors import ReefError
 
 
 class SnapshotNotRestorable(ReefError):
-    """A release has identity but no durable bytes to restore."""
+    """A snapshot has identity but no durable bytes to restore."""
 
 
 class ArtifactSnapshotChain:
@@ -35,7 +35,7 @@ class ArtifactSnapshotChain:
 
     @property
     def start(self) -> SnapshotRef:
-        """The scenario's root release."""
+        """The scenario's root snapshot."""
         return self._repository.start_artifact
 
     @property

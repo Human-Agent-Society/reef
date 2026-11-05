@@ -69,7 +69,7 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
-#: The remote tracking ref naming the release a workspace fetched last, a commit the remote already holds.
+#: The remote tracking ref naming the snapshot a workspace fetched last, a commit the remote already holds.
 FETCHED_RELEASE_REF = "refs/remotes/origin/reef-fetched"
 
 
@@ -78,10 +78,10 @@ class RefLayout:
     """Where the backend keeps its refs in the repository (RFC #1002).
 
     Values: ``moving`` is the prefix of the refs that move (each scenario's registration and head), and ``fixed``
-    the prefix of the refs that never move once written (each release, and each
+    the prefix of the refs that never move once written (each snapshot, and each
     archived scenario head); both are full ref prefixes that end in ``/``. ``REEF_REFS`` keeps both under
     ``refs/reef/``. ``HUB_REFS`` puts the moving refs on branches and the fixed refs on tags, the only refs that the
-    Hugging Face Hub accepts. A release's ID is its commit under both, so on the Hub it is a revision.
+    Hugging Face Hub accepts. A snapshot's ID is its commit under both, so on the Hub it is a revision.
     Purpose: ``GitLFSSettings.refs`` selects one; the backend and its factory name every ref through it.
     """
 
@@ -199,7 +199,7 @@ class _GitWorkspace:
                 child.unlink()
         target = self.clone_dir if subdirectory is None else self.clone_dir / subdirectory
         target.mkdir(parents=True, exist_ok=True)
-        # Released files are immutable, so the work tree links them rather than copying a checkpoint per step.
+        # Stored files are immutable, so the work tree links them rather than copying a checkpoint per step.
         for child in source.iterdir():
             destination = target / child.name
             if child.is_dir():
@@ -323,11 +323,11 @@ class _GitWorkspace:
     def fetch_version(self, version: str) -> str:
         """Fetch ``version`` from the remote and return its commit id.
 
-        Every publish path fetches the release it builds on or pushes through
+        Every publish path fetches the snapshot it builds on or pushes through
         here. The remote holds that commit and its history, and a remote
         tracking ref records it, so the LFS pre push check scans only the
-        commits a later push adds, not the older releases whose objects this
-        clone never fetched. A push to a new ref, such as a release saved for
+        commits a later push adds, not the older snapshots whose objects this
+        clone never fetched. A push to a new ref, such as a snapshot saved for
         review without moving the head, has no remote commit of its own to stop
         the scan.
         """
@@ -380,13 +380,13 @@ def same_file(first: Path, second: Path) -> bool:
 
 
 def write_fresh(path: Path, text: str) -> None:
-    """Write ``text`` to a new inode: a work tree file may be a link to a released or cached file."""
+    """Write ``text`` to a new inode: a work tree file may be a link to a stored or cached file."""
     path.unlink(missing_ok=True)
     path.write_text(text, encoding="utf-8")
 
 
 def materialized_metadata(checkout: Path) -> Mapping[str, object]:
-    """The release metadata recorded in a materialized checkout's manifest; a bootstrap tree has none."""
+    """The snapshot metadata recorded in a materialized checkout's manifest; a bootstrap tree has none."""
     manifest_path = checkout / _MANIFEST
     if not manifest_path.is_file():
         return {}
@@ -463,10 +463,10 @@ class _ArtifactManifest:
 
 
 class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
-    """The releases of one scenario in a Git LFS repository.
+    """The snapshots of one scenario in a Git LFS repository.
 
-    The scenario's ref names its head. ``register`` pushes the scenario's root release, a commit with no parent, to
-    that ref; each later release is a descendant of the root. Scenarios of one repository share no release.
+    The scenario's ref names its head. ``register`` pushes the scenario's root snapshot, a commit with no parent, to
+    that ref; each later snapshot is a descendant of the root. Scenarios of one repository share no snapshot.
     """
 
     def __init__(
@@ -611,7 +611,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         ``materialize`` links the files and pulls nothing.
         """
         if root.local_path is None or not root.local_path.is_dir():
-            raise ArtifactPublicationError("a root release needs an existing local artifact directory")
+            raise ArtifactPublicationError("a root snapshot needs an existing local artifact directory")
         with self._workspace.lock:
             existing = self._workspace.ls_remote(self.ref_name)
             if existing is not None:
@@ -732,7 +732,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 )
             self.bind_artifact_ids(self.stored_snapshot(commit))
             if not advance_head:
-                # A pending release lives under the releases namespace; the scenario's ref and the head stay put.
+                # A pending snapshot lives under the snapshots namespace; the scenario's ref and the head stay put.
                 self._workspace.push(f"+{commit}:{self.refs.snapshot(commit)}")
                 if not linked:
                     self._cache_snapshot(commit, artifact.local_path, paths, files)
@@ -755,7 +755,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         """Fill a just-published release's cache entry from the staged tree it was committed from.
 
         The staged files hold the committed bytes, so the entry links them
-        instead of cloning the release and pulling its LFS objects back. An
+        instead of cloning the snapshot and pulling its LFS objects back. An
         entry that cannot be filled is cloned by the first ``materialize``.
         """
         destination = self.cache_dir / revision
@@ -780,12 +780,12 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         with self._workspace.lock:
             staged = self.resolve_snapshot(ref.revision)
             if staged != ref or ref.parent_revision != expected_parent.revision:
-                raise ArtifactPublicationError("committed release differs from its staged identity or parent")
+                raise ArtifactPublicationError("committed snapshot differs from its staged identity or parent")
             current = self._workspace.ls_remote(self.ref_name)
             if current == ref.revision:
                 return
             if current != expected_parent.revision:
-                raise ArtifactConflict("repository head changed before the staged release was committed")
+                raise ArtifactConflict("repository head changed before the staged snapshot was committed")
             try:
                 self._workspace.force_push_with_lease(
                     f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
@@ -796,7 +796,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 if current == ref.revision:
                     return
                 if current != expected_parent.revision:
-                    raise ArtifactConflict("repository head changed while committing a staged release") from exc
+                    raise ArtifactConflict("repository head changed while committing a staged snapshot") from exc
                 raise
 
     def _open_repository(self) -> None:
@@ -894,8 +894,8 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         """Rename the scenario's ref into the layout's ``archived/<scenario>/<time>`` and drop its work clone.
 
         The commits stay reachable under the archived ref, so nothing the
-        scenario published is lost; its pending releases stay under the
-        releases namespace. Only a local bare
+        scenario published is lost; its pending snapshots stay under the
+        snapshots namespace. Only a local bare
         repository can be renamed in place.
         """
         if not isinstance(self._repository, Path):

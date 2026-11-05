@@ -1,4 +1,4 @@
-"""Artifacts served beside the active release, each at its own URL (RFC #997)."""
+"""Artifacts served beside the active selection, each at its own URL (RFC #997)."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
 
 class ArtifactEcho(InferenceHandler):
-    """Answer each call with the release it was given, so a test sees which release answered."""
+    """Answer each call with the snapshot it was given, so a test sees which snapshot answered."""
 
     def __init__(self) -> None:
         self.artifact_ids: list[str] = []
@@ -68,7 +68,7 @@ def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, Repository
 
 
 def answering_each_artifact(runtime) -> None:
-    """Make the stub runtime answer each call from the release that the call names, as Tinker does."""
+    """Make the stub runtime answer each call from the snapshot that the call names, as Tinker does."""
     runtime.inference.answers_each_artifact = True
 
 
@@ -120,13 +120,13 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
                 f"/reef/scenarios/math/artifacts/{older['artifact_id']}/v1/chat/completions", json=CHAT
             )
             assert beside.status == 200
-            # The active release answers at its artifact's URL without a serve.
+            # The active selection answers at its artifact's URL without a serve.
             active = await client.post(
                 f"/reef/scenarios/math/artifacts/{newest['artifact_id']}/v1/chat/completions", json=CHAT
             )
             assert active.status == 200
             assert handler.artifact_ids == [newest["artifact_id"], older["artifact_id"], newest["artifact_id"]]
-            # The record names the release that answered.
+            # The record names the snapshot that answered.
             record_id = beside.headers["x-reef-agent-record-id"]
             record = value.get_or_create_scenario("math").records.get("math", record_id)
             assert record.artifact_id == older["artifact_id"]
@@ -170,7 +170,7 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     assert newest["artifact_id"] not in scenario.served_beside()
     with pytest.raises(ArtifactNotFound):
         value.stop_serving("math", newest["artifact_id"])
-    # The active release still answers at its artifact's URL; the stopped artifact has no row.
+    # The active selection still answers at its artifact's URL; the stopped artifact has no row.
     wait_for_serving(value)
     rows = value.coordination.served_models.read_scenario("math")
     assert older["artifact_id"] in rows and newest["artifact_id"] not in rows
@@ -205,7 +205,7 @@ def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_serve(tmp
     older = value.get_or_create_scenario("math").artifacts()[-1]
     scenario = value.get_or_create_scenario("math")
     steps = len(scenario.store.history())
-    with pytest.raises(ReefError, match="answers only from the release it has loaded"):
+    with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
         value.serve("math", older["artifact_id"])
     assert len(scenario.store.history()) == steps
     value.close()
