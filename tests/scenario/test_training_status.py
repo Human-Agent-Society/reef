@@ -311,7 +311,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         algorithm_state: Mapping[str, object] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:

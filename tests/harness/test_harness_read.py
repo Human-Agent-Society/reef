@@ -84,7 +84,7 @@ def test_current_files_never_creates_a_scenario(tmp_path) -> None:
 
 
 def test_manifest_error_distinguishes_a_scenario_without_a_published_tree(tmp_path) -> None:
-    # A scenario exists and its recipe has a harness components, but its release holds no tree yet. The message must
+    # A scenario exists and its recipe has a harness components, but its snapshot holds no tree yet. The message must
     # tell the operator that nothing has been published, not that the components is missing.
     service = _service(tmp_path, recipe=_HarnessRecipe(rules=None))
     with pytest.raises(ArtifactNotFound, match="holds no harness tree"):

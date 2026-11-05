@@ -201,7 +201,7 @@ and generation window are constants at the top of `harness/agent.py`, and
 the port and token they use are the ones written in `serve.yaml`. The task
 list is `TASKS` in `run.py`.
 
-### Reading the release chain and the metrics
+### Reading the snapshot chain and the metrics
 
 Each scored rollout publishes one `training` entry to the scenario's version
 chain:

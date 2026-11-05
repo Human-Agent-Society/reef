@@ -16,7 +16,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class ImportingInference(StubInferenceRuntime):
-    """Serve each release under the version that its materialized ``model.txt`` names; the initial one is ``w0``.
+    """Serve each snapshot under the version that its materialized ``model.txt`` names; the initial one is ``w0``.
 
     ``restore_order`` is shared with the training component, so a test sees which side an operation reached first.
     """
@@ -34,7 +34,7 @@ class ImportingInference(StubInferenceRuntime):
 
 
 class ImportingComponent(StubTrainingComponent):
-    """A component whose ``n``-th job saves ``w<n>``; ``train-from`` imports a release as the next job's start.
+    """A component whose ``n``-th job saves ``w<n>``; ``train-from`` imports a snapshot as the next job's start.
 
     ``inference`` is the runtime that serves its checkpoints. ``activated`` lists the versions that it served, and
     ``trained`` counts the submitted jobs.

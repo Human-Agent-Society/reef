@@ -1,4 +1,4 @@
-"""How a weight-training deployment serves its releases, from its ``inference`` settings alone.
+"""How a weight-training deployment serves its snapshots, from its ``inference`` settings alone.
 
 The serving runtime is chosen and configured here, not by the training
 backend. ``serving_mode`` reads ``inference.serving`` (or its default), and
@@ -25,7 +25,7 @@ from reef.inference.interfaces import InferenceHandler
 from reef.service.deploy.service_config import ServiceConfig
 from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
 
-#: Reef's engines on an inference component serve the releases.
+#: Reef's engines on an inference component serve the snapshots.
 ENGINES = "engines"
 #: The training backend's own serving runtime serves them, such as Tinker's sampler.
 TRAINER = "trainer"
@@ -33,7 +33,7 @@ TRAINER = "trainer"
 NONE = "none"
 
 #: Native options that Reef sets itself for a serving engine, in SGLang's names: the managed engine's,
-#: and the adapter table that the release format and inference.max-loaded-adapters set.
+#: and the adapter table that the artifact format and inference.max-loaded-adapters set.
 INFERENCE_RESERVED_OPTIONS = MANAGED_ENGINE_OPTIONS | {
     "enable-lora",
     "max-lora-rank",
@@ -107,7 +107,7 @@ def serving_mode(settings: ServiceConfig, backend: TrainingDeployment) -> str:
     if selected != ENGINES and configured:
         raise DeployConfigError(f"inference.serving: {selected} runs no Reef engine; remove {', '.join(configured)}")
     if selected == TRAINER and backend.trainer_serving_config(asdict(settings)) is None:
-        raise DeployConfigError("inference.serving: trainer needs a training backend that serves its own releases")
+        raise DeployConfigError("inference.serving: trainer needs a training backend that serves its own snapshots")
     if ":" not in selected and settings.inference_serving_config:
         raise DeployConfigError("inference.serving-config configures a module:Factory serving runtime only")
     return selected
@@ -164,8 +164,8 @@ def serving_runtime_config(
     settings, the inference component of ``inference.remote`` and the
     ``rollout`` role's executor. ``trainer`` gives the backend's own config,
     and ``none`` the null runtime. A ``module:Factory`` gets
-    ``inference.serving-config`` and the release format as ``artifact_format``
-    (``None`` when the releases hold no weight files). Raise
+    ``inference.serving-config`` and the artifact format as ``artifact_format``
+    (``None`` when the snapshots hold no weight files). Raise
     ``DeployConfigError`` when Reef's engines would serve releases without
     weight files.
     """
@@ -175,7 +175,9 @@ def serving_runtime_config(
     if mode == TRAINER:
         own = backend.trainer_serving_config(asdict(settings))
         if own is None:
-            raise DeployConfigError("inference.serving: trainer needs a training backend that serves its own releases")
+            raise DeployConfigError(
+                "inference.serving: trainer needs a training backend that serves its own snapshots"
+            )
         return own
     if mode != ENGINES:
         return {
