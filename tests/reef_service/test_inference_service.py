@@ -15,7 +15,7 @@ from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import EngineClients, InferenceHandler
-from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, RELEASE_HEADER, build_inference_app
+from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination
@@ -87,7 +87,7 @@ async def ask(tmp_path: Path, *, write: bool = True) -> tuple[int, dict[str, Any
 def test_a_request_goes_to_the_served_artifact_and_its_record_joins_the_record_store(tmp_path: Path) -> None:
     status, headers, records = asyncio.run(ask(tmp_path))
     assert status == 200
-    assert headers[ARTIFACT_HEADER] == headers[RELEASE_HEADER] == "release-1"
+    assert headers[ARTIFACT_HEADER] == "release-1"
     (item,) = inference_records(records)
     assert item.agent_record_id == headers[RECORD_HEADER]
     assert item.artifact_id == "release-1"
@@ -286,7 +286,7 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
                     assert await response.json() == {"artifact_id": "release-2", "state": "pending", "error": None}
                     response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                     assert response.status == 200
-                    assert response.headers[ARTIFACT_HEADER] == response.headers[RELEASE_HEADER] == "release-1"
+                    assert response.headers[ARTIFACT_HEADER] == "release-1"
         finally:
             storage.close()
             coordination.close()

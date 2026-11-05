@@ -139,7 +139,7 @@ Online: learn from your sessions
      -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
 
    # The steps and their results; a row with "selected": true is a new release.
-   curl -s -H "x-reef-scenario: <scenario>" http://127.0.0.1:8901/reef/harness/releases
+   curl -s -H "x-reef-scenario: <scenario>" http://127.0.0.1:8901/reef/harness/artifacts
 
 The next ``pi`` session starts on the new active release. `Tutorial: evolve your
 agent's harness <../getting-started/harness-tutorial.rst>`__ walks through
@@ -192,7 +192,7 @@ The example runs the online way without a person:
 
 ``configs/serve.yaml`` holds the endpoint, the model and the token. Three
 exact-answer tasks go through Reef, and each graded reply is one step. The
-run succeeds when a row of ``/reef/harness/releases`` shows ``selected:
+run succeeds when a row of ``/reef/harness/artifacts`` shows ``selected:
 true``. When both sides score nothing, no run gave an answer: vLLM, for
 example, needs ``--enable-auto-tool-choice --tool-call-parser hermes``. See
 `Troubleshooting <troubleshooting.rst>`__.
@@ -392,8 +392,8 @@ screens each prompt, and caps them at ``max_collected_per_client`` (5) and
 History
 ~~~~~~~
 
-- ``GET /reef/harness/releases`` has a row per step: the patch, the scores,
-  the method's summary and its cost. ``/reef/harness/releases/<step>/page``
+- ``GET /reef/harness/artifacts`` has a row per step: the patch, the scores,
+  the method's summary and its cost. ``/reef/harness/artifacts/<step>/page``
   explains one step.
 - ``<evolution.state_dir>/<scenario>/harness/`` keeps ``history/`` (every
   tree, run and decision; the score cache) and ``steps/<step>/`` (each
@@ -485,7 +485,7 @@ the deployment's top-level ``activation`` section (`Configuration
 - A kind that is always reviewed, such as native's ``native_loop``, always
   waits.
 
-An inactive release sits in ``GET /reef/harness/releases`` with ``active:
+An inactive release sits in ``GET /reef/harness/artifacts`` with ``active:
 false`` and ``activated: false``, and Reef serves it to no client. The next
 steps train from it in the meantime. To serve it, send the row's
 ``artifact_id`` to the activate route. The same route serves an earlier

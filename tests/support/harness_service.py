@@ -32,8 +32,7 @@ from reef.evaluation.harness import ComparePolicy
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.scenario.scenario import Scenario
-from reef.service.request_service import RequestService
+from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
 from reef.storage.sql_coordination import memory_coordination
 from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
@@ -194,8 +193,15 @@ def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
 
 
 def catalog(scenario: Scenario) -> list[dict[str, Any]]:
-    """The catalog rows of ``scenario``, newest first, as ``GET /reef/harness/releases`` lists them."""
-    return RequestService.legacy_harness_rows(scenario)
+    """The catalog rows of ``scenario``, newest first, as ``GET /reef/harness/artifacts`` lists them."""
+    rows = []
+    for row in scenario.harness_snapshot_rows():
+        snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
+        listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
+        listed["release_id"] = selected.revision
+        listed["parent_release_id"] = snapshot.parent_revision if parent is None else parent.revision
+        rows.append(listed)
+    return rows
 
 
 #: Each backend's scenario step: the steps ``backend_step`` ran on it.

@@ -48,7 +48,7 @@ class ComponentJobs(StubTrainingComponent):
     """
 
     def __init__(self, component: str, artifact_dir: Path) -> None:
-        super().__init__(artifact_dir, name=component, shares_scenarios=True, release_format=None)
+        super().__init__(artifact_dir, name=component, shares_scenarios=True, artifact_format=None)
         self.component = component
         self.artifact_dir = artifact_dir
         self.prepared = 0
@@ -58,7 +58,7 @@ class ComponentJobs(StubTrainingComponent):
         self.started: str | None = None
 
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
-        return frozenset({HELD}) if checkpoint.release_path in self.held_paths else frozenset()
+        return frozenset({HELD}) if checkpoint.artifact_path in self.held_paths else frozenset()
 
     def unblock(self) -> None:
         """Let go of any step the test holds, so the dispatcher can close."""
