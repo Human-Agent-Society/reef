@@ -125,12 +125,12 @@ durable store, the order is:
    * - Commit kind
      - Order after trainer preparation
    * - Activated artifact
-     - Stage the bytes, load them into serving, publish the durable snapshot,
+     - Stage the bytes, publish the durable snapshot,
        commit the store with ``activated: true``, install the committed heads,
        synchronize the backend pointer, apply trainer state.
    * - Activation
-     - Check the selected artifact. A standalone scenario loads it first;
-       a service scenario defers loading until the selection commits. Append
+     - Check the selected artifact. Inference loads it after the selection
+       commits. Append
        an ``activate`` operation with the complete component mapping.
        Publish no artifact snapshot. Recovery restores the committed mapping,
        including every unchanged component.

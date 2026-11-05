@@ -1017,7 +1017,7 @@ def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["stage", "publish", "activation", "commit_history"])
+@pytest.mark.parametrize("failure_point", ["stage", "publish", "commit_history"])
 def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, monkeypatch, failure_point) -> None:
     agent_record_dir = tmp_path / "records" if failure_point == "commit_history" else None
     dispatcher, backend = _build_saved_artifact_dispatcher(
@@ -1044,9 +1044,6 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         target = scenario.store.commit_history
         method_name = "append"
         assert target is not None
-    elif failure_point == "activation":
-        target = committer
-        method_name = "_activate"
     else:
         target = committer._artifacts
         method_name = failure_point
