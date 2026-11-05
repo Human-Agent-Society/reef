@@ -213,7 +213,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             experiment_tracker=self.experiment_tracker,
             admission=scenario_admission,
             lifecycle=self,
-            activates_runtime=False,
             served_models=coordination.served_models,
             training_requests=TrainingRequestQueue(self.queue),
         )

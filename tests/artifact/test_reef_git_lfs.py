@@ -102,6 +102,30 @@ def test_artifact_identity_survives_publication_and_a_fresh_git_cache(tmp_path: 
     assert recovered.materialize(recovered.resolve_snapshot(initial.revision)).artifact_id == root.artifact_id
 
 
+def test_a_batch_lookup_gives_each_binding_as_one_lookup_does(tmp_path: Path, fake_git_lfs: None) -> None:
+    remote = tmp_path / "artifacts.git"
+    backend = GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    root = root_tree(tmp_path / "root", {"rules.md": "initial"})
+    head = backend.register(root, metadata={})
+    trained = root_tree(tmp_path / "trained", {"rules.md": "updated"})
+    backend.publish(trained, expected_parent=head)
+
+    fresh = GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "fresh", cache_dir=tmp_path / "fresh-cache")
+    found = fresh.artifact_snapshots({root.artifact_id, trained.artifact_id, "artifact:missing"})
+    assert found == {
+        root.artifact_id: backend.artifact_snapshot(root.artifact_id),
+        trained.artifact_id: backend.artifact_snapshot(trained.artifact_id),
+    }
+    assert fresh.artifact_snapshots(set()) == {}
+
+
+def test_the_default_batch_lookup_leaves_out_an_id_without_a_binding(tmp_path: Path) -> None:
+    backend = InMemoryRepositoryBackend("math", directory=tmp_path / "stored")
+    root = root_tree(tmp_path / "root", {"rules.md": "initial"})
+    stored = backend.register(root, metadata={})
+    assert backend.artifact_snapshots({root.artifact_id, "artifact:missing"}) == {root.artifact_id: stored}
+
+
 @pytest.mark.parametrize("storage", ["memory", "git"])
 def test_artifact_id_binding_is_immutable_and_scoped_to_its_scenario(
     tmp_path: Path, fake_git_lfs: None, storage: str
