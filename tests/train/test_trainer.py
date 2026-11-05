@@ -32,7 +32,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
-from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe import WeightTrainingRecipe
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.storage.commit_history import CommitHistoryScenarioStore
@@ -44,7 +44,6 @@ from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.trainer import PendingTrainingResult
@@ -353,9 +352,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor = threshold_pipeline(PipelineContext("math"))
     sft_processor.push(inference("i1"))
     sft_processor.push(report("r1", "i1", 1.0))
-    sft_result = prepare_slime_job(
-        sft_processor.build_job_data(1), TrainingMethod("sft"), {}, StepScheduling(), step_size=1
-    )
+    sft_result = prepare_slime_job(sft_processor.build_job_data(1), "sft", {}, StepScheduling(), step_size=1)
     assert sft_result.next_algorithm_state == {"steps": 1}
 
     grpo_processor = grouped_policy_pipeline(PipelineContext("math"))
@@ -363,7 +360,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
         grpo_processor.push(inference(rid))
         grpo_processor.push(report("r" + rid, rid, score, comparison_set="x"))
     result = prepare_slime_job(
-        grpo_processor.build_job_data(1), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
+        grpo_processor.build_job_data(1), _GROUPED_PG_OBJECTIVE, {}, StepScheduling(), step_size=1
     )
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
@@ -662,8 +659,8 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     # define-a-recipe guide describes, kept local to this suite.
     class GroupedPgRecipe(WeightTrainingRecipe):
         @classmethod
-        def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(objective=_GROUPED_PG_OBJECTIVE)
+        def default_parameters(cls):
+            return {kind: {"objective": _GROUPED_PG_OBJECTIVE} for kind in ("trajectory", "task")}
 
         def build(
             self,
@@ -708,12 +705,10 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         assert time.monotonic() < deadline, "the training job did not finish"
         time.sleep(0.001)
     [job] = component.submitted
-    assert TrainingMethod.from_dict(job.parameters["method"]) == TrainingMethod(_GROUPED_PG_OBJECTIVE)
+    assert job.parameters == {"objective": _GROUPED_PG_OBJECTIVE}
     # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
     assert [trajectory_reward(item) for item in read_job_data(job.data_dir).samples] == [0.2, 0.8]
-    prepared = prepare_slime_job(
-        read_job_data(job.data_dir), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
-    )
+    prepared = prepare_slime_job(read_job_data(job.data_dir), _GROUPED_PG_OBJECTIVE, {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
     # After the root snapshot, the job's checkpoint is what the scenario serves.
@@ -737,7 +732,7 @@ def test_the_slime_sao_row_defaults_the_action_mask_to_the_loss_mask_of_a_render
     assert "action_mask" not in sample.training
     rendered, left_out = rendered_job_data(batch, CharTemplate())
     assert left_out == ()
-    prepared = prepare_slime_job(rendered, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
+    prepared = prepare_slime_job(rendered, "sao", {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     (row,) = prepared.payload["samples"]
     loss_mask, action_mask, producing_artifact_id = row[2], row[5], row[6]
@@ -755,7 +750,7 @@ def test_reported_samples_leave_rendering_and_tensor_validation_to_the_training_
     (sample,) = batch.samples
     # The stage stores the trajectory without tensors; a job that is prepared without rendering it fails explicitly.
     assert "tokens" not in sample.training
-    prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
+    prepared = prepare_slime_job(batch, "sao", {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)

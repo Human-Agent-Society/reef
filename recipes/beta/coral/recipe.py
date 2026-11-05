@@ -16,13 +16,16 @@ recipe reuses; ``reef serve`` finds it beside the example config.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 # The tttd training objective and loss-family reference live in the repository
 # cookbook; importing them is what registers both names this recipe binds.
 import recipes.tttd  # noqa: F401  (registration side effect)
 from recipes.beta.coral.processor import CoralJobData, CoralSamples
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -36,8 +39,8 @@ class CoralRecipe(WeightTrainingRecipe):
     name: str = "coral"
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="tttd")
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "tttd"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

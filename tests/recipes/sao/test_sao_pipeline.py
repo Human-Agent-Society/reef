@@ -50,7 +50,6 @@ from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -255,14 +254,14 @@ def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_wit
 def test_backend_keeps_an_explicit_observation_boundary_and_defaults_the_action_mask_to_the_loss_mask() -> None:
     # Response tokens: action, observation, action. loss_mask trains only the action tokens.
     explicit = prepare_slime_job(
-        _sao_job(loss_mask=[1, 0, 1], action_mask=[1, 0, 1]), TrainingMethod("sao"), {}, StepScheduling(), step_size=1
+        _sao_job(loss_mask=[1, 0, 1], action_mask=[1, 0, 1]), "sao", {}, StepScheduling(), step_size=1
     )
     assert explicit.payload is not None
     (row,) = explicit.payload["samples"]
     assert (row[2], row[5]) == ([1, 0, 1], [1, 0, 1])
     # A rendered sample has no action mask: its actions are the tokens that it trains.
     rendered = prepare_slime_job(
-        _sao_job(loss_mask=[1, 0, 1], action_mask=[]), TrainingMethod("sao"), {}, StepScheduling(), step_size=1
+        _sao_job(loss_mask=[1, 0, 1], action_mask=[]), "sao", {}, StepScheduling(), step_size=1
     )
     assert rendered.payload is not None
     (row,) = rendered.payload["samples"]
@@ -282,7 +281,7 @@ def test_backend_keeps_an_explicit_observation_boundary_and_defaults_the_action_
     ],
 )
 def test_backend_rejects_malformed_rollout_tensors(training: dict[str, Any]) -> None:
-    prepared = prepare_slime_job(_sao_job(**training), TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
+    prepared = prepare_slime_job(_sao_job(**training), "sao", {}, StepScheduling(), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
 
@@ -336,7 +335,7 @@ def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    result = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
+    result = prepare_slime_job(batch, "sao", {}, StepScheduling(), step_size=1)
 
     assert result.payload is not None and result.payload["loss"] == "sao"
     assert "advantages" not in result.payload
@@ -350,8 +349,8 @@ def test_backend_preparation_advances_step_state() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    first = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
-    second = prepare_slime_job(batch, TrainingMethod("sao"), first.next_algorithm_state, StepScheduling(), step_size=1)
+    first = prepare_slime_job(batch, "sao", {}, StepScheduling(), step_size=1)
+    second = prepare_slime_job(batch, "sao", first.next_algorithm_state, StepScheduling(), step_size=1)
 
     assert first.next_algorithm_state == {"steps": 1}
     assert second.next_algorithm_state == {"steps": 2}
@@ -378,9 +377,9 @@ class _SAOComponent(StubTrainingComponent):
         assert left_out == ()
         prepared = prepare_slime_job(
             data,
-            TrainingMethod.from_dict(job.parameters["method"]),
+            job.parameters["objective"],
             {},
-            StepScheduling.from_parameters(job.parameters),
+            StepScheduling(**job.parameters.get("scheduling", {})),
             step_size=1,
         )
         assert prepared.payload is not None
@@ -440,8 +439,7 @@ def _checkpoint_commits(dispatcher: Dispatcher) -> list[CommitRecord]:
 def test_sao_submits_every_batch_with_the_sao_objective() -> None:
     parameters = SAORecipe(**runtime_bindings()).parameters_by_kind()["trajectory"]
 
-    assert TrainingMethod.from_dict(parameters["method"]) == TrainingMethod("sao")
-    assert set(parameters) == {"method"}, "the training component owns the step schedule"
+    assert parameters == {"objective": "sao"}, "the training component owns the step schedule"
 
 
 @pytest.mark.integration

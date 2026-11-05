@@ -1,28 +1,29 @@
 Loss families
 =============
 
-A method's ``TrainingObjective`` owns signal preparation and declares its
+A method's objective owns signal preparation and declares its
 ``loss_family``. A loss family implements the model-dependent computation for
 one backend. Preparation runs on the job's full data; tensor loss hooks run after
 the backend's forward passes.
 
-- ``recipes/<name>/objective.py`` holds the backend-neutral objective.
-  ``reef/train/algos/`` defines its shared contract and registry.
-- ``reef/train/slime_backend/`` holds Slime integration machinery; each
-  method's Slime implementation lives in ``recipes/<name>/slime/``. Its spec
-  is torch-free code that runs in the Slime component's process, and its
-  ``objective.py`` contains worker hooks.
-- Methods can also supply a Tinker loss implementation. TTTD shares one
-  preparation method between its Slime and Tinker implementations.
+- ``reef/train/slime_backend/`` holds Slime integration machinery, with the
+  ``SlimeObjective`` base class and its registry in ``objectives.py``. Each
+  method's Slime implementation lives in ``recipes/<name>/slime/``. Its
+  ``__init__.py`` holds the objective and the spec, torch-free code that runs in
+  the Slime component's process, and its ``objective.py`` contains worker hooks.
+- Methods can also supply a ``TinkerObjective`` and a Tinker loss implementation.
+  TTTD shares one signal function between its Slime and Tinker objectives.
 
-A recipe binds ``WeightTrainingSpec(objective=...)``.
-``WeightTrainingSpec.loss_family`` derives the family from that objective, and
-``TrainingSignal`` carries advantages, metrics and proposed state. The training
+A recipe names its objective in ``default_parameters()``, a parameter that Reef
+reads as opaque data. ``TrainingSignal`` carries advantages, metrics and proposed
+state. The training
 component cuts each job's data into optimizer steps of its batch size. The
 objective's ``rollout_unit`` keeps each sample, or each comparison set, in one
 step; the job's optional ``scheduling`` parameter sets the passes, the order
 and the last step (`Python API <../reference/python-api.rst>`__).
-The workers start with that objective's family. A job that selects another
+The Slime backend reads the objective of the recipe's parameters when it connects
+(trajectory kind first, then task kind), and the workers start with that
+objective's family. A job that selects another
 objective trains that objective's family on the same workers (see
 `Per-job families`_).
 
@@ -36,12 +37,12 @@ Layout
                      wire row's shaper and payload builder live here too
      objective.py    the @objective hooks, torch
 
-A package ``__init__`` registers its family by reference
-(``register_loss_family_ref("<name>", "my_pkg.slime:MyAlgorithm")``);
+A package ``__init__`` registers its objective and its family by reference
+(``register_objective_ref("<name>", "my_pkg.slime:MyObjective")`` and
+``register_loss_family_ref("<name>", "my_pkg.slime:MyAlgorithm")``);
 ``loss_families.py`` imports the reference on first resolve so
 ``@register_loss_family`` runs at boot. An external family decorates its class
-the same way. The recipe names it in ``training_spec().loss_family``; Reef
-reads that binding after it imports the configured recipe class. Resolving the
+the same way. The objective names it in ``loss_family``. Resolving the
 reference imports the module, which registers the family. The Slime component
 also keeps the reference on ``args.loss_family_ref``, so each Megatron worker,
 whose registry starts empty, can import it too.

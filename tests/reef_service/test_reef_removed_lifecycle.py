@@ -152,7 +152,7 @@ def test_naming_unification_renames_are_complete() -> None:
 
     # The objective id is no longer called "algorithm".
     assert not hasattr(WeightTrainingRecipe, "algorithm")
-    assert WeightTrainingRecipe.training_spec().objective == ""
+    assert WeightTrainingRecipe.default_parameters() == {}
     assert not hasattr(Trainer, "algorithm")
     assert not hasattr(Trainer, "objective")
     assert not hasattr(Scenario, "algorithm")
@@ -197,10 +197,10 @@ def test_online_grpo_objective_and_recipe_are_removed() -> None:
     data recipe, with nothing in it addressing drift on a continually updated
     policy."""
     from reef.recipe.registry import recipe_class_for
-    from reef.train.algos.registry import resolve_objective
+    from reef.train.slime_backend.objectives import resolve_slime_objective
 
-    with pytest.raises(ValueError, match="unknown objective"):
-        resolve_objective("online_grpo")
+    with pytest.raises(ValueError, match="unknown Slime objective"):
+        resolve_slime_objective("online_grpo")
     assert recipe_class_for("online_grpo") is None
     assert recipe_class_for("online_rft") is None
 

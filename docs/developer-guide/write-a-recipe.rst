@@ -76,7 +76,7 @@ A weight recipe is four pieces plus the class that binds them.
 .. container:: config
 
    ``training objective``
-       a ``TrainingObjective`` declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch, Ray, or Slime import.
+       a backend's objective (``SlimeObjective`` or ``TinkerObjective``) declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch or Ray import at module scope.
 
    ``pipeline stages``
        the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
@@ -85,12 +85,12 @@ A weight recipe is four pieces plus the class that binds them.
        the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
 
    ``recipe class``
-       a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path); ``parameters_by_kind()`` gives each training job's parameters by the kind of its samples
+       a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``default_parameters()`` gives each training job's parameters by the kind of its samples, normally the ``objective`` by registered name or dotted class/instance path
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
 ``recipes/sao/`` is the smallest cookbook implementation and the one to read
-alongside this page. Its ``recipe.py``, ``processor.py`` and ``objective.py``
-total fewer than 200 lines; the ``slime/`` package holds its loss family.
+alongside this page. Its ``recipe.py`` and ``processor.py``
+total fewer than 200 lines; the ``slime/`` package holds its objective and its loss family.
 
 Every weight recipe takes a ``training_component`` as its first positional
 argument and an inference ``runtime`` as a keyword argument. Reef builds both
@@ -136,7 +136,8 @@ optimizer steps of this size. With the same value for both, one job is one
 optimizer step (see `Job size <processors.rst#job-size>`__). The recipe does
 not configure optimizer steps. Add the Slime flags your
 loss family requires (`the mapping <loss-families.rst#family-to-slime-flags>`__).
-Reef gets the loss family from the class's ``training_spec()``. Do not repeat
+The Slime backend gets the loss family from the objective in the recipe's
+parameters. Do not repeat
 the recipe or its family in the environment. Reef has no global
 recipe-implementation registry.
 
@@ -177,42 +178,46 @@ Train each kind of sample with its own method
 A weight trainer has one training component. Reef submits one job each time
 job data is ready. The pipeline's sample-to-job stage gives the job its data
 (``make_job_data``) and its parameters (``job_parameters``). A job holds
-samples of one kind: trajectories or tasks. By default, every job trains
-``training_spec().objective``. Its parameters are ``method`` and the
-``recipe.config.job_parameters`` setting, for example a ``scheduling`` or a
-``save_interval``. The component's defaults fill the rest, such as its
+samples of one kind: trajectories or tasks. Its parameters are those of
+``default_parameters()`` for that kind, with the
+``recipe.config.job_parameters`` setting over them, for example a ``scheduling`` or a
+``save_interval``. Reef reads none of them, and each training backend owns their
+names and shapes. The component's defaults fill the rest, such as its
 configured learning rate.
 
 A recipe that trains each kind with its own method, such as SFT on
-trajectories and a policy objective on tasks, overrides
-``parameters_by_kind()``. It returns the parameters of a job by the kind of
-the job's samples. The ``method`` parameter is the ``TrainingMethod`` of that
-kind. The same component switches the objective from one job to the next. The
+trajectories and a policy objective on tasks, gives each kind its own
+``objective``. The same component switches the objective from one job to the next. The
 job's ``backend`` is always the component's name, so the parameters do not
 name it.
 
 .. code:: python
 
    from reef.recipe import WeightTrainingRecipe
-   from reef.train.method import LearningRateSchedule, TrainingMethod
-
-   POLICY = LearningRateSchedule("policy", 1e-6, warmup_steps=10)
 
 
    class MyMethodRecipe(WeightTrainingRecipe):
-       def parameters_by_kind(self):
-           sft = TrainingMethod("reef.recipe.sft:SftObjective")
-           policy = TrainingMethod("my_pkg.objectives:PolicyObjective", POLICY)
-           return {"trajectory": {"method": sft.to_dict()}, "task": {"method": policy.to_dict()}}
+       @classmethod
+       def default_parameters(cls):
+           return {
+               "trajectory": {"objective": "sft"},
+               "task": {
+                   "objective": "my_pkg.objectives:PolicyObjective",
+                   "learning_rate_schedule": {"name": "policy", "peak_learning_rate": 1e-6, "warmup_steps": 10},
+               },
+           }
 
-- ``parameters_by_kind()`` must return the same parameters at every call. A
+- ``default_parameters()`` must return the same parameters at every call. A
   retry after a restart computes the job again, and the parameters are part of
   the job's identity.
 - The stage refuses job data that holds both kinds, and a kind that the
   result does not name.
 - The component resolves the objective in its own process. Use a dotted
-  reference for an objective from another package, such as the built-in
-  `SFT <../user-guide/recipes/sft.rst>`__ objective above.
+  reference for an objective from another package. The ``sft`` objective is
+  built in on each backend (`SFT <../user-guide/recipes/sft.rst>`__).
+- A kind that the result leaves out trains only for a request that gives its
+  parameters. Override ``configured_parameters`` when ``job_parameters`` should
+  reach only some kinds.
 - To train again from the base weights with no training state, call
   ``POST /reef/scenarios/{scenario}/train-from`` with the scenario's root
   snapshot, when it holds the default start.
@@ -341,11 +346,12 @@ deployment and does not allocate model resources:
   HTTP service waits for: for Slime, the optional teacher engine; for an
   in-process backend, none. It must not download models, allocate devices or
   construct a component.
-* ``component_config(settings, *, loss_family)`` returns the config that
+* ``component_config(settings, *, default_parameters)`` returns the config that
   ``reef.train.component.build_training_component`` builds in the HTTP
   process. Its ``type`` is the dotted reference of the component's
-  ``TrainingComponentFactory``. ``loss_family`` is the recipe's startup loss
-  family.
+  ``TrainingComponentFactory``. ``default_parameters`` is the recipe's parameters
+  by sample kind, or empty before a recipe is selected. A backend that starts its
+  workers with one method reads it, as Slime reads ``objective``.
 * ``http_environment(settings)`` returns variables for the HTTP service
   process. A value can name ``${endpoints.<service>}`` of a service that
   ``prepare`` returned.
