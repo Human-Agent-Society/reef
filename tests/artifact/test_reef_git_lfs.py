@@ -21,16 +21,12 @@ from reef.artifact import (
     GitLFSRepositoryBackendFactory,
     InMemoryRepositoryBackend,
     ModelDirectory,
-    Repository,
     RepositoryBackend,
     RepositoryBackendContext,
 )
-from reef.artifact.composite import compose_snapshot
 from reef.artifact.git_client import GitClient
 from reef.artifact.git_lfs import HUB_REFS, same_file, token_config
-from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
 from reef.core.plugins import PluginConfigError
-from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
 
 
 def root_tree(directory: Path, files: dict[str, str] | None = None) -> Artifact:
@@ -316,7 +312,13 @@ def test_metadata_and_release_reads_share_one_git_workspace_safely(
     first = GitLFSRepositoryBackend("scenario", remote, work_dir=work, cache_dir=tmp_path / "cache")
     root = first.register(root_tree(tmp_path / "root"), metadata={"generation": "root"})
     candidate = root_tree(tmp_path / "candidate", {"rules.md": "new rules"})
-    candidate = Artifact(candidate.ref, None, local_path=candidate.local_path, metadata={"generation": "new"})
+    candidate = Artifact(
+        candidate.ref,
+        None,
+        artifact_id=candidate.artifact_id,
+        local_path=candidate.local_path,
+        metadata={"generation": "new"},
+    )
     first.publish(candidate, expected_parent=root)
     second = GitLFSRepositoryBackend("scenario", remote, work_dir=work / ".", cache_dir=tmp_path / "cache")
     fetched, release, attempted, second_fetch = Event(), Event(), Event(), Event()
@@ -766,57 +768,3 @@ def test_configured_factory_reads_the_ref_layout_and_the_token(
     assert factory._git_config == token_config(config["repository"], "hf_secret_token")
     with pytest.raises(PluginConfigError, match="refs must be one of"):
         GitLFSRepositoryBackendFactory.from_config({"repository": "a", "refs": "custom"}, context=context)
-
-
-@pytest.mark.parametrize("storage", ["memory", "git"])
-def test_legacy_selection_rebuilds_missing_artifact_index(tmp_path: Path, fake_git_lfs: None, storage: str) -> None:
-    root = compose_snapshot(
-        {
-            "weights": root_tree(tmp_path / "weights", {"model.bin": "weights"}),
-            "harness": root_tree(tmp_path / "harness", {"rules.md": "rules"}),
-        },
-        directory=tmp_path / "composed",
-    )
-    backend: RepositoryBackend
-    if storage == "memory":
-        backend = InMemoryRepositoryBackend("math", directory=tmp_path / "memory")
-    else:
-        backend = GitLFSRepositoryBackend(
-            "math", tmp_path / "artifacts.git", work_dir=tmp_path / "work", cache_dir=tmp_path / "cache"
-        )
-    initial = backend.register(root, metadata={})
-    ids = {name: root.component(name).artifact_id for name in ("weights", "harness")}
-    stored = {
-        name: {"artifact_id": artifact_id, "ref": {**encode_snapshot_ref(initial), "content_id": "obsolete"}}
-        for name, artifact_id in ids.items()
-    }
-    legacy = ArtifactSelection.from_dict(stored)
-    assert legacy == ArtifactSelection(ids), "an older stored selection decodes to a plain selection"
-    # Older repositories have snapshots but no independent ID index.
-    if isinstance(backend, InMemoryRepositoryBackend):
-        backend._storage.artifacts.clear()
-    else:
-        refs = run_git(
-            "for-each-ref", "--format=%(refname)", backend.artifact_ref_prefix, cwd=tmp_path / "artifacts.git"
-        )
-        for ref in refs.splitlines():
-            run_git("update-ref", "-d", ref, cwd=tmp_path / "artifacts.git")
-    with pytest.raises(ArtifactNotFound):
-        backend.resolve_artifact(ids["weights"])
-    # Recovery indexes the snapshots that the older selection named, as the scenario factory does.
-    for locator in set(legacy_selection_locators(stored).values()):
-        backend.index_snapshot(locator)
-        backend.index_snapshot(locator)
-    repository = Repository(backend, initial)
-    old_view = SnapshotRef("selection:legacy-cache-key", None)
-    repository.remember_selection(old_view, legacy)
-    repository.remember_selection(old_view, legacy)
-    restored = repository.resolve(old_view)
-    assert {name: restored.component(name).artifact_id for name in ids} == ids
-    assert (restored.component("harness").local_path / "rules.md").read_text() == "rules"
-    assert legacy.to_dict() == ids
-    assert repository.selection(restored.ref, tuple(ids)).to_dict() == ids
-    # Subsequent recovery uses only IDs, even when the persisted view key is old.
-    recovered = Repository(backend, initial)
-    recovered.remember_selection(old_view, ArtifactSelection.from_dict(legacy.to_dict()))
-    assert recovered.resolve(old_view).component("weights").artifact_id == ids["weights"]

@@ -245,7 +245,7 @@ def request_html(record: Mapping[str, object]) -> str:
         f'<p class="text">{escape(payload.get("text"))}</p>',
         '<details class="request-meta"><summary>Session and request details</summary><dl class="metadata">',
         f'<div><dt>Session</dt><dd class="id">{escape(payload.get("session") or "Not provided")}</dd></div>',
-        f'<div><dt>Base artifact</dt><dd class="id">{escape(payload.get("artifact_id", payload.get("release_id")) or "Not provided")}</dd></div>',
+        f'<div><dt>Base artifact</dt><dd class="id">{escape(payload.get("artifact_id") or "Not provided")}</dd></div>',
         f'<div class="record-id"><dt>Request ID</dt><dd class="id">{escape(record["agent_record_id"])}</dd></div>',
     ]
     filed = record.get("created_at")

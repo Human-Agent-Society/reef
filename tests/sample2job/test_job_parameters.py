@@ -31,7 +31,7 @@ def test_a_job_gets_the_parameters_of_its_samples_kind() -> None:
 
 
 def training_request(**parameters: object) -> TrainingRequest:
-    payload = {"text": "train", "session": "s", "release_id": "r", "parameters": parameters}
+    payload = {"text": "train", "session": "s", "artifact_id": "r", "parameters": parameters}
     return TrainingRequest.from_dict(payload, request_id="train-1")
 
 

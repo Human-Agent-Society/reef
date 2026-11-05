@@ -19,7 +19,7 @@ SCENARIO = "agents"
 
 
 def train_request(text: str) -> dict:
-    return {"text": text, "session": "3f1c2a9d0b7e", "release_id": "rel-0"}
+    return {"text": text, "session": "3f1c2a9d0b7e", "artifact_id": "rel-0"}
 
 
 def manual_dispatcher(tmp_path: Path, method):

@@ -228,7 +228,7 @@ def test_the_pipeline_keeps_requests_and_sends_records_through_its_stage() -> No
     processor.push(inference("i1"))
     processor.push(inference("drop-1"))
     processor.queue_requests(
-        [TrainingRequest.from_dict({"text": "train-1", "session": "s-1", "release_id": "r-1"}, request_id="train-1")]
+        [TrainingRequest.from_dict({"text": "train-1", "session": "s-1", "artifact_id": "r-1"}, request_id="train-1")]
     )
     assert processor.stage.assembled == ["i1"]
     assert len(processor.training_requests) == 1
@@ -692,7 +692,7 @@ def auto_ids(pipeline: TrainingPipeline) -> tuple[str, ...]:
 
 def training_request(*samples: str) -> TrainingRequest:
     """A queued request that names ``samples``."""
-    payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": {"rollout": {}}}
+    payload = {"text": "train", "session": "s-1", "artifact_id": "r-1", "parameters": {"rollout": {}}}
     return TrainingRequest.from_dict({**payload, **({"samples": list(samples)} if samples else {})}, request_id="t")
 
 

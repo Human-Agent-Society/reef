@@ -9,7 +9,7 @@ the table with :func:`commit_table` and supply their namespace.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from threading import RLock
 
@@ -123,25 +123,6 @@ class SQLCommitHistory(CommitHistory):
     def records(self) -> tuple[CommitRecord, ...]:
         with self._lock, self._transaction(write=False) as connection:
             return self._read(connection)
-
-    def stored_commits(self) -> Mapping[int, str]:
-        table = self.table.table
-        with self._lock, self._transaction(write=False) as connection:
-            rows = connection.execute(select(table.c.step, table.c.commit_json).where(self.table.condition()))
-            return {row.step: row.commit_json for row in rows}
-
-    def rewrite(self, records: Sequence[CommitRecord]) -> None:
-        table = self.table.table
-        with self._lock, self._transaction(write=True) as connection:
-            for record in records:
-                updated = connection.execute(
-                    table.update()
-                    .where(self.table.condition(), table.c.step == record.step)
-                    .values(commit_json=encode_commit(record))
-                )
-                if updated.rowcount != 1:
-                    raise CommitHistoryError(f"commit step {record.step} has no stored commit to rewrite")
-            self._cached = ()
 
     def append(self, record: CommitRecord) -> None:
         encoded = encode_commit(record)
