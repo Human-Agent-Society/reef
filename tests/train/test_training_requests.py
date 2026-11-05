@@ -7,6 +7,7 @@ from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core.training_request import normalize_training_request_payload
+from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.records import RecordConflict
 from reef.storage.sql_coordination import memory_coordination
@@ -87,6 +88,24 @@ def test_a_trainer_gets_the_queued_requests_and_a_commit_settles_the_one_it_cons
     finally:
         trainer.close()
         records.close()
+
+
+def test_a_new_pipeline_reads_a_stored_request_failure_and_a_consumed_request_leaves_with_it() -> None:
+    requests = TrainingRequestQueue(memory_coordination().work_queue).of("s")
+    requests.file("poison", payload("poison"))
+    requests.file("fine", payload("fine"))
+    requests.mark_failed("poison", "RuntimeError: poison method")
+    assert requests.failures() == {"poison": "RuntimeError: poison method"}
+
+    restarted = TrainingPipeline(PipelineContext("s"))
+    restarted.queue_requests(requests.queued(), requests.failures())
+    assert restarted.request_failure("poison") == "RuntimeError: poison method"
+    assert restarted.request_failure("fine") is None
+
+    requests.settle(["poison"])
+    assert requests.failures() == {}
+    restarted.queue_requests(requests.queued(), requests.failures())
+    assert restarted.request_failure("poison") is None
 
 
 def test_retrying_a_request_written_before_artifact_identity_keeps_its_item():

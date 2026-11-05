@@ -37,7 +37,7 @@ class LocalSampleProducers(SampleProducers):
         produced = ProducedSamples(changed=False, background=False)
         for component_trainer in current.trainers:
             if component_trainer.component == component and component_trainer.trainer.trains:
-                produced = component_trainer.trainer.produce_samples()
+                produced = current.produce_samples(component)
         # Only new input gives the trainer's worker something to build; a selection that brought none leaves it.
         if self.local_workers is not None and produced.changed:
             self.local_workers.wake(current)
