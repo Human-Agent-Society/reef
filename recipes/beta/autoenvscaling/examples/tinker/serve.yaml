@@ -50,8 +50,8 @@ recipe:
   implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
   config:
     job_parameters:
-      # The method that trains the rollouts. Replace this reference with a TinkerObjective that you provide.
-      objective: my_methods.objectives:MyObjective
+      # The method that trains the rollouts: each rollout's reward minus its task's mean reward (recipes/task_group).
+      objective: recipes.task_group.tinker:TaskGroupTinkerObjective
       # Tinker's own rollout of each task job: the rollouts run on Tinker's sampler at the job's start weights.
       rollout:
         # The training rollouts of each task form one group.
