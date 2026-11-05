@@ -176,7 +176,7 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
         (event,) = tracker.starts
         assert event.run_segment == 0 and event.step == 2
         assert event.start_artifacts.components == {"weights": seed.revision}
-        # The step after the new start names the training start as its source, not the active release.
+        # The step after the new start names the training start as its source, not the active selection.
         assert tracker.events[-1].context.source_artifacts.components == {"weights": seed.revision}
     finally:
         store.close()

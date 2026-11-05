@@ -254,7 +254,7 @@ commits cannot advance search or its summary.
 - `reef-data/`: SQLite records and the scenario's commits. Each commit holds
   the method state: the replies that proposed no candidate.
 - `artifacts.git`, `artifact-work/`, `artifact-cache/`: published harnesses and
-  their release chain.
+  their snapshot chain.
 - `summary.json`: rebuilt from the latest commit and the history of the steps
   it covers: each candidate's parent, outcome, and scores, the served id, the
   candidates generated, and the evaluation runs spent.

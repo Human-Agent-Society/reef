@@ -2,7 +2,7 @@
 
 The upstream optimizer run fresh on the same day as the method's own runs, so
 the two arms can be compared without a month of drift between them. Both used
-`gepa.optimize` from the pinned release, `gpt-4.1-mini-2025-04-14` for tasks,
+`gepa.optimize` from the pinned artifact, `gpt-4.1-mini-2025-04-14` for tasks,
 `gpt-5-2025-08-07` for reflection, the pinned 45/45/150 AIME split, the same
 seed prompt, a 150-call budget, and 128 workers. Scores are on the sealed
 150-problem AIME-2025 split.

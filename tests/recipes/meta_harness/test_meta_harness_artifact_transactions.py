@@ -22,7 +22,7 @@ __all__ = ["fake_git_lfs"]
 def publication_case(tmp_path, request):
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
     recipe = meta_harness_recipe(tmp_path, chat)
-    # A new scenario's root release holds the recipe's seed, as a deployment's does.
+    # A new scenario's root snapshot holds the recipe's seed, as a deployment's does.
     memory = InMemoryRepositoryBackend.factory(directory=tmp_path / "memory")
 
     if request.param == "git":
@@ -127,7 +127,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
             raise ArtifactPublicationError("backend pointer unavailable")
 
         with monkeypatch.context() as patch:
-            patch.setattr(scenario.repository.backend, "commit_release", unavailable)
+            patch.setattr(scenario.repository.backend, "commit_snapshot", unavailable)
             scenario.commit(result)
         assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
         committed_head = scenario.current_snapshot()
@@ -176,7 +176,7 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
         def unexpected(*args, **kwargs):
             pytest.fail("a non-journaled publication must commit its backend head directly")
 
-        monkeypatch.setattr(scenario.repository.backend, "commit_release", unexpected)
+        monkeypatch.setattr(scenario.repository.backend, "commit_snapshot", unexpected)
         report_once(scenario, "1")
         result = checkpoint_result(scenario)
         scenario.commit(result)
@@ -247,19 +247,19 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         # This writer publishes new bytes, so it cannot carry the root's component IDs.
         metadata.pop("components", None)
         competing = Artifact.local(competing_path, metadata=metadata)
-        commit_release = backend.commit_release
+        commit_snapshot = backend.commit_snapshot
         unrelated = None
 
         def conflict_after_journal(ref, *, expected_parent):
             nonlocal unrelated
             assert scenario.store.history()[-1].snapshot == ref
             unrelated = backend.publish(competing, expected_parent=expected_parent)
-            return commit_release(ref, expected_parent=expected_parent)
+            return commit_snapshot(ref, expected_parent=expected_parent)
 
         report_once(scenario, "1")
         result = checkpoint_result(scenario)
         with monkeypatch.context() as patch:
-            patch.setattr(backend, "commit_release", conflict_after_journal)
+            patch.setattr(backend, "commit_snapshot", conflict_after_journal)
             scenario.commit(result)
 
         committed = scenario.store.history()[-1]

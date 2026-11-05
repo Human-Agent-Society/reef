@@ -241,8 +241,8 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
 
     backend = scenario.repository.backend
     assert backend.current() == scenario.repository.current_artifact
-    # Walk the durable release chain: every publish linked exactly one parent, so
-    # the chain from the tip reaches the root release in total + 1 hops, with no
+    # Walk the durable snapshot chain: every publish linked exactly one parent, so
+    # the chain from the tip reaches the root snapshot in total + 1 hops, with no
     # forks or skipped links.
     node = backend.current()
     nodes = 0

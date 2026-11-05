@@ -50,7 +50,7 @@ pipeline:
   # The staleness limit, and the teacher's window.
   record2sample:
     config:
-      max_staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
+      max_staleness: 0                 # on-policy: the stage waits for each step's snapshot before sampling again
       max_teacher_tokens: 8192         # the trainer's seq-length; a longer teacher sequence does not train
   sample2job:
     config:
