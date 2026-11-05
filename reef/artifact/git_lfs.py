@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, RLock
@@ -39,6 +39,8 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 
 _MANIFEST = "reef-artifact.json"
+#: How many commits one ``git fetch`` names: 40 hexadecimal digits each stay far below the limit of a command line.
+FETCH_BATCH_COMMITS = 1000
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
 _LFS_ATTRIBUTES = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
 # Backend instances in one process can share a working directory.
@@ -347,6 +349,17 @@ class _GitWorkspace:
             return None
         return output.split()[0]
 
+    def ls_remote_prefix(self, prefix: str) -> dict[str, str]:
+        """The commit of each remote ref whose name starts with ``prefix``, by ref name."""
+        output = self.git("ls-remote", "origin", f"{prefix}*")
+        return {name: commit for commit, name in (line.split() for line in output.splitlines())}
+
+    def fetch_commits(self, commits: Collection[str]) -> None:
+        """Fetch ``commits``, in groups that fit on a command line."""
+        ordered = sorted(commits)
+        for start in range(0, len(ordered), FETCH_BATCH_COMMITS):
+            self.git("fetch", "origin", *ordered[start : start + FETCH_BATCH_COMMITS])
+
     def clone_for_materialize(self, destination: Path, version: str) -> None:
         self._run(("git", "clone", "--no-checkout", self.repository, str(destination)))
         self._install_lfs(destination)
@@ -602,6 +615,19 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
             self._workspace.fetch_version(commit)
             return self._manifest.snapshot(commit, local=True)
+
+    def artifact_snapshots(self, artifact_ids: Collection[str]) -> dict[str, SnapshotRef]:
+        """Read every binding of this scenario with one ``ls-remote``, and fetch their commits with one ``fetch``."""
+        with self._workspace.lock:
+            bound = self._workspace.ls_remote_prefix(self.artifact_ref_prefix)
+            commits = {
+                artifact_id: bound[self.artifact_ref_name(artifact_id)]
+                for artifact_id in artifact_ids
+                if self.artifact_ref_name(artifact_id) in bound
+            }
+            self._workspace.fetch_commits(set(commits.values()))
+            snapshots = {commit: self._manifest.snapshot(commit, local=True) for commit in set(commits.values())}
+            return {artifact_id: snapshots[commit] for artifact_id, commit in commits.items()}
 
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         """Commit the files of ``root`` with no parent and push the commit to the scenario's ref.

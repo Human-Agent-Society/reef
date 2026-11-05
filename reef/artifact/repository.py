@@ -8,7 +8,7 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -19,6 +19,7 @@ from reef.artifact.artifact import (
     LOCAL_SNAPSHOT_PREFIX,
     Artifact,
     ArtifactConflict,
+    ArtifactNotFound,
     ArtifactPublicationError,
     ArtifactRepository,
     SnapshotRef,
@@ -70,6 +71,19 @@ class RepositoryBackend(ArtifactRepository):
 
         Raise ``ArtifactNotFound`` when this repository has no binding for the ID.
         """
+
+    def artifact_snapshots(self, artifact_ids: Collection[str]) -> dict[str, SnapshotRef]:
+        """The stored snapshot of each of ``artifact_ids`` that has a binding; an ID without a binding is absent.
+
+        This default makes one lookup for each ID. A backend whose lookup is slow can look up all of them at once.
+        """
+        snapshots = {}
+        for artifact_id in artifact_ids:
+            try:
+                snapshots[artifact_id] = self.artifact_snapshot(artifact_id)
+            except ArtifactNotFound:
+                continue
+        return snapshots
 
     def resolve_artifact(self, artifact_id: str) -> Artifact:
         """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path.

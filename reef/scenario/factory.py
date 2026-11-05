@@ -112,6 +112,15 @@ class RepositoryCommitSnapshots(CommitSnapshots):
         return SnapshotRef(f"{SELECTION_VIEW_PREFIX}{selection_digest(selection)}", None)
 
     def locate(self, records: Sequence[CommitRecord]) -> tuple[CommitRecord, ...]:
+        wanted = {
+            artifact_id
+            for record in records
+            if record.snapshot == UNLOCATED_SNAPSHOT and (record.checkpoint or record.operation != "training")
+            for artifact_id in (record.artifact_ids or {}).values()
+            if artifact_id not in self.bindings
+        }
+        if wanted:
+            self.bindings.update(self.backend.artifact_snapshots(wanted))
         seen: set[str] = set()
         active = self.start
         located = []
