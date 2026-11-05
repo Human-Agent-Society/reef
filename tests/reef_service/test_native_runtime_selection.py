@@ -27,6 +27,9 @@ class ClosingComponent(StubTrainingComponent):
         super().close()
 
 
+SAO_PARAMETERS = {"trajectory": {"objective": "sao"}}
+
+
 @pytest.fixture
 def created(monkeypatch):
     """The settings each Slime component was created from, and the components, without Ray or GPUs."""
@@ -57,7 +60,9 @@ def training_settings(**changes) -> ServiceConfig:
 
 
 def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
-    component, runtime = connect_training_component(training_settings(), model_path="model", default_parameters={})
+    component, runtime = connect_training_component(
+        training_settings(), model_path="model", default_parameters=SAO_PARAMETERS
+    )
     try:
         [(settings, built)] = created
         assert component is built
@@ -80,7 +85,9 @@ def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
 def test_slime_requires_a_ray_cluster_before_creating_the_component(created, monkeypatch):
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     with pytest.raises(RuntimeConfigError, match=r"training\.ray-address or RAY_ADDRESS"):
-        connect_training_component(training_settings(ray_address=None), model_path="model", default_parameters={})
+        connect_training_component(
+            training_settings(ray_address=None), model_path="model", default_parameters=SAO_PARAMETERS
+        )
     assert created == []
 
 
@@ -96,6 +103,6 @@ def test_a_serving_factory_that_builds_no_inference_runtime_releases_the_trainin
 
     monkeypatch.setattr("reef.inference.registry._runtime_kinds", {"none": WrongServingFactory()})
     with pytest.raises(TypeError, match="must build an InferenceRuntime, not ClosingComponent: a runtime serves"):
-        connect_training_component(training_settings(), model_path="model", default_parameters={})
+        connect_training_component(training_settings(), model_path="model", default_parameters=SAO_PARAMETERS)
     [(_, component)] = created
     assert component.closed
