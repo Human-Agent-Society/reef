@@ -227,7 +227,7 @@ class LocalTrainingWorkers:
 
     def fail_request(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
         """A failed request step consumes the request with a skip row on the next step; wake for it."""
-        if not current.trainer_for(component).fail_pending_request(error_text(cause)):
+        if not current.fail_pending_request(error_text(cause), component):
             return
         with self.registry.lock_instance(current) as state:
             # Wake the worker, so that the failed request settles without a new record.
@@ -295,20 +295,4 @@ class LocalTrainingWorkers:
             return
         with self.registry.lock_instance(current) as state:
             if state is InstanceState.CURRENT:
-                self.reload(current.name, current)
-
-    def reload(self, scenario: str, current: Scenario | None) -> Scenario:
-        """Rebuild durable state, retaining failed requests that still need skip rows."""
-        failures = (
-            {
-                component_trainer.component: component_trainer.trainer.request_failures()
-                for component_trainer in current.trainers
-            }
-            if current is not None
-            else {}
-        )
-        recovered = self.registry.reload(scenario)
-        for component, failed in failures.items():
-            if failed:
-                recovered.trainer_for(component).set_request_failures(failed)
-        return recovered
+                self.registry.reload(current.name)
