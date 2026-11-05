@@ -42,7 +42,7 @@ CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
 @dataclass(frozen=True)
 class RolloutSettings:
-    """A task job's ``rollout`` parameter: how the component samples the rollouts of the job's tasks.
+    """How a training component samples the rollouts of a task job's tasks.
 
     Values: ``rollouts_per_task`` is an int of at least 2, the group of one task. ``agent`` is a Harbor
     agent config with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders, or None for
@@ -51,8 +51,8 @@ class RolloutSettings:
     None for an agent on this host. ``concurrency`` is a positive int, the rollouts in flight.
     ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed out, or None to leave it
     unscored. ``scaffold_tolerance`` is a non-negative int, the masked tokens that the assembly may realign
-    before a response (for a thinking template's scaffold). Purpose: ``from_parameters`` reads it from a
-    job's parameters; ``run_train_tasks`` runs it.
+    before a response (for a thinking template's scaffold). Purpose: a training component makes it from its own
+    job parameters; ``run_train_tasks`` runs it.
     """
 
     rollouts_per_task: int
@@ -70,31 +70,16 @@ class RolloutSettings:
             ("scaffold_tolerance", self.scaffold_tolerance, 0),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < least:
-                raise ValueError(f"rollout.{name} must be an int of at least {least}, got {value!r}")
+                raise ValueError(f"{name} must be an int of at least {least}, got {value!r}")
         if self.agent is not None and not isinstance(self.agent, Mapping):
-            raise ValueError("rollout.agent must be a Harbor agent config object")
+            raise ValueError("agent must be a Harbor agent config object")
         if not isinstance(self.environment, str) or not self.environment:
-            raise ValueError("rollout.environment must be a non-empty Harbor environment type")
+            raise ValueError("environment must be a non-empty Harbor environment type")
         if self.agent_host is not None and (not isinstance(self.agent_host, str) or not self.agent_host):
-            raise ValueError("rollout.agent_host must be a non-empty host or None")
+            raise ValueError("agent_host must be a non-empty host or None")
         reward = self.verifier_timeout_reward
         if reward is not None and (isinstance(reward, bool) or not isinstance(reward, (int, float))):
-            raise ValueError("rollout.verifier_timeout_reward must be a number or None")
-
-    @classmethod
-    def from_parameters(cls, parameters: Mapping[str, Any]) -> RolloutSettings:
-        """The ``rollout`` parameter of a task job; raise ``ValueError`` when it is missing or malformed."""
-        value = parameters.get("rollout")
-        if not isinstance(value, Mapping):
-            raise ValueError("a task job needs the rollout parameter as an object")
-        names = {name.replace("-", "_"): item for name, item in value.items()}
-        unknown = set(names) - set(cls.__dataclass_fields__)
-        if unknown:
-            raise ValueError(f"the rollout parameter takes no {sorted(unknown)}")
-        try:
-            return cls(**names)
-        except TypeError as exc:
-            raise ValueError(f"the rollout parameter is incomplete: {exc}") from exc
+            raise ValueError("verifier_timeout_reward must be a number or None")
 
 
 @dataclass(frozen=True)

@@ -19,13 +19,12 @@ from tests.support.slime_component import finished
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample
 from reef.execution.executor.placement import GpuBundles
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.component import TrainingJob
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import rollout_group as rollout_group_module
 from reef.train.slime_backend.component import ROLLOUTS_FILE
+from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective, unregister_slime_objective
+from reef.train.slime_backend.parameters import harbor_settings
 from reef.train.slime_backend.rollout_group import EngineChat, SlimeRolloutGroup
 from reef.train.task_rollouts import TaskJobRollouts
 
@@ -88,7 +87,7 @@ def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the
         "slime",
         stack.component.base_start,
         job_data_ref(JobData("tasks", (task(tmp_path / "tasks", "add"),))),
-        {**parameters(TrainingMethod("sft")), "rollout": ROLLOUT},
+        {**parameters("sft"), "harbor": ROLLOUT},
         scenario="s",
     )
 
@@ -106,7 +105,7 @@ def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the
     # The rollouts are kept: a resumed job trains them without rolling out again.
     directory = stack.component.job_directory("job-0")
     assert json.loads((directory / ROLLOUTS_FILE).read_text())["scores"] == [{"task": "add", "scores": [1.0, 0.0]}]
-    settings = slime_component.RolloutSettings.from_parameters(job.parameters)
+    settings = harbor_settings(job.parameters)
     assert stack.component.task_rollouts(job, directory, settings) == grouped()
     assert events == ["sync", "run_train_tasks", "release"]
 
@@ -119,14 +118,12 @@ def test_failed_rollouts_still_release_the_engines(tmp_path, task_stack):
         "slime",
         stack.component.base_start,
         job_data_ref(JobData("tasks", (task(tmp_path / "tasks", "add"),))),
-        {**parameters(TrainingMethod("sft")), "rollout": ROLLOUT},
+        {**parameters("sft"), "harbor": ROLLOUT},
         scenario="s",
     )
     (tmp_path / "failing").mkdir()
     with pytest.raises(RuntimeError, match="sandbox did not start"):
-        stack.component.task_rollouts(
-            job, tmp_path / "failing" / "job", slime_component.RolloutSettings.from_parameters(job.parameters)
-        )
+        stack.component.task_rollouts(job, tmp_path / "failing" / "job", harbor_settings(job.parameters))
     assert events == ["sync", "run_train_tasks", "release"]
 
 
@@ -134,12 +131,12 @@ def test_failed_rollouts_still_release_the_engines(tmp_path, task_stack):
 def test_a_task_job_is_checked_at_submit(tmp_path, task_stack):
     stack, events, _ = task_stack
     add = task(tmp_path / "a", "add")
-    method = parameters(TrainingMethod("sft"))
+    method = parameters("sft")
     for items, job_parameters, message in (
-        ((add,), method, "needs the rollout parameter"),
-        ((add, *batch_for(0).samples), {**method, "rollout": ROLLOUT}, "both trajectories and tasks"),
-        ((add, task(tmp_path / "b", "add")), {**method, "rollout": ROLLOUT}, "distinct names"),
-        ((add,), {**method, "rollout": {"rollouts_per_task": 1}}, "rollouts_per_task must be an int of at least 2"),
+        ((add,), method, "needs the harbor parameter"),
+        ((add, *batch_for(0).samples), {**method, "harbor": ROLLOUT}, "both trajectories and tasks"),
+        ((add, task(tmp_path / "b", "add")), {**method, "harbor": ROLLOUT}, "distinct names"),
+        ((add,), {**method, "harbor": {"rollouts_per_task": 1}}, "rollouts_per_task must be an int of at least 2"),
     ):
         with pytest.raises(ValueError, match=message):
             stack.component.submit(
@@ -155,30 +152,40 @@ def test_a_task_job_is_checked_at_submit(tmp_path, task_stack):
     assert events == []
 
 
+class ImportanceSamplingObjective(SlimeObjective):
+    """A method that a deployment provides, on the importance_sampling family."""
+
+    name = "test-importance-sampling"
+    loss_family = "importance_sampling"
+
+    def prepare(self, data, state):
+        raise AssertionError("a checked job prepares nothing")
+
+
 @pytest.mark.unit
 def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path, task_stack):
     stack, events, _ = task_stack
     add = task(tmp_path / "a", "add")
-    # The generated-task objective's family, importance_sampling, is Slime's too.
+    # A provided method's family, importance_sampling, is Slime's too.
     stack.component.check_job(
         TrainingJob(
             "j",
             "slime",
             stack.component.base_start,
             job_data_ref(JobData("d", (add,))),
-            {**parameters(TrainingMethod("task_group")), "rollout": ROLLOUT},
+            {**parameters(f"{__name__}:ImportanceSamplingObjective"), "harbor": ROLLOUT},
             scenario="s",
         )
     )
 
-    class Elsewhere(TrainingObjective):
+    class Elsewhere(SlimeObjective):
         name = "elsewhere"
         loss_family = "only-on-another-backend"
 
         def prepare(self, data, state):
             raise AssertionError("a refused job prepares nothing")
 
-    register_objective(Elsewhere())
+    register_slime_objective(Elsewhere())
     try:
         with pytest.raises(ValueError, match="no loss family 'only-on-another-backend'"):
             stack.component.submit(
@@ -187,12 +194,12 @@ def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path, task_
                     "slime",
                     stack.component.base_start,
                     job_data_ref(JobData("d", (add,))),
-                    {**parameters(TrainingMethod("elsewhere")), "rollout": ROLLOUT},
+                    {**parameters("elsewhere"), "harbor": ROLLOUT},
                     scenario="s",
                 )
             )
     finally:
-        unregister_objective("elsewhere")
+        unregister_slime_objective("elsewhere")
     assert events == []
 
 
@@ -205,7 +212,7 @@ def test_a_task_job_with_score_centering_trains_the_untruncated_distribution_at_
             score_centering_min_tail_mass=1e-6,
             **{"rollout_temperature": 1.0, "rollout_top_p": 1.0, "rollout_top_k": -1, **sampling},
         )
-        slime_component.SlimeJobs.check_task_jobs(SimpleNamespace(args=args), {"rollout": ROLLOUT})
+        slime_component.SlimeJobs.check_task_jobs(SimpleNamespace(args=args), {"objective": "sft", "harbor": ROLLOUT})
 
     checked()
     for sampling in ({"rollout_temperature": 0.7}, {"rollout_top_p": 0.9}, {"rollout_top_k": 20}):

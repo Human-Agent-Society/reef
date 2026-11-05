@@ -10,7 +10,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
-from recipes.tttd.objective import TttdObjective
+from recipes.tttd.objective import adaptive_entropic_advantages
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
@@ -20,7 +20,6 @@ from reef.record2sample import NoSamples
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -428,7 +427,7 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
             processor.push(_report(0, group, rollout, 1.0))
 
     batch = processor.build_job_data(6)
-    result = prepare_slime_job(batch, TrainingMethod("tttd"), {}, StepScheduling(), step_size=6)
+    result = prepare_slime_job(batch, "tttd", {}, StepScheduling(), step_size=6)
 
     assert len(trajectory_groups(batch)) == 1
     assert result.payload is not None
@@ -462,7 +461,7 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
     ],
 )
 def test_adaptive_entropic_advantages_match_pinned_reference(rewards, expected) -> None:
-    advantages, beta = TttdObjective.adaptive_entropic_advantages(rewards)
+    advantages, beta = adaptive_entropic_advantages(rewards)
 
     # Pinned from the original float32 torch implementation; the pure-math
     # port uses float64 so values match well within this tolerance.
@@ -602,13 +601,13 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     # The processor keeps one constant-reward group when every group is
     # constant; the objective reports that batch, whose advantages carry no
     # signal, through constant_groups_retained.
-    from reef.train.algos.registry import resolve_objective
+    from reef.train.slime_backend.objectives import resolve_slime_objective
     from reef.train.types import JobData
 
     def sample(record_id: str, reward: float) -> TrajectorySample:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
-    objective = resolve_objective("tttd")
+    objective = resolve_slime_objective("tttd")
     constant = JobData(
         "b",
         tuple(

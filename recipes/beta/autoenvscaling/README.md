@@ -164,7 +164,7 @@ Reef refuses at startup a token that is missing or is no Claude Code OAuth token
 
 The pass rate of a task that ran is the mean reward of its training rollouts. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
-The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every rollout of a group whose rewards are all equal. With 0 or 1 rewards and four rollouts per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
+The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. The objective that the deployment provides (`recipe.config.job_parameters.objective`; the example `serve.yaml` holds a placeholder that you must replace) decides what such a group trains. With 0 or 1 rewards and four rollouts per task, a task outside the default band has equal rewards in its group, and it still takes a place in a batch.
 
 ## Solver calibration
 

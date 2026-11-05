@@ -20,12 +20,11 @@ from reef.core.job_data import JobData
 from reef.core.training_request import TrainingRequest
 from reef.storage.durable_files import read_json, write_json
 from reef.train.component import TrainingJob
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SlimeNativeAlgorithm
 from reef.train.slime_backend.rollout_group import SlimeRolloutGroup
 
-METHOD = TrainingMethod("reef.recipe.dataset:SlimeDatasetObjective")
+OBJECTIVE = "slime_dataset"
 FAMILY = "reef.train.slime_backend.native:SlimeNativeAlgorithm"
 
 
@@ -74,7 +73,7 @@ def dataset_stack(tmp_path: Path, *, rollouts_per_epoch: int = 4) -> tuple[Stack
 
 def dataset_job(stack: Stack, job_id: str, *, epochs: int = 1, save_interval: int | None = 2) -> TrainingJob:
     parameters: dict[str, Any] = {
-        "method": METHOD.to_dict(),
+        "objective": OBJECTIVE,
         "dataset": {"path": "/data/prompts.jsonl", "epochs": epochs},
     }
     if save_interval is not None:
@@ -192,7 +191,7 @@ def test_dataset_jobs_and_the_slime_family_go_together(tmp_path, dataset_args) -
                     "slime",
                     stack.start,
                     job_data_ref(batch_for(0)),
-                    {"method": METHOD.to_dict()},
+                    {"objective": OBJECTIVE},
                     scenario="s",
                 )
             )
@@ -216,11 +215,11 @@ def test_the_dataset_stage_makes_a_requests_job_with_its_parameters() -> None:
     from reef.recipe.dataset import DatasetJobData
 
     stage = DatasetJobData.__new__(DatasetJobData)
-    stage.context = SimpleNamespace(job_parameters={"trajectory": {"method": METHOD.to_dict(), "save_interval": 4}})
+    stage.context = SimpleNamespace(job_parameters={"trajectory": {"objective": OBJECTIVE, "save_interval": 4}})
     request = TrainingRequest("train", "s", "r", id="r1", parameters={"dataset": {"path": "/d"}})
     data = JobData("scenario:request:r1", (), request=request)
     assert stage.make_job_data((), "scenario:request:r1").samples == ()
-    assert stage.job_parameters(data) == {"method": METHOD.to_dict(), "save_interval": 4, "dataset": {"path": "/d"}}
+    assert stage.job_parameters(data) == {"objective": OBJECTIVE, "save_interval": 4, "dataset": {"path": "/d"}}
 
 
 @pytest.mark.unit

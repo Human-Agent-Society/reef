@@ -24,7 +24,6 @@ from recipes.openclawrl.turns import TurnJob
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id
 from reef.train.algos.schedule import StepScheduling
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData, TrajectorySample
@@ -263,7 +262,7 @@ class TestOpenclawrlWireRow:
                 _sample(-1.0),
             ),
         )
-        step = prepare_slime_job(batch, TrainingMethod("openclawrl"), {}, StepScheduling(), step_size=2)
+        step = prepare_slime_job(batch, "openclawrl", {}, StepScheduling(), step_size=2)
         assert step.payload["loss"] == "openclawrl"
         assert step.payload["advantages"] == [1.0, -1.0]
         # The family's wire row: policy 5-tuple + the teacher candidates; the actor computes the student's top-K.
