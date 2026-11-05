@@ -142,7 +142,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     batch = processor.build_job_data(1)
     assert source_record_id(batch.samples[0]) == "r1"
     processor.acknowledge(batch.data_id)
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert "r1" in decision
     assert "r2" not in decision  # still tracked
 
@@ -150,7 +150,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
 def test_untracked_records_are_terminal_on_sight() -> None:
     processor, worker = _engine()
     processor.push(_record("noise"))
-    assert "noise" in processor.releasable_record_ids()
+    assert "noise" in processor.record2sample.releasable_record_ids()
     assert not worker.jobs
 
 
@@ -164,7 +164,7 @@ def test_failed_and_declined_judgments_retire_the_record() -> None:
     worker.push(_Judgment("b", good=False))
     processor.produce()
     assert not processor.ready(1)
-    releasable = processor.releasable_record_ids()
+    releasable = processor.record2sample.releasable_record_ids()
     assert {"a", "b"} <= set(releasable)
 
 
@@ -176,7 +176,7 @@ def test_refused_submission_retires_immediately() -> None:
     processor, _ = _engine(worker=_Refusing())
     processor.push(_record("r1", track=True))
     processor.push(_record("r2", completes="r1"))
-    assert "r1" in processor.releasable_record_ids()
+    assert "r1" in processor.record2sample.releasable_record_ids()
 
 
 def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_batch() -> None:
@@ -191,7 +191,7 @@ def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_bat
     worker.push(_Judgment("old"))
     processor.produce()
     assert not processor.ready(2)  # the stale sample is not in the buffer
-    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert {"old", "new"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
 
 
@@ -205,7 +205,7 @@ def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
         worker.push(_Judgment(name))
     processor.produce()
     assert not processor.ready(3)  # e:3 is two artifacts behind e:5
-    assert {"v3", "v4", "v5"} <= processor.releasable_record_ids()
+    assert {"v3", "v4", "v5"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(2).samples] == ["v4", "v5"]
 
 
@@ -213,7 +213,7 @@ def test_correlate_only_mode_without_a_worker() -> None:
     processor = _ToyProcessor(PipelineContext("s"), worker=None)
     processor.push(_record("r1", track=True))
     processor.push(_record("r2", completes="r1"))
-    assert "r1" in processor.releasable_record_ids()
+    assert "r1" in processor.record2sample.releasable_record_ids()
     processor.close()
 
 

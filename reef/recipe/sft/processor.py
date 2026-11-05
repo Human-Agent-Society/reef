@@ -79,7 +79,7 @@ class SFTSamples(ReportSamples):
     ) -> Self:
         return cls(context, SFTSettings.parse(config, plugin_class=cls))
 
-    def is_stale(self, samples: Sequence[Sample]) -> bool:
+    def is_stale(self, samples: Sequence[Sample], served_artifact_ids: Sequence[str]) -> bool:
         return False
 
     def limited(self, sample: TrajectorySample) -> TrajectorySample:
