@@ -1055,7 +1055,7 @@ class GeneratedTaskJobData(Sample2Job):
     The generated tasks train like any other sample. A job takes at least ``job_samples``
     tasks, 1 by default, and at most ``buffer_size``, 4 by default or ``job_samples`` when that is more. The
     training component rolls the tasks out on its own sampler and trains on their rollouts (a task job; see the
-    Tinker component's ``rollout`` job parameter). The commit that submits the job counts the tasks trained;
+    training component's job parameters). The commit that submits the job counts the tasks trained;
     ``GeneratedTaskSamples.job_ended`` saves their results when the job ends. Imported train tasks train the same
     way; only generated tasks get results.
     """

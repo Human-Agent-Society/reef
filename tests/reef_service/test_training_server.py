@@ -435,7 +435,7 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
     )
     backend = training_deployment_for("slime")
 
-    config = backend.component_config(dataclasses.asdict(settings), loss_family="policy")
+    config = backend.component_config(dataclasses.asdict(settings), default_parameters={})
     assert (config["ray_address"], config["namespace"]) == ("ray-head:6379", "reef")
     assert config["settings"]["model_path"] == "/models/demo"
     serving = serving_runtime_config(settings, backend, ArtifactFormat("full"))

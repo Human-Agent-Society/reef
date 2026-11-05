@@ -7,21 +7,15 @@ becomes one dataset job (``reef.train.slime_backend.dataset``): Slime rolls the
 dataset's prompts out, rewards them and trains them with its own options in
 ``training.options``.
 
-- ``objective``: ``SlimeDatasetObjective``, of the ``slime`` loss family,
-  which leaves the training signal to Slime.
 - ``processor``: ``DatasetJobData``, the job of one request, with no samples.
-- ``recipe``: the objective and the stage.
+- ``recipe``: the default objective and the stage.
 
-The ``slime`` loss family is in ``reef.train.slime_backend.native``. This
-package registers the family by reference, so only the training driver and
-the workers import the Slime code.
+The ``slime_dataset`` objective belongs to Slime
+(``reef.train.slime_backend.objectives``). Its ``slime`` loss family is in
+``reef.train.slime_backend.native``; it leaves the training signal to Slime.
 """
 
-from reef.recipe.dataset.objective import SlimeDatasetObjective
 from reef.recipe.dataset.processor import DatasetJobData
 from reef.recipe.dataset.recipe import DatasetRecipe
-from reef.train.algos.registry import register_loss_family_ref
 
-register_loss_family_ref("slime", "reef.train.slime_backend.native:SlimeNativeAlgorithm")
-
-__all__ = ["DatasetJobData", "DatasetRecipe", "SlimeDatasetObjective"]
+__all__ = ["DatasetJobData", "DatasetRecipe"]
