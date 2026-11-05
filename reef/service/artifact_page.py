@@ -1,6 +1,6 @@
 """One HTML page per catalog step: why the version exists, what it changed, the evaluation's result, its setup, its chain.
 
-``GET /reef/harness/releases/{step}/page`` builds it from the releases row
+``GET /reef/harness/artifacts/{step}/page`` builds it from the releases row
 plus the source files of the release the step ran on, which each updated
 file of the step's patch is read against. A step whose method returned a
 summary (``method_summary``) gets a Method summary section after Why, and a
@@ -180,7 +180,7 @@ def recorded_patch(metrics: Mapping[str, Any] | None) -> dict[str, str | None]:
 
 
 def result_of(row: Mapping[str, Any]) -> str:
-    """The result of one ``GET /reef/harness/releases`` row, one of:
+    """The result of one ``GET /reef/harness/artifacts`` row, one of:
 
     - ``rejected``: ``metrics.selected`` is false.
     - ``inactive``: ``metrics.selected`` is true, the row made an artifact
@@ -236,7 +236,7 @@ def before_artifact_id(row: Mapping[str, Any]) -> str | None:
 def step_href(step: int, link_query: Mapping[str, str] | None) -> str:
     """The page of another step, opened the way this one was: the scenario and the page key travel in the
     query."""
-    href = f"/reef/harness/releases/{step}/page"
+    href = f"/reef/harness/artifacts/{step}/page"
     if link_query:
         href += "?" + urlencode(dict(link_query))
     return href
@@ -673,14 +673,14 @@ def build_running_step_page(
     )
 
 
-def build_release_page(
+def build_artifact_page(
     step: int,
     rows: Sequence[Mapping[str, Any]],
     *,
     before_files: Mapping[str, str] | None = None,
     link_query: Mapping[str, str] | None = None,
 ) -> str:
-    """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/releases`` lists them.
+    """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/artifacts`` lists them.
 
     ``before_files`` is the source tree of the release the step ran on (see
     ``before_artifact_id``), which each updated file of the patch is read
@@ -735,7 +735,7 @@ __all__ = [
     "RESULT_FIELDS",
     "RESULT_LABELS",
     "before_artifact_id",
-    "build_release_page",
+    "build_artifact_page",
     "build_running_step_page",
     "failed_words",
     "floor_tasks_note",

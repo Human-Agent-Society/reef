@@ -17,7 +17,7 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData, TaskSample
 from reef.core.snapshot import SnapshotRef
 from reef.core.training_request import TrainingRequest
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.observability.base import (
     ExperimentRun,
     ExperimentTracker,
@@ -60,8 +60,8 @@ class StepComponent(LocalJobComponent):
         return "steps"
 
     @property
-    def release_format(self) -> ReleaseFormat:
-        return ReleaseFormat("full")
+    def artifact_format(self) -> ArtifactFormat:
+        return ArtifactFormat("full")
 
     def default_start(self) -> DefaultStart:
         return DefaultStart()
@@ -147,10 +147,10 @@ def test_a_queued_job_keeps_its_component_and_previous_job():
 def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the_queue(worked):
     queue, component, _worker = worked
     view = JobQueueComponent(component, queue)
-    assert (view.name, view.root_start(STUB_ROOT), view.release_format) == (
+    assert (view.name, view.root_start(STUB_ROOT), view.artifact_format) == (
         "steps",
         "steps:base",
-        ReleaseFormat("full"),
+        ArtifactFormat("full"),
     )
 
     view.submit(job("j1"))
@@ -239,7 +239,7 @@ class ReleaseRefusingComponent(StepComponent):
     """A component that continues only from its own checkpoints, as Slime does."""
 
     @property
-    def starts_from_releases(self) -> bool:
+    def starts_from_artifacts(self) -> bool:
         return False
 
     def import_start(self, release: Path) -> str:
@@ -249,9 +249,9 @@ class ReleaseRefusingComponent(StepComponent):
 @pytest.mark.unit
 def test_a_queue_component_reports_whether_its_component_starts_from_releases(tmp_path):
     queue = memory_coordination().work_queue
-    assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_releases is True
+    assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_artifacts is True
     refusing = JobQueueComponent(ReleaseRefusingComponent(tmp_path / "b"), queue)
-    assert refusing.starts_from_releases is False
+    assert refusing.starts_from_artifacts is False
 
 
 @pytest.mark.unit

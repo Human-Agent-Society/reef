@@ -147,13 +147,13 @@ against the receipts of its model calls with `POST /reef/report`, as
 describes. Adapt `deployment.yaml`'s tasks and `harness/evolution.py`'s grader
 for your workload before starting the deployment.
 
-`deployment.yaml` also sets the `activation` section's `review_kinds: [extension]`: when a win touches an `extension` file, its release stays inactive, because an evolved extension runs in pi's process with your privileges. An inactive release is served to no client until a person activates it. To activate it, find the newest row in `GET /reef/harness/releases` with `"checkpoint": true` and `"activated": false`. Send that row's `artifact_id` to `POST /reef/scenarios/{scenario}/activate` as `{"artifact_id": ...}`. The curl is under [Activate an inactive release](../../docs/user-guide/evolve-your-harness.rst#activate-an-inactive-release) in the user guide. `serve.yaml` and `serve-native.yaml` set no `activation` section, so only a kind that is always reviewed, such as native's `native_loop`, waits for a person.
+`deployment.yaml` also sets the `activation` section's `review_kinds: [extension]`: when a win touches an `extension` file, its release stays inactive, because an evolved extension runs in pi's process with your privileges. An inactive release is served to no client until a person activates it. To activate it, find the newest row in `GET /reef/harness/artifacts` with `"checkpoint": true` and `"activated": false`. Send that row's `artifact_id` to `POST /reef/scenarios/{scenario}/activate` as `{"artifact_id": ...}`. The curl is under [Activate an inactive release](../../docs/user-guide/evolve-your-harness.rst#activate-an-inactive-release) in the user guide. `serve.yaml` and `serve-native.yaml` set no `activation` section, so only a kind that is always reviewed, such as native's `native_loop`, waits for a person.
 
 ## Notebook
 
 `evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook loads serve.yaml, sets `inference.upstream-url` and `inference.upstream-model` to those values, writes the result to `work/serve-notebook.yaml`, and materializes the recipe config from it with `harness/materialize_recipe.py`, the step `run.sh` runs. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
 
-Pick a model that fails at least one task. A model that passes all three tasks still trains one step per report, but no step has a failing trace to learn from, so every step skips and nothing publishes (the DeepSeek result below). A step that changes nothing commits as skipped, and its `method_summary`, on the step's row in `GET /reef/harness/releases`, says why.
+Pick a model that fails at least one task. A model that passes all three tasks still trains one step per report, but no step has a failing trace to learn from, so every step skips and nothing publishes (the DeepSeek result below). A step that changes nothing commits as skipped, and its `method_summary`, on the step's row in `GET /reef/harness/artifacts`, says why.
 
 ## What one run does
 

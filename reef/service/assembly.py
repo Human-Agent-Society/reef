@@ -104,7 +104,7 @@ def connect_training_component(
 
     The training backend builds only the component. The serving runtime comes
     from the deployment's ``inference`` settings and the component's
-    ``release_format`` (``reef.service.deploy.serving``).
+    ``artifact_format`` (``reef.service.deploy.serving``).
 
     The dispatcher puts the component behind the jobs queue (``Dispatcher``); the training service runs it.
     """
@@ -114,7 +114,7 @@ def connect_training_component(
     )
     try:
         serving = RuntimeRegistry().build(
-            serving_runtime_config(settings, backend, component.release_format), model_path=model_path
+            serving_runtime_config(settings, backend, component.artifact_format), model_path=model_path
         )
     except BaseException:
         component.close()

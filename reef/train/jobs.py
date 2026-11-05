@@ -238,7 +238,7 @@ class JobLoop:
     def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
         """The commit that publishes ``checkpoint``, the running job's next unpublished one, as an artifact.
 
-        The next job starts from ``checkpoint.path``. The commit publishes the checkpoint's ``release_path``, and
+        The next job starts from ``checkpoint.path``. The commit publishes the checkpoint's ``artifact_path``, and
         the scenario's activation rule decides whether it serves. The commit's metrics are the checkpoint's
         training metrics and ``training_job``. Raise ``ValueError`` when ``state`` has no running job, or when a
         training metric is named ``training_job``: a metric is never overwritten.
@@ -264,7 +264,7 @@ class JobLoop:
             TrainStepResult(
                 state=handled.to_dict(),
                 metrics=metrics,
-                artifact=Artifact.local(Path(checkpoint.release_path)),
+                artifact=Artifact.local(Path(checkpoint.artifact_path)),
                 training_job_id=job.job_id,
                 changed_kinds=self.component.changed_parts(state.start, checkpoint),
             )
