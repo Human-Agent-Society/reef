@@ -70,18 +70,13 @@ def ended(component: HarnessTrainingComponent, job_id: str, seconds: float = 30.
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("queued_earlier", [False, True])
 def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
-    tmp_path: Path, queued_earlier: bool
+    tmp_path: Path,
 ) -> None:
     component = component_of(tmp_path, lambda workspace, services: MARKER)
     component.start_jobs()
     try:
         first = job(component, "one", start=seed_start(component, tmp_path))
-        if queued_earlier:
-            # A job that an earlier Reef queued names its component and its artifact in its parameters.
-            parameters = {**first.parameters, "component": COMPONENT, "head_release_id": "base", "previous_job": None}
-            first = replace(first, parameters=parameters, component=None)
         component.submit(first)
         status = ended(component, "one")
         assert status.state == "finished" and status.metrics == {}

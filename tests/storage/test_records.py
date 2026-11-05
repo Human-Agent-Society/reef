@@ -255,7 +255,7 @@ def test_legacy_schema_migrates_consumption_and_backfills_utf8_body_sizes(tmp_pa
     legacy_database(database)
     payload_json = '{"text":"海"}'
     references_json = '["起点"]'
-    artifact_json = '{"kind":"artifact","content_id":"内容","release_id":"发布","parent_release_id":null}'
+    artifact_json = '"发布"'
     with sqlite3.connect(database) as connection:
         connection.execute("ALTER TABLE agent_record ADD COLUMN compacted_at REAL")
         connection.execute(
@@ -269,7 +269,6 @@ def test_legacy_schema_migrates_consumption_and_backfills_utf8_body_sizes(tmp_pa
     with SQLiteRecordStore(database) as records:
         retired = records.get_for_audit("math", "retired")
         assert retired.sequence == 7
-        assert records.consumption_receipts("math")[0]["consumed_ids"] == ("retired",)
         assert retired.item.payload == {"text": "海"}
         assert retired.item.references == ("起点",)
         assert retired.item.artifact_id == "发布"
@@ -579,89 +578,3 @@ def test_concurrent_openers_all_upgrade_a_rollback_mode_database(tmp_path) -> No
         legacy_database(database)
         with ThreadPoolExecutor(max_workers=12) as executor:
             tuple(executor.map(open_store, range(12)))  # raises if any opener saw "database is locked"
-
-
-@pytest.mark.parametrize(
-    "ids_json, metadata_json",
-    [('["source", "report"]', '{"outcome":"stale"}'), ("[]", '{"consumed_ids":["report","source"]}')],
-)
-def test_legacy_consumption_receipts_are_migrated_once(tmp_path, ids_json, metadata_json):
-    database = tmp_path / "legacy.sqlite3"
-    with SQLiteRecordStore(database):
-        pass
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE compaction_receipts (scenario TEXT, receipt_id TEXT, compacted_ids_json TEXT, "
-            "metadata_json TEXT, recorded_at REAL, PRIMARY KEY (scenario, receipt_id, compacted_ids_json))"
-        )
-        connection.execute(
-            "INSERT INTO compaction_receipts VALUES ('math', 'batch-1', ?, ?, 123)",
-            (ids_json, metadata_json),
-        )
-    with SQLiteRecordStore(database) as records:
-        [receipt] = records.consumption_receipts("math")
-        assert receipt["consumed_ids"] == ("report", "source")
-        assert receipt["receipt_id"] == "legacy:batch-1"
-        assert receipt["recorded_at"] == 123
-
-
-def test_legacy_retirement_migration_pages_ids_and_rolls_back_as_one_upgrade(tmp_path):
-    database = tmp_path / "records.sqlite3"
-    with SQLiteRecordStore(database) as records:
-        records.append_many([item(str(index), "math") for index in range(600)])
-    with sqlite3.connect(database) as connection:
-        connection.executescript(
-            "ALTER TABLE agent_record ADD COLUMN compacted_at REAL;"
-            "UPDATE agent_record SET compacted_at=1;"
-            "CREATE INDEX agent_record_active_sequence ON agent_record(sequence) WHERE compacted_at IS NULL;"
-            "CREATE TRIGGER reject_migration BEFORE INSERT ON record_consumption "
-            "BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END;"
-        )
-    with pytest.raises(IntegrityError, match="injected migration failure"):
-        SQLiteRecordStore(database)
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM agent_record WHERE compacted_at=1").fetchone() == (600,)
-        assert connection.execute("SELECT COUNT(*) FROM record_consumption").fetchone() == (0,)
-        connection.execute("DROP TRIGGER reject_migration")
-    for _ in range(2):
-        with SQLiteRecordStore(database) as records:
-            assert records.count("math") == 600
-            receipts = records.consumption_receipts("math")
-            assert len(receipts) == 3
-            assert {key for receipt in receipts for key in receipt["consumed_ids"]} == {
-                str(index) for index in range(600)
-            }
-    with sqlite3.connect(database) as connection:
-        assert "compacted_at" not in {row[1] for row in connection.execute("PRAGMA table_info(agent_record)")}
-        assert "agent_record_active_sequence" not in {
-            row[1] for row in connection.execute("PRAGMA index_list(agent_record)")
-        }
-
-
-@pytest.mark.parametrize("component_id", [None, "weights:existing"])
-def test_legacy_record_locator_reads_and_retries_as_an_artifact_id(tmp_path, component_id):
-    database = tmp_path / "records.sqlite3"
-    payload = {"messages": [{"role": "user", "content": "hello"}]}
-    if component_id is not None:
-        payload["artifact_id"] = component_id
-    identity = component_id or "old-snapshot"
-    original = AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload=payload,
-        agent_record_id="legacy",
-        artifact_id=identity,
-    )
-    with SQLiteRecordStore(database) as store:
-        store.append(original)
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "UPDATE agent_record SET artifact_json = ? WHERE agent_record_id = 'legacy'",
-            ('{"kind":"artifact","release_id":"old-snapshot","parent_release_id":"parent","content_id":"old"}',),
-        )
-    with SQLiteRecordStore(database) as store:
-        restored = store.get("math", "legacy")
-        assert restored == original
-        assert store.append(restored) == original
-        assert store.append(original) == original
-        assert store.count("math") == 1

@@ -274,10 +274,10 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
 
     base = SnapshotRef("base-release", None)
     head = SnapshotRef("checkpoint-release", base.revision)
-    # Persisted reef-scenario/5 metadata contains registration and recovery
+    # Persisted reef-scenario/7 metadata contains registration and recovery
     # fields; the containing artifact supplies the checkpoint release identity.
     metadata = {
-        "format": "reef-scenario/5",
+        "format": "reef-scenario/7",
         "scenario": "math",
         "source": {"kind": "item", "item": "upload-1", "uri": "s3://bucket/upload-1/", "version": ""},
         "start_artifact": encode_snapshot_ref(base),
@@ -398,7 +398,7 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         # A scenario that an earlier Reef stored is refused, not read: it is created again.
         (
             {"format": "reef-scenario/4"},
-            r"format 'reef-scenario/4'; this Reef reads reef-scenario/7 and legacy reef-scenario/5 or reef-scenario/6",
+            r"format 'reef-scenario/4'; this Reef reads reef-scenario/7",
         ),
     ],
 )
@@ -408,7 +408,7 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
 
     base = SnapshotRef("base", None)
     metadata = {
-        "format": "reef-scenario/5",
+        "format": "reef-scenario/7",
         "scenario": "math",
         "source": {"kind": "default", "inputs": {}},
         "start_artifact": encode_snapshot_ref(base),
@@ -532,7 +532,7 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
     try:
         with pytest.raises(
             ValueError,
-            match=r"'reef-scenario/4'; this Reef reads reef-scenario/7 and legacy reef-scenario/5 or reef-scenario/6, so create",
+            match=r"'reef-scenario/4'; this Reef reads reef-scenario/7",
         ):
             dispatcher.get_or_create_scenario("math")
     finally:

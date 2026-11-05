@@ -135,7 +135,7 @@ def saved_full_weights(path: Path) -> Path:
 
 
 def release(path: Path, artifact_id: str) -> Artifact:
-    return Artifact(SnapshotRef(artifact_id, None), None, local_path=path)
+    return Artifact(SnapshotRef(artifact_id, None), None, artifact_id=artifact_id, local_path=path)
 
 
 @pytest.fixture

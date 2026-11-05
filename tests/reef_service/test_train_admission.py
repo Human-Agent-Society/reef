@@ -18,7 +18,7 @@ TEXT = "add a skill that runs the tests before it answers"
 
 
 def _request(text: str = TEXT, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
-    return {"text": text, "session": session, "release_id": release_id}
+    return {"text": text, "session": session, "artifact_id": release_id}
 
 
 async def _post(client: TestClient, body: object, scenario: str = "agents"):
@@ -74,7 +74,6 @@ def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: P
             stored = scenario.training_requests.get(answer["agent_record_id"])
             # The queued payload has one shape: a request that named nothing carries an empty ``requires``.
             expected = _request()
-            expected["artifact_id"] = expected.pop("release_id")
             assert stored is not None and dict(stored.payload) == {**expected, "requires": []}
             assert await asyncio.to_thread(entered.wait, 5)
         finally:

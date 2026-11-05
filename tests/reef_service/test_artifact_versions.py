@@ -211,7 +211,7 @@ def test_restore_and_operation_history_use_artifact_identities(tmp_path) -> None
             assert scenario.artifact_status()[component] == {"active": target["artifact_id"], "training_start": start}
             assert scenario.store.history()[-1].operation == "restore"
             assert len(scenario.artifacts()) == len(artifacts)
-            for payload in ({"step": True}, {"step": -1}, {"step": 999}, {"release_id": "old"}):
+            for payload in ({"step": True}, {"step": -1}, {"step": 999}, {"artifact_id": "old"}):
                 assert (await client.post("/reef/scenarios/math/restore", json=payload)).status == 400
             assert (await client.post("/reef/scenarios/missing/restore", json={"step": 0})).status == 404
             root = await client.post("/reef/scenarios/math/restore", json={"step": 0})

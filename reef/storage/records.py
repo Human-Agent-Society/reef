@@ -8,33 +8,15 @@ backends in this package implement this interface; importing it loads no databas
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypedDict
 
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 
 
-class ConsumptionReceipt(TypedDict):
-    """Record IDs consumed without a training commit, as an older store holds them.
-
-    Reef no longer writes receipts. A store that an earlier Reef version wrote
-    keeps the receipts of its stale job data drops, and the storage migration turns
-    old retired rows into receipts. ``consumed_ids`` is sorted; ``metadata`` may
-    name the receipt's ``component``. Scenario recovery reads them, so that
-    these records never train.
-    """
-
-    receipt_id: str
-    consumed_ids: tuple[str, ...]
-    metadata: dict[str, object]
-    recorded_at: float
-
-
 class RecordConflict(ReefError):
-    """A record id or consumption receipt already identifies different content."""
+    """A record id already identifies different content."""
 
 
 @dataclass(frozen=True)
@@ -79,9 +61,9 @@ class RecordRetention:
 
 
 class RecordStore(ABC):
-    """Persist records and consumption receipts independently of processors.
+    """Persist records independently of processors.
 
-    Reads and consumption receipts are scoped to the supplied scenario. Record ids are
+    Reads are scoped to the supplied scenario. Record ids are
     unique across the store: retries with identical content are idempotent,
     while different content raises ``RecordConflict``. Retry comparison ignores
     ``created_at`` and continues to work after capacity eviction.
@@ -169,10 +151,6 @@ class RecordStore(ABC):
         not stored. A store that keeps no trajectories treats each record as a trajectory of one call."""
         return () if self.get_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
 
-    @abstractmethod
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        """Read the scenario's consumption receipts that an older store holds, in recorded order."""
-
     def loss(self, scenario: str) -> RecordLoss:
         """Capacity losses, including after restart; non-evicting stores return zero."""
         return RecordLoss()
@@ -185,7 +163,6 @@ class RecordStore(ABC):
 __all__ = [
     "AgentRecord",
     "AppendResult",
-    "ConsumptionReceipt",
     "RecordConflict",
     "RecordLoss",
     "RecordRetention",

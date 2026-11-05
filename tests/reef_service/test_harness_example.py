@@ -581,8 +581,7 @@ def session_events(session: str, release: str, stages, tool: str | None = None) 
 def write_commits(directory: Path, *commits: dict) -> None:
     """Replace the commits of one scenario database with stored records at steps 1, 2, ...
 
-    Each of ``commits`` gives the fields that differ from a complete record. A commit with a legacy
-    ``artifact_ref`` is stored in the ``reef-commit/6`` format.
+    Each of ``commits`` gives the fields that differ from a complete record.
     """
     stored = []
     for commit in commits:
@@ -596,10 +595,6 @@ def write_commits(directory: Path, *commits: dict) -> None:
             high_water_sequence=0,
             high_water_offset=0,
         ).to_dict()
-        if "artifact_ref" in commit:
-            base.pop("snapshot")
-            base["record"] = "reef-commit/6"
-            commit = {**commit, "artifact_ref": {"kind": "artifact", "content_id": "c", **commit["artifact_ref"]}}
         if "snapshot" in commit:
             commit = {**commit, "snapshot": {"kind": "snapshot", **commit["snapshot"]}}
         stored.append({**base, **commit})
@@ -624,7 +619,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "step": 1,
         "recorded_at": 1050.0,
         "operation": "training",
-        "artifact_ref": {"release_id": "r2", "parent_release_id": "r1"},
+        "snapshot": {"revision": "r2", "parent_revision": "r1"},
         "metrics": {
             "selected": True,
             "wins": 2,
@@ -698,7 +693,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "recorded_at": 1060.0,
         "operation": "activate",
         "step": 2,
-        "artifact_ref": {"release_id": "r1", "parent_release_id": None},
+        "snapshot": {"revision": "r1", "parent_revision": None},
         "metrics": None,
         "algorithm_state": None,
     }
