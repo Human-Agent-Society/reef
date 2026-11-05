@@ -38,7 +38,7 @@ from reef.train.tinker_backend.launch import TinkerDeployment
 from reef.train.types import JobData, TrajectorySample
 
 TOKENS = ("REEF_REMOTE_CONTROL_TOKEN", "REEF_REMOTE_INFERENCE_TOKEN")
-#: What the engines load: the adapter at each release's sampler path, at the configs' LoRA rank.
+#: What the engines load: the adapter at each snapshot's sampler path, at the configs' LoRA rank.
 ENGINE_ADAPTERS = ArtifactFormat("adapter", 16, ("all",))
 
 
@@ -310,7 +310,7 @@ def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(
     component, inference, seen = build(config, monkeypatch, engines)
     try:
         assert isinstance(component, TinkerTrainingComponent) and isinstance(inference, AdapterServingRuntime)
-        # A release is its manifest; the engines load the adapter downloaded from its sampler path.
+        # A snapshot is its manifest; the engines load the adapter downloaded from its sampler path.
         assert component.artifact_format is None
         assert (seen["artifact_format"], seen["adapter_capacity"]) == (ENGINE_ADAPTERS.to_dict(), 3)
         math, served = train(component, inference, objective, "math", 0)

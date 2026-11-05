@@ -23,7 +23,7 @@ class SDPORecipe(WeightTrainingRecipe):
     next-token distributions over the student's on-policy response become the
     target of a per-token divergence. A step is a complete sampling grid,
     ``groups_per_step`` questions by ``rollouts_per_group`` attempts from one
-    policy release; each report carries one rollout's receipt, its score and
+    policy artifact; each report carries one rollout's receipt, its score and
     its coordinates, and the grid trains as one optimizer step once complete.
 
     The recipe binds the objective, the step schedule, and the report

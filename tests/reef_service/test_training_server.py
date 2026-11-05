@@ -287,7 +287,7 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
-    # The backend serves its own releases by default (``inference.serving: trainer``).
+    # The backend serves its own snapshots by default (``inference.serving: trainer``).
     assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
@@ -487,7 +487,7 @@ class HeldJobComponent(StubTrainingComponent):
 
 
 class AdapterInference(StubInferenceRuntime):
-    """Serve each release under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
+    """Serve each snapshot under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
 
     def __init__(self, *, per_scenario_adapters: bool) -> None:
         super().__init__()

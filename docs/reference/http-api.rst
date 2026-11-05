@@ -1,5 +1,5 @@
-HTTP API: inference, feedback, and releases
-===========================================
+HTTP API: inference, feedback, and artifacts
+============================================
 
 Reef serves the provider's own inference routes: OpenAI Chat Completions at
 ``/v1/chat/completions``, OpenAI Responses at ``/v1/responses``, and Anthropic
@@ -12,7 +12,7 @@ large contexts. Record import routes accept request bodies up to 10 MiB.
 
 For a complete request, receipt, and feedback example, start with the
 `inference and feedback quickstart <../getting-started/quickstart.rst>`__.
-To put the release routes into practice, follow the `agent harness tutorial
+To put the snapshot routes into practice, follow the `agent harness tutorial
 <../user-guide/evolve-your-harness.rst>`__ or the `model weight training guide
 <../user-guide/evolve-your-model.rst>`__.
 
@@ -49,11 +49,11 @@ Routes
 |                                                                                  | unknown scenario or one that serves no model      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same, for a candidate of one component of a   |
-|                                                                                  | composed release                                  |
+|                                                                                  | composed snapshot                                 |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``           | one of the inference routes above, answered and   |
 |                                                                                  | recorded by an artifact that the scenario serves  |
-|                                                                                  | beside its active release; 404 for any other      |
+|                                                                                  | beside its active selection; 404 for any other    |
 |                                                                                  | artifact. The same prefix with                    |
 |                                                                                  | ``/evaluation/v1/{route}`` makes the same call    |
 |                                                                                  | without a record                                  |
@@ -129,7 +129,7 @@ Routes
 | ``POST /reef/scenarios/{scenario}/train-from``                                   | set the artifact a trainer starts its next job or |
 |                                                                                  | step from                                         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/serve``                                        | serve an artifact beside the active release       |
+| ``POST /reef/scenarios/{scenario}/serve``                                        | serve an artifact beside the active selection     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/stop-serving``                                 | stop serving an artifact beside the active        |
 |                                                                                  | release                                           |
@@ -148,7 +148,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/next-job``                                      | the samples that the next automatic job trains    |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/evaluations``                                  | evaluate one artifact of a release                |
+| ``POST /reef/scenarios/{scenario}/evaluations``                                  | evaluate one artifact of a snapshot               |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations``                                   | artifact evaluations, newest first                |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -158,7 +158,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness``                                                            | the harness tree of the active release, rendered  |
+| ``GET /reef/harness``                                                            | the harness tree of the active selection, rendered|
 |                                                                                  | for the adapter, as its source tree, or bound for |
 |                                                                                  | a client install                                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -558,7 +558,7 @@ The data service makes an item for each artifact that a scenario lists
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
 Its ``source_uri`` comes from the artifact backend: a backend
 that keeps releases where other deployments can read them, such as an object
-store, gives the URI of the release's directory. The built-in ``git_lfs``
+store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
 backend gives none, so its items have a null ``source_uri``.
 
 To add files that you stored, such as an upload to an S3 prefix, create an
@@ -946,7 +946,7 @@ The method may add items of its own (an extension that reads a variable,
 say) in its step's result. The backend runs the same credential and directive screens
 over each added item, and merges the ones that pass by name after the
 person's items into the commit's ``training_request.requires``, so the
-releases row and the manifest carry what the person named and what the change
+snapshots row and the manifest carry what the person named and what the change
 added. An added item with a person's item's name is dropped: the person's copy
 wins. ``training_request.refused_requires`` lists each item a screen refused
 as ``{"item": <the item as written>, "reason": "..."}``; the key is absent
@@ -1020,7 +1020,7 @@ rules still determine whether the result becomes served.
 requests also report ``pending_requests`` (accepted requests that
 no commit consumed yet, read from the queue).
 Committed step metrics include ``training_request`` with the request
-id, text, session, release id and ``requires``; the releases row of a step
+id, text, session, release id and ``requires``; the snapshots row of a step
 that answered a request carries, for example:
 
 .. code:: json
@@ -1060,7 +1060,7 @@ setting says. The normal bearer authentication applies.
 Scenarios
 ---------
 
-A scenario isolates the records, trainer, and release chain for one workload.
+A scenario isolates the records, trainer, and snapshot chain for one workload.
 Create it with ``POST /reef/scenarios`` before you send inference requests to
 it. An inference request never creates a scenario: for an unknown scenario, it
 answers HTTP 404. The first report or imported record carrying a new
@@ -1254,7 +1254,7 @@ scenario can run, so that it offers only those:
 
 - ``serve_beside``: whether ``POST /reef/scenarios/{scenario}/serve`` can
   serve an artifact beside the active selection. It is false when the runtime
-  answers only from the release that it has loaded, or when the store keeps
+  answers only from the snapshot that it has loaded, or when the store keeps
   no durable commit history.
 - ``evaluate``: the components whose artifacts ``POST
   /reef/scenarios/{scenario}/evaluations`` can evaluate. It is empty when the
@@ -1265,7 +1265,7 @@ scenario can run, so that it offers only those:
   component, which continues only from its own checkpoints, is not in it.
 
 An operation that the capabilities allow can still refuse one artifact, for
-example a release whose weights the training component cannot import.
+example a snapshot whose weights the training component cannot import.
 
 Deleting a scenario
 -------------------
@@ -1276,8 +1276,8 @@ log move under ``<agent_record_dir>/archived/``, the recipe's own directories
 (a harness scenario's history and step records) move under an
 ``archived/`` sibling, and the
 scenario's ref in the artifact repository is renamed into
-``refs/reef/archived/``, so every release it published stays reachable. A
-later create of the same name writes a new root release. A local step in flight for the scenario ends without a
+``refs/reef/archived/``, so every snapshot it published stays reachable. A
+later create of the same name writes a new root snapshot. A local step in flight for the scenario ends without a
 commit. Only a local artifact repository can be archived; a remote one
 answers 501.
 
@@ -1485,9 +1485,9 @@ sampling parameters, and no artifact adds to the request.
 
 Reef answers the request from the scenario's row in ``served_models``. The
 request's ``model`` selects the row of an artifact served beside the active
-release when it names one; any other ``model`` selects the active row. Reef
+selection when it names one; any other ``model`` selects the active row. Reef
 keeps that row for the whole request. It sends the request to the engine at
-the row's URL under the row's model name, and records the release of the row's
+the row's URL under the row's model name, and records the snapshot of the row's
 artifact, even if an activation completes mid-request. `Run the services in
 separate processes
 <../user-guide/operate.rst#run-the-services-in-separate-processes>`__ gives the
@@ -1522,8 +1522,8 @@ training, including when a report references their IDs directly or retained
 records are replayed after a restart.
 
 Every inference response also carries ``x-reef-artifact-id``: the ID of the
-artifact that answered. It does not report harness releases. A client learns
-of a new harness release from the harness routes (`Harness artifacts`_).
+artifact that answered. It does not report harness artifacts. A client learns
+of a new harness artifact from the harness routes (`Harness artifacts`_).
 
 A composite recipe's evaluation calls come through these routes; a recipe of
 one component calls its runtime's endpoint directly, as before composites.
@@ -1531,7 +1531,7 @@ The evaluation calls do not present a service token. When auth is configured,
 the service issues a random token at startup that opens the evaluation routes
 alone, and hands it to the recipe. The evaluation runs, which run candidate code, and
 the method's calls to the served model use it: they can sample the active
-release but reach no other route. A restart issues a new one.
+selection but reach no other route. A restart issues a new one.
 
 Artifact of a recorded response
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1638,12 +1638,12 @@ Receiving an update
 
 For weight-training scenarios there is nothing to do: keep calling the same
 inference endpoint and it serves the active selection. The artifact
-lives in the inference runtime, so requests reach the new release directly.
+lives in the inference runtime, so requests reach the new snapshot directly.
 
 A scenario whose artifact is the harness tree works the other way: the client
 pulls. It fetches the tree of the active selection with ``GET /reef/harness``,
 writes the files where its agent reads them, binds the agent's model to this
-Reef, and runs the agent on that release. The release it runs is then the one
+Reef, and runs the agent on that snapshot. The snapshot it runs is then the one
 whose receipts it reports against. ``reef-client harness`` is that client (see
 `Use a published tree
 <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
@@ -1687,15 +1687,15 @@ scenario. An unknown scenario or one without a harness tree answers HTTP 404.
 
 ``?form=`` chooses what ``files`` holds, path to text:
 
-- ``rendered`` (the default): the release rendered for the scenario's
+- ``rendered`` (the default): the snapshot rendered for the scenario's
   adapter. These are the paths the agent reads, with the adapter's enforced
   config defaults merged in (see `Rendering
   <../developer-guide/harness-adapters.rst#rendering>`__).
-- ``source``: the source tree the release stores. These are the tree paths
+- ``source``: the source tree the snapshot stores. These are the tree paths
   that the adapter's parts take, the ones a patch names (see `Tree parts
   <../developer-guide/harness-adapters.rst#tree-parts>`__). A client that
   renders the tree itself reads this form.
-- ``client``: the release as a layer over a person's own configuration,
+- ``client``: the snapshot as a layer over a person's own configuration,
   for an install at ``root``, bound to
   ``<service_url>/reef/scenarios/<scenario>``. Both query parameters are
   required: ``service_url`` is the address the client reaches Reef at, and
@@ -1777,7 +1777,7 @@ for serving and as the harness trainer's start.
 - A sync that changes nothing answers ``changed: false`` and commits
   nothing. Otherwise the commit's operation is ``sync``, and its metrics
   carry ``sync`` (with ``base_artifact_id``), ``patch`` and
-  ``patch_parts``. The release serves at once, without the activation rule,
+  ``patch_parts``. The snapshot serves at once, without the activation rule,
   and the next step trains from it.
 - A sync while a step holds job data is HTTP 409; send it again when the
   step ends. So is a sync that another commit overtook.
@@ -1799,7 +1799,7 @@ The trainer runs the method's step on the request, then evaluates and
 publishes under the same policy as automatic evolution. Its commit metrics
 carry ``training_request: {id, text, session, artifact_id, requires}`` (with
 ``client`` when the request sent one) and the method's ``method_summary`` and
-``method_notes``, all visible through the release catalog.
+``method_notes``, all visible through the snapshot catalog.
 
 Artifacts
 ~~~~~~~~~
@@ -1926,7 +1926,7 @@ the artifact. A private repo needs a token that the service reads in Hugging
 Face's standard way, such as ``HF_TOKEN``. A revision that does not resolve for
 that token answers HTTP 400.
 
-The directory must have the layout of the releases that the scenario's
+The directory must have the layout of the snapshots that the scenario's
 component makes. The training backend and its configuration decide it:
 
 +-----------------------------+------------------------------------------------+------------------+
@@ -1948,7 +1948,7 @@ component makes. The training backend and its configuration decide it:
 +-----------------------------+------------------------------------------------+------------------+
 | Harness                     | a source tree whose files are UTF-8 text and   | refused: a path  |
 |                             | pass validation for the adapter, the files a   | off the harness  |
-|                             | harness release stores                         | layout fails     |
+|                             | harness artifact stores                        | layout fails     |
 |                             |                                                | validation       |
 +-----------------------------+------------------------------------------------+------------------+
 
@@ -2012,7 +2012,7 @@ revision, whether the scenario has one component or several.
 
 Activating the active artifact changes nothing. Activation never changes a
 trainer's training start. A full-weight serving runtime that activates the
-root release after it served a checkpoint loads the root's files.
+root snapshot after it served a checkpoint loads the root's files.
 
 Restore a scenario selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2068,7 +2068,7 @@ Whether a trainer can start from an artifact depends on the trainer:
   from their own latest checkpoint.
 - A harness trainer starts its next evolve step from the artifact's tree.
 
-A weight artifact without optimizer state, such as a root release made from
+A weight artifact without optimizer state, such as a root snapshot made from
 the default start, starts training with a new optimizer state.
 
 Both routes answer these statuses:
@@ -2146,7 +2146,7 @@ answers HTTP 404 afterwards.
 The runtime must answer each call from the artifact that the call names.
 The Tinker runtime does, so a Tinker scenario can serve any of its
 artifacts. A runtime that loads weights into engines answers only from the
-release it has loaded, so Reef refuses a serve there. A scenario whose
+snapshot it has loaded, so Reef refuses a serve there. A scenario whose
 components load nothing into a runtime, such as a harness scenario, can serve
 any of its artifacts. A store without a durable commit history also refuses
 a serve.
@@ -2155,16 +2155,16 @@ a serve.
 | Status | Cause                                                              |
 +========+====================================================================+
 | 200    | the artifact is served (``serve``) or no longer served beside the  |
-|        | active release (``stop-serving``)                                  |
+|        | active selection (``stop-serving``)                                |
 +--------+--------------------------------------------------------------------+
 | 400    | a malformed body; ``serve``: the artifact has no durable bytes, an |
 |        | unknown ``component`` or a missing one in a scenario of several    |
-|        | components, the runtime answers only from the release it has       |
+|        | components, the runtime answers only from the snapshot it has      |
 |        | loaded, or the store keeps no durable commit history;              |
 |        | ``stop-serving``: the body names a ``component``                   |
 +--------+--------------------------------------------------------------------+
 | 404    | unknown scenario or artifact; ``stop-serving``: the scenario does  |
-|        | not serve the artifact beside its active release                   |
+|        | not serve the artifact beside its active selection                 |
 +--------+--------------------------------------------------------------------+
 | 409    | a training result waits for its commit; send the request again     |
 |        | after the commit                                                   |
@@ -2221,7 +2221,7 @@ step settles the request, the page reloads every five seconds and shows the
 request's state and the step's activity (its latest 80 lines). The catalog row
 whose ``metrics.training_request.id`` is the record id settles the page: it
 then shows the result, the next action (``GET /reef/harness`` for an active
-release, the activate request for an inactive one), ``method_summary``, the
+selection, the activate request for an inactive one), ``method_summary``, the
 patch with each file's kind of the harness tree (from the row's
 ``patch_parts``), and ``method_notes``. An unknown id, or one that is not a
 training request, is HTTP 404.
@@ -2306,7 +2306,7 @@ from online record-body capacity eviction.
 Status
 ------
 
-Read ``GET /reef/status`` when inference is still serving an older release while
+Read ``GET /reef/status`` when inference is still serving an older snapshot while
 a training job runs or an update is being published.
 
 .. code:: json
@@ -2408,7 +2408,7 @@ Status codes
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (on inference, on ``POST /reef/train``,    |
 |        | or with implicit creation off), a scenario that serves no   |
-|        | model, unknown release or artifact, unknown adapter, no     |
+|        | model, unknown snapshot or artifact, unknown adapter, no    |
 |        | configured harness recipe, or a scenario that serves no     |
 |        | files                                                       |
 +--------+-------------------------------------------------------------+
@@ -2529,7 +2529,7 @@ cached commit history; the response is bounded, not a new persisted index.
 Reef does not join these endpoints into learning links or assign learning
 states, human-readable explanations, policy capability flags, or evaluation
 results. The console owns that interpretation. Consumption is not proof that a
-release made from the records serves.
+snapshot made from the records serves.
 
 
 Sample processing tasks

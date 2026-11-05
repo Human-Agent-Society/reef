@@ -190,7 +190,7 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
     Holds an HttpInferenceHandler with provider-native auth
-    and exposes it via inference_handler. It loads no weights: a release
+    and exposes it via inference_handler. It loads no weights: a snapshot
     serves under its release ID, and no load names what serves.
     """
 

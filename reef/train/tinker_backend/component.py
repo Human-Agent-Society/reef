@@ -130,14 +130,14 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
     releases) and ``jobs/`` (see ``LocalJobComponent``). The constructor makes no base start. ``prepared_base``
     makes ``base/`` on its first call in a process: before the process runs jobs (``start_jobs``), when it reads
-    ``base_start`` or checks a job from it, or when a new scenario's root release holds the default start
+    ``base_start`` or checks a job from it, or when a new scenario's root snapshot holds the default start
     (``TinkerBaseFiles``). A process that does none of these, such as a service that only opens scenarios, makes
     nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
-    directory is both the start of a later job and the release Reef publishes.
+    directory is both the start of a later job and the snapshot Reef publishes.
     The weights stay on the service. A subclass decides the parameterization:
     which checkpoints it trains (``validated``), what its base is
-    (``prepare_base``, ``start_at``), and which releases it imports.
+    (``prepare_base``, ``start_at``), and which snapshots it imports.
     """
 
     def __init__(
@@ -213,8 +213,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"the start {directory} holds no Tinker checkpoint manifest")
         return self.validated(TinkerCheckpoint.read(directory))
 
-    def complete_release(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
-        """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its release holds; by default nothing.
+    def complete_artifact(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its snapshot holds; by default nothing.
 
         The job loop calls it for each saved checkpoint before the checkpoint is recorded, so a job that a restart
         interrupts here saves the checkpoint again.
@@ -224,7 +224,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def check_manifest(self, files: ArtifactFiles) -> None:
         """Raise ``ValueError`` unless ``files`` hold a manifest that ``validated`` takes and whose state resolves."""
         if MANIFEST not in files.paths():
-            raise ValueError(f"a Tinker release holds {MANIFEST}")
+            raise ValueError(f"a Tinker artifact holds {MANIFEST}")
         try:
             checkpoint = TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
         except (TypeError, ValueError) as exc:
@@ -232,11 +232,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
         self._client.check_remote(self.validated(checkpoint))
 
-    def import_manifest(self, release: Path) -> str:
+    def import_manifest(self, artifact_dir: Path) -> str:
         """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
-        if not (release / MANIFEST).exists():
+        if not (artifact_dir / MANIFEST).exists():
             raise ValueError(f"artifact is missing {MANIFEST}")
-        checkpoint = self.validated(TinkerCheckpoint.read(release))
+        checkpoint = self.validated(TinkerCheckpoint.read(artifact_dir))
         digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
         imported = self._root / "imported" / digest
         if not imported.exists():
@@ -246,7 +246,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     @property
     def artifact_format(self) -> ArtifactFormat | None:
-        """``None`` by default: a release holds only its manifest, and the weights stay on the service."""
+        """``None`` by default: a snapshot holds only its manifest, and the weights stay on the service."""
         return None
 
     @property
@@ -445,7 +445,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             )
             target = directory / str(last)
             current.write(target)
-            self.complete_release(current, target)
+            self.complete_artifact(current, target)
             self.save_checkpoint(
                 directory,
                 SavedCheckpoint(
@@ -468,7 +468,7 @@ class TinkerBaseFiles(BaseModelFiles):
     """The base start of a Tinker component as the model files of its default start.
 
     Values: ``component`` is the ``TinkerJobComponent`` whose ``base/`` the files are. ``directory`` returns
-    ``component.prepared_base()``, so a new scenario's root release makes the base start on its first call in a
+    ``component.prepared_base()``, so a new scenario's root snapshot makes the base start on its first call in a
     process. Purpose: ``TinkerJobComponent`` subclasses give it in their ``default_start``, which itself makes
     nothing.
     """
@@ -484,7 +484,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     The base start, ``base/``, is the untrained adapter's checkpoint, which the
     client saves on first use (``TinkerClient.initialize``): before the training
-    process runs jobs, or when a new scenario's root release holds the
+    process runs jobs, or when a new scenario's root snapshot holds the
     default start (``prepared_base``). Serving reads
     each saved checkpoint from its artifact: Tinker's sampler
     (``reef.inference.tinker``) reads the manifest, and a serving runtime that
@@ -505,7 +505,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     def prepare_base(self) -> None:
         if not (self._base / MANIFEST).exists():
-            # The untrained adapter is the base checkpoint: the default start holds it as a release.
+            # The untrained adapter is the base checkpoint: the default start holds it as a snapshot.
             self._client.initialize().write(self._base)
 
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
@@ -528,5 +528,5 @@ class TinkerTrainingComponent(TinkerJobComponent):
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
         self.check_manifest(files)
 
-    def import_start(self, release: Path) -> str:
-        return self.import_manifest(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return self.import_manifest(artifact_dir)

@@ -47,12 +47,12 @@ TINKER_URL = "https://tinker.thinkingmachines.ai"
 def checkpoint_sampler_path(
     artifact: Artifact, base_model: str, service: str | None, *, full: bool = False
 ) -> str | None:
-    """The sampler that a release's checkpoint manifest names; ``None`` for the base model's own weights.
+    """The sampler that a snapshot's checkpoint manifest names; ``None`` for the base model's own weights.
 
     A LoRA's default start holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
-    Under full-parameter training (``full``), a release without a manifest has the base model's weights: the
+    Under full-parameter training (``full``), a snapshot without a manifest has the base model's weights: the
     component's base, a reference to the base revision, or an import of the base's files (RFC #996).
-    ``ValueError``: the release is not materialized; it has no manifest and is not full-parameter, or refers to
+    ``ValueError``: the snapshot is not materialized; it has no manifest and is not full-parameter, or refers to
     another repo; or its manifest names another model or another service than ``service``.
     """
     path = artifact.materialize().local_path
@@ -65,19 +65,19 @@ def checkpoint_sampler_path(
         if revision is not None and revision.repo != base_model:
             raise ValueError(f"the artifact refers to {revision.uri}, not to the base model {base_model}")
         return None
-    release = TinkerArtifact.read(path)
-    release.check_compatible(base_model, service=service)
-    return release.sampler_path
+    tinker_artifact = TinkerArtifact.read(path)
+    tinker_artifact.check_compatible(base_model, service=service)
+    return tinker_artifact.sampler_path
 
 
 class TinkerInferenceRuntime(InferenceRuntime):
-    """Serve the sampler each release names, on the Tinker-compatible service ``service`` (None: hosted Tinker).
+    """Serve the sampler each snapshot names, on the Tinker-compatible service ``service`` (None: hosted Tinker).
 
-    ``served_weight_kind`` is ``model_adapter`` for a LoRA's releases, and ``model`` for the releases of
+    ``served_weight_kind`` is ``model_adapter`` for a LoRA's releases, and ``model`` for the snapshots of
     Spindle's full-parameter training, whose base serves the base model (``checkpoint_sampler_path``).
     Every sampler served in this process gets a runtime load ID of this
-    incarnation; activating a release whose sampler is not the one served
-    mints a new one. A release of another service is refused.
+    incarnation; activating a snapshot whose sampler is not the one served
+    mints a new one. A snapshot of another service is refused.
     """
 
     def __init__(
@@ -114,7 +114,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         return checkpoint_sampler_path(artifact, self._model, self._service, full=self._kind == "model")
 
     def served_model_name(self, scenario: str) -> str:
-        """The name of the sampler that serves now: its sampler path, or the base model before any release.
+        """The name of the sampler that serves now: its sampler path, or the base model before any snapshot.
         A request under this name reaches that sampler on the service at ``base_url``."""
         with self._lock:
             return self._active or self._model
@@ -176,7 +176,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
     # -- Serving releases
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Serve the release's sampler; a sampler other than the served one is a new serving update."""
+        """Serve the snapshot's sampler; a sampler other than the served one is a new serving update."""
         with self._lock:
             sampler_path = self.sampler_path(artifact)
             if sampler_path != self._active:
@@ -249,7 +249,7 @@ class TinkerInferenceConfig:
     )
     timeout_s: float = config_option(300.0, help="Sampling request timeout in seconds.")
     parameterization: str = config_option(
-        "lora", help="lora: each release is a LoRA's manifest; full: Spindle's full-parameter releases."
+        "lora", help="lora: each snapshot is a LoRA's manifest; full: Spindle's full-parameter releases."
     )
 
     def __post_init__(self) -> None:
