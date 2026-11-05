@@ -29,7 +29,7 @@ dependencies = [
     # generator service play Harbor tasks with reef-eval.
     "harbor>=0.20,<0.26",
     "pyyaml",
-    "reef-client>=0.2.0",
+    "reef-client>=0.4.0",
     "reef-eval>=0.1.1",
     "sqlalchemy>=2.0,<3",
     "tomli-w",
