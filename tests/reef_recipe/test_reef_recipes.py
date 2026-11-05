@@ -255,7 +255,7 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
         )
 
     assert not pipeline.ready(1)
-    assert "r1" not in pipeline.releasable_record_ids()
+    assert "r1" not in pipeline.record2sample.releasable_record_ids()
 
 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:
@@ -277,7 +277,7 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
         )
     )
     assert not pipeline.ready(1)
-    decision = pipeline.releasable_record_ids()
+    decision = pipeline.record2sample.releasable_record_ids()
     assert "r1" in decision
     assert "r1" in decision
     trainer.close()

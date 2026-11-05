@@ -125,7 +125,6 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     result = submitted.result
     [job] = component.jobs
     assert (job.backend, job.start, job.parameters) == ("fake", "fake:base", {"method": "sft"})
-    assert submitted.ended is None
     assert result.artifact is None and result.training_job_id == job.job_id
     assert result.metrics["training_job"] == {"job_id": job.job_id, "backend": "fake", "event": "submitted"}
     assert JobLoopState.from_dict(result.state).job == RunningJob(job.job_id)
@@ -179,7 +178,6 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
     first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"), {"loss": 0.5})
     component.statuses[job_id] = JobStatus(job_id, "running", (first,))
     publication = loop.poll(state)
-    assert publication.ended is None
     published = publication.result
     assert published.artifact is not None and published.artifact.local_path == tmp_path / "1-release"
     # The commit carries the training metrics and the checkpoint's place in its job, and no selection.
@@ -196,7 +194,7 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
     ended = end.result
     state = JobLoopState.from_dict(ended.state)
     assert state.job is None and state.finished_jobs == 1 and state.start == first.path
-    assert end.ended == state.last_job == JobOutcome(job_id, "fake", "finished", {"optimizer_steps": 2})
+    assert state.last_job == JobOutcome(job_id, "fake", "finished", {"optimizer_steps": 2})
     assert ended.metrics["training_job"]["event"] == "finished" and ended.metrics["optimizer_steps"] == 2
     loop.submit(state, batch("next"), PARAMETERS)
     assert component.jobs[-1].start == first.path
@@ -413,18 +411,23 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     prepared = trainer.prepare_commit(finished)
     assert ended.outcomes == [], "the end is not durable before its commit settles"
     trainer.commit(prepared)
+    assert ended.outcomes == [], "the samples service reads the end, not the commit"
+    make_samples(trainer)
     assert ended.outcomes == [JobOutcome(job.job_id, "fake", "finished", metrics)]
     trainer.commit(prepared)
+    make_samples(trainer)
     assert len(ended.outcomes) == 1, "a settled commit is not applied again"
 
     # A restart can fall between the end's commit and the stage taking it: the next trainer gives it again.
-    Trainer.build(
+    restarted = Trainer.build(
         "math",
         scored_records(),
         pipeline_factory=pipeline,
         job_loop=loop_with(component),
         algorithm_state=trainer.algorithm_state_dict(),
     )
+    assert stages[-1].outcomes == [], "a control process that makes no samples never feeds the stage"
+    make_samples(restarted)
     assert stages[-1].outcomes == ended.outcomes
 
 

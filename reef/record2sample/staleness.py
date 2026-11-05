@@ -38,11 +38,11 @@ class ServedArtifacts:
     """The artifacts that a scenario served, oldest first.
 
     Values: ``artifact_ids`` is a finite list of artifact IDs with no two neighbors equal; the last one is the
-    artifact that the scenario serves now. ``observe`` appends an artifact that differs from the last one. The list
-    lives with its pipeline: a pipeline built again (a reload or a restart) starts it empty, so data from the
-    artifacts served before it is stale.
-    Purpose: a stage that runs the staleness check keeps one, fed by the pipeline's ``observe_serving_artifact_id``,
-    and gives ``artifact_ids`` to ``is_stale``.
+    artifact that the scenario serves now. ``observe`` appends an artifact that differs from the last one, and
+    ``restore`` replaces the list.
+    Purpose: the pipeline keeps one. The scenario restores it from its commit history before each job's selection, so
+    a reload or a restart keeps the artifacts served before it. The pipeline gives ``artifact_ids`` to
+    ``Record2Sample.is_stale``.
     """
 
     def __init__(self) -> None:
@@ -52,6 +52,10 @@ class ServedArtifacts:
         """Add the artifact that the scenario serves now, if it changed."""
         if not self.artifact_ids or self.artifact_ids[-1] != artifact_id:
             self.artifact_ids.append(artifact_id)
+
+    def restore(self, artifact_ids: Sequence[str]) -> None:
+        """Replace the list with ``artifact_ids``, a commit history's artifacts, oldest first."""
+        self.artifact_ids = list(artifact_ids)
 
 
 __all__ = ["ServedArtifacts", "is_stale", "producing_artifact_ids"]
