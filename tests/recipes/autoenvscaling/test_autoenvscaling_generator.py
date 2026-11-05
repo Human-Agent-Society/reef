@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from recipes.task_group.tinker import TaskGroupTinkerObjective
 import yaml
 from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     DESCRIPTION,
@@ -71,6 +72,7 @@ from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenT
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.train.tinker_backend.objectives import resolve_tinker_objective
 from reef.service.deploy.service_config import service_config_from_mapping
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
@@ -888,6 +890,9 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
     kwargs = rollout_agent["kwargs"]
     # A training rollout that fills the context ends and is scored.
     assert rollout_agent["import_path"] == "reef.record2sample.generator.terminus:VerifiedTerminus2"
+    # Each rollout's advantage is its reward minus its task's mean reward.
+    objective = resolve_tinker_objective(config["recipe"]["config"]["job_parameters"]["objective"])
+    assert isinstance(objective, TaskGroupTinkerObjective)
     # The official solver's cap of one reply; on chat completions, model_info caps nothing.
     assert kwargs["llm_kwargs"]["max_tokens"] == 16384
     assert kwargs["enable_summarize"] is False and kwargs["record_terminal_session"] is False
