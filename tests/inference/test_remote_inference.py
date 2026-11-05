@@ -15,28 +15,22 @@ import pytest
 from aiohttp import web
 
 from reef.artifact import Artifact
-from reef.core.errors import ReefError
-from reef.core.weight_layout import ADAPTER_DIR
+from reef.core.errors import ReefError, RuntimeConfigError
+from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat, WeightFiles
+from reef.inference.deployment import InferenceConnection, InferenceService
+from reef.inference.interfaces import InferenceBackend
+from reef.inference.registry import RuntimeRegistry, runtime_factory_for
 from reef.inference.remote import server as server_module
 from reef.inference.remote.config import CONTROL_PROTOCOL, RemoteInferenceSettings
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.remote.server import RemoteInferenceServer
 from reef.inference.remote.service import RemoteControl, RemoteInferenceBackend, RemoteInferenceService
+from reef.inference.residency import adapter_name
+from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.runtime.deployment import (
-    InferenceConnection,
-    InferenceService,
-    RuntimeConfigError,
-    RuntimeRegistry,
-    runtime_factory_for,
-)
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
-from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
-from reef.surface.adapter import adapter_name
 
 CONTROL_TOKEN = "control-secret"
-ADAPTER = ReleaseFormat("adapter", 16, ("all",))
+ADAPTER = ArtifactFormat("adapter", 16, ("all",))
 INFERENCE_TOKEN = "inference-secret"
 
 
@@ -410,7 +404,7 @@ def serving_config(url: str = "https://component.example", **values) -> dict:
     return {
         "type": "remote_serving",
         "remote": {"url": url, "startup-timeout-s": 30},
-        "release_format": ADAPTER.to_dict(),
+        "artifact_format": ADAPTER.to_dict(),
         "engine": "sglang",
         "num_gpus": 2,
         **values,
@@ -445,7 +439,7 @@ def saved_adapter(path):
         ({}, {"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN}, "REEF_REMOTE_INFERENCE_TOKEN"),
         ({}, {"REEF_REMOTE_INFERENCE_TOKEN": INFERENCE_TOKEN}, "REEF_REMOTE_CONTROL_TOKEN"),
         ({"engine": " "}, TOKENS, "runtime.engine must be a non-empty string"),
-        ({"release_format": {"layout": "shards"}}, TOKENS, "layout must be 'full' or 'adapter'"),
+        ({"artifact_format": {"layout": "shards"}}, TOKENS, "layout must be 'full' or 'adapter'"),
         ({"num_gpus": 0}, TOKENS, "runtime.num_gpus must be a positive integer"),
         ({"tensor_parallel_size": 3}, TOKENS, "multiple of runtime.tensor_parallel_size"),
         ({"engine": "vllm"}, TOKENS, "vllm serves full weights only"),
@@ -504,7 +498,9 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
 def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(component, tmp_path):
     url, events, _, _ = component
     runtime = RuntimeRegistry().build(
-        serving_config(url, release_format=ReleaseFormat("full").to_dict()), model_path="Qwen/Qwen3-8B", environ=TOKENS
+        serving_config(url, artifact_format=ArtifactFormat("full").to_dict()),
+        model_path="Qwen/Qwen3-8B",
+        environ=TOKENS,
     )
     runtime.open()
     assert started_engines(events[0]) == ("sglang", "Qwen/Qwen3-8B", 1, None, "placement-2")
@@ -540,7 +536,9 @@ def test_the_serving_runtime_reloads_its_release_into_the_engines_of_a_restarted
 ):
     url, events, _, services = component
     runtime = RuntimeRegistry().build(
-        serving_config(url, release_format=ReleaseFormat("full").to_dict()), model_path="Qwen/Qwen3-8B", environ=TOKENS
+        serving_config(url, artifact_format=ArtifactFormat("full").to_dict()),
+        model_path="Qwen/Qwen3-8B",
+        environ=TOKENS,
     )
     runtime.open()
     weights = tmp_path / "hf"

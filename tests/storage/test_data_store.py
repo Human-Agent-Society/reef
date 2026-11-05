@@ -6,18 +6,23 @@ from contextlib import closing
 from dataclasses import replace
 
 import pytest
+import sqlalchemy
 from sqlalchemy import func, select
+from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
 
 from reef.core.atif_payloads import canonical_json
+from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink
 from reef.storage.item_kinds import json_digest
+from reef.storage.job_data import job_data_key, read_job_data
 from reef.storage.record_items import record_item
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
+from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
@@ -139,7 +144,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         (NewItem("x", ATIF, {"kind": "trajectory", "owner": "globex"}), "metadata.owner"),
         (NewItem("x", {}, {"kind": "record"}), "metadata.origin"),
         (NewItem("x", {}, {"kind": "record", "origin": {**ORIGIN, "artifact_id": ""}}), "origin.artifact_id"),
-        (trajectory("x", origin=ORIGIN), "only a record or an artifact"),
+        (trajectory("x", origin=ORIGIN), "stage sample.s metadata.origin"),
         (NewItem("x", {}, {"kind": "artifact", "scenarios": {"coding": "train"}}), "importing it"),
         (NewItem("x", {}, {"kind": "artifact", "origin": unserved}), "names its artifact_id"),
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
@@ -169,6 +174,62 @@ def test_an_update_patches_the_metadata_and_a_scenario_query_follows_it(store):
     assert [item.item_id for item in store.query("acme", scenario="coding")] == ["t1"]
     assert [item.item_id for item in store.query("acme", scenario="other")] == ["t3"]
     assert store.read("acme", "t2").content == store.read("acme", "t1").content
+
+
+def test_a_scenario_reads_its_items_in_the_order_that_their_uses_began(store, tmp_path):
+    store.create("acme", [trajectory("t1", scenarios={"coding": "train"}), trajectory("t2")])
+    store.create("acme", [trajectory("t3", "three", scenarios={"coding": "train"})])
+
+    def used(after=0):
+        return [
+            (item.item_id, sequence)
+            for sequence, item in store.scenario_items("acme", "coding", kinds=("trajectory", "task"), after=after)
+        ]
+
+    first = used()
+    assert [item_id for item_id, _ in first] == ["t1", "t3"]
+    assert store.scenario_items("acme", "coding", kinds=("task",)) == ()
+    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0][1].content == ATIF
+    # An older item that joins later is read after the others; a metadata change keeps a use's sequence.
+    store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
+    store.update("acme", ["t1"], {"label": "week 43"})
+    assert [item_id for item_id, _ in used(after=first[-1][1])] == ["t2"]
+    assert used()[:2] == first
+    # A use that ends and a use whose split changes: the task's new split is a new use.
+    task = tmp_path / "fix-bug"
+    task.mkdir()
+    (task / "instruction.md").write_text("Fix the bug.\n")
+    store.create("acme", [NewItem("fix-bug", task, {"kind": "task", "scenarios": {"coding": "eval"}})])
+    before = used()[-1][1]
+    store.update("acme", ["fix-bug", "t3"], {"scenarios": {"coding": "train"}})
+    store.update("acme", ["t1"], {"scenarios": {"coding": None}})
+    assert [item_id for item_id, _ in used(after=before)] == ["fix-bug"]
+    assert [item_id for item_id, _ in used()] == ["t3", "t2", "fix-bug"]
+    store.delete("acme", "t2")
+    assert [item_id for item_id, _ in used()] == ["t3", "fix-bug"]
+
+
+def test_an_upgrade_gives_each_use_its_own_sequence_and_split(open_durable_store):
+    with closing(open_durable_store()) as store:
+        store.create("acme", [trajectory("t1"), trajectory("t2", "two")])
+        uses = store.scenarios_table
+        # The table of a store from before RFC #1140: one row per use, without a sequence or a split.
+        legacy = sqlalchemy.Table(
+            uses.name,
+            sqlalchemy.MetaData(schema=uses.schema),
+            *(sqlalchemy.Column(name, sqlalchemy.Text, primary_key=True) for name in ("owner", "item_id", "scenario")),
+        )
+        with store.transaction() as connection:
+            uses.drop(connection)
+            legacy.create(connection)
+            connection.execute(legacy.insert(), [{"owner": "acme", "item_id": "t1", "scenario": "coding"}])
+    with closing(open_durable_store()) as store:
+        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == ["t1"]
+        store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
+        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == [
+            "t1",
+            "t2",
+        ]
 
 
 def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store):
@@ -284,6 +345,38 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-3": RecordLink("coding/call-1", entries[3]),
         "coding/retry-2": RecordLink("coding/call-1", entries[2]),
     }
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda store: store.read("acme", "coding/call-2").item_id,
+        lambda store: [item.item_id for item in store.query("acme", kind="record")],
+        lambda store: list(store.record_links("acme", ["coding/call-1", "coding/call-2"])),
+    ],
+    ids=["read", "query", "record_links"],
+)
+def test_a_read_sees_one_snapshot_while_a_delete_commits(postgres_config, tmp_path, monkeypatch, read):
+    url, schema = postgres_config
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    with (
+        closing(task_files),
+        closing(PostgresDataStore(url, task_files, schema=schema)) as reader,
+        closing(PostgresDataStore(url, task_files, schema=schema)) as writer,
+    ):
+        writer.create("acme", calls(1, 2))
+        paths = TrajectoryNodes.paths
+
+        def paths_after_delete(self, connection, node_sequences, *columns):
+            # The leaf call-2 and its node go between the read's item rows and its node rows.
+            writer.delete("acme", "coding/call-2")
+            return paths(self, connection, node_sequences, *columns)
+
+        monkeypatch.setattr(TrajectoryNodes, "paths", paths_after_delete)
+        before = read(reader)
+        monkeypatch.undo()
+        assert before in ("coding/call-2", ["coding/call-1", "coding/call-2"])
+        assert reader.read("acme", "coding/call-2") is None
 
 
 def test_a_record_link_is_checked_at_construction():
@@ -464,3 +557,23 @@ def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable
     with pytest.raises(ItemConflict, match="other content"):
         store.create("acme", [NewItem("weights", {**content, "source_uri": "s3://other/weights"}, item.metadata)])
     assert store.read("acme", "weights") == legacy
+
+
+def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):
+    sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
+    first = store.write_job_directory(JobData("s:data:1", (sample,)))
+    # A job of the same samples, under another data ID, uses the same directory.
+    again = store.write_job_directory(JobData("s:request:r1", (sample,)))
+    assert (again.uri, again.data_id, again.sample_count, again.kind) == (first.uri, "s:request:r1", 1, "trajectory")
+    assert read_job_data(store.open_job_directory(again.to_dict()).path).samples == (sample,)
+    other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
+    assert other.uri != first.uri
+    # A directory that no job used since the time goes; a used one stays.
+    store.record_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
+    assert store.delete_unused_job_directories(100.0) == 1
+    with pytest.raises(FileNotFoundError):
+        store.open_job_directory(first.to_dict())
+    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+    # The periodic work keeps a directory that a job used within the time to live.
+    store.maintain()
+    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)

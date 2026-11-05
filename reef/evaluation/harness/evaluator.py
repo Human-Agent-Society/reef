@@ -41,6 +41,9 @@ from reef.core.evaluation import (
 from reef.evaluation.harness.history import History, RunRecord
 from reef.evaluation.harness.runner import EvaluationWorkerPool, TaskEvaluationWorker, TaskRun
 from reef.evaluation.harness.scoring import ScoredRun, TaskScorer
+from reef.execution.executor import WorkerSpec
+from reef.execution.executor.config import ExecutorSelection
+from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.harbor_task import can_run_in_task_container
@@ -49,9 +52,6 @@ from reef.harness.tasks.run import TrajectoryKeepError
 from reef.harness.tasks.trajectory import sum_agents
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import clip_record_text
-from reef.runtime.executor import WorkerSpec
-from reef.runtime.executor.config import ExecutorSelection
-from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.storage.tasks import files_digest
 
 #: The trees a candidate evaluation runs, in pairing order; a policy that evaluates the candidate alone names the

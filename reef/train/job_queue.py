@@ -10,15 +10,21 @@ A jobs-queue item:
 - ``id`` is the job ID, which ``JobLoop.job_id`` makes from the job's inputs;
 - ``kind`` is ``training_job:<component name>``, so a worker takes only the jobs of its component;
 - ``scenario`` and ``serial_key`` are the job's scenario, so the jobs of one scenario run one at a time, in the order control added them;
-- ``payload`` is the job (``job_payload``);
+- ``payload`` is the job (``job_payload``): its backend, start, parameters, component and previous job, the reference of its job data
+  directory (``JobDataRef.to_dict``), and the summary of its training request for the job listing;
 - each ``progress`` entry is one ``SavedCheckpoint``, in step order;
 - ``result`` is ``{"state": "finished", "metrics": {...}}``;
 - ``metadata["experiment"]``, when present, is the ``ExperimentRun`` that records the job, as ``to_dict`` gives
   it. Control writes it (``JobExperimentRecorder``) when its experiment tracker records a commit of the job, so the
   job listing of any service reads it from the item.
 
-A checkpoint's ``path`` and ``release_path`` are paths of the training service. In the one-process layout they
+A checkpoint's ``path`` and ``artifact_path`` are paths of the training service. In the one-process layout they
 are local; a split deployment gives control and the training service one volume for them.
+
+The job's data is not in the item. Control writes it as a job data directory in the data store
+(``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
+store before the component runs the job. A job that an earlier Reef added held its data inline: the worker runs no
+such item, and the job listing still reads its counts and its request.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from typing import Any, cast
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.job_data import JobData
+from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.observability.base import (
     ExperimentLogger,
@@ -43,8 +49,10 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
+from reef.storage.data import DataStore
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
+from reef.train.training_requests import TRAINING_REQUESTS_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +67,9 @@ def job_kind(component_name: str) -> str:
     return f"training_job:{component_name}"
 
 
-def job_payload(job: TrainingJob) -> dict[str, JsonValue]:
-    """The jobs-queue payload of ``job``: its backend, start, data and parameters, as JSON."""
+def job_payload(job: TrainingJob, request: Mapping[str, JsonValue] | None = None) -> dict[str, JsonValue]:
+    """The jobs-queue payload of ``job``: its backend, start, parameters and data reference, and ``request``, the
+    ``{id, text, parameters}`` of its training request or None, as JSON."""
     return cast(
         dict[str, JsonValue],
         {
@@ -68,6 +77,10 @@ def job_payload(job: TrainingJob) -> dict[str, JsonValue]:
             "start": job.start,
             "data": job.data.to_dict(),
             "parameters": dict(job.parameters),
+            "request": None if request is None else dict(request),
+            "component": job.component,
+            "previous_job_id": job.previous_job_id,
+            "train_from_artifact_id": job.train_from_artifact_id,
         },
     )
 
@@ -86,24 +99,56 @@ def json_text(value: JsonValue, name: str) -> str:
     return value
 
 
-def job_from_item(item: WorkItem) -> TrainingJob:
-    """The ``TrainingJob`` that ``job_payload`` wrote into ``item``; ``ValueError`` for another payload."""
+def job_from_item(item: WorkItem, data_store: DataStore) -> TrainingJob:
+    """The ``TrainingJob`` that ``job_payload`` wrote into ``item``, with its data directory opened in
+    ``data_store``; ``ValueError`` for another payload."""
     payload = item.payload
+    data = json_object(payload.get("data"), "a job's data")
+    request = request_summary(item)
+    ref = data_store.open_job_directory(data)
     return TrainingJob(
         item.id,
         json_text(payload.get("backend"), "a job's backend"),
         json_text(payload.get("start"), "a job's start"),
-        JobData.from_dict(json_object(payload.get("data"), "a job's data")),
+        ref,
         json_object(payload.get("parameters"), "a job's parameters"),
         scenario=item.scenario,
+        request_id=None if request is None else cast(str, request["id"]),
+        component=optional_text(payload.get("component"), "a job's component"),
+        previous_job_id=optional_text(payload.get("previous_job_id"), "a job's previous job"),
+        train_from_artifact_id=optional_text(payload.get("train_from_artifact_id"), "a job's start artifact"),
     )
+
+
+def optional_text(value: JsonValue, name: str) -> str | None:
+    """``value`` as a non-empty string, or None for null or a missing key; ``ValueError`` for another value."""
+    return None if value is None else json_text(value, name)
+
+
+def request_summary(item: WorkItem) -> dict[str, JsonValue] | None:
+    """The ``{id, text, parameters}`` of the training request of the job in ``item``, or None."""
+    payload = item.payload
+    data = json_object(payload.get("data"), "a job's data")
+    # An item that an earlier Reef added keeps the request in its inline data.
+    value = data.get("request") if "samples" in data else payload.get("request")
+    if value is None:
+        return None
+    given = json_object(value, "a job's request")
+    text = given.get("text")
+    if not isinstance(text, str):
+        raise ValueError("a request's text is a string")
+    return {
+        "id": json_text(given.get("id"), "a request's id"),
+        "text": text,
+        "parameters": dict(json_object(given.get("parameters", {}), "a request's parameters")),
+    }
 
 
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
     return {
         "step": checkpoint.step,
         "path": checkpoint.path,
-        "release_path": checkpoint.release_path,
+        "artifact_path": checkpoint.artifact_path,
         "metrics": cast(JsonValue, dict(checkpoint.metrics)),
     }
 
@@ -116,7 +161,7 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
     return SavedCheckpoint(
         step,
         json_text(entry.get("path"), "a checkpoint's path"),
-        json_text(entry.get("release_path"), "a checkpoint's release_path"),
+        json_text(entry.get("artifact_path"), "a checkpoint's artifact_path"),
         json_object(entry.get("metrics"), "a checkpoint's metrics"),
     )
 
@@ -154,14 +199,15 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``.
     - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else None.
     - ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's
-      samples, with the instruction's parameters over them. They hold the training ``method`` and the
-      ``scheduling`` when the recipe or the instruction gives them.
+      samples, with the request's parameters merged in. They hold the training ``method`` and the
+      ``scheduling`` when the recipe or the request gives them.
     - ``sample_count``: the number of samples in the job's data, an integer from 0.
     - ``sample_kind``: ``"trajectory"`` or ``"task"``, the kind of the job's samples, which one job never mixes;
       None for data with no sample.
-    - ``instruction``: ``{id, text, parameters}`` of the training instruction (``POST /reef/train``) that the job
-      trains, where ``parameters`` is the JSON object that the instruction gave, ``{}`` when it gave none; None for
-      a job that the training mode ``auto`` made without an instruction.
+    - ``request``: ``{id, text, parameters}`` of the training request (``POST /reef/train``) that the job
+      trains, where ``parameters`` is the JSON object that the request gave, ``{}`` when it gave none; None for
+      a job that the training mode ``auto`` made without a request.
+    - ``train_from_artifact_id``: the artifact that the job started from; None for an item that an earlier Reef added.
     - ``created_at``, ``started_at`` and ``ended_at``: ISO 8601 UTC times of the item, when control added the job,
       when a worker first took it, and when it finished or failed. ``started_at`` is None until a worker takes the
       job, and ``ended_at`` until the job ends.
@@ -171,22 +217,17 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     """
     payload = item.payload
     data = json_object(payload.get("data"), "a job's data")
-    samples = data.get("samples")
-    if not isinstance(samples, list):
-        raise ValueError("a job's samples are a JSON array")
-    kinds = {json_text(json_object(sample, "a job's sample").get("kind"), "a sample's kind") for sample in samples}
-    if len(kinds) > 1:
-        raise ValueError(f"job {item.id} mixes the sample kinds {sorted(kinds)}")
-    request_value = data.get("request")
-    if request_value is None:
-        instruction: JsonValue = None
+    if "samples" in data:
+        samples = data.get("samples")
+        if not isinstance(samples, list):
+            raise ValueError("a job's samples are a JSON array")
+        kinds = {json_text(json_object(sample, "a job's sample").get("kind"), "a sample's kind") for sample in samples}
+        if len(kinds) > 1:
+            raise ValueError(f"job {item.id} mixes the sample kinds {sorted(kinds)}")
+        sample_count: JsonValue = len(samples)
+        sample_kind: JsonValue = next(iter(kinds), None)
     else:
-        request = json_object(request_value, "a job's instruction")
-        instruction = {
-            "id": json_text(request.get("id"), "an instruction's id"),
-            "text": json_text(request.get("text"), "an instruction's text"),
-            "parameters": dict(json_object(request.get("parameters", {}), "an instruction's parameters")),
-        }
+        sample_count, sample_kind = data.get("sample_count"), data.get("kind")
     experiment = item.metadata.get(EXPERIMENT_METADATA_KEY)
     return {
         "id": item.id,
@@ -196,9 +237,10 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
         "result": None if item.result is None else dict(item.result),
         "error": item.error,
         "parameters": dict(json_object(payload.get("parameters"), "a job's parameters")),
-        "sample_count": len(samples),
-        "sample_kind": next(iter(kinds), None),
-        "instruction": instruction,
+        "sample_count": sample_count,
+        "sample_kind": sample_kind,
+        "request": cast(JsonValue, request_summary(item)),
+        "train_from_artifact_id": optional_text(payload.get("train_from_artifact_id"), "a job's start artifact"),
         "created_at": utc_time(item.created_at),
         "started_at": None if item.started_at is None else utc_time(item.started_at),
         "ended_at": None if item.ended_at is None else utc_time(item.ended_at),
@@ -265,8 +307,8 @@ class JobQueueComponent(TrainingComponent):
         return self.component.name
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
-        return self.component.release_format
+    def artifact_format(self) -> ArtifactFormat | None:
+        return self.component.artifact_format
 
     def default_start(self) -> DefaultStart:
         return self.component.default_start()
@@ -279,8 +321,8 @@ class JobQueueComponent(TrainingComponent):
         return self.component.shares_scenarios
 
     @property
-    def starts_from_releases(self) -> bool:
-        return self.component.starts_from_releases
+    def starts_from_artifacts(self) -> bool:
+        return self.component.starts_from_artifacts
 
     def check_job(self, job: TrainingJob) -> None:
         self.component.check_job(job)
@@ -288,22 +330,32 @@ class JobQueueComponent(TrainingComponent):
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         self.component.check_task_jobs(parameters)
 
-    def check_release(self, files: ArtifactFiles) -> None:
-        self.component.check_release(files)
+    def check_artifact(self, files: ArtifactFiles) -> None:
+        self.component.check_artifact(files)
 
     def import_start(self, release: Path) -> str:
         return self.component.import_start(release)
 
+    def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
+        return self.component.changed_parts(start, checkpoint)
+
     def submit(self, job: TrainingJob) -> None:
+        """Check ``job`` and add it to the jobs queue, with the summary of its training request, which the queue
+        of training requests still holds, for the job listing."""
         if job.backend != self.name:
             raise ValueError(f"the job is for {job.backend!r}, not the {self.name!r} training component")
         if self.queue.get(JOBS_QUEUE, job.job_id) is not None:
             return
         self.component.check_job(job)
+        request: dict[str, JsonValue] | None = None
+        if job.request_id is not None:
+            held = self.queue.get(TRAINING_REQUESTS_QUEUE, job.request_id)
+            given = {} if held is None else held.payload
+            text, parameters = given.get("text", ""), given.get("parameters", {})
+            request = {"id": job.request_id, "text": text, "parameters": parameters}
+        payload = job_payload(job, request)
         self.queue.add(
-            NewWork(
-                JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), job_payload(job), serial_key=job.scenario
-            )
+            NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload, serial_key=job.scenario)
         )
 
     def status(self, job_id: str) -> JobStatus:
@@ -383,8 +435,9 @@ class JobExperimentRecorder(ExperimentTracker):
 class TrainingJobWorker(QueueWorker):
     """One worker of the training service: it takes the jobs of one component from the jobs queue and runs them.
 
-    Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``poll_seconds`` is also the wait
-    between two looks at a running job.
+    Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``data_store`` is the data store,
+    which keeps the data directory of each job; ``poll_seconds`` is also the wait between two looks at a
+    running job.
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
     closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses
@@ -393,12 +446,19 @@ class TrainingJobWorker(QueueWorker):
     """
 
     def __init__(
-        self, component: TrainingComponent, queue: WorkQueue, *, worker_id: str, poll_seconds: float = 0.5
+        self,
+        component: TrainingComponent,
+        queue: WorkQueue,
+        data_store: DataStore,
+        *,
+        worker_id: str,
+        poll_seconds: float = 0.5,
     ) -> None:
         if isinstance(component, JobQueueComponent):
             raise TypeError("a training worker runs jobs on the component itself, not on a jobs-queue component")
         super().__init__(queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds)
         self.component = component
+        self.data_store = data_store
 
     def start(self) -> None:
         """Start the component's jobs in this process (``TrainingComponent.start_jobs``), then the worker."""
@@ -421,7 +481,7 @@ class TrainingJobWorker(QueueWorker):
         worker continues it at once: the component keeps running it, and that worker's ``submit`` continues from
         the job's latest checkpoint.
         """
-        job = job_from_item(item)
+        job = job_from_item(item, self.data_store)
         self.component.submit(job)
         reported = {checkpoint_from_json(entry).step for entry in item.progress}
         progress_count = len(item.progress)
@@ -468,6 +528,7 @@ __all__ = [
     "job_json",
     "job_kind",
     "job_payload",
+    "request_summary",
     "scenario_jobs",
     "status_from_item",
 ]

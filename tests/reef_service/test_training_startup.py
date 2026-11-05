@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from reef.cli import main
-from reef.runtime.jobs import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.service.deploy import inference as inference_deploy
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_config
@@ -31,7 +31,7 @@ from reef.train.slime_backend.launch import SlimeDeployment, global_batch_size, 
 
 RECIPE = "recipes.sao.recipe:SAORecipe"
 CONTROL_TOKEN_ENV = "REEF_REMOTE_CONTROL_TOKEN"
-FULL_WEIGHTS = ReleaseFormat("full")
+FULL_WEIGHTS = ArtifactFormat("full")
 INFERENCE_TOKEN_ENV = "REEF_REMOTE_INFERENCE_TOKEN"
 
 
@@ -53,9 +53,9 @@ def slime_argv(config):
     return slime_arguments(slime_runtime_config(config)["settings"], loss_family="", environ={})
 
 
-def serving_config(config, release_format=FULL_WEIGHTS):
-    """The serving runtime config that the HTTP service builds for Slime's releases of ``release_format``."""
-    return serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), release_format)
+def serving_config(config, artifact_format=FULL_WEIGHTS):
+    """The serving runtime config that the HTTP service builds for Slime's releases of ``artifact_format``."""
+    return serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), artifact_format)
 
 
 @pytest.fixture(autouse=True)

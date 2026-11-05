@@ -4,7 +4,7 @@ A scenario owns one runtime binding, trainer, artifact chain, and store session.
 The modules follow these responsibilities:
 
 - ``scenario`` exposes operations on one instance; ``binding`` freezes its
-  deployment-selected admission, surface, runtime, and inference backend.
+  deployment-selected components with their admission checks, and the runtime.
 - ``registry`` owns loaded instances, per-scenario locks, and scenario
   archival coordination. It keeps each scenario's settings through the
   injected storage. It asks its ``admission.ScenarioAdmission`` before it

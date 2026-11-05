@@ -21,20 +21,19 @@ from reef.artifact import (
     InMemoryRepositoryBackend,
     Repository,
 )
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import ReefError, RequestType
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.sync import create_harness_surface
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_weight_surface
 from reef.train import TrainStepResult
-from reef.train.types import JobData
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -46,10 +45,10 @@ class ContractInferenceHandler(InferenceHandler):
 
 
 class WeightRecipe(Recipe):
-    """A recipe whose scenarios serve weights (the core ``recipe`` implementation serves a plain evolution surface)."""
+    """A recipe whose scenarios serve weights (the core ``recipe`` implementation serves none)."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return create_weight_surface(kind="model")
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents({"weights": ComponentSpec(kind="model")})
 
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={"model.txt": "base"})
@@ -304,7 +303,6 @@ def test_recipe_pipeline_has_no_update_algorithm() -> None:
     ).get_or_create_scenario("math")
 
     assert not runtime.trainer.trains
-    assert runtime.trainer.pipeline.output_schema is JobData
 
 
 @pytest.mark.unit
@@ -406,7 +404,7 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
     async def upstream(request):
         received["path"] = request.path
         received["payload"] = await request.json()
-        received["release_id"] = request.headers["x-reef-release-id"]
+        received["release_id"] = request.headers["x-reef-artifact-id"]
         received["artifact_path"] = request.headers["x-reef-artifact-path"]
         return web.json_response({"provider": "ok"})
 
@@ -445,7 +443,7 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
         async def upstream(request):
             received["path"] = request.path
             received["payload"] = await request.json()
-            received["release_id"] = request.headers["x-reef-release-id"]
+            received["release_id"] = request.headers["x-reef-artifact-id"]
             response = web.StreamResponse(
                 headers={
                     "Content-Type": "text/event-stream",
@@ -1076,8 +1074,10 @@ class HarnessRecipe(Recipe):
     """A recipe whose clients pull a file tree: the served exchange is the same on every release. A stub runtime
     answers its model calls."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(get_adapter("pi"))
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(
+            {HARNESS_COMPONENT: ComponentSpec(files=HarnessFiles(get_adapter("pi")), kind="harness_plugin")}
+        )
 
 
 @pytest.mark.unit
@@ -1212,7 +1212,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
                 )
             )
         with pytest.raises(ValueError, match="training_mode"):
-            dispatcher.accept_instruction("math", {"text": "train"})
+            dispatcher.accept_request("math", {"text": "train"})
         scenario = dispatcher.get_or_create_scenario("math")
 
         def fail_write(item: AgentRecord) -> None:

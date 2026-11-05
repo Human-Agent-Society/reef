@@ -43,6 +43,7 @@ from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, SnapshotRef
+from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
@@ -55,7 +56,6 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.service import SAMPLES_QUEUE
-from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.sample2job import Sample2Job
 from reef.scenario import Scenario
 from reef.scenario.scenario import validate_component_trainers
@@ -68,10 +68,11 @@ from reef.storage.commits import (
     parse_scenario_metadata,
     scenario_metadata_for,
 )
-from reef.storage.samples import consumed_sample_id
+from reef.storage.job_data import read_job_data
+from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import ComponentTrainer, Trainer
+from reef.train.component import JobStatus, TrainingJob
 from reef.train.job_queue import JOBS_QUEUE
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
@@ -119,6 +120,11 @@ class _FlakyBackend(ComponentJobs):
             self.failures_left -= 1
             raise RuntimeError("proposer away once")
         return super().step(job)
+
+
+def listed_revisions(scenario: Scenario) -> list[str]:
+    """The storage revision of each harness catalog row, oldest first."""
+    return [row["artifact_snapshot"].revision for row in reversed(scenario.harness_snapshot_rows())]
 
 
 def _report(record_id: str, *references: str) -> AgentRecord:
@@ -282,8 +288,8 @@ def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispat
     # A commit retires no row: each trainer consumed the same rows, and its own sample of them, at its job's
     # submission.
     assert scenario.records.count("agent") == 2
-    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(f"{HARNESS}:r1:0")}
-    assert records[3].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
+    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(stage_item_id("agent", f"{HARNESS}:r1:0"))}
+    assert records[3].consumed_ids == {"i1", "r1", consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0"))}
 
     # Each trainer recovers from its own commits.
     reloaded = _reload(dispatcher)
@@ -330,7 +336,7 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
     assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     [job] = _wait_for_jobs(dispatcher, training, 1)
-    assert [item.source_agent_record_ids for item in job.data.samples] == [("i1", "r1")]
+    assert [item.source_agent_record_ids for item in read_job_data(job.data_dir).samples] == [("i1", "r1")]
     assert _commit_step(scenario, HARNESS) == [("i1", "r1")]
     for _ in range(2):
         wait_for_serving(dispatcher, "agent")
@@ -352,8 +358,8 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
         (WEIGHTS, "checkpoint"),
         (WEIGHTS, "finished"),
     ]
-    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
-    assert records[1].consumed_ids == {"i1", "r1", consumed_sample_id(f"{HARNESS}:r1:0")}
+    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0"))}
+    assert records[1].consumed_ids == {"i1", "r1", consumed_sample_id(stage_item_id("agent", f"{HARNESS}:r1:0"))}
     assert all(record.consumed_ids == frozenset() for record in records[2:])
     assert {record.training_job_id for record in records if record.component == WEIGHTS} == {job.job_id}
 
@@ -542,15 +548,15 @@ def test_an_instance_parked_while_its_cycle_lock_is_held_closes_when_the_holder_
 
 
 @pytest.mark.unit
-def test_a_failed_instruction_of_a_scenario_that_is_gone_starts_no_worker(
+def test_a_failed_request_of_a_scenario_that_is_gone_starts_no_worker(
     monkeypatch: Any, dispatchers: _Dispatchers
 ) -> None:
     """Workers started for a deleted name would record errors that nothing clears."""
     dispatcher, _ = dispatchers.open()
     old = _scenario(dispatcher)
     dispatcher.delete_scenario("agent")
-    monkeypatch.setattr(old.trainer_for(HARNESS), "fail_pending_instruction", lambda error: True)
-    dispatcher.local_workers.fail_instruction(old, RuntimeError("rollout failed"), HARNESS)
+    monkeypatch.setattr(old.trainer_for(HARNESS), "fail_pending_request", lambda error: True)
+    dispatcher.local_workers.fail_request(old, RuntimeError("rollout failed"), HARNESS)
     with dispatcher.local_workers.lock:
         assert dispatcher.local_workers.workers == {}
 
@@ -654,10 +660,10 @@ class _NamedComponentsRecipe(Recipe):
     def default_start(self) -> DefaultStart:
         return seeded_start(self.names)
 
-    def build_surface(self, scenario: str) -> Surface:
-        return Surface(
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(
             components={
-                name: ComponentSurface(files=TextFileTree()) if name == HARNESS else ComponentSurface()
+                name: ComponentSpec(files=TextFileTree()) if name == HARNESS else ComponentSpec()
                 for name in self.names
             }
         )
@@ -667,7 +673,7 @@ class _NamedComponentsRecipe(Recipe):
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
@@ -739,20 +745,26 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
 
 
 @pytest.mark.unit
-def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(dispatchers: _Dispatchers) -> None:
-    """The harness trained on i1 through r1a while the weights trainer still holds i1; after a restart r1b is not resolved against it."""
+@pytest.mark.parametrize("select_before_commit", [False, True])
+def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(
+    dispatchers: _Dispatchers, select_before_commit: bool
+) -> None:
+    """The restarted harness settles a second report on a trained source; weights keep independent consumption."""
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     scenario.records.append(_report("r1b", "i1"))
-    # The job trains the sample of r1a alone: r1b has no sample yet.
+    if select_before_commit:
+        make_samples(scenario)
+    # The job trains r1a alone; r1b references the same source and makes no new sample.
     assert _commit_step(scenario, HARNESS, make=False) is not None
     assert scenario.records.count("agent") == 3
     assert scenario.prepare_training_step(HARNESS) is None
     rebuilt = _reload(dispatcher)
     make_samples(rebuilt)
     assert rebuilt.prepare_training_step(HARNESS) is None
-    # Its source trained, so the rebuilt harness skips it; the weights trainer still reads it.
-    assert "r1b" in rebuilt.trainer_for(HARNESS).skipped_record_ids
+    # Selection before the commit can persist the skipped report as consumed.
+    harness = rebuilt.trainer_for(HARNESS)
+    assert "r1b" in harness.skipped_record_ids | harness.consumed_record_ids
     assert "r1b" not in rebuilt.trainer_for(WEIGHTS).consumed_record_ids
 
 
@@ -880,8 +892,8 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
 ) -> None:
     """The harness acknowledges its batch before its record is durable. When that commit fails, the scenario
     reloads at once, and the weights job submitted after it leaves the harness's rows stored. The harness's sample
-    of them is in the sample store, which consumed the rows for the harness: the rebuilt harness trains the sample
-    once."""
+    of them is an item of the scenario, and the harness consumed the rows when it saved it: the rebuilt harness
+    trains the sample once."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"))
     # Recovery reloads wake workers; this test drives each cycle explicitly.
     monkeypatch.setattr(dispatcher.local_workers, "start", lambda scenario, component=None: None)
@@ -901,11 +913,11 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     # A job's submission consumes its rows; its checkpoint and its end consume none.
     submissions = [record for record in history if _job_event(record) == "submitted"]
     assert [sorted(record.consumed_ids) for record in submissions if record.component == HARNESS] == [
-        [consumed_sample_id(f"{HARNESS}:r1:0")]
+        [consumed_sample_id(stage_item_id("agent", f"{HARNESS}:r1:0"))]
     ]
     # Likewise, the weights trainer's sample was stored before the reload: its submission names the sample.
     assert [sorted(record.consumed_ids) for record in submissions if record.component == WEIGHTS] == [
-        [consumed_sample_id(f"{WEIGHTS}:r1:0")]
+        [consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0"))]
     ]
 
 
@@ -1163,9 +1175,11 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
     reloaded = _reload(dispatcher)
     assert reloaded.prepare_training_step(HARNESS) is None
     assert _commit_step(reloaded, WEIGHTS) is not None
-    # The weights trainer's sample of the rows was stored before the restart, and the sample store consumed the rows
-    # for it: the commit names the sample.
-    assert _submission(reloaded, WEIGHTS).consumed_ids == {consumed_sample_id(f"{WEIGHTS}:r1:0")}
+    # The weights trainer saved its sample of the rows before the restart, and consumed the rows when it saved it:
+    # the commit names the sample.
+    assert _submission(reloaded, WEIGHTS).consumed_ids == {
+        consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0"))
+    }
     assert reloaded.records.count("agent") == 2
 
 
@@ -1184,7 +1198,7 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     manifest = service.harness_manifest(headers)
     assert manifest["release_id"] == harness_release
     assert manifest["files"] == {"harness.txt": "harness step 1"}
-    catalog = service.harness_releases(headers)["releases"]
+    catalog = service.harness_artifacts(headers)["artifacts"]
     assert [row["operation"] for row in catalog] == ["creation", "training"]
     # The root release made the creation's artifacts; the harness step made its own.
     base = scenario.repository.start_artifact.revision
@@ -1235,14 +1249,12 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert not any(record.made_artifact for record in scenario.store.history()[-2:])
     assert scenario.current_snapshot().revision == w1
     assert service.harness_manifest(headers)["release_id"] == h1
-    catalog = service.harness_releases(headers)["releases"]
+    catalog = service.harness_artifacts(headers)["artifacts"]
     # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head;
     # like a flat scenario's rejected row, it lists the head's parent, not itself.
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1]
+    assert listed_revisions(scenario) == [creation, h1, h1]
     assert catalog[-1]["metrics"]["selected"] is False
-    assert catalog[-1]["composed_release_id"] == w1
-    assert catalog[-1]["parent_release_id"] == catalog[1]["parent_release_id"] == creation
-    assert "ran on" in service.harness_release_page(headers, 2).lower()
+    assert "ran on" in service.harness_artifact_page(headers, 2).lower()
     assert service.harness_manifest(headers, form="source")["release_id"] == h1
 
     # The next harness release descends from h1 in the listed chain; the weights release it was published
@@ -1252,13 +1264,11 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     _append_records(scenario, 3)
     assert _commit_step(scenario, HARNESS) is not None
     h2 = scenario.current_snapshot().revision
-    catalog = service.harness_releases(headers)["releases"]
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2]
-    assert catalog[-1]["parent_release_id"] == h1
-    assert catalog[-1]["composed_parent_release_id"] == w2
+    catalog = service.harness_artifacts(headers)["artifacts"]
+    assert listed_revisions(scenario) == [creation, h1, h1, h2]
     assert required_by(catalog, component_id(scenario, h2, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
     assert service.harness_manifest(headers)["release_id"] == h2
-    page = service.harness_release_page(headers, 3)
+    page = service.harness_artifact_page(headers, 3)
     assert component_id(scenario, h2, HARNESS) in page
     assert h2 not in page
 
@@ -1267,8 +1277,8 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     scenario.activate(component_id(scenario, h1, HARNESS), HARNESS)
     activated_view = scenario.current_snapshot().revision
     assert activated_view not in (h1, h2)
-    catalog = service.harness_releases(headers)["releases"]
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2]
+    catalog = service.harness_artifacts(headers)["artifacts"]
+    assert listed_revisions(scenario) == [creation, h1, h1, h2]
     assert service.harness_manifest(headers)["release_id"] == h1
     assert required_by(catalog, component_id(scenario, h1, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
@@ -1286,8 +1296,8 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
     combined = scenario.current_snapshot().revision
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 3"
-    catalog = service.harness_releases(headers)["releases"]
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, h3]
+    catalog = service.harness_artifacts(headers)["artifacts"]
+    assert listed_revisions(scenario) == [creation, h1, h1, h2, h3]
     assert (
         service.harness_manifest(headers, form="source")["release_id"]
         == h3
@@ -1338,7 +1348,7 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             assert [row["active"] for row in rows] == [False, False, True]
             assert all(row["component"] == HARNESS and row["activated"] for row in rows)
             first = rows[1]
@@ -1346,7 +1356,7 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
             answer = await client.post("/reef/scenarios/agent/activate", json=body)
             assert answer.status == 200, await answer.text()
             assert (await answer.json())["artifact_id"] == first["artifact_id"]
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             assert [row["artifact_id"] for row in rows if row["active"]] == [first["artifact_id"]]
         finally:
             await client.close()
@@ -1398,7 +1408,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatc
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
     assert service.harness_manifest(headers)["release_id"] == creation
-    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [creation]
+    assert listed_revisions(scenario) == [creation]
 
 
 @pytest.mark.unit
@@ -1421,14 +1431,14 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     scenario.activate(component_id(scenario, first_weights, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
     assert service.harness_manifest(headers)["release_id"] == harness_release
-    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
+    assert listed_revisions(scenario) == [base, harness_release]
 
     # Back to the root's harness: the seed tree is served again, named by the root release.
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, HARNESS), HARNESS)
     assert service.harness_manifest(headers)["release_id"] == base
     assert service.harness_manifest(headers)["release_id"] == base
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
-    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
+    assert listed_revisions(scenario) == [base, harness_release]
 
 
 @pytest.mark.unit
@@ -1467,8 +1477,8 @@ def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
 class _OneTrainerRecipe(_TwoTrainerRecipe):
     """The harness trainer alone, serving one component: the shape of every shipped recipe."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return Surface(components={HARNESS: ComponentSurface(files=TextFileTree())})
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(components={HARNESS: ComponentSpec(files=TextFileTree())})
 
 
 @pytest.mark.unit
@@ -1542,21 +1552,21 @@ def test_commit_record_carries_its_component() -> None:
 
 
 @pytest.mark.unit
-def test_component_trainers_must_match_the_surface() -> None:
+def test_component_trainers_must_match_the_components() -> None:
     def trainer() -> Trainer:
         return Trainer.build("agent", SQLiteRecordStore(), pipeline_factory=TrainingPipeline)
 
-    flat = Surface(components={HARNESS: ComponentSurface(files=TextFileTree())})
-    composed = Surface(components={WEIGHTS: ComponentSurface(), HARNESS: ComponentSurface(files=TextFileTree())})
+    flat = ScenarioComponents(components={HARNESS: ComponentSpec(files=TextFileTree())})
+    composed = ScenarioComponents(components={WEIGHTS: ComponentSpec(), HARNESS: ComponentSpec(files=TextFileTree())})
     harness_only = (ComponentTrainer(HARNESS, trainer()),)
     assert validate_component_trainers(harness_only, flat) == harness_only
     assert validate_component_trainers(harness_only, composed) == harness_only
     named = (ComponentTrainer(WEIGHTS, trainer()), ComponentTrainer(HARNESS, trainer()))
     assert validate_component_trainers(named, composed) == named
     records_only = (ComponentTrainer(RECORDS_COMPONENT, trainer()),)
-    assert validate_component_trainers(records_only, Surface()) == records_only
+    assert validate_component_trainers(records_only, ScenarioComponents()) == records_only
     with pytest.raises(ReefError, match="serving no component"):
-        validate_component_trainers(harness_only, Surface())
+        validate_component_trainers(harness_only, ScenarioComponents())
     with pytest.raises(ValueError, match="non-empty"):
         ComponentTrainer("", trainer())
     with pytest.raises(ReefError, match="does not serve"):
@@ -1565,24 +1575,6 @@ def test_component_trainers_must_match_the_surface() -> None:
         validate_component_trainers(
             (ComponentTrainer(HARNESS, trainer()), ComponentTrainer(HARNESS, trainer())), composed
         )
-
-
-@pytest.mark.unit
-def test_a_surface_built_with_the_flat_keywords_serves_one_component() -> None:
-    """The surface main documents, Surface(inference=..., files=...), is one component; dataclasses.replace of a
-    capability replaces it on that component; a surface of several components takes them per component."""
-    import dataclasses
-
-    from reef.surface.base import FLAT_COMPONENT
-
-    tree = TextFileTree()
-    surface = Surface(files=tree)
-    assert surface.names == (FLAT_COMPONENT,) and surface.single and surface.files is tree
-    named = Surface(components={HARNESS: ComponentSurface()})
-    replaced = dataclasses.replace(named, files=tree)
-    assert replaced.names == (HARNESS,) and replaced.components[HARNESS].files is tree
-    with pytest.raises(ValueError, match="per component"):
-        Surface(components={WEIGHTS: ComponentSurface(), HARNESS: ComponentSurface()}, files=tree)
 
 
 @pytest.mark.unit
@@ -1651,35 +1643,32 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
 
 
 @pytest.mark.unit
-def test_a_manual_weights_trainer_waits_for_inserted_samples_and_submits_them_with_the_instruction(
+def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """In manual mode a weights stage takes an instruction as a request to train: the job waits until a client
-    inserts samples into the trainer's manual buffer, then carries them and the instruction, and the submission
-    consumes both and empties the buffer."""
+    """In manual mode a weights stage trains only for a training request: the job carries the samples that
+    the request names and the request, and the submission consumes both."""
     training = WeightsJobComponent(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     scenario.set_training_mode("manual")
-    dispatcher.accept_instruction(
-        "agent", {"text": "learn the tool", "session": "session-1", "release_id": "release-1"}, request_id="t1"
-    )
-    assert scenario.prepare_training_step(WEIGHTS) is None
     _append_records(scenario, 1)
     make_samples(scenario)
-    # The samples service stores the step's sample, but no sample joins the manual buffer by itself: the instruction
-    # waits.
+    # The samples service stores the step's sample, but without a training request nothing trains.
     assert scenario.prepare_training_step(WEIGHTS) is None
     trainer = scenario.trainer_for(WEIGHTS)
-    held = tuple(trainer.pipeline.held)
-    # In a scenario of several components, a sample's ID names its component first.
-    assert held == (f"{WEIGHTS}:r1:0",)
-    trainer.change_buffer(held, insert=True)
+    held = tuple(stored.sample_id for stored in trainer.pipeline.store.page())
+    # In a scenario of several components, a sample's name names its component first.
+    assert held == (stage_item_id("agent", f"{WEIGHTS}:r1:0"),)
+    dispatcher.accept_request(
+        "agent",
+        {"text": "learn the tool", "session": "session-1", "release_id": "release-1", "samples": list(held)},
+        request_id="t1",
+    )
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
-    assert trainer.buffer_listing()["samples"] == []
     [job] = _submitted(training, 1)
-    assert job.data.data_id == "agent:instruction:t1"
-    assert job.data.request is not None and job.data.request.id == "t1"
+    assert job.data_id == "agent:request:t1"
+    assert job.request_id == "t1"
     assert {"t1", "i1", "r1"} <= scenario.store.history()[-1].consumed_ids
     _settle_weights_job(scenario)
     assert _job_events(scenario) == ["submitted", "checkpoint", "finished"]
@@ -1715,7 +1704,9 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     for record in _records(3, scenario.serving_artifact_id()):
         restarted.accept_record(record)
     assert _wait_for(lambda: len(training.submitted) == 2)
-    assert [item.source_agent_record_ids for item in training.submitted[1].data.samples] == [("i3", "r3")]
+    assert [item.source_agent_record_ids for item in read_job_data(training.submitted[1].data_dir).samples] == [
+        ("i3", "r3")
+    ]
     assert training.submitted[1].start == str(tmp_path / "checkpoints" / "1")
 
 

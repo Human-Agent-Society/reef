@@ -24,8 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from reef.core.requirements import required_by
-from reef.service.page_layout import document, escape, requires_table, stamp, status_span
-from reef.service.release_page import (
+from reef.service.artifact_page import (
     failed_words,
     floor_tasks_note,
     method_notes,
@@ -38,6 +37,7 @@ from reef.service.release_page import (
     step_href,
     unscored_failures,
 )
+from reef.service.page_layout import document, escape, requires_table, stamp, status_span
 from reef.train.harness_backend.backend import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -104,7 +104,7 @@ left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font
 
 #: What each state means, in the words the page prints beside it.
 STATE_WORDS = {
-    "queued": "no step has taken the request yet; the trainer runs one step per instruction, oldest first",
+    "queued": "no step has taken the request yet; the trainer runs one step per request, oldest first",
     "proposing": "the method is making the change; the activity shows what it has done so far",
     "evaluating": "the evaluation is running the candidate through its runs",
     "running": "the step holds the request and reports no phase; its row follows",
@@ -410,7 +410,7 @@ def build_request_page(
             body += (
                 f'<section class="card activity-card">\n<h2>Activity</h2>\n{activity_html(progress, now)}</section>\n'
             )
-        subtitle = "Follow your request from instruction to outcome."
+        subtitle = "Follow your training request to its outcome."
         current_stage = {"queued": 0, "proposing": 1, "evaluating": 1, "running": 1}.get(state, 1)
     else:
         metrics = rows[step].get("metrics")

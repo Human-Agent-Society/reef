@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import STUB_ROOT
 
 from reef.artifact import DefaultStart
@@ -16,21 +17,25 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData, TaskSample
 from reef.core.snapshot import SnapshotRef
 from reef.core.training_request import TrainingRequest
+from reef.core.weight_layout import ArtifactFormat
 from reef.observability.base import (
     ExperimentRun,
     ExperimentTracker,
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
+from reef.storage.data import MemoryDataStore
 from reef.storage.sql_coordination import memory_coordination
+from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import NewWork
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.job_queue import (
     JOBS_QUEUE,
     JobExperimentRecorder,
     JobQueueComponent,
     TrainingJobWorker,
     checkpoint_json,
+    job_from_item,
     job_json,
     job_kind,
     job_payload,
@@ -55,8 +60,8 @@ class StepComponent(LocalJobComponent):
         return "steps"
 
     @property
-    def release_format(self) -> ReleaseFormat:
-        return ReleaseFormat("full")
+    def artifact_format(self) -> ArtifactFormat:
+        return ArtifactFormat("full")
 
     def default_start(self) -> DefaultStart:
         return DefaultStart()
@@ -91,7 +96,7 @@ class StepComponent(LocalJobComponent):
 
 def job(job_id: str, **parameters: Any) -> TrainingJob:
     data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
-    return TrainingJob(job_id, "steps", "steps:base", data, parameters, scenario="s")
+    return TrainingJob(job_id, "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
 
 
 def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
@@ -108,20 +113,44 @@ def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
 def worked(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
-    worker = TrainingJobWorker(component, queue, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
     worker.start()
     yield queue, component, worker
     worker.stop()
 
 
 @pytest.mark.unit
+def test_a_queued_job_keeps_its_component_and_previous_job():
+    queue = memory_coordination(lease_seconds=300).work_queue
+    job = TrainingJob(
+        "j1",
+        "steps",
+        "steps:base",
+        job_data_ref(JobData("s:data:1")),
+        {},
+        scenario="s",
+        component="harness",
+        previous_job_id="j0",
+    )
+    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job), serial_key="s"))
+    taken = job_from_item(queue.get(JOBS_QUEUE, "j1"), MemoryDataStore(LocalTaskFileStore()))
+    assert (taken.component, taken.previous_job_id) == ("harness", "j0")
+
+
+@pytest.mark.unit
 def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the_queue(worked):
     queue, component, _worker = worked
     view = JobQueueComponent(component, queue)
-    assert (view.name, view.root_start(STUB_ROOT), view.release_format) == (
+    assert (view.name, view.root_start(STUB_ROOT), view.artifact_format) == (
         "steps",
         "steps:base",
-        ReleaseFormat("full"),
+        ArtifactFormat("full"),
     )
 
     view.submit(job("j1"))
@@ -159,7 +188,13 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
     view.cancel("waiting")
     assert view.status("waiting").state == "failed" and view.status("waiting").error == "cancelled"
 
-    worker = TrainingJobWorker(component, queue, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
     assert worker.run_once() is False  # the cancelled job is final, so nothing is left to take
     worker.stop()
     assert component.closed_count == 1
@@ -186,7 +221,13 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     queue.add_progress(JOBS_QUEUE, "j1", "training-0", checkpoint_json(first), number=0)
     queue.requeue_expired(now=time.time() + 60)
 
-    worker = TrainingJobWorker(StepComponent(tmp_path / "jobs"), queue, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        StepComponent(tmp_path / "jobs"),
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
     assert worker.run_once()
     item = queue.get(JOBS_QUEUE, "j1")
     assert item.state == "finished"
@@ -198,7 +239,7 @@ class ReleaseRefusingComponent(StepComponent):
     """A component that continues only from its own checkpoints, as Slime does."""
 
     @property
-    def starts_from_releases(self) -> bool:
+    def starts_from_artifacts(self) -> bool:
         return False
 
     def import_start(self, release: Path) -> str:
@@ -208,25 +249,28 @@ class ReleaseRefusingComponent(StepComponent):
 @pytest.mark.unit
 def test_a_queue_component_reports_whether_its_component_starts_from_releases(tmp_path):
     queue = memory_coordination().work_queue
-    assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_releases is True
+    assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_artifacts is True
     refusing = JobQueueComponent(ReleaseRefusingComponent(tmp_path / "b"), queue)
-    assert refusing.starts_from_releases is False
+    assert refusing.starts_from_artifacts is False
 
 
 @pytest.mark.unit
-def test_a_listed_job_carries_its_parameters_instruction_data_and_times(tmp_path):
+def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     queue = memory_coordination(lease_seconds=300).work_queue
     request = TrainingRequest("prefer tests", "session-1", "release-1", id="r1", parameters={"learning_rate": 1e-5})
     sample = policy_trajectory("s-j1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
-    data = JobData("s:instruction:r1", (sample, sample), request=request)
+    data = JobData("s:request:r1", (sample, sample), request=request)
     parameters = {"method": {"objective": "sft"}, "learning_rate": 1e-5}
-    instructed = TrainingJob("j1", "steps", "steps:base", data, parameters, scenario="s")
-    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(instructed), serial_key="s"), now=0)
+    instructed = TrainingJob("j1", "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
+    summary = {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
+    queue.add(
+        NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(instructed, summary), serial_key="s"), now=0
+    )
 
     queued = job_json(queue.get(JOBS_QUEUE, "j1"))
     assert queued["parameters"] == parameters
     assert (queued["sample_count"], queued["sample_kind"]) == (2, "trajectory")
-    assert queued["instruction"] == {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
+    assert queued["request"] == {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
     assert (queued["created_at"], queued["started_at"], queued["ended_at"]) == (
         "1970-01-01T00:00:00+00:00",
         None,
@@ -241,15 +285,15 @@ def test_a_listed_job_carries_its_parameters_instruction_data_and_times(tmp_path
     (ended,) = scenario_jobs(queue, "s")
     assert (ended["state"], ended["ended_at"]) == ("finished", "1970-01-01T00:01:30.500000+00:00")
 
-    # A job of the auto mode has no instruction; a task job names its kind, and an empty job has none.
+    # A job of the auto mode has no request; a task job names its kind, and an empty job has none.
     automatic = TrainingJob(
-        "j2", "steps", "steps:base", JobData("s:data:1", (TaskSample(tmp_path),)), {}, scenario="s"
+        "j2", "steps", "steps:base", job_data_ref(JobData("s:data:1", (TaskSample(tmp_path),))), {}, scenario="s"
     )
-    empty = TrainingJob("j3", "steps", "steps:base", JobData("s:data:2"), {}, scenario="s")
+    empty = TrainingJob("j3", "steps", "steps:base", job_data_ref(JobData("s:data:2")), {}, scenario="s")
     for value in (automatic, empty):
         queue.add(NewWork(JOBS_QUEUE, value.job_id, "s", job_kind("steps"), job_payload(value), serial_key="s"))
     listed = {listed_job["id"]: listed_job for listed_job in scenario_jobs(queue, "s")}
-    assert (listed["j2"]["instruction"], listed["j2"]["sample_kind"], listed["j2"]["parameters"]) == (None, "task", {})
+    assert (listed["j2"]["request"], listed["j2"]["sample_kind"], listed["j2"]["parameters"]) == (None, "task", {})
     assert (listed["j3"]["sample_count"], listed["j3"]["sample_kind"]) == (0, None)
 
 

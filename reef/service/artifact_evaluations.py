@@ -12,7 +12,7 @@ rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No 
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
 artifact on request (``InferenceRuntime.serves_artifacts_on_request``), with a Harbor agent, on the Harbor tasks of the eval
-split of the scenario's imported tasks (its sample store). It refuses a harness artifact, and a model artifact on any
+split of the scenario's imported tasks (its samples). It refuses a harness artifact, and a model artifact on any
 other runtime.
 """
 
@@ -419,7 +419,7 @@ class ArtifactEvaluations:
         """The request of ``settings`` for ``artifact_id`` (None: the component's active artifact), the materialized
         artifact, and the model that the runtime serves for it; ``ValueError`` or ``ReefError`` when ``current``
         cannot run it."""
-        kinds = {name: component.kind for name, component in current.surface.components.items()}
+        kinds = {name: component.kind for name, component in current.components.components.items()}
         component = settings.component
         if component is None:
             named = [name for name, kind in kinds.items() if kind is not None]
@@ -430,7 +430,7 @@ class ArtifactEvaluations:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
         if artifact_id is None:
             active = Artifact(current.current_snapshot(), current.repository)
-            artifact_id = current.surface.component_artifact(active, component).artifact_id
+            artifact_id = current.components.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]
         if kind is None:
@@ -461,9 +461,10 @@ class ArtifactEvaluations:
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             request, _artifact, model = self.checked(current, artifact_id, settings)
+            samples = self.dispatcher.storage.sample_store(scenario, current.store)
             held = {
                 stored.sample_id: stored.sample.task_path
-                for stored in current.store.samples.imported_tasks(split="eval")
+                for stored in (() if samples is None else samples.imported_tasks(split="eval"))
                 if isinstance(stored.sample, TaskSample)
             }
         unknown = sorted(set(request.task_names) - set(held))

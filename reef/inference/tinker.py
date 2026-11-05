@@ -25,19 +25,19 @@ from reef_client.sse import synthesize_sse_events
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import read_reference
 from reef.core.config import config_option
+from reef.core.errors import UpstreamStatusError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
-from reef.runtime.deployment import RuntimeFactory, config_secret
-from reef.runtime.interfaces import (
+from reef.inference.interfaces import (
     InferenceArtifact,
     InferenceHandler,
     InferenceRuntime,
     InferenceStream,
     RuntimeLoadId,
-    UpstreamStatusError,
     new_runtime_load_id_incarnation,
 )
-from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
+from reef.inference.registry import RuntimeFactory, config_secret
+from reef.tinker.checkpoint import MANIFEST, TinkerArtifact
 from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 
 #: The hosted Tinker service, which ``service=None`` names.
@@ -65,9 +65,9 @@ def checkpoint_sampler_path(
         if revision is not None and revision.repo != base_model:
             raise ValueError(f"the artifact refers to {revision.uri}, not to the base model {base_model}")
         return None
-    checkpoint = TinkerCheckpoint.read(path)
-    checkpoint.check_compatible(base_model, service=service)
-    return checkpoint.sampler_path
+    release = TinkerArtifact.read(path)
+    release.check_compatible(base_model, service=service)
+    return release.sampler_path
 
 
 class TinkerInferenceRuntime(InferenceRuntime):

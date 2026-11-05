@@ -23,9 +23,9 @@ from typing import Any
 
 from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import TrainingComponentFactory
-from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.jobs import ReleaseFormat, TrainingComponent
+from reef.core.weight_layout import ArtifactFormat
+from reef.execution.executor.arguments import normalize_native_options
+from reef.train.component import TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import EngineWeights, InProcessTrainingDeployment
 from reef.train.tinker_backend.config import SpindleFullConfig, TinkerConfig, TinkerServiceConfig
 
@@ -74,7 +74,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
         """Each release's adapter at its sampler path, downloaded into ``state_dir/sampler-weights``."""
         tinker = tinker_settings(settings["training_backend_options"])
         return EngineWeights(
-            ReleaseFormat("adapter", tinker.lora_rank, ("all",)),
+            ArtifactFormat("adapter", tinker.lora_rank, ("all",)),
             {
                 "module": "reef.tinker.weights:TinkerSamplerWeights",
                 "config": {

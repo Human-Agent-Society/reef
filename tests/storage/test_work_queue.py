@@ -164,6 +164,18 @@ def test_a_request_reuses_the_queued_item_of_its_key_and_ended_items_go_after_th
     assert third.id not in (first.id, second.id)
 
 
+@pytest.mark.unit
+def test_a_request_makes_the_queued_item_of_its_key_available_no_later_than_it_asks(open_coordination):
+    queue = open_coordination().queue
+    later = queue.request("samples", "s", "record_selection", "record_selection:s", {}, available_at=60, now=0)
+    assert later.available_at == 60
+    # A request for a later time leaves it; a request for now moves it to now.
+    assert queue.request("samples", "s", "record_selection", "record_selection:s", {}, available_at=90, now=1) == later
+    moved = queue.request("samples", "s", "record_selection", "record_selection:s", {}, now=2)
+    assert (moved.id, moved.available_at) == (later.id, 2)
+    assert queue.take("samples", "w", ["record_selection"], now=2).id == later.id
+
+
 class FailingWorker(QueueWorker):
     """A worker whose every item ends with ``error``."""
 
@@ -289,6 +301,24 @@ def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path
         # An ended item ended at its last change; the start of an earlier item is not known.
         assert (ended.started_at, ended.ended_at, ended.metadata) == (None, 2, {})
         assert (waiting.started_at, waiting.ended_at, waiting.metadata) == (None, None, {})
+
+
+def test_the_queued_training_requests_of_an_older_version_move_to_their_new_queue_and_kind(tmp_path):
+    directory = tmp_path / "coordination"
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        queue.add(NewWork("instructions", "ask-1", "my/agent", "train_instruction:my/agent", {"text": "t"}), now=0)
+        queue.add(job("other"), now=0)
+
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        moved = queue.get("training_requests", "ask-1")
+        assert (moved.kind, moved.payload, queue.get("instructions", "ask-1")) == (
+            "training_request:my/agent",
+            {"text": "t"},
+            None,
+        )
+        assert queue.get("jobs", "other").kind == job("other").kind
 
 
 @pytest.mark.unit
@@ -591,7 +621,7 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
     owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
 
-    table.recover_completed(owner, "worker", stop_delay_seconds=10, now=4)
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=4)
     recovery = table.current_request("ready")
     assert recovery.id != ready.id and recovery.payload == ready.payload and recovery.state == "queued"
     assert recovery.metadata == {"recovery": True}
@@ -600,11 +630,31 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     assert table.current_request("queued") == queued
     assert table.current_request("withdrawn") == withdrawn
     assert table.current_request("failed").state == "failed"
-    table.recover_completed(owner, "worker", stop_delay_seconds=10, now=5)
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=5)
     assert table.current_request("ready") == recovery
     with pytest.raises(WorkLeaseLost):
-        table.recover_completed(owner, "worker", stop_delay_seconds=10, now=14)
+        table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=14)
     assert table.current_request("ready") == recovery
+
+
+@pytest.mark.unit
+def test_a_new_owner_keeps_the_routes_whose_engines_still_serve_until_it_serves_again(open_coordination):
+    stores = open_coordination()
+    lease = stores.lease.acquire("control", now=0)
+    table, queue = stores.served, stores.queue
+    live, gone = ServedArtifact("a", "http://live", "a"), ServedArtifact("b", "http://gone", "b")
+    for scenario, served in (("live", live), ("gone", gone)):
+        table.request(scenario, {"artifact_id": served.artifact_id}, control_lease_number=lease.number, now=0)
+        running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
+        table.complete_request(running, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=2)
+    queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
+    owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
+
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(live,), now=4)
+    assert table.current_request("live").metadata == table.current_request("gone").metadata == {"recovery": True}
+    assert table.read_scenario("live") == {"active": live}
+    assert table.read_scenario("gone") == {}
+    assert table.due_stops(14) == (ScheduledStop(gone, 14),)
 
 
 @pytest.mark.unit

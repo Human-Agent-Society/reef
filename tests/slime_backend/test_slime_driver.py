@@ -14,13 +14,14 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.slime_backend.test_slime_component import batch_for, parameters, worker_args
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData, TaskSample
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
+from reef.storage.durable_files import read_json, write_json
+from reef.train.component import TrainingJob
 from reef.train.local_jobs import JOB_FILE
+from reef.train.method import TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import driver
 from reef.train.slime_backend.component import (
@@ -54,7 +55,7 @@ start.mkdir(parents=True)
 (start / "start.json").write_text(json.dumps(
     {"rollout_id": 0, "objective": None, "algorithm_state": {}, "schedule_state": None}))
 (directory / "checkpoints.json").write_text(json.dumps({"checkpoints": [
-    {"step": 2, "path": str(start), "release_path": str(start), "metrics": {"train/loss": 0.5}, "changed_kinds": []}]}))
+    {"step": 2, "path": str(start), "artifact_path": str(start), "metrics": {"train/loss": 0.5}, "changed_kinds": []}]}))
 (directory / "driver-result.json").write_text(json.dumps({"metrics": {"arguments": settings["arguments"]}}))
 """
 
@@ -88,7 +89,12 @@ def parsed(tmp_path, monkeypatch):
 
 def sft_job(component: SlimeTrainingComponent, job_id: str = "job-0", start: str | None = None) -> TrainingJob:
     return TrainingJob(
-        job_id, "slime", start or component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+        job_id,
+        "slime",
+        start or component.base_start,
+        job_data_ref(batch_for(0)),
+        parameters(TrainingMethod("sft")),
+        scenario="s",
     )
 
 
@@ -231,9 +237,16 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
         **parameters(TrainingMethod("sft")),
         **({"rollout": {"rollouts_per_task": 2}} if rollout else {}),
     }
+    # The job file that LocalJobComponent.submit writes: the job data reference with its local path.
+    ref = job_data_ref(data)
     write_json(
         directory / JOB_FILE,
-        {"scenario": "s", "start": str(start), "data": data.to_dict(), "parameters": job_parameters},
+        {
+            "scenario": "s",
+            "start": str(start),
+            "data": {**ref.to_dict(), "path": str(ref.path)},
+            "parameters": job_parameters,
+        },
     )
     write_json(directory / DRIVER_FILE, settings_to_json(SETTINGS))
     return directory

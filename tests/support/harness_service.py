@@ -20,6 +20,7 @@ from typing import Any
 from weakref import WeakKeyDictionary
 
 from tests.support.harness_steps import head_of
+from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, CachedRepositoryBackendFactory, InMemoryRepositoryBackend
@@ -28,14 +29,12 @@ from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ComparePolicy
+from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import ScenarioRoot
-from reef.scenario.scenario import Scenario
-from reef.service.request_service import RequestService
+from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JobQueueComponent
@@ -58,16 +57,19 @@ def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
 
 
 def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: bool = False) -> Dispatcher:
-    """A dispatcher over ``recipe`` with a seeded repository and a durable commit history.
+    """A dispatcher over ``recipe`` with a seeded repository, a durable commit history and a data store.
 
     A test that prepares and commits each step itself sets ``hold_local_cycles``, so no local cycle commits the
     same step a second time.
     """
+    storage = data_storage(tmp_path / "agent-record")
     return Dispatcher(
         recipe,
         harness_repository(tmp_path),
         local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        data_store=storage.data,
         hold_local_cycles=hold_local_cycles,
         coordination=memory_coordination(),
     )
@@ -191,8 +193,15 @@ def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
 
 
 def catalog(scenario: Scenario) -> list[dict[str, Any]]:
-    """The catalog rows of ``scenario``, newest first, as ``GET /reef/harness/releases`` lists them."""
-    return RequestService.legacy_harness_rows(scenario)
+    """The catalog rows of ``scenario``, newest first, as ``GET /reef/harness/artifacts`` lists them."""
+    rows = []
+    for row in scenario.harness_snapshot_rows():
+        snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
+        listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
+        listed["release_id"] = selected.revision
+        listed["parent_release_id"] = snapshot.parent_revision if parent is None else parent.revision
+        rows.append(listed)
+    return rows
 
 
 #: Each backend's scenario step: the steps ``backend_step`` ran on it.

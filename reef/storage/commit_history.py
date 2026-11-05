@@ -19,7 +19,7 @@ from reef.core.errors import ReefError
 from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainingState
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.storage.tasks import TaskStorage
 
@@ -93,10 +93,10 @@ class CommitHistory(ABC):
 
 
 class CommitHistoryScenarioStore(ScenarioStore):
-    """One open session of a scenario: its records, task stores, training samples, evaluations and commits.
+    """One open session of a scenario: its records, task stores, training state, evaluations and commits.
 
     Values: ``scenario`` is a non-empty name. ``records``, ``tasks``,
-    ``samples``, ``evaluations`` and ``commit_history`` hold that
+    ``training_state``, ``evaluations`` and ``commit_history`` hold that
     scenario's state; the bundled storages keep all five in one database. Every record in the
     history names ``scenario``; a read that finds another name raises
     ``ReefError``. ``initial_step`` is a non-negative step for an existing
@@ -116,7 +116,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         commit_history: CommitHistory,
         *,
         tasks: TaskStorage,
-        samples: SampleStore,
+        training_state: TrainingState,
         evaluations: EvaluationStore,
         initial_step: int = 0,
     ) -> None:
@@ -127,7 +127,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self._scenario = scenario
         self._records = records
         self._tasks = tasks
-        self._samples = samples
+        self._training_state = training_state
         self._evaluations = evaluations
         self._commit_history = commit_history
         self._initial_step = initial_step
@@ -153,10 +153,10 @@ class CommitHistoryScenarioStore(ScenarioStore):
             return self._tasks
 
     @property
-    def samples(self) -> SampleStore:
+    def training_state(self) -> TrainingState:
         with self._lock:
             self._ensure_open()
-            return self._samples
+            return self._training_state
 
     @property
     def evaluations(self) -> EvaluationStore:

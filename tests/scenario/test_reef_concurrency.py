@@ -18,9 +18,9 @@ from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from reef.artifact import Artifact, ArtifactConflict, InMemoryRepositoryBackend, Repository, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import TrainingJobWorker
 from reef.train.types import TrainStepResult
 
@@ -194,9 +194,9 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     base_artifact_id = scenario.serving_artifact_id()
     original_prepare_commit = scenario.trainer.prepare_commit
 
-    def slow_prepare_commit(result):
+    def slow_prepare_commit(result, correlation_metrics=None):
         time.sleep(0.05)
-        return original_prepare_commit(result)
+        return original_prepare_commit(result, correlation_metrics)
 
     monkeypatch.setattr(scenario.trainer, "prepare_commit", slow_prepare_commit)
 

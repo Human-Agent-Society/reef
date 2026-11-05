@@ -23,6 +23,7 @@ from tests.support.trajectory_uploads import dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
 from reef.core.snapshot import SnapshotRef
@@ -31,16 +32,15 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.harness.adapters import get_adapter
-from reef.harness.sync import create_harness_surface
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tasks.rollouts import RolloutRow, TaskLab
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_weight_surface
 from reef.train.trainer import ComponentTrainer
 
 TOKEN = "artifact-evaluation-test-token"
@@ -97,18 +97,18 @@ class WeightRecipe(Recipe):
 
     harness: bool = False
 
-    def build_surface(self, scenario: str) -> Surface:
-        weights = create_weight_surface(kind=self.runtime.served_weight_kind)
-        if not self.harness:
-            return weights
-        return Surface({**weights.components, **create_harness_surface(get_adapter("pi")).components})
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        components = {"weights": ComponentSpec(kind=self.runtime.served_weight_kind)}
+        if self.harness:
+            components[HARNESS_COMPONENT] = ComponentSpec(files=HarnessFiles(get_adapter("pi")), kind="harness_plugin")
+        return ScenarioComponents(components)
 
     def build_trainers(
         self,
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
@@ -128,7 +128,7 @@ class WeightRecipe(Recipe):
                     root=root,
                 ),
             )
-            for name in surface.names
+            for name in components.names
         )
 
 
@@ -433,6 +433,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "effective_activation": {"module": "never", "config": {}},
                 "serving_config": {},
                 "effective_serving_config": {"weights": {}},
+                "job_parameters": {"trajectory": {}, "task": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": rule})

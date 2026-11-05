@@ -17,9 +17,8 @@ from uuid import uuid4
 
 import ray
 
-from reef.runtime.deployment import DeploymentResources
-from reef.runtime.executor.placement import GpuBundles
-from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
+from reef.execution.executor.placement import DeploymentResources, GpuBundles
+from reef.execution.executor.process_guard import DEPLOYMENT_ENV, retire
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 
@@ -63,7 +62,7 @@ class SlimeDeploymentResources(DeploymentResources):
         self._owns_session = True
         runtime_env = dict(self.runtime_env or {})
         runtime_env["env_vars"] = {**runtime_env.get("env_vars", {}), DEPLOYMENT_ENV: self._process_lease}
-        runtime_env["worker_process_setup_hook"] = "reef.runtime.executor.process_guard.install"
+        runtime_env["worker_process_setup_hook"] = "reef.execution.executor.process_guard.install"
         ray.init(address=self.ray_address, namespace=self.namespace, runtime_env=runtime_env)
         self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
         if not self.place:

@@ -22,7 +22,7 @@ import json
 import math
 import time
 from abc import abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +62,7 @@ from reef.core.values import require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.marks import Marks, check_mark_name
-from reef.storage.migrations import migrate_work_item_columns
+from reef.storage.migrations import migrate_training_request_items, migrate_work_item_columns
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
@@ -248,6 +248,7 @@ class CoordinationDatabase(CoordinationResource):
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
         migrate_work_item_columns(connection, self.tables.work_item)
+        migrate_training_request_items(connection, self.tables.work_item)
         present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
         for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
             if sequence not in present:
@@ -630,6 +631,7 @@ class SQLServedModels(ServedModelsWriter):
         worker_id: str,
         *,
         stop_delay_seconds: float,
+        kept: Collection[ServedArtifact],
         now: float | None = None,
     ) -> None:
         if not math.isfinite(stop_delay_seconds) or stop_delay_seconds < 0:
@@ -658,7 +660,10 @@ class SQLServedModels(ServedModelsWriter):
             self.checked_owner(connection, owner, worker_id, moment)
             for row in connection.execute(latest).mappings().all():
                 current = item_from_row(row)
-                self.replace_routes(connection, served_counter, current.scenario, {}, moment + stop_delay_seconds)
+                served = self.tables.served_model
+                routes = connection.execute(select(served).where(served.c.scenario == current.scenario)).mappings()
+                staying = {row["name"]: route for row in routes if (route := served_from_row(row)) in kept}
+                self.replace_routes(connection, served_counter, current.scenario, staying, moment + stop_delay_seconds)
                 if current.state != "finished" or not current.payload:
                     continue
                 sequence = counter.next()
@@ -995,7 +1000,11 @@ class SQLWorkQueue(WorkQueue):
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             found = connection.execute(waiting).mappings().first()
             if found is not None:
-                return item_from_row(found)
+                queued = item_from_row(found)
+                wanted = moment if available_at is None else available_at
+                if queued.available_at <= wanted:
+                    return queued
+                return self.save(connection, counter, queued, moment, available_at=wanted)
             sequence = counter.next()
             work = NewWork(
                 queue,

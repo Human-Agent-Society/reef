@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from reef.artifact import Artifact, DefaultStart
 from reef.core.evaluation import PolicyModel
-from reef.core.job_data import JobData
+from reef.core.job_data import Sample
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import InferenceProxyRuntime
-from reef.runtime.interfaces import InferenceBackend
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
-from reef.runtime.serving import OpenedEngines, ServingEngines
+from reef.inference.interfaces import InferenceBackend
+from reef.inference.serving import OpenedEngines, ServingEngines
+from reef.storage.job_data import read_job_data
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 #: The release format of a stub component that does not name one.
-FULL_WEIGHTS = ReleaseFormat("full")
+FULL_WEIGHTS = ArtifactFormat("full")
 #: The file a stub checkpoint holds: the version name that serving the checkpoint reports.
 VERSION_FILE = "model.txt"
 #: The root release of a trainer that a test builds outside a scenario; a stub's ``root_start`` does not read it.
@@ -35,8 +38,8 @@ class StubTrainingComponent(TrainingComponent):
     version name ``w<n>`` for the ``n``-th job. ``submitted`` lists the jobs
     in submission order and ``imported`` the releases given to
     :meth:`import_start`. ``shares_scenarios`` is what the component reports
-    for :attr:`TrainingComponent.shares_scenarios`, and ``release_format`` for
-    :attr:`TrainingComponent.release_format` (full weights by default). Like
+    for :attr:`TrainingComponent.shares_scenarios`, and ``artifact_format`` for
+    :attr:`TrainingComponent.artifact_format` (full weights by default). Like
     the Tinker component, it runs task jobs that carry a ``rollout`` object.
     """
 
@@ -46,12 +49,12 @@ class StubTrainingComponent(TrainingComponent):
         *,
         name: str = "stub",
         shares_scenarios: bool = False,
-        release_format: ReleaseFormat | None = FULL_WEIGHTS,
+        artifact_format: ArtifactFormat | None = FULL_WEIGHTS,
     ) -> None:
         self.checkpoint_root = checkpoint_root
         self.backend_name = name
         self.scenarios_shared = shares_scenarios
-        self.releases = release_format
+        self.releases = artifact_format
         self.submitted: list[TrainingJob] = []
         self.imported: list[Path] = []
         self.statuses: dict[str, JobStatus] = {}
@@ -66,7 +69,7 @@ class StubTrainingComponent(TrainingComponent):
         return self.scenarios_shared
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
+    def artifact_format(self) -> ArtifactFormat | None:
         return self.releases
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
@@ -120,19 +123,29 @@ class StubTrainingComponent(TrainingComponent):
         self.closed = True
 
 
+@dataclass(frozen=True)
+class RecordedJob:
+    """What a component got for one job: the data of its job data directory, and the ID of its training request."""
+
+    data_id: str
+    samples: tuple[Sample, ...]
+    request_id: str | None
+
+
 class RecordingComponent(StubTrainingComponent):
-    """A training component that keeps the data of every job it ran, in ``batches``, and saves no checkpoint, so each
-    job ends at once in ``submit``.
+    """A training component that keeps what it got for every job it ran, in ``batches``, and saves no checkpoint, so
+    each job ends at once in ``submit``.
 
     Purpose: a test of how a trainer reads, batches and commits records, which trains nothing worth publishing.
     """
 
-    def __init__(self, batches: list[JobData] | None = None, *, name: str = "recording") -> None:
+    def __init__(self, batches: list[RecordedJob] | None = None, *, name: str = "recording") -> None:
         super().__init__(name=name, shares_scenarios=True)
-        self.batches: list[JobData] = [] if batches is None else batches
+        self.batches: list[RecordedJob] = [] if batches is None else batches
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.batches.append(job.data)
+        data = read_job_data(job.data_dir, job.data_id)
+        self.batches.append(RecordedJob(data.data_id, data.samples, job.request_id))
         return ()
 
 

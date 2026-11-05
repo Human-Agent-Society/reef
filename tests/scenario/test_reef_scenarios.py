@@ -11,20 +11,20 @@ from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingCompon
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import AgentRecord, RequestType
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.sync import create_harness_surface
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.harness import HarnessLayout
-from reef.runtime.jobs import ScenarioRoot, TrainingComponent
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface
+from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.jobs import JobLoopState
 
 
@@ -554,9 +554,12 @@ class ItemTreeRecipe(Recipe):
     Scenario creation tests use its fixed default tree and harness layout as a composite's second component.
     """
 
-    def build_surface(self, scenario: str) -> Surface:
+    def build_components(self, scenario: str) -> ScenarioComponents:
         descriptor = get_adapter("pi")
-        return create_harness_surface(descriptor, layout=HarnessLayout(descriptor))
+        harness = ComponentSpec(
+            files=HarnessFiles(descriptor), kind="harness_plugin", layout=HarnessLayout(descriptor)
+        )
+        return ScenarioComponents({HARNESS_COMPONENT: harness})
 
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={"rules.md": "default rules"})

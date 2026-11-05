@@ -3,7 +3,7 @@
 The data store keeps the data that scenarios train on, once per deployment. An item is content and metadata.
 Its content never changes; its metadata says what the item is, which owner it belongs to, and which scenarios
 use it. The store has create, read, query, update and delete, and each operation reads or writes the items of
-one owner only. Training state, such as train counts and buffers, is not data and stays in the scenario
+one owner only. Training state, such as train counts, is not data and stays in the scenario
 storage.
 
 This module defines the item values, the metadata rules, the ``DataStore`` plugin base and an in-memory store.
@@ -13,7 +13,10 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
+import json
 import re
+import tempfile
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -21,11 +24,13 @@ from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
+from reef.core.job_data import JobData
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
-from reef.storage.segments import SegmentStore
+from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
+from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
@@ -106,8 +111,8 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
 
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
     defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
-    ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); any other kind
-    refuses it. Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
+    ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
+    when a trainer's stage made it (``check_stage_origin``). Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
@@ -127,8 +132,25 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("an artifact item's metadata.origin names its artifact_id")
         created["origin"] = origin
     elif "origin" in metadata:
-        raise ValueError(f"only a record or an artifact has metadata.origin, not a {kind}")
+        created["origin"] = check_stage_origin(metadata["origin"])
     return created
+
+
+def check_stage_origin(value: object) -> dict[str, Any]:
+    """Return ``value`` as the ``origin`` of a trajectory or a task that a trainer's stage made, or raise
+    ``ValueError``: ``{scenario, component, records}``, the scenario (the rules of ``check_owner``), the trainer's
+    component (``""`` for the only trainer of a scenario) and the IDs of the records that the sample came from."""
+    if not isinstance(value, Mapping) or set(value) != {"scenario", "component", "records"}:
+        raise ValueError("a stage sample's metadata.origin must be {scenario, component, records}")
+    check_owner(value["scenario"])
+    records = value["records"]
+    if (
+        not isinstance(value["component"], str)
+        or not isinstance(records, list)
+        or not all(isinstance(record_id, str) and record_id for record_id in records)
+    ):
+        raise ValueError("metadata.origin.component is a string and metadata.origin.records a list of record IDs")
+    return {"scenario": value["scenario"], "component": value["component"], "records": list(records)}
 
 
 def merge_patch(target: Any, patch: Any) -> Any:
@@ -270,6 +292,10 @@ class RecordLink:
             raise ValueError("a record link's entry_count is a non-negative int")
 
 
+#: How long a data store keeps a job data directory that no job used: 7 days.
+JOB_DIRECTORY_TTL_SECONDS = 7 * 24 * 3600.0
+
+
 class DataStore(Plugin, ABC):
     """The data of a deployment: items of content and metadata, each in one owner.
 
@@ -289,6 +315,13 @@ class DataStore(Plugin, ABC):
     * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
       ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
       are given. Without ``content``, each item's ``content`` is None, and the store does not read it.
+    * ``scenario_items(owner, scenario, kinds, after, limit)`` returns the items of ``kinds`` of ``owner`` that
+      ``scenario`` uses, with content, each with the sequence of its use, in the order of those sequences: the uses
+      after ``after``, at most ``limit``. The store reads no item of another kind; without ``content``, each item's
+      ``content`` is None, and the store does not read it. Each use of an item by a scenario
+      has its own sequence, which increases across the store: a new use, also of an older item, and a use whose
+      split changes get a new one. A trainer reads its scenario's items with
+      it.
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
@@ -300,8 +333,24 @@ class DataStore(Plugin, ABC):
     * ``groups(owner, kind, key, before, limit)`` groups the items of ``owner`` and ``kind`` by the string under
       ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
       when given, newest first, at most ``limit``.
-    * ``maintain()`` does the store's periodic work, such as moving content into segments. It changes no item.
-      The data service calls it every few minutes. The default does nothing.
+    * ``maintain()`` does the store's periodic work: it deletes the job data directories that no job used for
+      ``job_directory_ttl_seconds``, and a subclass can do more, such as moving content into segments. It changes
+      no item. The data service calls it every few minutes.
+
+    The store also keeps the data directory of each training job (``reef.storage.job_data``), one directory for each
+    content, in the segment store ``job_directories``:
+
+    * ``write_job_directory(data)`` writes the directory of ``data`` if the store does not hold it, records its use,
+      and returns its reference.
+    * ``open_job_directory(value)`` gives the reference that ``JobDataRef.to_dict`` wrote, with a local copy of the
+      directory, and records its use.
+    * ``delete_unused_job_directories(time)`` deletes each directory that no job used since ``time``, and returns
+      their number.
+
+    A subclass sets ``job_directories`` and ``job_directory_ttl_seconds``, and keeps the time of the last use of each
+    directory, by its key:
+    ``record_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
+    ``delete_job_directory_record(key)``.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
     ``scenarios`` names only scenarios of the owner.
@@ -319,6 +368,7 @@ class DataStore(Plugin, ABC):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         """Build the store a deployment names.
 
@@ -326,7 +376,8 @@ class DataStore(Plugin, ABC):
         ``storage.agent_record_dir``, for local files. ``task_files`` keeps the directories of task items, in the
         partition of each owner (``task_partition``); the caller owns it and closes it. ``segments`` is the
         ``storage.segment_backend`` store, or None when it is unset; a store can keep large content there, in the
-        partition of each owner. The data store owns it and closes it with itself.
+        partition of each owner. The data store owns it and closes it with itself. ``job_directory_ttl_seconds`` is
+        ``storage.job_directory_ttl_s``.
         """
 
     @abstractmethod
@@ -346,6 +397,18 @@ class DataStore(Plugin, ABC):
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
     ) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def scenario_items(
+        self,
+        owner: str,
+        scenario: str,
+        *,
+        kinds: Sequence[str],
+        after: int = 0,
+        limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
+    ) -> tuple[tuple[int, StoredItem], ...]: ...
 
     @abstractmethod
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]: ...
@@ -382,7 +445,52 @@ class DataStore(Plugin, ABC):
         return tuple(group for group in newest if before is None or group.first_sequence < before)[:limit]
 
     def maintain(self) -> None:
-        """Do the store's periodic work. The default does nothing."""
+        """Do the store's periodic work: delete the job data directories that no job used for the time to live."""
+        self.delete_unused_job_directories(time.time() - self.job_directory_ttl_seconds)
+
+    #: The segment store of the job data directories.
+    job_directories: SegmentStore
+    #: How long the store keeps a job data directory that no job used, in seconds.
+    job_directory_ttl_seconds: float
+
+    @abstractmethod
+    def record_job_directory_use(self, key: str, time: float) -> None: ...
+
+    @abstractmethod
+    def job_directories_unused_since(self, time: float) -> tuple[str, ...]: ...
+
+    @abstractmethod
+    def delete_job_directory_record(self, key: str) -> None: ...
+
+    def write_job_directory(self, data: JobData) -> JobDataRef:
+        key = job_data_key(data)
+        name = f"{JOB_DATA_PREFIX}/{key}"
+        uri = self.job_directories.find_directory(name)
+        if uri is None:
+            with tempfile.TemporaryDirectory() as staging:
+                directory = Path(staging) / key
+                write_job_data(data, directory)
+                uri = self.job_directories.put_directory(name, directory)
+        self.record_job_directory_use(key, time.time())
+        return JobDataRef(
+            uri, self.job_directories.open_directory(uri), data.data_id, len(data.samples), job_data_kind(data)
+        )
+
+    def open_job_directory(self, value: Mapping[str, Any]) -> JobDataRef:
+        uri = value.get("uri")
+        if not isinstance(uri, str) or not uri:
+            raise ValueError("a job data reference has a uri")
+        path = self.job_directories.open_directory(uri)
+        header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
+        self.record_job_directory_use(header["key"], time.time())
+        return JobDataRef.from_dict(value, path)
+
+    def delete_unused_job_directories(self, time: float) -> int:
+        unused = self.job_directories_unused_since(time)
+        for key in unused:
+            self.job_directories.delete_directory(f"{JOB_DATA_PREFIX}/{key}")
+            self.delete_job_directory_record(key)
+        return len(unused)
 
     @abstractmethod
     def close(self) -> None:
@@ -451,16 +559,37 @@ def prepared_items(
 class MemoryDataStore(DataStore):
     """A data store in memory, for tests and for a deployment that keeps nothing.
 
-    It keeps the items of each owner in a dict from ID to item, and the next sequence. Task directories go to the
-    task file store that it is given. ``trajectories`` links the record items of each owner and origin scenario as
+    It keeps the items of each owner in a dict from ID to item, the use sequence of each item, scenario and split
+    (``uses``), and the next sequence, which items and uses share. Task directories go to the task file store that it
+    is given. ``trajectories`` links the record items of each owner and origin scenario as
     they are created; a deleted item stays there as a link of later calls.
     """
 
-    def __init__(self, task_files: TaskFileStore) -> None:
+    def __init__(
+        self, task_files: TaskFileStore, job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS
+    ) -> None:
         self.task_files = task_files
+        self.job_directories = LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-directories-")))
+        self.job_directory_ttl_seconds = job_directory_ttl_seconds
+        self.job_directory_uses: dict[str, float] = {}
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
+        self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
         self.next_sequence = 1
+
+    def take_sequence(self) -> int:
+        """The next sequence of an item or a use."""
+        self.next_sequence += 1
+        return self.next_sequence - 1
+
+    def write_uses(self, owner: str, item_id: str, scenarios: Mapping[str, str]) -> None:
+        """Keep the use of each unchanged scenario and split, and give each new one its sequence."""
+        for key in [key for key in self.uses if key[:2] == (owner, item_id) and key[2] not in scenarios]:
+            self.uses.pop(key)
+        for scenario, split in scenarios.items():
+            used = self.uses.get((owner, item_id, scenario))
+            if used is None or used[0] != split:
+                self.uses[(owner, item_id, scenario)] = (split, self.take_sequence())
 
     @classmethod
     def from_config(
@@ -470,10 +599,20 @@ class MemoryDataStore(DataStore):
         directory: Path,
         task_files: TaskFileStore,
         segments: SegmentStore | None,
+        job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> Self:
         if config:
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
-        return cls(task_files)
+        return cls(task_files, job_directory_ttl_seconds)
+
+    def record_job_directory_use(self, key: str, time: float) -> None:
+        self.job_directory_uses[key] = time
+
+    def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
+        return tuple(key for key, last_used in self.job_directory_uses.items() if last_used < time)
+
+    def delete_job_directory_record(self, key: str) -> None:
+        self.job_directory_uses.pop(key, None)
 
     def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
@@ -489,9 +628,9 @@ class MemoryDataStore(DataStore):
                 result.append(existing)
                 continue
             content = copy.deepcopy(dict(item.content)) if isinstance(item.content, Mapping) else None
-            created = StoredItem(self.next_sequence, owner, item.item_id, metadata, digest, content)
-            self.next_sequence += 1
+            created = StoredItem(self.take_sequence(), owner, item.item_id, metadata, digest, content)
             stored[item.item_id] = created
+            self.write_uses(owner, item.item_id, metadata["scenarios"])
             if content is not None and metadata["kind"] == "record" and content["request_type"] == "inference":
                 scenario = metadata["origin"]["scenario"]
                 self.trajectories.setdefault((owner, scenario), TrajectoryIndex()).add(
@@ -533,6 +672,28 @@ class MemoryDataStore(DataStore):
         )
         return tuple(item if content else replace(item, content=None) for item in matched[:limit])
 
+    def scenario_items(
+        self,
+        owner: str,
+        scenario: str,
+        *,
+        kinds: Sequence[str],
+        after: int = 0,
+        limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
+    ) -> tuple[tuple[int, StoredItem], ...]:
+        check_query(owner, None, scenario, after, limit)
+        stored = self.items.get(owner, {})
+        used = sorted(
+            (sequence, item_id)
+            for (use_owner, item_id, use_scenario), (_, sequence) in self.uses.items()
+            if use_owner == owner and use_scenario == scenario and sequence > after and stored[item_id].kind in kinds
+        )
+        return tuple(
+            (sequence, stored[item_id] if content else replace(stored[item_id], content=None))
+            for sequence, item_id in used[:limit]
+        )
+
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)
         stored = self.items.get(owner, {})
@@ -552,10 +713,12 @@ class MemoryDataStore(DataStore):
         ]
         for item in updated:
             stored[item.item_id] = item
+            self.write_uses(owner, item.item_id, item.scenarios)
         return tuple(updated)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
+        self.write_uses(owner, item_id, {})
         return self.items.get(owner, {}).pop(item_id, None) is not None
 
     def task_path(self, item: StoredItem) -> Path:

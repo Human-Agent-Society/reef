@@ -110,7 +110,7 @@ def steps_done(scenario: Scenario) -> int:
 
 def search_history(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> History:
     """The search history that the harness training component keeps for the scenario, as its last step left it."""
-    root = recipe.harness_state_dir(scenario.name, scenario.surface.files_component or "harness")
+    root = recipe.harness_state_dir(scenario.name, scenario.components.files_component or "harness")
     if root is None:
         raise TypeError("the example's scenario evolves a harness")
     return History.open(root / HISTORY_DIR)
@@ -137,7 +137,9 @@ def commit_job(scenario: Scenario) -> bool:
 def served_tree(scenario: Scenario) -> HarnessTree:
     """The head release's source tree: the tree the next step builds on."""
     artifact = scenario.repository.resolve(scenario.repository.require_current_artifact())
-    return HarnessTree(component_files(scenario.surface, artifact, scenario.surface.files_component or "harness"))
+    return HarnessTree(
+        component_files(scenario.components, artifact, scenario.components.files_component or "harness")
+    )
 
 
 def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) -> dict[str, Any]:
@@ -182,7 +184,7 @@ def search(dispatcher: Dispatcher, scenario: Scenario, recipe: HarnessEvolutionR
     summary = write_summary(scenario, recipe, directory)
     while steps_done(scenario) < steps:
         step = steps_done(scenario) + 1
-        dispatcher.accept_instruction(
+        dispatcher.accept_request(
             scenario.name, {"text": STEP_REQUEST, "session": "", "artifact_id": ""}, request_id=f"step-{step}"
         )
         if not commit_job(scenario):

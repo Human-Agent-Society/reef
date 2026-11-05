@@ -11,7 +11,7 @@ attempt can consume API resources but cannot apply its gradient twice.
 
 Serving reads each saved checkpoint from its artifact: Tinker's sampler
 (``reef.inference.tinker``) reads the manifest, and Reef's serving engines
-(``reef.runtime.serving``) load the PEFT adapter the component exports beside
+(``reef.inference.serving``) load the PEFT adapter the component exports beside
 it. Nothing is shared in process.
 """
 
@@ -34,15 +34,18 @@ from reef.artifact.repository import BaseModelFiles, DefaultStart
 from reef.core.chat_rendering import needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
+from reef.core.weight_layout import ArtifactFormat
+from reef.storage.durable_files import read_json, write_json
+from reef.storage.job_data import read_job_data
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.local_jobs import LocalJobComponent
+from reef.train.method import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
@@ -242,7 +245,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return str(imported)
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
+    def artifact_format(self) -> ArtifactFormat | None:
         """``None`` by default: a release holds only its manifest, and the weights stay on the service."""
         return None
 
@@ -281,10 +284,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             start = Path(job.start)
             # A job from the base start reads ``base/`` as this process prepares it.
             self.start_at(self.prepared_base() if start == self._base else start)
-        tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
-        if tasks and len(tasks) != len(job.data.samples):
-            raise ValueError("a Tinker job trains either trajectories or tasks, not both")
-        if tasks:
+        if job.kind == "task":
+            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
@@ -318,11 +319,13 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data_id, samples)), RolloutScores.from_json(kept["scores"])
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
-        tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
+        tasks = tuple(
+            item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)
+        )
         self.warm_sampler(start.sampler_path)
         chat = SamplerChat(
             self._sampler,
@@ -344,7 +347,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         write_json(
             record,
             {
-                "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
+                "samples": JobData(job.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
             },
         )
@@ -373,7 +376,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         parameters = self.job_parameters(job.parameters)
         start = self.start_at(Path(job.start))
         method = parameters.method
-        data = job.data
+        data = read_job_data(job.data_dir, job.data_id)
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
@@ -520,7 +523,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
             inputs["service"] = self._config.base_url
         return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
 
-    def check_release(self, files: ArtifactFiles) -> None:
+    def check_artifact(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
         self.check_manifest(files)
 

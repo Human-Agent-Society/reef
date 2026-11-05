@@ -6,7 +6,7 @@ Each step gets one directory, which is kept afterwards as the step record::
     material/     what the step learns from, read-only:
                     traces/<n>/trace.json        one trace (``Trace``): a client's request, or a run
                     traces/<n>/trajectory.json   the ATIF trajectory of a client's request
-                    request.json                 the instruction the step answers (instruction steps only)
+                    request.json                 the request the step answers (request steps only)
                     evaluation.json              the step's evaluation tasks and repeats
                     host.json                    the adapter, the parts of its tree, and its config targets
     state/        the method's own files, committed with the step
@@ -263,7 +263,7 @@ class Workspace:
         return tuple(traces)
 
     def request(self) -> TrainingRequest | None:
-        """The instruction this step answers, ``None`` for a step without one."""
+        """The request this step answers, ``None`` for a step without one."""
         path = self.material / REQUEST_FILE
         if not path.is_file():
             return None

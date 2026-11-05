@@ -35,11 +35,10 @@ from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorkers
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, close_runtimes
 from reef.record2sample.service import SamplesWorker, request_selection
-from reef.runtime.deployment import close_runtimes
-from reef.runtime.interfaces import InferenceRuntime
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.factory import ItemStart
@@ -49,16 +48,17 @@ from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
-from reef.storage.data import DataStore, check_owner
-from reef.storage.data_sync import ScenarioUses, sync_scenario_samples, uploads
+from reef.storage.data import DataStore, MemoryDataStore, check_owner
+from reef.storage.data_sync import ScenarioUses
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
-from reef.storage.samples import StoredSample
+from reef.storage.samples import ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import WorkItem
-from reef.train.instructions import InstructionQueue
 from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
 from reef.train.trainer import Trainer
+from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
         that this process runs. A process that runs every service and keeps no state across restarts, such as an
         embedded dispatcher, gives it ``reef.storage.sql_coordination.memory_coordination()``.
+
+        The data store keeps the data directory of each training job (``reef.storage.job_data``): control writes
+        it, and the training service opens it. Without a data store, a ``MemoryDataStore`` keeps them.
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
         the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
 
@@ -165,12 +168,21 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.work_retention_seconds = work_retention_seconds
         # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
         # training service runs one worker for each of them.
+        #: The store of the job data directories of the training jobs.
+        self.job_directory_store: DataStore = (
+            MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
+        )
         job_components = recipe.job_components()
         if job_components:
             if self.services.runs_training:
                 for component in job_components:
                     self.workers.add(
-                        TrainingJobWorker(component, self.queue, worker_id=instance_id(f"training-{component.name}"))
+                        TrainingJobWorker(
+                            component,
+                            self.queue,
+                            self.job_directory_store,
+                            worker_id=instance_id(f"training-{component.name}"),
+                        )
                     )
             recipe = recipe.with_job_components(
                 {
@@ -178,7 +190,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                         component, self.queue, owns_component=not self.services.runs_training
                     )
                     for component in job_components
-                }
+                },
+                self.job_directory_store,
             )
         #: The deployment's recipe; its trainers submit to the jobs queue.
         self.recipe = recipe
@@ -202,7 +215,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             lifecycle=self,
             activates_runtime=False,
             served_models=coordination.served_models,
-            instructions=InstructionQueue(self.queue),
+            training_requests=TrainingRequestQueue(self.queue),
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
@@ -356,7 +369,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_loaded(self, instance: Scenario) -> None:
         """The registry calls this when it loads a scenario: its weight trainers resume their jobs and records.
 
-        The data sync can add uploads while the scenario opens, and no record wakes a worker for them, so the
+        The scenario's items can wait untrained when it opens, and no record wakes a worker for them, so the
         workers wake when a trainer holds untrained samples.
         """
         if not self.services.runs_control:
@@ -639,23 +652,23 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 self.process_accepted_records(current)
             return stored
 
-    def accept_instruction(
+    def accept_request(
         self,
         scenario: str,
         payload: Mapping[str, Any],
         *,
         request_id: str | None = None,
     ) -> WorkItem:
-        """Queue a training instruction of ``scenario`` (``ingest.file_instruction``) and wake its workers.
+        """Queue a training request of ``scenario`` (``ingest.file_request``) and wake its workers.
 
-        The scenario must exist. ``request_id`` makes the request retry-safe; without it the instruction gets a new
-        ID. Return the instruction's queue item.
+        The scenario must exist. ``request_id`` makes the request retry-safe; without it the request gets a new
+        ID. Return the request's queue item.
         """
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            item = ingest.file_instruction(current, request_id or uuid.uuid4().hex, payload)
+            item = ingest.file_request(current, request_id or uuid.uuid4().hex, payload)
             self.local_workers.wake(current)
             return item
 
@@ -685,22 +698,23 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         return self.storage.read_settings(scenario).owner or scenario
 
     def set_scenario_owner(self, scenario: str, owner: str) -> None:
-        """Give ``scenario`` the owner ``owner``, and sync its uploads with that owner's items.
+        """Give ``scenario`` the owner ``owner``, and load it again, so that it reads the items of that owner.
 
         A scenario gets its owner when it is created, so only a scenario that still has the default owner (its
-        own name) and no uploads can take another. The data service then copies the scenario's artifacts and
-        records to items of ``owner``. Raise ``ValueError`` otherwise, and ``UnknownScenario`` for a scenario that
-        does not exist.
+        own name) and uses none of its trajectory or task items can take another. The data service then copies the
+        scenario's artifacts and records to items of ``owner``. Raise ``ValueError`` otherwise, and
+        ``UnknownScenario`` for a scenario that does not exist.
         """
         check_owner(owner)
         with self.locked_scenario(scenario) as current:
             settings = self.storage.read_settings(scenario)
             if settings.owner == owner:
                 return
-            if settings.owner != scenario or next(uploads(current.store.samples), None) is not None:
+            samples = self.storage.sample_store(scenario, current.store)
+            if settings.owner != scenario or (samples is not None and samples.page(limit=1)):
                 raise ValueError(f"scenario {scenario!r} has the owner {settings.owner!r}; it is set at creation")
             self.storage.write_settings(scenario, replace(settings, owner=owner))
-            self.apply_sync(current, owner)
+        self.registry.reload(scenario)
         # A copy that ran before, such as the one that the creation commit asked for, filled the default owner's
         # store; the new owner's store gets the scenario's artifacts and records too.
         self.request_artifact_copy(scenario)
@@ -714,7 +728,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             ingest.check_use(current, trajectories, train_tasks)
 
     def sync_items(self, owner: str, scenarios: Iterable[str]) -> None:
-        """Sync the uploads of each loaded scenario of ``owner`` among ``scenarios`` with that owner's items.
+        """Sync each loaded scenario of ``owner`` among ``scenarios`` with that owner's items (``apply_sync``).
 
         A scenario that is not loaded syncs when it opens. A scenario of another owner does not use the items.
         """
@@ -727,43 +741,31 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                     self.apply_sync(current, owner)
 
     def apply_sync(self, current: Scenario, owner: str) -> None:
-        """Sync the uploads and record copies of the loaded scenario ``current`` with the items of ``owner``.
-
-        Its trainers forget the uploads that left it, and its workers wake for new uploads and copies. The caller
-        holds the scenario's lock.
-        """
+        """Copy the record items of ``owner`` that the loaded scenario ``current`` now uses into its record store,
+        and wake its workers, which read the items that the write changed. The caller holds the scenario's lock."""
         if self.data_store is None:
             raise ReefError("this dispatcher has no data store")
-        result = sync_scenario_samples(current.store.samples, self.data_store, owner, current.name)
-        for component_trainer in current.trainers:
-            component_trainer.trainer.forget_samples(result.removed)
         if sync_scenario_records(current.store.records, self.data_store, owner, current.name):
             self.process_accepted_records(current)
-        elif result.added:
+        else:
             self.local_workers.wake(current)
 
-    def sample_buffer(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
-        """The buffer of the trainer of ``component`` (the only one when None): its mode and its samples."""
+    def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
+        """The next automatic job of the trainer of ``component`` (the only one when None): its mode and samples."""
         with self.locked_scenario(scenario) as current:
-            return self.trainer_of(current, component).buffer_listing()
-
-    def change_buffer(
-        self, scenario: str, sample_ids: tuple[str, ...], *, insert: bool, component: str | None = None
-    ) -> Mapping[str, Any]:
-        """Insert ``sample_ids`` into the manual buffer of the trainer of ``component``, or remove them.
-
-        Raise ``ManualBufferRefused`` in automatic mode and ``ValueError`` for an ID that the trainer cannot take.
-        """
-        with self.locked_scenario(scenario) as current:
-            listing = self.trainer_of(current, component).change_buffer(sample_ids, insert=insert)
-            # A queued instruction may now have samples to train.
-            self.local_workers.wake(current)
-            return listing
+            return self.trainer_of(current, component).next_job_listing()
 
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""
         with self.locked_scenario(scenario) as current:
-            return current.store.samples.page(after_sequence=after_sequence, limit=limit)
+            samples = self.storage.sample_store(scenario, current.store)
+            return () if samples is None else samples.page(after_sequence=after_sequence, limit=limit)
+
+    def listed_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[ListedSample, ...]:
+        """The listing of the scenario's stored samples after ``after_sequence``, at most ``limit``, without content."""
+        with self.locked_scenario(scenario) as current:
+            samples = self.storage.sample_store(scenario, current.store)
+            return () if samples is None else samples.listing(after_sequence=after_sequence, limit=limit)
 
     @staticmethod
     def trainer_of(current: Scenario, component: str | None) -> Trainer:
@@ -820,7 +822,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
         with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
         after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
-        a load does. Raise ``UnknownScenario`` for an unknown scenario.
+        a load does. ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
+        (``PipelineContext.job_parameters``), which a request's ``parameters`` merge into; a kind that the
+        recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
@@ -828,6 +832,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 effective_serving = current.effective_serving_config(settings.serving_config)
             except ValueError:
                 effective_serving = current.effective_serving_config(ServingConfig())
+            job_parameters = current.stepping_trainers()[0].trainer.pipeline.sample2job.context.job_parameters
             return {
                 "scenario": scenario,
                 "training_mode": current.training_mode,
@@ -836,12 +841,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "effective_activation": self.registry.effective_activation(settings),
                 "serving_config": settings.serving_config.to_json(),
                 "effective_serving_config": effective_serving,
+                "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
         """The scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.locked_scenario(scenario) as current:
-            return current.store.samples.imported_tasks()
+            samples = self.storage.sample_store(scenario, current.store)
+            return () if samples is None else samples.imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable, and copy them to record items."""
@@ -897,8 +904,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if current is not None:
             self.local_workers.wake(current)
 
-    def instructions_added(self, scenario: str) -> None:
-        """Another process queued a training instruction of ``scenario``: its local workers run it."""
+    def requests_added(self, scenario: str) -> None:
+        """Another process queued a training request of ``scenario``: its local workers run it."""
         self.samples_added(scenario)
 
     def request_samples(self, current: Scenario) -> None:

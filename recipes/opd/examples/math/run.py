@@ -411,13 +411,13 @@ class Campaign:
                 if len(history) != step + 1:
                     raise RuntimeError("Scenario advanced beyond this campaign's batch")
             self.verify_update(step, rows, history)
-            release_path = self.output / f"releases-{step:04d}.json"
-            if release_path.exists():
-                saved = list(reversed(json.loads(release_path.read_text())))
+            artifact_path = self.output / f"releases-{step:04d}.json"
+            if artifact_path.exists():
+                saved = list(reversed(json.loads(artifact_path.read_text())))
                 if [row["artifact_id"] for row in saved] != [row["artifact_id"] for row in history[: len(saved)]]:
                     raise RuntimeError("Saved publication history no longer matches the service")
             else:
-                write_json(release_path, list(reversed(history)))
+                write_json(artifact_path, list(reversed(history)))
             if step % self.args.eval_every == 0 or step == self.args.steps:
                 self.evaluate(
                     evaluation, step, artifact_id=history[step]["artifact_id"], allow_new=len(history) == step + 1

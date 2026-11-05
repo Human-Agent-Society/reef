@@ -3,7 +3,7 @@
 Artifact storage and head movement live in ``reef.artifact``; the durable
 record values and checkpoint metadata formats live in ``commits``. This
 module owns the scenario-specific ordering across trainer state, store
-settlement, surfaces, and artifact operations.
+settlement, runtime activation, and artifact operations.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, SnapshotRef
+from reef.artifact.components import ArtifactLayout
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
@@ -27,7 +28,7 @@ from reef.core.errors import CommitPending, ReefError
 from reef.core.snapshot import RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
-from reef.scenario.binding import ScenarioBinding
+from reef.scenario.binding import ScenarioBinding, activate_release
 from reef.scenario.releases import ScenarioReleases, ServedBesideArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
@@ -40,7 +41,6 @@ from reef.storage.commits import (
     to_json_value,
 )
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
-from reef.surface.base import ArtifactLayout
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import NoArtifactPublication, PreparedCommit, SavedArtifactPublication, TrainStepResult
 
@@ -272,13 +272,13 @@ class ScenarioCommitter:
         manifest = artifact.components
         if manifest is not None:
             return manifest
-        surface = self._binding.surface
-        if not surface.single:
+        components = self._binding.components
+        if not components.single:
             raise ReefError(
-                f"scenario {self._name!r} serves components {list(surface.names)} but release "
+                f"scenario {self._name!r} serves components {list(components.names)} but release "
                 f"{artifact.ref.revision!r} carries no component manifest"
             )
-        name = surface.names[0] if surface.names else self.trainers[0].component
+        name = components.names[0] if components.names else self.trainers[0].component
         return ReleaseComponents({name: ComponentEntry(artifact.artifact_id)})
 
     def require_components(self, artifact: Artifact) -> None:
@@ -289,31 +289,31 @@ class ScenarioCommitter:
         registers or publishes carries a full manifest, so this is a
         misdirected repository, not a supported input.
         """
-        surface = self._binding.surface
-        if surface.single:
+        components = self._binding.components
+        if components.single:
             return
         manifest = self.release_manifest(artifact)
-        missing = [name for name in surface.names if name not in manifest.entries]
+        missing = [name for name in components.names if name not in manifest.entries]
         if missing:
             raise ReefError(
-                f"scenario {self._name!r} serves components {list(surface.names)} but release "
+                f"scenario {self._name!r} serves components {list(components.names)} but release "
                 f"{artifact.ref.revision!r} binds {list(manifest.names)}"
             )
 
     def recorded_components(self, artifact: Artifact, revision: str) -> dict[str, str] | None:
         """The ``artifact_id`` of each component that ``artifact``, published as ``revision``, binds; ``None`` for a scenario of one component."""
-        if self._binding.surface.single:
+        if self._binding.components.single:
             return None
         return self.release_manifest(artifact).artifact_ids(revision)
 
     def import_target(self, component: str | None) -> tuple[str, ArtifactLayout]:
         """The component an import into ``component`` lands in, and the layout that checks its directory
-        (``Surface.import_target``). Purpose: the import service calls it before it downloads anything."""
-        return self._binding.surface.import_target(component)
+        (``ScenarioComponents.import_target``). Purpose: the import service calls it before it downloads anything."""
+        return self._binding.components.import_target(component)
 
     def component_names(self) -> tuple[str, ...]:
-        """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
-        return self._binding.surface.names or (self.trainers[0].component,)
+        """The components whose artifacts this scenario names: the declared ones, or the lone trainer's when it serves none."""
+        return self._binding.components.names or (self.trainers[0].component,)
 
     def require_no_pending_commit(self, action: str) -> None:
         """Raise ``CommitPending`` while any trainer's result waits for its commit; ``action`` names what waits."""
@@ -378,19 +378,19 @@ class ScenarioCommitter:
         """
         with self._lock, self._publication_lock:
             selected, release = self.resolve_artifact(artifact_id, component)
-            surface = self._binding.surface
+            components = self._binding.components
             current_ref = self._artifacts.current
             served = Artifact(current_ref, self._artifacts.repository)
-            if surface.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
+            if components.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
                 return selected
             self.require_no_pending_commit("activate an artifact")
             target = self.release_with(served, selected, release)
             if self._binding.activates_runtime:
-                surface.activate(target, self._binding.runtime, previous=served)
+                activate_release(components, target, self._binding.runtime, self._name, previous=served)
             record = self.append_operation_record(
                 "activate",
                 target.ref,
-                component=None if surface.single else selected.component,
+                component=None if components.single else selected.component,
                 components=self.recorded_components(target, target.ref.revision),
             )
             self._artifacts.activate(target.ref, expected=current_ref)
@@ -399,17 +399,17 @@ class ScenarioCommitter:
 
     def release_with(self, active: Artifact, selected: ComponentArtifact, release: Artifact) -> Artifact:
         """A validated local view of ``active`` with one existing artifact replaced; publish nothing."""
-        surface = self._binding.surface
-        if surface.single:
-            surface.validate(release)
+        components = self._binding.components
+        if components.single:
+            components.validate(release)
             return release
         repository = self._artifacts.repository
-        components = dict(repository.selection(active.ref, self.component_names()).components)
-        components[selected.component] = selected.artifact_id
+        artifact_ids = dict(repository.selection(active.ref, self.component_names()).components)
+        artifact_ids[selected.component] = selected.artifact_id
         cached = set(repository.selections)
-        target = repository.select(ArtifactSelection(components))
+        target = repository.select(ArtifactSelection(artifact_ids))
         try:
-            surface.validator.validate(target)
+            components.validator.validate(target)
         except BaseException:
             if target.ref.revision not in cached:
                 repository.discard(target)
@@ -447,11 +447,11 @@ class ScenarioCommitter:
             cached = set(repository.selections)
             target = repository.select(selection)
             try:
-                surface = self._binding.surface
-                if surface.single:
-                    surface.validate(target)
+                components = self._binding.components
+                if components.single:
+                    components.validate(target)
                 else:
-                    surface.validator.validate(target)
+                    components.validator.validate(target)
             except BaseException:
                 if target.ref.selection_view and target.ref.revision not in cached:
                     repository.discard(target)
@@ -490,13 +490,13 @@ class ScenarioCommitter:
             if served is not None:
                 return selected
             self.require_no_pending_commit("serve an artifact")
-            surface = self._binding.surface
+            components = self._binding.components
             current = Artifact(self._artifacts.current, self._artifacts.repository)
-            loader = surface.loader_component
+            loaded = components.loaded_component
             runtime = self._binding.runtime
             # The calls use the artifact's own weights, or the active release's weights for an artifact of another
             # component. The runtime must answer each call from the release that the call names.
-            if loader is not None and runtime is not None and not runtime.serves_artifacts_on_request:
+            if loaded is not None and runtime is not None and not runtime.serves_artifacts_on_request:
                 raise ReefError(
                     f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
                     f"cannot serve artifact {selected.artifact_id!r} beside the active release"
@@ -505,7 +505,7 @@ class ScenarioCommitter:
             record = self.append_operation_record(
                 "serve",
                 target.ref,
-                component=None if surface.single else selected.component,
+                component=None if components.single else selected.component,
                 components=self.recorded_components(target, target.ref.revision),
             )
             self.advance_to(record.step)
@@ -528,7 +528,7 @@ class ScenarioCommitter:
                     f"scenario {self._name!r} does not serve artifact {artifact_id!r} beside its active release"
                 )
             self.require_no_pending_commit("stop serving an artifact")
-            if self._binding.surface.single:
+            if self._binding.components.single:
                 recorded_component, components = None, None
             else:
                 recorded_component = served.component
@@ -576,7 +576,7 @@ class ScenarioCommitter:
         """Publish ``files``, which an import's URI names, as a new artifact of ``component``; return it.
 
         ``component`` may be left out when the scenario has one component.
-        The component's layout (``ComponentSurface.layout``) checks ``files``
+        The component's layout (``ComponentSpec.layout``) checks ``files``
         and stores them in the empty ``directory``, outside the locks, since
         the check can ask a remote service (``ArtifactLayout.stored``). The release's
         own admission check runs on what is stored, as at a training
@@ -593,18 +593,18 @@ class ScenarioCommitter:
         training result waits for its commit. Nothing changes then.
         """
         component, layout = self.import_target(component)
-        surface = self._binding.surface
-        component_surface = surface.components[component]
+        components = self._binding.components
+        spec = components.components[component]
         imported = layout.stored(files, directory)
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1
-            if surface.single:
-                surface.validate(imported)
+            if components.single:
+                components.validate(imported)
                 staged = self._artifacts.stage(next_step, imported, parent=self._artifacts.checkpoint)
                 metadata = dict(staged.metadata)
             else:
-                component_surface.validator.validate(imported)
+                spec.validator.validate(imported)
                 active = self._artifacts.resolve(self._artifacts.current)
                 self.require_components(active)
                 staged = self.stage_combination(next_step, active, component, imported)
@@ -617,7 +617,7 @@ class ScenarioCommitter:
             record = self.append_operation_record(
                 "import",
                 published_ref,
-                component=None if surface.single else component,
+                component=None if components.single else component,
                 components=self.recorded_components(published, published_ref.revision),
                 metrics={"source": dict(source)},
             )
@@ -635,7 +635,7 @@ class ScenarioCommitter:
         The release binds ``artifact`` as ``component`` and every other
         component as the active release binds it. Its parent is the chain
         tip, and it is published beside the chain, as an import is. The
-        surface's admission check runs on the staged release first. The
+        release's admission check runs on the staged release first. The
         component's trainer then takes the release as its training start (``Trainer.start_from``).
         A standalone scenario activates the runtime before the ``"sync"`` record lands with ``metrics``.
         A service scenario leaves engine activation to inference after that record. The active release
@@ -679,11 +679,11 @@ class ScenarioCommitter:
                 )
                 published = self._artifacts.resolve(published_ref)
                 self.start_trainer(component_trainer, published)
-                self._activate(published, source=staged)
+                self._activate(published)
                 record = self.append_operation_record(
                     "sync",
                     published_ref,
-                    component=None if self._binding.surface.single else component,
+                    component=None if self._binding.components.single else component,
                     components=self.recorded_components(published, published_ref.revision),
                     metrics=metrics,
                 )
@@ -723,7 +723,7 @@ class ScenarioCommitter:
 
     def start_trainer(self, component_trainer: ComponentTrainer, release: Artifact) -> None:
         """Start ``component_trainer`` from its component of ``release``."""
-        artifact = self._binding.surface.component_artifact(release, component_trainer.component).materialize()
+        artifact = self._binding.components.component_artifact(release, component_trainer.component).materialize()
         component_trainer.trainer.start_from(artifact)
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
@@ -743,10 +743,9 @@ class ScenarioCommitter:
                 retrying = bool(records) and records[-1].step == next_step
             # The operation lock keeps the step and source stable while tracker
             # I/O runs; published artifact readers need only the publication lock.
-            if not retrying:
-                result = self.prepare_experiment(result, trainer, next_step, component)
+            correlation_metrics = None if retrying else self.prepare_experiment(trainer, next_step, component, result)
             with self._publication_lock:
-                prepared = trainer.prepare_commit(result)
+                prepared = trainer.prepare_commit(result, correlation_metrics)
                 # The activation rule decides whether the step's artifact serves. The training record keeps the result.
                 activated = not isinstance(result.publication, NoArtifactPublication) and (
                     self.activation_rule.activates(MadeArtifact(component, result.changed_kinds))
@@ -767,11 +766,12 @@ class ScenarioCommitter:
                 return result.state
 
     def prepare_experiment(
-        self, result: TrainStepResult, trainer: Trainer, step: int, component: str | None
-    ) -> TrainStepResult:
+        self, trainer: Trainer, step: int, component: str | None, result: TrainStepResult
+    ) -> Mapping[str, Any] | None:
+        """The experiment tracker's correlation fields for the commit of ``result``, or None without a tracker."""
         observer = self.experiment_observer
         if observer is None:
-            return result
+            return None
         job_loop = trainer.job_loop
         backend_config: dict[str, Any] | None = None
         if job_loop is not None:
@@ -792,16 +792,10 @@ class ScenarioCommitter:
             component=self.component_on_record(component),
         )
         artifact = result.artifact
-        correlation = observer.prepare(
+        return observer.prepare(
             context,
             checkpoint_path=None if artifact is None or artifact.local_path is None else str(artifact.local_path),
         )
-        if correlation:
-            try:
-                return trainer.add_commit_metrics(result, correlation)
-            except RuntimeError:
-                logger.exception("experiment correlation could not annotate the pending result")
-        return result
 
     def commit_without_artifact(self, prepared: PreparedCommit, trainer: Trainer, component: str | None) -> None:
         next_step = self._step + 1
@@ -854,7 +848,7 @@ class ScenarioCommitter:
                 activate=False,
             )
             if activated:
-                self._activate(artifacts.resolve(published_ref), source=local_artifact)
+                self._activate(artifacts.resolve(published_ref))
             record = self._append_commit_record(
                 step=next_step,
                 snapshot=published_ref,
@@ -956,16 +950,16 @@ class ScenarioCommitter:
         (:meth:`stage_combination`), so a step changes one component and
         never brings back what an activation replaced.
         """
-        surface = self._binding.surface
+        components = self._binding.components
         component = publication.component
         if component is None:
             raise ReefError(f"scenario {self._name!r}: a publication names the component it replaces")
-        if surface.names and component not in surface.names:
+        if components.names and component not in components.names:
             raise ReefError(f"scenario {self._name!r} serves no component {component!r}")
-        if surface.single:
-            surface.validate(publication.artifact)
+        if components.single:
+            components.validate(publication.artifact)
             return self._artifacts.stage(next_step, publication.artifact, parent=checkpoint)
-        surface.components[component].validator.validate(publication.artifact)
+        components.components[component].validator.validate(publication.artifact)
         active = self._artifacts.resolve(self._artifacts.current)
         self.require_components(active)
         return self.stage_combination(next_step, active, component, publication.artifact)
@@ -977,25 +971,25 @@ class ScenarioCommitter:
         components were admitted when they were published. A refused release
         is discarded.
         """
-        surface = self._binding.surface
-        components = {name: carried.component(name) for name in surface.names}
-        components[component] = content
-        staged = self._artifacts.stage_composed(next_step, components, parent=self._artifacts.checkpoint)
+        components = self._binding.components
+        artifacts = {name: carried.component(name) for name in components.names}
+        artifacts[component] = content
+        staged = self._artifacts.stage_composed(next_step, artifacts, parent=self._artifacts.checkpoint)
         try:
-            surface.validator.validate(staged)
+            components.validator.validate(staged)
         except BaseException:
             self._artifacts.discard(staged)
             raise
         return staged
 
-    def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
+    def _activate(self, artifact: Artifact) -> None:
         if not self._binding.activates_runtime:
             return
         # A component the engine already serves is not activated again, so a
         # harness release never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
         previous = Artifact(self._artifacts.current, self._artifacts.repository)
-        self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
+        activate_release(self._binding.components, artifact, self._binding.runtime, self._name, previous=previous)
 
     def finish_committed_step(
         self,

@@ -30,7 +30,6 @@ from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
-from reef.runtime.jobs import TrainingJob
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app
@@ -42,13 +41,16 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
+from reef.train.component import TrainingJob
 from reef.train.harness_backend.component import HarnessTrainingComponent
-from reef.train.instructions import InstructionQueue
 from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker
+from reef.train.training_requests import TrainingRequestQueue
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
 import signal
+
+from tests.support.job_data import job_data_ref
 
 from reef.core.errors import ReefError
 from reef.dispatcher.dispatcher import build_default_dispatcher
@@ -102,7 +104,14 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
     coordination = assembly.open_service_coordination(config)
     view = JobQueueComponent(component, coordination.work_queue, owns_component=False)
     view.submit(
-        TrainingJob("one", component.name, component.base_start, JobData("data", (trajectory,)), {}, scenario="math")
+        TrainingJob(
+            "one",
+            component.name,
+            component.base_start,
+            job_data_ref(JobData("data", (trajectory,))),
+            {},
+            scenario="math",
+        )
     )
 
     async def run() -> None:
@@ -278,7 +287,7 @@ class Changes(StoreChanges):
         self.records: list[str] = []
         self.samples: list[str] = []
         self.jobs: list[str] = []
-        self.instructions: list[str] = []
+        self.training_requests: list[str] = []
 
     def records_added(self, current) -> None:
         self.records.append(current.name)
@@ -289,8 +298,8 @@ class Changes(StoreChanges):
     def job_changed(self, scenario: str) -> None:
         self.jobs.append(scenario)
 
-    def instructions_added(self, scenario: str) -> None:
-        self.instructions.append(scenario)
+    def requests_added(self, scenario: str) -> None:
+        self.training_requests.append(scenario)
 
 
 @pytest.mark.unit
@@ -314,11 +323,11 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
     assert changes.records == [*first_records, "math"] and changes.samples == ["math"]
     watcher.run_once()
     assert changes.records == [*first_records, "math"] and changes.samples == ["math"]
-    # A training instruction that another process queued wakes control once.
-    InstructionQueue(queue).of("math").file("one", {"text": "train"})
+    # A training request that another process queued wakes control once.
+    TrainingRequestQueue(queue).of("math").file("one", {"text": "train"})
     watcher.run_once()
     watcher.run_once()
-    assert changes.instructions == ["math"]
+    assert changes.training_requests == ["math"]
 
     # A job that a worker takes changes nothing to commit; its checkpoint and its end each wake control.
     queue.add(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))

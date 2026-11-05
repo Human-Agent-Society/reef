@@ -10,20 +10,23 @@ from types import SimpleNamespace
 import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
+from tests.support.job_data import job_data_ref
 
 from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.tinker import TinkerInferenceRuntime
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
 from reef.service.deploy.training import training_deployment_for
-from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.component import TrainingJob, job_id_for
+from reef.train.method import TrainingMethod
 from reef.train.tinker_backend import client as client_module
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
 from reef.train.tinker_backend.config import SpindleFullConfig
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
@@ -165,7 +168,7 @@ def train(component, start=None):
     parameters = {"method": TrainingMethod(Objective.name).to_dict()}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":
         assert time.monotonic() < deadline, status
@@ -178,7 +181,7 @@ def train(component, start=None):
 def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_fresh(
     component, client, exporter, objective
 ):
-    assert component.release_format == ReleaseFormat("full")
+    assert component.artifact_format == ArtifactFormat("full")
     base = component.default_start()
     assert read_reference(base.model_files.directory()) == HuggingFaceRevision(MODEL, COMMIT)
     assert base.inputs == {"model": BASE, "service": SPINDLE}
@@ -186,7 +189,7 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 
     status = train(component)
     assert client.starts == [FreshStart(MODEL)]
-    release = Path(status.checkpoints[0].release_path)
+    release = Path(status.checkpoints[0].artifact_path)
     saved = TinkerCheckpoint.read(release)
     assert saved.lora_rank is None and saved.service == SPINDLE
     # The release refers to the checkpoint's weights, which the exporter put in the release repo.
@@ -217,27 +220,27 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
     full.write(tmp_path / "full")
     with pytest.raises(ValueError, match=f"holds {REFERENCE_FILE} beside its manifest"):
-        component.check_release(DirectoryFiles(tmp_path / "full"))
+        component.check_artifact(DirectoryFiles(tmp_path / "full"))
     # A release's reference must resolve to full weights.
     (tmp_path / "full" / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision(MODEL, COMMIT).to_dict()))
-    component.check_release(DirectoryFiles(tmp_path / "full"))
+    component.check_artifact(DirectoryFiles(tmp_path / "full"))
     assert client.checked[-1] == full
     del hub.files["config.json"]
     with pytest.raises(ValueError, match="holds no full weights"):
-        component.check_release(DirectoryFiles(tmp_path / "full"))
+        component.check_artifact(DirectoryFiles(tmp_path / "full"))
     hub.files["config.json"] = b"{}"
     TinkerCheckpoint(MODEL, 32, "tinker://l/state", "tinker://l/sampler", service=SPINDLE).write(tmp_path / "lora")
     with pytest.raises(ValueError, match="rank 32 LoRA, not all the parameters"):
-        component.check_release(DirectoryFiles(tmp_path / "lora"))
+        component.check_artifact(DirectoryFiles(tmp_path / "lora"))
 
     copy = tmp_path / "copy"
     copy.mkdir()
     for path, data in FILES.items():
         (copy / path).write_bytes(data)
-    component.check_release(DirectoryFiles(copy))
+    component.check_artifact(DirectoryFiles(copy))
     (copy / "model.safetensors").write_bytes(b"other-weights")
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
-        component.check_release(DirectoryFiles(copy))
+        component.check_artifact(DirectoryFiles(copy))
 
 
 @pytest.mark.unit

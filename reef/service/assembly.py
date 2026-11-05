@@ -27,15 +27,14 @@ from reef.dispatcher.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.inference.registry import RuntimeRegistry
 from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
-from reef.recipe.base import ServedEndpoint
+from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.deployment import RuntimeRegistry, build_training_component, close_runtimes
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
@@ -60,6 +59,7 @@ from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+from reef.train.component import TrainingComponent, build_training_component
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
@@ -104,7 +104,7 @@ def connect_training_component(
 
     The training backend builds only the component. The serving runtime comes
     from the deployment's ``inference`` settings and the component's
-    ``release_format`` (``reef.service.deploy.serving``).
+    ``artifact_format`` (``reef.service.deploy.serving``).
 
     The dispatcher puts the component behind the jobs queue (``Dispatcher``); the training service runs it.
     """
@@ -114,7 +114,7 @@ def connect_training_component(
     )
     try:
         serving = RuntimeRegistry().build(
-            serving_runtime_config(settings, backend, component.release_format), model_path=model_path
+            serving_runtime_config(settings, backend, component.artifact_format), model_path=model_path
         )
     except BaseException:
         component.close()
@@ -318,18 +318,27 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     if choice is None:
         choice = "postgres" if settings.record_backend == "postgres" else "sqlite"
     segments = build_segment_store(settings)
+    # Without a segment store, the job data directories stay in a directory that the services share.
+    job_directories = segments if segments is not None else LocalSegmentStore(directory / "job-directories")
+    ttl_seconds = settings.job_directory_ttl_s
     try:
         if choice == "postgres":
             return PostgresDataStore(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 task_files,
                 segments=segments,
+                job_directories=job_directories,
+                job_directory_ttl_seconds=ttl_seconds,
             )
         if choice == "sqlite":
-            return SQLiteDataStore(directory / "data", task_files, segments)
+            return SQLiteDataStore(directory / "data", task_files, segments, job_directories, ttl_seconds)
         reference = DataStore.reference(choice, setting="storage.data_store")
         return DataStore.referenced_class(reference).from_config(
-            reference.config, directory=directory, task_files=task_files, segments=segments
+            reference.config,
+            directory=directory,
+            task_files=task_files,
+            segments=segments,
+            job_directory_ttl_seconds=ttl_seconds,
         )
     except BaseException:
         # The data store owns the segment store after it exists. Until then, this code closes it.
@@ -355,17 +364,19 @@ def open_service_coordination(settings: ServiceConfig) -> Coordination:
     )
 
 
+def build_task_files(settings: ServiceConfig) -> TaskFileStore:
+    """The task file store that ``storage.task_file_backend`` names, in ``storage.task_file_dir``."""
+    task_file_directory = Path(settings.task_file_dir)
+    if settings.task_file_backend == "local":
+        return LocalTaskFileStore(task_file_directory)
+    reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
+    return TaskFileStore.referenced_class(reference).from_config(reference.config, directory=task_file_directory)
+
+
 def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, TaskFileStore]:
     """The deployment's scenario storage (``storage.record_backend``) and its task file store, which it owns."""
     record_directory = Path(settings.agent_record_dir)
-    task_file_directory = Path(settings.task_file_dir)
-    task_files: TaskFileStore
-    if settings.task_file_backend == "local":
-        task_files = LocalTaskFileStore(task_file_directory)
-    else:
-        reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
-        store_class = TaskFileStore.referenced_class(reference)
-        task_files = store_class.from_config(reference.config, directory=task_file_directory)
+    task_files = build_task_files(settings)
     try:
         if settings.record_backend == "postgres":
             storage: ScenarioStorage = PostgresScenarioStorage(
@@ -465,7 +476,7 @@ def build_dispatcher(
             scenario_storage = ObservedScenarioStorage(scenario_storage, new_artifacts)
         # The inference path and the data service append and read records without opening a scenario.
         record_storage = scenario_storage
-        # Each scenario's session opens with copies of the data items that the scenario uses.
+        # Each scenario's session reads its training samples from the data store.
         scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
         backend_factory = build_artifact_backend(settings)
         if not isinstance(settings.training_settings, Mapping):

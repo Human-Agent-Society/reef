@@ -3,7 +3,7 @@
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
     ask     - the request goes to ``POST /reef/train`` as a training
-              instruction, and the deployment, in ``training_mode: manual``,
+              request, and the deployment, in ``training_mode: manual``,
               runs one evolve step for it at once
     step    - the service's Reefine method designs the change, writes it
               and reviews it; the evaluation runs the candidate on the
@@ -54,7 +54,7 @@ from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
-from reef.service.release_page import result_of
+from reef.service.artifact_page import result_of
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane
@@ -140,9 +140,9 @@ def fetch_text(path):
 
 
 def catalog_rows(client):
-    """The catalog oldest first, as GET /reef/harness/releases lists it; empty before the scenario exists."""
+    """The catalog oldest first, as GET /reef/harness/artifacts lists it; empty before the scenario exists."""
     try:
-        return client.get("/reef/harness/releases", extra_headers=scenario_headers())["releases"]
+        return client.get("/reef/harness/artifacts", extra_headers=scenario_headers())["artifacts"]
     except ReefClientError as exc:
         if exc.status != 404:
             raise
@@ -154,7 +154,7 @@ def training_rows(rows):
 
 
 def request_text_of(row):
-    """The request the step answered, from the row the trainer writes for every instruction step; None otherwise."""
+    """The request the step answered, from the row the trainer writes for every request step; None otherwise."""
     return ((row.get("metrics") or {}).get("training_request") or {}).get("text")
 
 
@@ -285,11 +285,11 @@ def install(artifact_id=None):
 
 
 def ask(text):
-    """The request as a training instruction; the id of the training record the service accepted.
+    """Queue ``text`` as a training request; return the id of the training record that the service accepted.
 
-    The instruction names the installed release and this demo's session, and
+    The request names the installed release and this demo's session, and
     the deployment's manual mode runs one step for it. A refusal (the
-    screens, a mode that takes no instructions) is a stop, with the service's
+    screens, a mode that takes no requests) is a stop, with the service's
     answer saying why."""
     say(f"ask: POST /reef/train {text!r}")
     payload = {"text": text, "session": SCENARIO, "artifact_id": installed_artifact() or ""}
@@ -307,7 +307,7 @@ def wait_for_step(client, text, before, deadline):
     """The catalog and the training row whose request is ``text``, once that step settled; every new row is
     printed as it lands. ``(rows, None)`` at the deadline.
 
-    Manual mode answers the accepted instructions oldest first, so a request
+    Manual mode answers the accepted requests oldest first, so a request
     a stopped run left queued gets its step before ours; that row is printed
     as an earlier request's and the wait goes on for the row carrying our
     text."""
@@ -345,7 +345,7 @@ def activate(client, rows, row, run_dir):
     """Save the inactive step's page beside the run, print its URL, activate the row's artifact; the id of the
     active release that the activation names."""
     step = rows.index(row)
-    page = f"/reef/harness/releases/{step}/page"
+    page = f"/reef/harness/artifacts/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(fetch_text(page), encoding="utf-8")
     say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")

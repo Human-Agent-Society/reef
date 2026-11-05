@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactPublicationError
+from reef.artifact.components import ScenarioComponents
 from reef.artifact.composite import compose_release
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
@@ -31,8 +32,7 @@ from reef.core.snapshot import RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
-from reef.runtime.jobs import ScenarioRoot
-from reef.scenario.binding import ScenarioBinding
+from reef.scenario.binding import ScenarioBinding, activate_release
 from reef.scenario.release_files import ScenarioArtifactFiles
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import (
@@ -45,9 +45,9 @@ from reef.storage.commits import (
 )
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
-from reef.surface.base import Surface
-from reef.train.instructions import InstructionQueue
+from reef.train.component import ScenarioRoot
 from reef.train.trainer import ComponentTrainer
+from reef.train.training_requests import TrainingRequestQueue
 
 
 def committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
@@ -95,7 +95,7 @@ class RecoveredTrainerState:
 
 
 def recovered_trainer_states(
-    store: ScenarioStore, scenario: str, head_record: CommitRecord | None, surface: Surface
+    store: ScenarioStore, scenario: str, head_record: CommitRecord | None, components: ScenarioComponents
 ) -> dict[str, RecoveredTrainerState]:
     """What each component's trainer recovers from its own commits and its own stale drops.
 
@@ -103,7 +103,7 @@ def recovered_trainer_states(
     training commit and consumption receipt, which name no component.
     Activations and new training starts carry no trainer state, so no
     trainer recovers from them. The records that a trainer's stored samples
-    consumed (``SampleStore.consumed_record_ids``) count as consumed too, so a
+    consumed (``TrainingState.consumed_record_ids``) count as consumed too, so a
     replay never makes their samples again. A drop is a step without
     a commit that an earlier Reef version recorded as a consumption receipt:
     its rows count as consumed, and the state and the cursor stay the last
@@ -123,10 +123,10 @@ def recovered_trainer_states(
         named = receipt["metadata"].get("component")
         owner = named if isinstance(named, str) else None
         consumed_by_component.setdefault(owner, set()).update(receipt["consumed_ids"])
-    components = surface.names or (RECORDS_COMPONENT,)
-    alone = len(components) == 1
+    names = components.names or (RECORDS_COMPONENT,)
+    alone = len(names) == 1
     states: dict[str, RecoveredTrainerState] = {}
-    for component in components:
+    for component in names:
         own = tuple(
             record
             for record in records
@@ -134,8 +134,8 @@ def recovered_trainer_states(
             and (record.component == component or (alone and record.component is None))
         )
         last = own[-1] if own else None
-        # The records that the trainer's stored samples consumed: its sample store key is "" when it is alone.
-        stored = store.samples.consumed_record_ids("" if alone else component)
+        # The records that the trainer's stages consumed: its key is "" when it is alone.
+        stored = store.training_state.consumed_record_ids("" if alone else component)
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
@@ -167,11 +167,11 @@ class ScenarioFactory:
         experiment_reports: ExperimentReportQueue | None = None,
         activates_runtime: bool = True,
         served_models: ServedModels | None = None,
-        instructions: InstructionQueue | None = None,
+        training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._recipe = recipe
-        #: The training instructions of every scenario; None builds scenarios that take no instruction.
-        self._instructions = instructions
+        #: The training requests of every scenario; None builds scenarios that take no request.
+        self._training_requests = training_requests
         self._activates_runtime = activates_runtime
         self.served_models = served_models
         self._backend_factory = backend_factory
@@ -201,9 +201,9 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
-        surface = self._recipe.serving_surface(scenario)
+        components = self._recipe.scenario_components(scenario)
         if registration is None:
-            self.register(scenario, backend, surface, start)
+            self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
             # the durable registration instead of assuming this creation attempt won.
             metadata = backend.metadata()
@@ -214,11 +214,13 @@ class ScenarioFactory:
             scenario,
             backend,
             registration,
-            surface=surface,
+            components=components,
             registered_components=release_components(metadata),
         )
 
-    def register(self, scenario: str, backend: RepositoryBackend, surface: Surface, start: ItemStart | None) -> None:
+    def register(
+        self, scenario: str, backend: RepositoryBackend, components: ScenarioComponents, start: ItemStart | None
+    ) -> None:
         """Write the root release of the new scenario ``scenario`` and register it with ``backend``.
 
         The root holds the artifact item ``start`` in its component, or the recipe's default start
@@ -232,14 +234,14 @@ class ScenarioFactory:
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
-            root, source = self.root_release(surface, start, Path(work))
+            root, source = self.root_release(components, start, Path(work))
             if start is not None:
                 self._recipe.check_root_start(ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
                 SCENARIO_METADATA_KEY: scenario_metadata_for(name=scenario, source=source)
             }
-            names = surface.names or (RECORDS_COMPONENT,)
-            if surface.single:
+            names = components.names or (RECORDS_COMPONENT,)
+            if components.single:
                 registration_metadata[COMPONENTS_METADATA_KEY] = {
                     names[0]: {"artifact_id": root.artifact_id, "metadata": {}}
                 }
@@ -247,44 +249,48 @@ class ScenarioFactory:
                 registration_metadata[COMPONENTS_METADATA_KEY] = root.metadata[COMPONENTS_METADATA_KEY]
             backend.register(root, metadata=registration_metadata)
 
-    def root_release(self, surface: Surface, start: ItemStart | None, work: Path) -> tuple[Artifact, RootSource]:
-        """The unpublished root release of a new scenario that ``surface`` serves, under ``work``, and its source."""
+    def root_release(
+        self, components: ScenarioComponents, start: ItemStart | None, work: Path
+    ) -> tuple[Artifact, RootSource]:
+        """The unpublished root release of a new scenario that ``components`` serves, under ``work``, and its source."""
         item: tuple[str, Artifact] | None = None
         if start is None:
             default = self._recipe.default_start()
             source = RootSource("default", inputs=default.inputs)
         else:
-            component, layout = surface.import_target(start.component)
+            component, layout = components.import_target(start.component)
             directory = work / "item"
             directory.mkdir()
             stored = layout.stored(start.files, directory)
             source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
             # The admission checks of an import: the release's own with one component, else the component's here and
             # the release's on the composed root.
-            if surface.single:
-                surface.validate(stored)
+            if components.single:
+                components.validate(stored)
                 return stored, source
-            surface.components[component].validator.validate(stored)
+            components.components[component].validator.validate(stored)
             item = (component, stored)
             default = self._recipe.default_start()
         tree = work / "default"
         tree.mkdir()
         default.write(tree)
-        if surface.single:
+        if components.single:
             return Artifact.local(tree), source
         # Files outside every component directory, a model laid out at the root say, belong to no component.
-        stray = sorted(entry.name for entry in tree.iterdir() if entry.name not in surface.names or not entry.is_dir())
+        stray = sorted(
+            entry.name for entry in tree.iterdir() if entry.name not in components.names or not entry.is_dir()
+        )
         if stray:
             raise ReefError(
-                f"the default start keeps {stray} outside its components {list(surface.names)}: a release serving "
+                f"the default start keeps {stray} outside its components {list(components.names)}: a release serving "
                 "several components keeps one directory per component"
             )
-        components = {name: Artifact.local(tree / name) for name in surface.names}
+        artifacts = {name: Artifact.local(tree / name) for name in components.names}
         if item is None:
-            return compose_release(components, directory=work / "root"), source
-        components[item[0]] = item[1]
-        root = compose_release(components, directory=work / "root")
-        surface.validator.validate(root)
+            return compose_release(artifacts, directory=work / "root"), source
+        artifacts[item[0]] = item[1]
+        root = compose_release(artifacts, directory=work / "root")
+        components.validator.validate(root)
         return root, source
 
     def _recover(
@@ -293,12 +299,12 @@ class ScenarioFactory:
         backend: RepositoryBackend,
         registration: object,
         *,
-        surface: Surface,
+        components: ScenarioComponents,
         registered_components: ReleaseComponents | None,
     ) -> Scenario:
         if not isinstance(registration, Mapping):
             raise ValueError(f"invalid scenario metadata for {name!r}")
-        if not surface.single:
+        if not components.single:
             # A registration names the components its releases bind. One made by a
             # recipe serving a single component, or none, has releases with no
             # component directories to carry forward; refuse rather than compose
@@ -306,15 +312,15 @@ class ScenarioFactory:
             if registered_components is None:
                 raise ReefError(
                     f"scenario {name!r} was registered without a component manifest; a recipe serving components "
-                    f"{list(surface.names)} needs a scenario registered with that layout"
+                    f"{list(components.names)} needs a scenario registered with that layout"
                 )
-            missing = [component for component in surface.names if component not in registered_components.entries]
+            missing = [component for component in components.names if component not in registered_components.entries]
             if missing:
                 raise ReefError(
                     f"scenario {name!r} was registered with components {list(registered_components.names)}; "
                     f"the recipe also serves {missing}"
                 )
-            unserved = [component for component in registered_components.names if component not in surface.names]
+            unserved = [component for component in registered_components.names if component not in components.names]
             if unserved:
                 # A step carries forward the components the recipe serves: one it does not serve would leave
                 # every later release, and the head would then refuse the recipe that registered them.
@@ -335,7 +341,7 @@ class ScenarioFactory:
             checkpoint_head=checkpoint_head,
             components=(
                 None
-                if surface.single or registered_components is None
+                if components.single or registered_components is None
                 else registered_components.artifact_ids(checkpoint_head.revision)
             ),
         )
@@ -354,7 +360,7 @@ class ScenarioFactory:
         try:
             head_record = store.recover(checkpoint=checkpoint)
             scenario_step = 0 if head_record is None else head_record.step
-            recovered_states = recovered_trainer_states(store, name, head_record, surface)
+            recovered_states = recovered_trainer_states(store, name, head_record, components)
 
             # Publication stages durable bytes before the commit record is durable, while
             # the backend's head is only a post-commit mirror. A crash between the
@@ -397,9 +403,9 @@ class ScenarioFactory:
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.
             if self._activates_runtime:
-                surface.activate(Artifact(current_artifact, repository), runtime)
+                activate_release(components, Artifact(current_artifact, repository), runtime, name)
 
-            root_artifacts = repository.selection(start_artifact, surface.names or (RECORDS_COMPONENT,))
+            root_artifacts = repository.selection(start_artifact, components.names or (RECORDS_COMPONENT,))
             training_artifacts = root_artifacts
             for record in committed_records(store, head_record):
                 training_artifacts = training_starts(training_artifacts, record)
@@ -412,12 +418,12 @@ class ScenarioFactory:
             trainers = self._recipe.build_trainers(
                 name,
                 store.records,
-                surface=surface,
+                components=components,
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
-                releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, surface=surface),
-                samples=store.samples,
+                releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
+                samples=self._storage.sample_store(name, store),
                 root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )
             if any(
@@ -447,7 +453,7 @@ class ScenarioFactory:
             scenario = Scenario(
                 name=name,
                 binding=ScenarioBinding(
-                    surface=surface,
+                    components=components,
                     runtime=runtime,
                     training_component=self._recipe.training_component,
                     activation_rule=self._recipe.activation_rule(),
@@ -464,13 +470,13 @@ class ScenarioFactory:
                 store=store,
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,
-                instructions=None if self._instructions is None else self._instructions.of(name),
+                training_requests=None if self._training_requests is None else self._training_requests.of(name),
             )
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed
             # rows for audit.
             for component_trainer in trainers:
-                # Scenario() checked that every trainer names a component the surface serves: each has a state.
+                # Scenario() checked that every trainer names a component the scenario serves: each has a state.
                 recovered = recovered_states[component_trainer.component]
                 if recovered.high_water is not None:
                     scenario.replay_retained(

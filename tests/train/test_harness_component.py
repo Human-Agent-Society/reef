@@ -12,23 +12,13 @@ from pathlib import Path
 
 import pytest
 from tests.support._trajectories import recorded_trajectory
-from tests.support.harness_steps import (
-    COMPONENT,
-    PI_SEED,
-    UNCHANGED,
-    TreeReleases,
-    changed_rules,
-    harness_backend,
-    harness_recipe,
-)
+from tests.support.harness_steps import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_backend, harness_recipe
+from tests.support.job_data import job_data_ref
 
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
-from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.recipe.harness import HarnessJobLoop
-from reef.runtime.jobs import JobStatus, TrainingJob
-from reef.train.backend import ComponentArtifacts
+from reef.train.component import JobStatus, TrainingJob
 from reef.train.harness_backend.backend import StepProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,
@@ -36,7 +26,7 @@ from reef.train.harness_backend.component import (
     ProgressFile,
     read_step_progress,
 )
-from reef.train.jobs import JobLoopState, RunningJob
+from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 
@@ -61,14 +51,11 @@ def job(component: HarnessTrainingComponent, name: str, *, start: str, previous:
         name,
         component.name,
         start,
-        JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),)),
-        {
-            "component": COMPONENT,
-            "head_artifact_id": "base",
-            "evaluation_tasks": None,
-            "previous_job": previous,
-        },
+        job_data_ref(JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),))),
+        {"evaluation_tasks": None},
         scenario="demo",
+        component=COMPONENT,
+        previous_job_id=previous,
     )
 
 
@@ -83,31 +70,35 @@ def ended(component: HarnessTrainingComponent, job_id: str, seconds: float = 30.
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("legacy_start", [False, True])
-def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(tmp_path: Path, legacy_start: bool) -> None:
+@pytest.mark.parametrize("queued_earlier", [False, True])
+def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
+    tmp_path: Path, queued_earlier: bool
+) -> None:
     component = component_of(tmp_path, lambda workspace, services: MARKER)
     component.start_jobs()
     try:
         first = job(component, "one", start=seed_start(component, tmp_path))
-        if legacy_start:
-            parameters = dict(first.parameters)
-            parameters["head_release_id"] = parameters.pop("head_artifact_id")
-            first = replace(first, parameters=parameters)
+        if queued_earlier:
+            # A job that an earlier Reef queued names its component and its artifact in its parameters.
+            parameters = {**first.parameters, "component": COMPONENT, "head_release_id": "base", "previous_job": None}
+            first = replace(first, parameters=parameters, component=None)
         component.submit(first)
         status = ended(component, "one")
         assert status.state == "finished" and status.metrics == {}
         (checkpoint,) = status.checkpoints
         # The step's metrics are the checkpoint's: the job's end carries none of its own.
         assert checkpoint.metrics["selected"] is True
-        assert checkpoint.metrics["head_artifact_id"] == "base"
+        # The tree's checksum names the head that the step ran on.
+        assert checkpoint.metrics["head_checksum"] == PI_SEED.checksum()
         assert "head_release_id" not in checkpoint.metrics
-        assert checkpoint.path == checkpoint.release_path
+        assert checkpoint.path == checkpoint.artifact_path
         assert HarnessTree.read(Path(checkpoint.path)) == PI_SEED.apply(MARKER)
         # The next job starts from the checkpoint and continues the state after this job.
         component.submit(job(component, "two", start=checkpoint.path, previous="one"))
         second = ended(component, "two")
         assert second.state == "finished" and second.checkpoints == ()
-        assert second.metrics["skipped"] == UNCHANGED and second.metrics["head_artifact_id"] == "base"
+        assert second.metrics["skipped"] == UNCHANGED
+        assert second.metrics["head_checksum"] == PI_SEED.apply(MARKER).checksum()
         assert component.state_after("two")[0] == 2 and component.state_after(None)[0] == 0
     finally:
         component.close()
@@ -122,22 +113,14 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
         (checkpoint,) = ended(component, "one").checkpoints
     finally:
         component.close()
-    loop = HarnessJobLoop(
-        component,
-        scenario="demo",
-        releases=ComponentArtifacts(TreeReleases(PI_SEED), COMPONENT),
-        eval_samples=None,
-        layout=get_adapter("pi").layout,
-    )
-    # The activation rule reads the parts: the step rewrote the rules of the seed tree.
+    # The job loop of every component asks the component for the parts; the activation rule reads them: the step
+    # rewrote the rules of the seed tree.
+    loop = JobLoop(component, scenario="demo", scenario_component=COMPONENT)
     published = loop.publish(JobLoopState(seed_start(component, tmp_path), RunningJob("one")), checkpoint)
     assert published.result.artifact is not None and published.result.changed_kinds == {"rules"}
     # From a start that holds the same tree, nothing changed.
     again = loop.publish(JobLoopState(checkpoint.path, RunningJob("two")), checkpoint)
     assert again.result.changed_kinds == frozenset()
-    # The harness parameters are the loop's own: the stage cannot name them.
-    with pytest.raises(ValueError, match="already name"):
-        loop.submit(JobLoopState(seed_start(component, tmp_path)), JobData("three"), {"component": "other"})
 
 
 @pytest.mark.unit
@@ -190,13 +173,13 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
 @pytest.mark.unit
 def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
-    assert component.release_format is None and component.shares_scenarios
+    assert component.artifact_format is None and component.shares_scenarios
     assert component.default_start().files == dict(PI_SEED.files)
     # An imported start is a copy of the release's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
     # An import's directory holds the tree alone.
-    component.check_release(DirectoryFiles(release))
+    component.check_artifact(DirectoryFiles(release))
     (release / ".gitattributes").write_text("* filter=lfs\n")
     (release / "reef-artifact.json").write_text("{}\n")
     start = component.import_start(release)
@@ -207,20 +190,11 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="fails validation"):
         component.import_start(broken)
     valid = job(component, "valid", start=seed_start(component, tmp_path))
-    for name, value, message in (
-        ("component", "", "names the scenario component"),
-        ("head_artifact_id", None, "names the artifact of its start"),
-        ("evaluation_tasks", "t", "evaluation_tasks"),
-        ("previous_job", "", "previous_job"),
+    for broken_job, message in (
+        (replace(valid, component=None), "names the scenario component"),
+        (replace(valid, parameters={**valid.parameters, "evaluation_tasks": "t"}), "evaluation_tasks"),
+        (replace(valid, parameters={**valid.parameters, "request": "r"}), "training request"),
     ):
-        broken_job = TrainingJob(
-            valid.job_id,
-            valid.backend,
-            valid.start,
-            valid.data,
-            {**valid.parameters, name: value},
-            scenario="demo",
-        )
         with pytest.raises(ValueError, match=message):
             component.check_job(broken_job)
     component.close()

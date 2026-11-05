@@ -49,7 +49,7 @@ Training, imports and harness syncs make artifacts. The list is newest first, wi
 
 A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations, train-from operations and serves. ``GET /reef/scenarios/{scenario}/operations`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
-For harness scenarios, ``GET /reef/harness/artifacts`` lists the harness artifacts. Pull a listed tree with ``GET /reef/harness?artifact_id=<id>``. An artifact waiting for activation has ``active: false`` and ``activated: false``. The older ``/reef/harness/releases`` route remains for clients that need its step pages.
+For harness scenarios, ``GET /reef/harness/artifacts`` lists the harness artifacts. Pull a listed tree with ``GET /reef/harness?artifact_id=<id>``. An artifact waiting for activation has ``active: false`` and ``activated: false``. The older ``/reef/harness/artifacts`` route remains for clients that need its step pages.
 
 Starting artifacts
 ------------------
@@ -400,7 +400,7 @@ directory, as they reach the artifact backend.
 
 .. _Harness clients:
 
-**Harness clients.** Send ``GET /reef/harness``, ``GET /reef/harness/releases``,
+**Harness clients.** Send ``GET /reef/harness``, ``GET /reef/harness/artifacts``,
 ``POST /reef/harness/import`` and ``GET /reef/harness/adapters`` to the harness
 service. It reads the commit history and the artifact backend, and loads a
 scenario without activating it. It writes no release: an import goes to control
@@ -426,8 +426,8 @@ the same artifact backend.
 layout, control does not serve these routes. The data service also answers the
 reads of what each scenario stores: the scenario list, settings, contract,
 records, commits, artifacts, samples, tasks, and evaluations with their
-rollouts. Control answers these reads too. Writes to a scenario, the buffer
-routes, the cancel of a training job, ``/reef/status`` and the harness pages
+rollouts. Control answers these reads too. Writes to a scenario, the next-job
+read, the cancel of a training job, ``/reef/status`` and the harness pages
 stay with control; the harness client routes go to the harness service (see
 `Harness clients`_ below). The data service needs no control lease,
 so you can run several replicas of it behind one address.
@@ -464,7 +464,7 @@ deployment's provider key (``inference.upstream-api-key``), when one is set.
 No artifact changes the request on its way to the engine. The service
 appends the record to the scenario's record store and returns the record ID in
 ``x-reef-agent-record-id``, and the ID of the artifact that answered in
-``x-reef-release-id``. ``x-reef-tag-*`` headers go into the record. The
+``x-reef-artifact-id``. ``x-reef-tag-*`` headers go into the record. The
 inference service never creates a scenario: create it first with
 ``POST /reef/scenarios`` or a harness install. The inference service answers:
 
@@ -503,10 +503,13 @@ one hour. To retry at once, activate the active artifact again
 60 seconds. The service that fails a work item writes one warning to its log,
 with the queue, the item ID, the scenario and the error.
 
-After ownership changes, completed selections return to starting. The new
-owner opens its runtime, adopts retained engines, and activates the selections
-before it publishes routes again. This status is not a continuous engine
-health check. Runtime backends still control cancellation of engine calls
+After ownership changes, the new owner opens its runtime and offers it the
+routes from before. A route stays when the runtime reports that its engine
+still serves it, as a remote endpoint can; requests to it go on without a gap.
+The other routes go, and their scenarios' requests get ``inference_starting``.
+Then completed selections return to starting, and the new owner activates them
+again. An activation replaces a scenario's route when it serves from another
+engine. This status is not a continuous engine health check. Runtime backends still control cancellation of engine calls
 that were already in progress when a worker lost its lease.
 
 Control runs as one active instance and any number of standby instances on the

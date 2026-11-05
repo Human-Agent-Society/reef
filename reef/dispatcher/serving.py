@@ -14,11 +14,12 @@ from pathlib import Path
 from reef.artifact.artifact import Artifact
 from reef.artifact.repository import Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScenarioModel, ScheduledStop, ServedArtifact
+from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
 from reef.execution.workers import QueueWorker, WorkerStopped
+from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.base import Recipe
-from reef.runtime.interfaces import InferenceRuntime
+from reef.scenario.binding import activate_release
 from reef.storage.coordination import Coordination
 from reef.storage.served_models import INFERENCE_OWNER_QUEUE, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
 from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
@@ -62,12 +63,15 @@ def serving_config_of(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
 class ServingWorker(QueueWorker):
     """Start queued releases and retire unused endpoints in the inference service.
 
-    ``recipe`` supplies the runtime and each scenario's surface. ``backends`` resolves durable releases.
+    ``recipe`` supplies the runtime and each scenario's components. ``backends`` resolves durable releases.
     ``coordination`` owns requests and routes. ``local_artifact_dir`` holds materialized releases, or uses the repository default.
     A long-lived work lease gives one worker runtime ownership, including health checks and idle periods.
-    Other replicas only read routes. The owner recovers completed selections before it takes new work.
-    ``owner`` is None before ownership. ``recovery_routes`` is None before recovery, then holds routes to adopt.
-    ``opened`` becomes true after the runtime opens and adopts these routes.
+    Other replicas only read routes. The owner recovers completed selections before it takes new work: it opens the
+    runtime, offers it the routes from before (``InferenceRuntime.adopt``), keeps the routes that it took over, and
+    queues every completed selection again. ``owner`` is None before ownership. ``recovered`` becomes true after the
+    recovery. ``opened`` becomes true after the runtime opens. ``activated`` maps each scenario to the artifact that
+    this worker activated for it last. A route that it kept from before is activated again once, so that the runtime
+    takes over what it adopted.
     """
 
     def __init__(
@@ -90,7 +94,8 @@ class ServingWorker(QueueWorker):
         self.stop_delay_seconds = CACHE_SECONDS + (300.0 if runtime is None else runtime.inference_timeout_s)
         self.opened = False
         self.owner: ServingLease | None = None
-        self.recovery_routes: tuple[ServedArtifact, ...] | None = None
+        self.recovered = False
+        self.activated: dict[str, str] = {}
         # Engines can read selected files after startup. Keep local views alive until this worker stops.
         self.repositories: dict[str, Repository] = {}
 
@@ -126,12 +131,17 @@ class ServingWorker(QueueWorker):
             logger.info("inference worker %s holds runtime ownership", self.worker_id)
         if self.owner.lease_lost.is_set():
             return False
-        if self.recovery_routes is None:
+        if not self.recovered:
             previous = tuple(self.routes.all_served())
-            self.routes.recover_completed(self.owner.item, self.worker_id, stop_delay_seconds=self.stop_delay_seconds)
-            self.recovery_routes = previous
+            kept = self.adopted(previous) if previous else ()
+            self.routes.recover_completed(
+                self.owner.item, self.worker_id, stop_delay_seconds=self.stop_delay_seconds, kept=kept
+            )
+            self.recovered = True
             logger.info(
-                "requeued the serving of every scenario; %d routes from before wait for adoption", len(previous)
+                "requeued the serving of every scenario; kept %d of %d routes from before, whose engines still serve",
+                len(kept),
+                len(previous),
             )
         for stop in self.routes.due_stops(time.time()):
             payload: dict[str, JsonValue] = {"served": dict(stop.served.to_json()), "stop_after": stop.stop_after}
@@ -148,6 +158,25 @@ class ServingWorker(QueueWorker):
             )
         return super().run_once()
 
+    def open_runtime(self, runtime: InferenceRuntime) -> None:
+        started = time.monotonic()
+        runtime.open()
+        self.opened = True
+        logger.info("opened the inference runtime in %.1f s", time.monotonic() - started)
+
+    def adopted(self, previous: tuple[ServedArtifact, ...]) -> tuple[ServedArtifact, ...]:
+        """Open the owner's runtime and return the routes of ``previous`` whose engines it took over. A runtime that
+        does not open takes over none: the routes go, and the first serving opens it again."""
+        if self.owner is None:
+            raise WorkLeaseLost("the serving worker has no runtime ownership")
+        runtime = self.owner.runtime
+        try:
+            self.open_runtime(runtime)
+        except Exception:
+            logger.exception("could not open the inference runtime; the %d routes from before go", len(previous))
+            return ()
+        return tuple(served for served in previous if runtime.adopt(served))
+
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         if self.stopped.is_set():
             raise WorkerStopped
@@ -157,18 +186,7 @@ class ServingWorker(QueueWorker):
         if self.owner is None or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost runtime ownership")
         if not self.opened:
-            started = time.monotonic()
-            runtime.open()
-            adopted = (*(self.recovery_routes or ()), *self.routes.all_served())
-            for served in adopted:
-                runtime.adopt(served)
-            self.opened = True
-            self.recovery_routes = ()
-            logger.info(
-                "opened the inference runtime and offered it %d routes in %.1f s",
-                len(adopted),
-                time.monotonic() - started,
-            )
+            self.open_runtime(runtime)
         if lease_lost.is_set() or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost its lease")
         if item.kind == STOP_SERVING_KIND:
@@ -198,18 +216,18 @@ class ServingWorker(QueueWorker):
             return Artifact(backend.resolve_snapshot(require_text(value.get("release_id"), "release_id")), repository)
 
         artifact = selected_artifact(item.payload)
-        surface = self.recipe.serving_surface(item.scenario)
+        components = self.recipe.scenario_components(item.scenario)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
         runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
-        current_route = self.routes.read(ScenarioModel(item.scenario))
-        if current_route is None or current_route.artifact_id != artifact_id:
+        if self.activated.get(item.scenario) == artifact_id:
+            logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
+        else:
             started = time.monotonic()
-            surface.activate(artifact, runtime)
+            activate_release(components, artifact, runtime, item.scenario)
+            self.activated[item.scenario] = artifact_id
             logger.info(
                 "scenario %s: activated artifact %s in %.1f s", item.scenario, artifact_id, time.monotonic() - started
             )
-        else:
-            logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
         if lease_lost.is_set() or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost its lease")
         active = runtime.served_artifact(artifact_id, item.scenario)
@@ -226,9 +244,9 @@ class ServingWorker(QueueWorker):
             if not isinstance(value, dict):
                 raise ValueError("a beside artifact needs its release and component")
             component = require_text(value.get("component"), "component")
-            if component == surface.loader_component:
+            if component == components.loaded_component:
                 beside_model = runtime.served_artifact_on_request(
-                    surface.component_artifact(selected_artifact(value), component)
+                    components.component_artifact(selected_artifact(value), component)
                 )
                 if beside_model is None:
                     raise ValueError("the inference runtime provides no route for a beside artifact")

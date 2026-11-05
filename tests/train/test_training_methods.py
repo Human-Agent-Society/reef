@@ -13,16 +13,16 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
 
 from reef.core.job_data import JobOutcome, TaskSample
-from reef.runtime.interfaces import (
+from reef.storage.samples import SampleKind
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.train.component import job_id_for
+from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.method import (
     LearningRateSchedule,
     LearningRateScheduleState,
     TrainingMethod,
     resolve_learning_rate_schedule_state,
 )
-from reef.runtime.jobs import job_id_for
-from reef.storage.samples import SampleKind
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig
 from reef.train.types import JobData
 
@@ -132,7 +132,7 @@ def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> No
 
 
 @pytest.mark.unit
-def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default_build() -> None:
+def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default_build(tmp_path) -> None:
     class SupervisedThenPolicy(StagedRecipe):
         """Supervised trajectories with a warmup, then policy training on tasks with a lower rate."""
 
@@ -152,7 +152,9 @@ def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default
     assert loop is not None
     loop.submit(JobLoopState(component.base_start), batch("first"), stage.job_parameters(batch("first")))
     finished = JobLoopState(component.base_start, finished_jobs=1, last_job=JobOutcome("j", "stub", "finished"))
-    loop.submit(finished, task("second"), stage.job_parameters(task("second")))
+    (tmp_path / "second").mkdir()
+    second = JobData("second", (TaskSample(tmp_path / "second"),))
+    loop.submit(finished, second, stage.job_parameters(second))
     assert [TrainingMethod.from_dict(job.parameters["method"]) for job in component.submitted] == [
         TrainingMethod("sft", SFT),
         TrainingMethod("rl-objective", RL),

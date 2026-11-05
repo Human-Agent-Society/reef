@@ -12,14 +12,14 @@ from typing import Any
 
 from tests.support._threshold_processor import threshold_pipeline
 
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import ScenarioRoot, TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.jobs import JobLoop
 from reef.train.trainer import Trainer
 
