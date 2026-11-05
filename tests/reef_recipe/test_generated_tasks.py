@@ -171,7 +171,7 @@ def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path
     payload = {
         "text": "train it",
         "session": "s-1",
-        "release_id": "r-1",
+        "artifact_id": "r-1",
         "samples": [stage_item_id("tasks", "generated-tasks/harbor-00000-001")],
     }
     p.queue_requests([TrainingRequest.from_dict(payload, request_id="train-1")])

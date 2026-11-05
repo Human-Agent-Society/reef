@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sys
 
-_COMMANDS = {"serve", "check-artifacts", "migrate-commits"}
+_COMMANDS = {"serve", "check-artifacts"}
 
 
 def _help_text():
@@ -25,7 +25,6 @@ usage: reef <command> [options]
 
   serve            Start inference, connect a provider, or run a configured stack
   check-artifacts  Check that each commit history resolves to stored files, before an upgrade
-  migrate-commits  Rewrite older commit records in the current format
 
   -c CONFIG   Optional config file; omitted means configuration-free startup
   --version   Print the installed reef version
@@ -70,10 +69,6 @@ def main(argv=None):
             from reef.service.check_artifacts import main as check_main
 
             sys.exit(check_main(rest))
-        if cmd == "migrate-commits":
-            from reef.service.migrate_commits import main as migrate_main
-
-            sys.exit(migrate_main(rest))
         _serve_main(rest)
     except DeployConfigError as exc:
         # Deploy config errors are typed library errors; the CLI owns the exit.

@@ -335,9 +335,6 @@ directory that no job used for ``storage.job_directory_ttl_s`` (7 days by
 default). Keep this time above the longest job, since a component can read
 the directory again when it resumes the job.
 
-A queued job of an earlier Reef holds its data inline: the training service
-writes it to a temporary directory when it takes the job.
-
 Slow work
 ---------
 
