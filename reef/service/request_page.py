@@ -127,9 +127,9 @@ class NextAction:
 
 
 def next_action(scenario: str, artifact_id: str, selection_result: str, requires: Sequence[str]) -> NextAction | None:
-    """The next action of a settled step: activate a release that is not active, or pull an active one.
+    """The next action of a settled step: activate a snapshot that is not active, or pull an active one.
 
-    ``requires`` names what the release needs where the harness runs (see
+    ``requires`` names what the snapshot needs where the harness runs (see
     ``reef.core.requirements.required_by``). ``None`` for a rejected,
     skipped or failed step: nothing waits on the person then.
     """
@@ -137,7 +137,7 @@ def next_action(scenario: str, artifact_id: str, selection_result: str, requires
         return NextAction(
             "Read this page, then activate it",
             (f'POST /reef/scenarios/{scenario}/activate {{"artifact_id": "{artifact_id}"}}',),
-            "The scenario's activation rule did not make this release active; activating it serves it.",
+            "The scenario's activation rule did not make this snapshot active; activating it serves it.",
         )
     if selection_result != "selected":
         return None
@@ -145,7 +145,7 @@ def next_action(scenario: str, artifact_id: str, selection_result: str, requires
     return NextAction(
         "Pull it",
         ("GET /reef/harness",),
-        f"Reef serves this release's files now; a client gets them from there.{needs}",
+        f"Reef serves this snapshot's files now; a client gets them from there.{needs}",
     )
 
 
@@ -452,7 +452,7 @@ def build_request_page(
         eyebrow="Harness evolution",
         heading="Request details",
         subtitle=escape(subtitle),
-        # The active release is this scenario's home, the version this request is asked against.
+        # The active selection is this scenario's home, the version this request is asked against.
         home="" if served is None else step_href(served, link_query),
         head=head,
         body=(

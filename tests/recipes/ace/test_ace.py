@@ -14,7 +14,7 @@ import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import QueueChat
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import PI_SEED, TreeReleases, build_harness_backend, runtime, step_services
+from tests.support.harness_steps import PI_SEED, TreeArtifacts, build_harness_backend, runtime, step_services
 
 from recipes.ace import ACE, ACESettings
 from reef.core.job_data import TrajectorySample
@@ -108,7 +108,7 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_run(tmp_path: Path) 
         models={"ace": chat},
         runtime=runtime(),
     )
-    releases = TreeReleases(recipe.seed)
+    releases = TreeArtifacts(recipe.seed)
     backend = build_harness_backend(recipe, "demo", releases)
     # The first trace has no score and no feedback: ACE needs no correct answer.
     first = backend_step(

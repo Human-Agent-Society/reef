@@ -1896,7 +1896,7 @@ def test_the_binding_rides_in_the_run_render_and_the_published_tree_is_the_sourc
     assert settled.metrics["selected"] is True and settled.artifact is not None
     published = settled.artifact.local_path
     assert published is not None
-    # The release stores the source tree: the seed with the patch, and no rendered file or model binding.
+    # The snapshot stores the source tree: the seed with the patch, and no rendered file or model binding.
     assert HarnessTree.read(published) == HarnessTree(NATIVE_SEED_FILES).apply(brief)
 
 

@@ -10,10 +10,10 @@ and notes in ``output/``, and clips them, since they hold model traffic that
 the tree's checks have not seen.
 ``material/`` keeps the traces as the clients sent them, as the record store
 does, and ``harness/`` the tree as the method left it. ``read_step_records``
-redacts every text it serves, so the release pages show no credential of
+redacts every text it serves, so the snapshot pages show no credential of
 either.
 ``StepRecord.read`` serves bounded raw reads of a step's files to the
-release pages.
+snapshot pages.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class StepRecord:
 
     Values: ``root`` is the directory, created at construction so an
     unwritable path refuses to start.
-    Purpose: the backend claims one directory per step here, and the release
+    Purpose: the backend claims one directory per step here, and the snapshot
     pages read the records through ``read``.
     """
 

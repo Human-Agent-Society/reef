@@ -1,4 +1,4 @@
-"""The named components one release binds, stored as a manifest in release metadata.
+"""The named components one snapshot binds, stored as a manifest in release metadata.
 
 A snapshot with one component keeps its files at the root. A snapshot with
 several components keeps each one in a directory named after it. The mapping
@@ -10,8 +10,8 @@ a component into another snapshot preserves its ID. Legacy entries without an
 explicit ID retain their original revision-based identity.
 
 The manifest travels in artifact metadata under ``COMPONENTS_METADATA_KEY``.
-A release without a manifest is read as one component at the root, which the
-release made.
+A snapshot without a manifest is read as one component at the root, which the
+snapshot made.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def legacy_artifact_id(revision: str, component: str | None) -> str:
 
 @dataclass(frozen=True)
 class ComponentEntry:
-    """One component's artifact in a release manifest: its content, its identity and its metadata.
+    """One component's artifact in a snapshot manifest: its content, its identity and its metadata.
 
     Values: ``artifact_id`` is a non-empty string for a current entry, or
     None for a legacy entry whose snapshot revision determines its identity.
@@ -57,7 +57,7 @@ class ComponentEntry:
     component, or ``<revision>:<component>`` for a multi-component snapshot.
 
     Purpose: the committer and the scenario factory make entries when a
-    release is published or a scenario is created; readers resolve a
+    snapshot is published or a scenario is created; readers resolve a
     component's artifact and content from them.
     """
 
@@ -73,8 +73,8 @@ class ComponentEntry:
 
 
 @dataclass(frozen=True)
-class ReleaseComponents:
-    """The manifest of one release: which named components it binds, in declaration order.
+class SnapshotComponents:
+    """The manifest of one snapshot: which named components it binds, in declaration order.
 
     Values: ``entries`` is a non-empty mapping from valid component names to
     ``ComponentEntry`` values. No two entries have the same explicit
@@ -85,7 +85,7 @@ class ReleaseComponents:
 
     def __post_init__(self) -> None:
         if not isinstance(self.entries, Mapping) or not self.entries:
-            raise ValueError("a release binds at least one component")
+            raise ValueError("a snapshot binds at least one component")
         validated: dict[str, ComponentEntry] = {}
         for name, entry in self.entries.items():
             if not isinstance(entry, ComponentEntry):
@@ -93,7 +93,7 @@ class ReleaseComponents:
             validated[validate_component_name(name)] = entry
         explicit = [entry.artifact_id for entry in validated.values() if entry.artifact_id is not None]
         if len(set(explicit)) != len(explicit):
-            raise ValueError("one artifact ID cannot name several components of a release")
+            raise ValueError("one artifact ID cannot name several components of a snapshot")
         object.__setattr__(self, "entries", MappingProxyType(validated))
 
     @property
@@ -112,20 +112,20 @@ class ReleaseComponents:
         """The artifact ID of each component in the snapshot ``revision`` (``artifact_id``), in declaration order."""
         return {name: self.artifact_id(name, revision) for name in self.entries}
 
-    def carried_from(self, revision: str) -> ReleaseComponents:
-        """This manifest as a later release carries it forward: every entry names its artifact explicitly."""
+    def carried_from(self, revision: str) -> SnapshotComponents:
+        """This manifest as a later snapshot carries it forward: every entry names its artifact explicitly."""
         identities = self.artifact_ids(revision)
-        return ReleaseComponents(
+        return SnapshotComponents(
             {name: replace(entry, artifact_id=identities[name]) for name, entry in self.entries.items()}
         )
 
     @property
     def single(self) -> bool:
-        """True when the release keeps the flat, one-component layout."""
+        """True when the snapshot keeps the flat, one-component layout."""
         return len(self.entries) == 1
 
     def relative_path(self, name: str) -> Path:
-        """Where ``name``'s files live under the release root."""
+        """Where ``name``'s files live under the snapshot root."""
         if name not in self.entries:
             raise KeyError(f"release binds no component {name!r}")
         return Path(".") if self.single else Path(name)
@@ -140,7 +140,7 @@ class ReleaseComponents:
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> ReleaseComponents:
+    def from_dict(cls, value: object) -> SnapshotComponents:
         if not isinstance(value, Mapping) or not value:
             raise ValueError("components manifest must be a non-empty object")
         entries: dict[str, ComponentEntry] = {}
@@ -154,22 +154,22 @@ class ReleaseComponents:
         return cls(entries)
 
 
-def release_components(metadata: Mapping[str, object] | None) -> ReleaseComponents | None:
-    """The manifest carried by release metadata, or ``None`` for a release published without one."""
+def snapshot_components(metadata: Mapping[str, object] | None) -> SnapshotComponents | None:
+    """The manifest carried by release metadata, or ``None`` for a snapshot published without one."""
     if metadata is None:
         return None
     raw = metadata.get(COMPONENTS_METADATA_KEY)
     if raw is None:
         return None
-    return ReleaseComponents.from_dict(raw)
+    return SnapshotComponents.from_dict(raw)
 
 
 __all__ = [
     "COMPONENTS_METADATA_KEY",
     "RECORDS_COMPONENT",
     "ComponentEntry",
-    "ReleaseComponents",
+    "SnapshotComponents",
     "legacy_artifact_id",
-    "release_components",
+    "snapshot_components",
     "validate_component_name",
 ]
