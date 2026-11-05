@@ -6,9 +6,9 @@ service. They reach the engines through an ``InferenceBackend`` (for an
 inference component, ``reef.inference.remote.service.RemoteInferenceBackend``)
 and load only weights that a training job saved and Reef published: a
 release's files, when a scenario starts, when a release is committed, or
-when one is activated. No trainer holds a serving engine. ``ReleaseWeights``
+when one is activated. No trainer holds a serving engine. ``ArtifactWeights``
 says where a release's files come from: the release itself
-(``ReleaseFiles``), or a service that the release names.
+(``ArtifactWeightFiles``), or a service that the release names.
 
 ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
 base model; ``FullWeightServingRuntime`` serves one scenario's full weights.
@@ -29,7 +29,7 @@ from reef.artifact.sources import HuggingFaceSource, download_huggingface_snapsh
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
 from reef.core.served_models import ServedArtifact
-from reef.core.weight_layout import ADAPTER_DIR, ReleaseWeights, WeightFiles, WeightLayout
+from reef.core.weight_layout import ADAPTER_DIR, ArtifactWeights, WeightFiles, WeightLayout
 from reef.inference.interfaces import (
     AdapterEngine,
     InferenceBackend,
@@ -97,7 +97,7 @@ class ServingEngines(ABC):
         return
 
 
-class ReleaseFiles(ReleaseWeights):
+class ArtifactWeightFiles(ArtifactWeights):
     """The release's own files: the release directory for ``"full"``, its ``adapter/`` for ``"adapter"``.
 
     The files of a release that refers to a Hugging Face revision (``read_reference``, RFC #995) are that
@@ -134,7 +134,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
     stamps the base model's version on them; before that, the runtime only sends requests, and an operation that
     changes the engines raises ``ReefError``.
     ``weights`` gives each release's weight files; the default is
-    ``ReleaseFiles``.
+    ``ArtifactWeightFiles``.
     Runtime load IDs belong to one fresh incarnation, so a restart never
     reuses an ID for other weights. The base model serves under the first one,
     ``base_version``, and each load under the next unused one;
@@ -157,10 +157,10 @@ class SavedWeightServingRuntime(InferenceRuntime):
         model_path: str = "",
         inference_timeout_s: float = 300.0,
         health_interval_s: float = HEALTH_INTERVAL_S,
-        weights: ReleaseWeights | None = None,
+        weights: ArtifactWeights | None = None,
     ) -> None:
         super().__init__(base_url=engines.base_url, inference_timeout_s=inference_timeout_s)
-        self._weights = ReleaseFiles() if weights is None else weights
+        self._weights = ArtifactWeightFiles() if weights is None else weights
         self._engines = engines
         self._opened: InferenceBackend | None = None
         self._handler = handler
@@ -297,7 +297,7 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         model_path: str = "",
         inference_timeout_s: float = 300.0,
         health_interval_s: float = HEALTH_INTERVAL_S,
-        weights: ReleaseWeights | None = None,
+        weights: ArtifactWeights | None = None,
     ) -> None:
         self._residency = AdapterResidencyManager(adapter_capacity)
         #: The adapter that the engines still serve for each scenario from before this runtime (``adopt``), by
@@ -463,7 +463,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
         model_path: str = "",
         inference_timeout_s: float = 300.0,
         health_interval_s: float = HEALTH_INTERVAL_S,
-        weights: ReleaseWeights | None = None,
+        weights: ArtifactWeights | None = None,
     ) -> None:
         self.served_artifact_id: str | None = None
         self._served_files: WeightFiles | None = None

@@ -365,7 +365,7 @@ The ``TrainingComponentFactory`` that the config's ``type`` names returns the
 ``TrainingComponent`` alone. It runs in the HTTP service's process; Reef
 passes it to the recipe as ``training_component``. The backend does not build
 serving: the ``inference`` section selects it, and the component's
-``release_format`` tells the serving runtime what each release holds.
+``artifact_format`` tells the serving runtime what each release holds.
 `Training components <executors.rst#training-components>`__ defines the
 component contract, and `Serving saved weights
 <executors.rst#serving-saved-weights>`__ defines how published weights reach

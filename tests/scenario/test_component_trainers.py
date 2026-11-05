@@ -122,6 +122,11 @@ class _FlakyBackend(ComponentJobs):
         return super().step(job)
 
 
+def listed_revisions(scenario: Scenario) -> list[str]:
+    """The storage revision of each harness catalog row, oldest first."""
+    return [row["artifact_snapshot"].revision for row in reversed(scenario.harness_snapshot_rows())]
+
+
 def _report(record_id: str, *references: str) -> AgentRecord:
     return AgentRecord.create(
         scenario="agent",
@@ -1193,7 +1198,7 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     manifest = service.harness_manifest(headers)
     assert manifest["release_id"] == harness_release
     assert manifest["files"] == {"harness.txt": "harness step 1"}
-    catalog = service.harness_releases(headers)["releases"]
+    catalog = service.harness_artifacts(headers)["artifacts"]
     assert [row["operation"] for row in catalog] == ["creation", "training"]
     # The root release made the creation's artifacts; the harness step made its own.
     base = scenario.repository.start_artifact.revision
@@ -1244,14 +1249,12 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert not any(record.made_artifact for record in scenario.store.history()[-2:])
     assert scenario.current_snapshot().revision == w1
     assert service.harness_manifest(headers)["release_id"] == h1
-    catalog = service.harness_releases(headers)["releases"]
+    catalog = service.harness_artifacts(headers)["artifacts"]
     # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head;
     # like a flat scenario's rejected row, it lists the head's parent, not itself.
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1]
+    assert listed_revisions(scenario) == [creation, h1, h1]
     assert catalog[-1]["metrics"]["selected"] is False
-    assert catalog[-1]["composed_release_id"] == w1
-    assert catalog[-1]["parent_release_id"] == catalog[1]["parent_release_id"] == creation
-    assert "ran on" in service.harness_release_page(headers, 2).lower()
+    assert "ran on" in service.harness_artifact_page(headers, 2).lower()
     assert service.harness_manifest(headers, form="source")["release_id"] == h1
 
     # The next harness release descends from h1 in the listed chain; the weights release it was published
@@ -1261,13 +1264,11 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     _append_records(scenario, 3)
     assert _commit_step(scenario, HARNESS) is not None
     h2 = scenario.current_snapshot().revision
-    catalog = service.harness_releases(headers)["releases"]
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2]
-    assert catalog[-1]["parent_release_id"] == h1
-    assert catalog[-1]["composed_parent_release_id"] == w2
+    catalog = service.harness_artifacts(headers)["artifacts"]
+    assert listed_revisions(scenario) == [creation, h1, h1, h2]
     assert required_by(catalog, component_id(scenario, h2, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
     assert service.harness_manifest(headers)["release_id"] == h2
-    page = service.harness_release_page(headers, 3)
+    page = service.harness_artifact_page(headers, 3)
     assert component_id(scenario, h2, HARNESS) in page
     assert h2 not in page
 
@@ -1276,8 +1277,8 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     scenario.activate(component_id(scenario, h1, HARNESS), HARNESS)
     activated_view = scenario.current_snapshot().revision
     assert activated_view not in (h1, h2)
-    catalog = service.harness_releases(headers)["releases"]
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2]
+    catalog = service.harness_artifacts(headers)["artifacts"]
+    assert listed_revisions(scenario) == [creation, h1, h1, h2]
     assert service.harness_manifest(headers)["release_id"] == h1
     assert required_by(catalog, component_id(scenario, h1, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
@@ -1295,8 +1296,8 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
     combined = scenario.current_snapshot().revision
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 3"
-    catalog = service.harness_releases(headers)["releases"]
-    assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, h3]
+    catalog = service.harness_artifacts(headers)["artifacts"]
+    assert listed_revisions(scenario) == [creation, h1, h1, h2, h3]
     assert (
         service.harness_manifest(headers, form="source")["release_id"]
         == h3
@@ -1347,7 +1348,7 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             assert [row["active"] for row in rows] == [False, False, True]
             assert all(row["component"] == HARNESS and row["activated"] for row in rows)
             first = rows[1]
@@ -1355,7 +1356,7 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
             answer = await client.post("/reef/scenarios/agent/activate", json=body)
             assert answer.status == 200, await answer.text()
             assert (await answer.json())["artifact_id"] == first["artifact_id"]
-            rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
+            rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             assert [row["artifact_id"] for row in rows if row["active"]] == [first["artifact_id"]]
         finally:
             await client.close()
@@ -1407,7 +1408,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatc
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
     assert service.harness_manifest(headers)["release_id"] == creation
-    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [creation]
+    assert listed_revisions(scenario) == [creation]
 
 
 @pytest.mark.unit
@@ -1430,14 +1431,14 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     scenario.activate(component_id(scenario, first_weights, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
     assert service.harness_manifest(headers)["release_id"] == harness_release
-    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
+    assert listed_revisions(scenario) == [base, harness_release]
 
     # Back to the root's harness: the seed tree is served again, named by the root release.
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, HARNESS), HARNESS)
     assert service.harness_manifest(headers)["release_id"] == base
     assert service.harness_manifest(headers)["release_id"] == base
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
-    assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
+    assert listed_revisions(scenario) == [base, harness_release]
 
 
 @pytest.mark.unit

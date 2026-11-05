@@ -1,10 +1,8 @@
 """The serve process's view of Reef's harness artifact channel: the poll, the manifest read, and the head watch.
 
 ``ArtifactClient`` reads the artifact catalog and one artifact's source tree.
-``HeadWatch`` learns the head from
-the periodic poll and from the ``x-reef-release-id`` header the capture proxy
-reads on every inference answer, and notifies its listener once per new head; a
-failure is logged and retried with backoff, and the process keeps serving.
+``HeadWatch`` learns the head from the periodic poll, and notifies its listener once per new head; a failure is
+logged and retried with backoff, and the process keeps serving.
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-from reef.harness.capture import ReleaseObserver
 
 #: The poll backoff never waits longer than this between attempts.
 MAX_BACKOFF_S = 600.0
@@ -46,10 +43,6 @@ class ArtifactUpdateListener(ABC):
 
     @abstractmethod
     def new_head(self, artifact_id: str, source: str) -> None: ...
-
-    @abstractmethod
-    def new_legacy_head(self, revision: str) -> None:
-        """A head that an older Reef service named by its harness ``revision``; the mount resolves its artifact."""
 
 
 class EventWriter(ABC):
@@ -124,12 +117,10 @@ class ArtifactClient:
         }
 
 
-class HeadWatch(ReleaseObserver):
-    """Compares every release id it hears of with the mounted one and notifies the listener of a new head once.
+class HeadWatch:
+    """Compares the active artifact of each poll with the mounted one and notifies the listener of a new head once.
 
-    The poll runs on its own thread every ``interval_s``; a response header
-    is considered on the proxy's thread at once, before the answer reaches
-    the agent, so the mount is queued by the time the next step starts."""
+    The poll runs on its own thread every ``interval_s``."""
 
     def __init__(
         self,
@@ -145,8 +136,6 @@ class HeadWatch(ReleaseObserver):
         self._interval_s = interval_s
         self._mounted = mounted
         self._announced: str | None = None
-        #: The last harness revision that a legacy response header named.
-        self._observed_revision: str | None = None
         self._failure = ""
         self._failure_timed_out = False
         self._lock = threading.Lock()
@@ -182,18 +171,6 @@ class HeadWatch(ReleaseObserver):
                 if self._announced == artifact_id:
                     self._announced = None
             raise
-
-    def observe(self, revision: str) -> None:
-        """Queue the head that a legacy harness revision header names, once per revision, without a request.
-
-        Only an older Reef service, which sends no ``x-reef-artifact-id`` header, reaches this path. The mount
-        resolves the revision on the thread that mounts, before the agent's next step.
-        """
-        with self._lock:
-            if revision == self._observed_revision:
-                return
-            self._observed_revision = revision
-        self._listener.new_legacy_head(revision)
 
     def poll_once(self) -> bool:
         """One poll and its consequence; False when Reef did not answer."""

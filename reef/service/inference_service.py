@@ -69,7 +69,6 @@ RECORD_HEADER = "x-reef-agent-record-id"
 #: The header that carries the ID of the artifact that answered.
 ARTIFACT_HEADER = "x-reef-artifact-id"
 # Kept for clients deployed before artifact identity became the public contract.
-RELEASE_HEADER = "x-reef-release-id"
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
 
@@ -383,7 +382,7 @@ class InferenceReplica:
             if attempt == 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
-        reply_headers = {ARTIFACT_HEADER: served.artifact_id, RELEASE_HEADER: served.artifact_id}
+        reply_headers = {ARTIFACT_HEADER: served.artifact_id}
         if record:
             try:
                 reply_headers[RECORD_HEADER] = await asyncio.to_thread(
@@ -418,11 +417,9 @@ class InferenceReplica:
         headers = {
             key: value
             for key, value in upstream.headers.items()
-            if key.lower()
-            not in (RECORD_HEADER, ARTIFACT_HEADER, RELEASE_HEADER, "content-length", "transfer-encoding")
+            if key.lower() not in (RECORD_HEADER, ARTIFACT_HEADER, "content-length", "transfer-encoding")
         }
         headers[ARTIFACT_HEADER] = served.artifact_id
-        headers[RELEASE_HEADER] = served.artifact_id
         content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
         response = web.StreamResponse(status=upstream.status, headers=headers)
         body = bytearray()
@@ -587,7 +584,6 @@ __all__ = [
     "ARTIFACT_HEADER",
     "INFERENCE_PATHS",
     "RECORD_HEADER",
-    "RELEASE_HEADER",
     "InferenceReplica",
     "NotServed",
     "ServedModelsCache",
