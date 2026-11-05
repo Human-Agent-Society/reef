@@ -42,7 +42,7 @@ from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput
-from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication, TrainStepResult
+from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication, TrainingCommit
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 PLAIN = TreePatch(changed_rules("plain rules\n"))
@@ -53,7 +53,7 @@ def data(step: int, *samples, request: TrainingRequest | None = None) -> JobData
     return JobData(f"demo:{step}", tuple(samples), request=request)
 
 
-def published(artifacts: TreeArtifacts, release_id: str, result: TrainStepResult) -> HarnessTree:
+def published(artifacts: TreeArtifacts, release_id: str, result: TrainingCommit) -> HarnessTree:
     """Record ``result``'s tree as release ``release_id``, as the committer's publish does."""
     if result.artifact is None or result.artifact.local_path is None:
         raise AssertionError(f"the step published nothing: {result.metrics.get('selection')}")
@@ -62,7 +62,7 @@ def published(artifacts: TreeArtifacts, release_id: str, result: TrainStepResult
     return tree
 
 
-def state_of(result: TrainStepResult) -> HarnessState:
+def state_of(result: TrainingCommit) -> HarnessState:
     return HarnessState.from_json(result.state)
 
 

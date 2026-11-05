@@ -75,13 +75,13 @@ def test_a_trainer_gets_the_queued_requests_and_a_commit_settles_the_one_it_cons
         assert len(trainer.pipeline.training_requests) == 2
         make_samples(trainer)
         # The commit that submits a job consumes its request; the job's end is the next commit.
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         # The next give finishes the consumed request's item and keeps the other queued.
         training_requests.give([trainer])
         assert training_requests.get("one").final and [request.id for request in training_requests.queued()] == ["two"]
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         training_requests.give([trainer])
         assert [batch.request_id for batch in component.batches] == ["one", "two"] and training_requests.queued() == ()
         assert trainer.pipeline.training_requests == {}

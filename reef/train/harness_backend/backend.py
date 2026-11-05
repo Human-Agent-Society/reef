@@ -70,7 +70,7 @@ from reef.train.harness_backend.records import CALLS_FILE, StepRecord
 from reef.train.harness_backend.services import StepServices
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput, Workspace
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 #: The phases of a running step, in order; only an offline step, which rolls out train tasks, has the first.
 STEP_PHASES = ("running tasks", "proposing", "evaluating")
@@ -421,7 +421,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
             self.progress = replace(self.progress, phase="evaluating", runs_total=total)
         return self.evaluator.evaluate(harness_candidate, sides=sides)
 
-    def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
+    def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainingCommit:
         """Fold ``decision`` into the state and the history; a selected tree is the step's kept tree.
 
         The head the step prepared against is ``prepared.metrics["head_checksum"]``; no activation, new training
@@ -474,14 +474,14 @@ class HarnessBackend(HarnessCandidateEvaluator):
             },
         }
         if not decision.selected:
-            return TrainStepResult(state.to_json(), metrics)
+            return TrainingCommit(state.to_json(), metrics)
         directory = Path(tempfile.mkdtemp(prefix="reef-harness-"))
         candidate.candidate_tree.write(directory)
         artifact = Artifact.local(directory)
         if self.pending_artifact is not None:
             self.pending_artifact.discard()
         self.pending_artifact = artifact
-        return TrainStepResult(state.to_json(), metrics, artifact=artifact)
+        return TrainingCommit(state.to_json(), metrics, artifact=artifact)
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self.progress = None
