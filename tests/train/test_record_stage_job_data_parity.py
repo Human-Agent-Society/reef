@@ -178,12 +178,12 @@ class StreamRun:
         while True:
             self.training_requests.give([trainer])
             make_samples(trainer)
-            result = trainer.run_once(serving_artifact_id=self.serving_artifact_id)
+            result = trainer.advance_job(serving_artifact_id=self.serving_artifact_id)
             if result is None:
                 return
             batch = trainer.pending_job_data
             prepared = trainer.prepare_commit(result)
-            trainer.commit(prepared)
+            trainer.settle_commit(prepared)
             self.consumed |= prepared.consumed_ids
             self.high_water = (prepared.high_water_sequence, prepared.high_water_offset)
             if batch is None:

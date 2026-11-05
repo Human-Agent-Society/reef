@@ -354,7 +354,7 @@ class TrainingComponent(ABC):
 
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         """The parts of the scenario component that ``checkpoint`` changed from ``start``, which the scenario's
-        activation rule reads (``TrainStepResult.changed_kinds``). The default is none."""
+        activation rule reads (``TrainingCommit.changed_kinds``). The default is none."""
         return frozenset()
 
     @abstractmethod

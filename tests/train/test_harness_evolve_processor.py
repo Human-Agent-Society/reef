@@ -204,7 +204,7 @@ def test_trace_processor_has_no_judge_hook() -> None:
 
 def test_trace_processor_has_no_training_preparation_hook() -> None:
     for stage in (TrainingPipeline, TraceSamples, TraceJobData):
-        assert not hasattr(stage, "prepare_training_step")
+        assert not hasattr(stage, "next_commit")
         assert not hasattr(stage, "prepare")
 
 
