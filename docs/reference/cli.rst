@@ -42,6 +42,18 @@ to forced cleanup of the managed service processes.
    ``-V, --version``
        the installed reef version. Takes no command: ``reef --version``.
 
+Check artifacts before an upgrade
+---------------------------------
+
+.. code-block:: bash
+
+   reef check-artifacts -c path/to/stack.yaml
+
+The command checks that each scenario's commit history resolves to stored
+files. It prints each problem, and it exits with status 1 when it finds one and
+0 when it finds none. See the `upgrade steps
+<../user-guide/operate.rst#upgrade-to-commit-records-without-storage-locations>`__.
+
 Selecting the model
 -------------------
 
