@@ -743,10 +743,9 @@ class ScenarioCommitter:
                 retrying = bool(records) and records[-1].step == next_step
             # The operation lock keeps the step and source stable while tracker
             # I/O runs; published artifact readers need only the publication lock.
-            if not retrying:
-                result = self.prepare_experiment(result, trainer, next_step, component)
+            correlation_metrics = None if retrying else self.prepare_experiment(trainer, next_step, component, result)
             with self._publication_lock:
-                prepared = trainer.prepare_commit(result)
+                prepared = trainer.prepare_commit(result, correlation_metrics)
                 # The activation rule decides whether the step's artifact serves. The training record keeps the result.
                 activated = not isinstance(result.publication, NoArtifactPublication) and (
                     self.activation_rule.activates(MadeArtifact(component, result.changed_kinds))
@@ -767,11 +766,12 @@ class ScenarioCommitter:
                 return result.state
 
     def prepare_experiment(
-        self, result: TrainStepResult, trainer: Trainer, step: int, component: str | None
-    ) -> TrainStepResult:
+        self, trainer: Trainer, step: int, component: str | None, result: TrainStepResult
+    ) -> Mapping[str, Any] | None:
+        """The experiment tracker's correlation fields for the commit of ``result``, or None without a tracker."""
         observer = self.experiment_observer
         if observer is None:
-            return result
+            return None
         job_loop = trainer.job_loop
         backend_config: dict[str, Any] | None = None
         if job_loop is not None:
@@ -792,16 +792,10 @@ class ScenarioCommitter:
             component=self.component_on_record(component),
         )
         artifact = result.artifact
-        correlation = observer.prepare(
+        return observer.prepare(
             context,
             checkpoint_path=None if artifact is None or artifact.local_path is None else str(artifact.local_path),
         )
-        if correlation:
-            try:
-                return trainer.add_commit_metrics(result, correlation)
-            except RuntimeError:
-                logger.exception("experiment correlation could not annotate the pending result")
-        return result
 
     def commit_without_artifact(self, prepared: PreparedCommit, trainer: Trainer, component: str | None) -> None:
         next_step = self._step + 1
