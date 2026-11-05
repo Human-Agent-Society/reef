@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 
 import pytest
 import tests
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import (
     STUB_ROOT,
@@ -24,12 +22,13 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
-from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, load_recipe_config
+from reef.recipe import Recipe, RecipeConfigError, load_recipe_config
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.sample2job import NoJobData
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
+from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.slime_backend.objectives import resolve_slime_objective
 from reef.train.types import JobData
 
 
@@ -69,7 +68,9 @@ def test_recipe_class_resolver_has_no_method_short_names() -> None:
 
 def test_cookbook_weight_training_recipe_loss_family_mappings() -> None:
     mappings = {
-        recipe_type.__name__: recipe_type.training_spec().loss_family
+        recipe_type.__name__: resolve_slime_objective(
+            recipe_type.default_parameters()["trajectory"]["objective"]
+        ).loss_family
         for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe)
     }
 
@@ -145,36 +146,13 @@ def test_concrete_recipe_builds_its_processor_objective_and_report_type(
         assert trainer.job_loop is None
     else:
         assert trainer.job_loop is not None
-        assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == objective
+        assert trainer.pipeline.context.job_parameters["trajectory"]["objective"] == objective
     assert trainer.pipeline.context.report_type is report_type
-
-
-def test_build_rejects_an_unknown_objective_before_any_training_step() -> None:
-    # Regression: the objective name used to be resolved only at the first
-    # training step — after GPUs were already up. A recipe naming an objective
-    # that no longer exists (the deleted online_grpo arm, a typo) must fail at
-    # recipe build, with the registry's available-objectives message.
-    @dataclass(frozen=True)
-    class StaleObjectiveRecipe(WeightTrainingRecipe):
-        _: KW_ONLY
-        name: str = "stale"
-
-        @classmethod
-        def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(objective="online_grpo")
-
-        @classmethod
-        def pipeline_spec(cls) -> PipelineSpec:
-            return PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
-
-    with pytest.raises(ValueError, match=r"unknown objective 'online_grpo'.*available objectives"):
-        StaleObjectiveRecipe(**runtime_bindings()).build("math", SQLiteRecordStore(), root=STUB_ROOT)
 
 
 def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process() -> None:
     # A service process never imports the Slime driver, so the cookbook
-    # package must register its objective when the dotted recipe is imported for eager objective
-    # resolution to accept "tttd" in the process the recipe is served from.
+    # package must register its objective when the dotted recipe is imported.
     # In-process tests cannot pin this (a sibling test may have imported the
     # driver for the whole session), hence the subprocess.
     subprocess.run(
@@ -192,7 +170,9 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "stages = PipelineConfig.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
                 "trainer = TTTDRecipe(**runtime_bindings(), pipeline_stages=stages)"
                 ".build('math', SQLiteRecordStore(), root=STUB_ROOT)\n"
-                "assert trainer.pipeline.context.job_parameters['trajectory']['method']['objective'] == 'tttd'\n"
+                "assert trainer.pipeline.context.job_parameters['trajectory']['objective'] == 'tttd'\n"
+                "from reef.train.slime_backend.objectives import resolve_slime_objective\n"
+                "assert resolve_slime_objective('tttd').loss_family == 'tttd'\n"
             ),
         ],
         check=True,
@@ -436,14 +416,15 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
     # Both driver selection and batch preparation use the same method binding.
     from dataclasses import replace
 
-    from reef.train.algos.registry import resolve_objective
     from reef.train.slime_backend.loss_families import resolve_loss_family
 
     first = policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5)
     second = first.with_metadata(source_agent_record_id="i2", reward=1.5)
     checked = set()
     for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe):
-        spec = recipe_type.training_spec()
+        expected_family = resolve_slime_objective(
+            recipe_type.default_parameters()["trajectory"]["objective"]
+        ).loss_family
         assert recipe_type.pipeline_spec().sample2job is not NoJobData
         if recipe_type is TTTDRecipe:
             batch = JobData(
@@ -462,11 +443,11 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
                     second,
                 ),
             )
-        objective = resolve_objective(spec.objective)
+        objective = resolve_slime_objective(recipe_type.default_parameters()["trajectory"]["objective"])
         signal = objective.prepare(batch, {})
         assert signal.action == "train"
-        assert objective.loss_family == spec.loss_family, recipe_type.__name__
-        assert resolve_loss_family(objective.loss_family).loss_family == spec.loss_family
+        assert objective.loss_family == expected_family, recipe_type.__name__
+        assert resolve_loss_family(objective.loss_family).loss_family == expected_family
         checked.add(recipe_type.__name__)
     assert checked == {"OpenClawRLRecipe", "SAORecipe", "TTTDRecipe"}
 

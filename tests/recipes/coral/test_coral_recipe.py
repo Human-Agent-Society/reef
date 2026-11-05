@@ -16,7 +16,7 @@ reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef ch
 
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.train.algos.registry import resolve_objective
+from reef.train.slime_backend.objectives import resolve_slime_objective
 
 
 def _recipe_cls():
@@ -32,20 +32,18 @@ def coral_recipe(config):
     return _recipe_cls().from_environment({}, config=config, **runtime_bindings())
 
 
-def test_training_spec_binds_processor_and_grouped_machinery():
+def test_the_recipe_binds_processor_and_grouped_machinery():
     recipe_cls = _recipe_cls()
-    spec = recipe_cls.training_spec()
     stages = recipe_cls.pipeline_spec()
     from recipes.beta.coral.processor import CoralJobData, CoralSamples
 
     assert (stages.record2sample, stages.sample2job) == (CoralSamples, CoralJobData)
-    assert spec.objective == "tttd"
-    assert spec.loss_family == "tttd"
+    assert recipe_cls.default_parameters()["trajectory"] == {"objective": "tttd"}
 
 
 def test_importing_the_recipe_registers_the_reused_objective():
     _recipe_cls()
-    assert resolve_objective("tttd").loss_family == "tttd"
+    assert resolve_slime_objective("tttd").loss_family == "tttd"
 
 
 def test_example_pipeline_section_builds_the_coral_stages():

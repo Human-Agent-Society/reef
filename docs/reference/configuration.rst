@@ -1005,13 +1005,42 @@ job trains them.
        ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` request
 
 ``recipe.config.job_parameters`` is an object that a weight recipe sends with
-every job, beside ``method``. The training component
-reads it: for example ``scheduling`` (`Step scheduling
-<python-api.rst#training-objective>`__) or ``save_interval``. The component
-refuses a parameter that it does not take, and the job is not submitted. The
-recipe refuses a ``method`` key, because the recipe's objective is the
-method. A recipe that overrides ``parameters_by_kind`` decides where the setting
-goes.
+every job, over its default parameters. Reef does not read it. The training
+component owns it, and ``GET /reef/scenarios/{scenario}/contract`` serves its JSON
+Schema. The component refuses a parameter that it does not take, and the job is
+not submitted. A recipe that overrides ``configured_parameters`` decides where the
+setting goes.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Parameter
+     - Slime
+     - Tinker
+   * - ``objective``
+     - required: a registered name or a dotted reference
+     - required: a registered name or a dotted reference
+   * - ``learning_rate_schedule``
+     - optional
+     - optional
+   * - ``scheduling``
+     - optional (`Step scheduling <python-api.rst#training-objective>`__)
+     - optional
+   * - ``save_interval``
+     - optional
+     - optional
+   * - ``batch_size``, ``learning_rate``, ``kl_coef``
+     - no
+     - optional
+   * - ``dataset``
+     - a job without samples (`Dataset jobs on Slime`_)
+     - no
+   * - ``harbor``
+     - required on a task job, refused on another job
+     - no
+   * - ``rollout``
+     - no
+     - required on a task job, refused on another job
 
 .. code:: yaml
 
@@ -1625,17 +1654,16 @@ Generated tasks
 ~~~~~~~~~~~~~~~
 
 The built-in generated-task recipe,
-``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
-objective on the ``importance_sampling`` loss family: Tinker's built-in loss,
-or on Slime truncated importance sampling at ``--tis-clip`` (`Task jobs on
-Slime`_). Its stages are ``GeneratedTaskSamples`` and
+``reef.recipe.generated_tasks:GeneratedTaskRecipe``, names no objective. The
+deployment names one in ``recipe.config.job_parameters.objective``, as a dotted
+reference to a method that it provides. Its stages are ``GeneratedTaskSamples`` and
 ``GeneratedTaskJobData``. Without
 ``pipeline.record2sample.config.rounds`` no round runs, and the recipe trains
 only the train tasks that earlier generations saved in the scenario. Each
 job is a task job: the training component rolls the job's tasks out on its own
-sampler and trains on their rollouts, as
-``recipe.config.job_parameters.rollout`` says. The recipe requires that
-parameter.
+sampler and trains on their rollouts, as ``recipe.config.job_parameters`` says:
+``rollout`` on Tinker, ``harbor`` on Slime. The recipe refuses a config without
+the objective and the rollouts.
 
 .. code:: yaml
 
@@ -1643,6 +1671,7 @@ parameter.
      implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
      config:
        job_parameters:
+         objective: my_methods.objectives:MyObjective
          rollout:
            rollouts_per_task: 4
            environment: docker
@@ -1734,7 +1763,9 @@ whatever Tinker's batch size (``training.options.batch-size``) is:
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
 job's start weights, and the Slime component on its own rollout engines (see
-`Task jobs on Slime`_). The ``rollout`` job parameter configures them:
+`Task jobs on Slime`_). The ``rollout`` job parameter on Tinker, and the ``harbor``
+job parameter on Slime, configure them with the same keys. They say only where the
+samples come from; the ``objective`` parameter says how the samples train.
 
 .. container:: config
 
@@ -1789,7 +1820,7 @@ engines.
        sglang-mem-fraction-static: 0.5
 
 A task job loads the workers' weights into the engines, runs the rollouts the
-``rollout`` parameter describes, frees the colocated engines' memory, and
+``harbor`` parameter describes, frees the colocated engines' memory, and
 trains the samples of each task's group with the job's objective. The
 engines answer OpenAI text chat: system, user and assistant text messages, no
 tools. A task job whose options give the engines no GPUs fails. A LoRA actor
@@ -1797,8 +1828,8 @@ cannot have rollout engines, since Reef's adapters do not reach Slime's weight
 transfer.
 
 The job's objective must have a loss family that Slime trains; the component
-checks it when the job is submitted, before any rollout. The generated-task
-objective, ``task_group``, trains on the ``importance_sampling`` family: the
+checks it when the job is submitted, before any rollout. A method that a
+deployment provides can select the ``importance_sampling`` family: the
 loss of a response token is ``-A * sg[min(p / q, c)] * log p``, with ``q`` the
 engines' log-probability of the sampled token, ``c`` Slime's ``--tis-clip``
 (default 2) and Slime's per-sample mean as the reduction. Tinker's loss of

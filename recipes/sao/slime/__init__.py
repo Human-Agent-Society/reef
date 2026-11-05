@@ -13,8 +13,12 @@ from typing import Any
 
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult, register_loss_family
 from reef.train.slime_backend.data_builder import build_policy_rollout_data, validate_policy_columns
+from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.types import JobData, trajectories
 
 _logger = logging.getLogger(__name__)
 
@@ -426,4 +430,29 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
     _logger.info("SAO: freezing critic attention via patterns %s", patterns)
 
 
-__all__ = ["SaoAlgorithm", "SaoSchedule", "SaoSettings", "SaoStepPlan", "build_sao_rollout_data", "sao_sample_row"]
+@register_slime_objective
+class SaoObjective(SlimeObjective):
+    name = "sao"
+    loss_family = "sao"
+    # The SAO ratio is clipped on both sides, so passes after the first stay bounded.
+    supports_multiple_epochs = True
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
+        steps = next_steps(state)
+        return TrainingSignal(
+            "train",
+            {"steps": steps},
+            {"steps": steps, "rollouts": len(samples)},
+        )
+
+
+__all__ = [
+    "SaoAlgorithm",
+    "SaoObjective",
+    "SaoSchedule",
+    "SaoSettings",
+    "SaoStepPlan",
+    "build_sao_rollout_data",
+    "sao_sample_row",
+]

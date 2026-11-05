@@ -267,8 +267,8 @@ rollout. With it, each run of ``save_interval`` optimizer steps is one
 rollout. The workers train the rollout's optimizer steps, and the component
 then saves the paired Hugging Face and Megatron checkpoints. A checkpoint's
 step is the job's optimizer steps up to it. The snapshot is the Hugging Face export, or with LoRA
-the PEFT adapter. A job's ``method`` parameter selects the loss family and
-learning-rate schedule. The actor workers switch to it when they receive the
+the PEFT adapter. A job's ``objective`` parameter selects the loss family, and its
+``learning_rate_schedule`` parameter the learning-rate schedule. The actor workers switch to it when they receive the
 job's data.
 
 The job's last checkpoint records the objective's state after the job's
