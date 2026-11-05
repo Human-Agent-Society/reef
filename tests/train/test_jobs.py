@@ -310,7 +310,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
     pending = job_trainer(JobLoopState("fake:base", job=RunningJob("job-2")), component)
     component.statuses["job-2"] = JobStatus("job-2", "finished")
     assert not pending.has_pending_commit
-    assert pending.run_once() is not None
+    assert pending.advance_job() is not None
     assert pending.has_pending_commit
     with pytest.raises(CommitPending, match="waits for its commit"):
         pending.start_from(Artifact.local(Path("/releases/old")))
@@ -332,7 +332,7 @@ def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tm
     component = StartDuringStatus()
     trainer = job_trainer(JobLoopState("/start", RunningJob("job-1")), component)
     component.trainer = trainer
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert not trainer.has_pending_commit and component.cancelled == ["job-1"]
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old")
 
@@ -342,28 +342,28 @@ def test_a_restarted_trainer_polls_its_running_job_before_it_reserves_a_batch(co
     trainer = job_trainer(JobLoopState("fake:base", job=RunningJob("job-1")), component)
     component.statuses["job-1"] = JobStatus("job-1", "running")
     assert trainer.job_running
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert trainer.pending_job_data is None and component.jobs == []
     saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
     component.statuses["job-1"] = JobStatus("job-1", "running", (saved,))
-    published = trainer.run_once()
+    published = trainer.advance_job()
     assert published is not None and published.metrics["training_job"]["event"] == "checkpoint"
     assert trainer.pending_job_data is None
-    trainer.commit(trainer.prepare_commit(published))
+    trainer.settle_commit(trainer.prepare_commit(published))
     assert JobLoopState.from_dict(trainer.state).job == RunningJob("job-1", 1)
 
 
 @pytest.mark.unit
 def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_start(component):
     trainer = job_trainer(JobLoopState("/start", RunningJob("lost")), component)
-    ended = trainer.run_once()
+    ended = trainer.advance_job()
     assert ended is not None and ended.metrics["training_job"]["event"] == "failed"
-    trainer.commit(trainer.prepare_commit(ended))
+    trainer.settle_commit(trainer.prepare_commit(ended))
     state = JobLoopState.from_dict(trainer.state)
     assert (state.job, state.start, state.finished_jobs) == (None, "/start", 1)
     # With the job ended, the ready batch becomes the next job, from the kept start.
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     [job] = component.jobs
     assert job.start == "/start"
 
@@ -396,25 +396,25 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     )
     [ended] = stages
     make_samples(trainer)
-    submitted = trainer.run_once()
-    trainer.commit(trainer.prepare_commit(submitted))
+    submitted = trainer.advance_job()
+    trainer.settle_commit(trainer.prepare_commit(submitted))
     [job] = component.jobs
     saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
     component.statuses[job.job_id] = JobStatus(job.job_id, "running", (saved,))
-    published = trainer.run_once()
-    trainer.commit(trainer.prepare_commit(published))
+    published = trainer.advance_job()
+    trainer.settle_commit(trainer.prepare_commit(published))
     assert ended.outcomes == [], "neither the submission nor a checkpoint publication ends the job"
 
     metrics = {"rollout_rewards": {"task-a": [1.0, 0.0]}}
     component.statuses[job.job_id] = JobStatus(job.job_id, "finished", (saved,), metrics)
-    finished = trainer.run_once()
+    finished = trainer.advance_job()
     prepared = trainer.prepare_commit(finished)
     assert ended.outcomes == [], "the end is not durable before its commit settles"
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     assert ended.outcomes == [], "the samples service reads the end, not the commit"
     make_samples(trainer)
     assert ended.outcomes == [JobOutcome(job.job_id, "fake", "finished", metrics)]
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     make_samples(trainer)
     assert len(ended.outcomes) == 1, "a settled commit is not applied again"
 
@@ -481,10 +481,10 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
 
     def train(record: TrainingRequest) -> dict:
         pipeline.queue_requests([record])
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         job = component.jobs[-1]
         component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         return dict(job.parameters)
 
     assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"objective": "sft", "learning_rate": 2e-5}
