@@ -51,7 +51,7 @@ curl -fsS -H 'x-reef-scenario: reefine-example' \
 ```
 
 The first release is the recipe's seed, one starter skill, rendered for pi.
-Note its `release_id`.
+Note its `artifact_id`.
 
 ## 3. Ask for a change
 
@@ -59,7 +59,7 @@ Send the request, with the release id from the previous step:
 
 ```bash
 curl -fsS -H 'x-reef-scenario: reefine-example' -H 'Content-Type: application/json' \
-  -d '{"text": "When I ask you to fix a bug, reproduce it with a failing test before editing the code.", "session": "example", "release_id": "<release_id>"}' \
+  -d '{"text": "When I ask you to fix a bug, reproduce it with a failing test before editing the code.", "session": "example", "artifact_id": "<artifact_id>"}' \
   http://127.0.0.1:8901/reef/train
 ```
 

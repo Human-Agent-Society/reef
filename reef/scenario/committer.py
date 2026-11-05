@@ -834,19 +834,23 @@ class ScenarioCommitter:
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
             # The durable release must exist before inference can take the committed selection.
-            published_ref = artifacts.publish(
-                local_artifact,
-                expected_parent=checkpoint,
-                metadata=self.release_metadata(
+            published_ref = self.published_attempt(publication, checkpoint) if durable else None
+            if published_ref is None:
+                published_ref = artifacts.publish(
                     local_artifact,
-                    prepared,
-                    next_step,
-                    component=component,
-                    active_artifact=None if activated else head,
-                ),
-                advance_heads=not durable,
-                activate=False,
-            )
+                    expected_parent=checkpoint,
+                    metadata=self.release_metadata(
+                        local_artifact,
+                        prepared,
+                        next_step,
+                        component=component,
+                        active_artifact=None if activated else head,
+                    ),
+                    advance_heads=not durable,
+                    activate=False,
+                )
+            else:
+                artifacts.discard(local_artifact)
             if activated:
                 self._activate(artifacts.resolve(published_ref))
             record = self._append_commit_record(
@@ -866,6 +870,22 @@ class ScenarioCommitter:
             raise
 
         self.finish_committed_step(prepared, record, trainer, expected=head, expected_checkpoint=checkpoint)
+
+    def published_attempt(self, publication: SavedArtifactPublication, checkpoint: SnapshotRef) -> SnapshotRef | None:
+        """The release that an earlier attempt of ``publication`` stored, or None when no attempt stored one.
+
+        A retry after a failed commit names the same artifact, so it publishes nothing new, and the artifact ID
+        names exactly one release. Raise ``ArtifactConflict`` when that release has another parent: then it is
+        no attempt of this publication.
+        """
+        artifact_id = publication.artifact.artifact_id
+        try:
+            stored = self._artifacts.repository.backend.artifact_snapshot(artifact_id)
+        except ArtifactNotFound:
+            return None
+        if stored.parent_revision != checkpoint.revision:
+            raise ArtifactConflict(f"artifact {artifact_id!r} is already in release {stored.revision!r}")
+        return stored
 
     def release_metadata(
         self,
