@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from recipes.task_group.tinker import TaskGroupTinkerObjective
 import yaml
 from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     DESCRIPTION,
@@ -56,6 +55,7 @@ from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling import workspace_reply
 from recipes.beta.autoenvscaling.checks import CheckResult, PassRateBand
 from recipes.beta.autoenvscaling.designer import AgentTools, TaskVariant
+from recipes.task_group.tinker import TaskGroupTinkerObjective
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
@@ -72,8 +72,8 @@ from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenT
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.train.tinker_backend.objectives import resolve_tinker_objective
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.train.tinker_backend.objectives import resolve_tinker_objective
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
 
