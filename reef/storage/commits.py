@@ -457,6 +457,11 @@ class CommitSnapshots(ABC):
     def locate(self, records: Sequence[CommitRecord]) -> tuple[CommitRecord, ...]: ...
 
 
+def encode_commit(record: CommitRecord) -> str:
+    """The JSON text that a commit history stores for ``record``."""
+    return json.dumps(record.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def active_record(records: Sequence[CommitRecord]) -> CommitRecord | None:
     """The newest record of ``records``, a commit history in step order, that activates a snapshot; ``None`` when
     no record does (the creation artifact is active)."""
