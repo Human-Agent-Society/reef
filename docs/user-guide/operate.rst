@@ -909,6 +909,25 @@ Reef makes these calls one at a time, so the methods must return quickly.
 ``ScenarioLimits``. If you set ``scenario-admission``, do not set them: Reef
 refuses that configuration.
 
+Upgrade to commit records without storage locations
+---------------------------------------------------
+
+This Reef writes ``reef-commit/8`` records. These records hold artifact IDs, and
+no storage location. Older records stay as they are, and Reef still reads them.
+Reef also stops sending ``release_id`` and ``parent_release_id`` in harness
+answers.
+
+#. Stop every Reef process that writes to the deployment.
+#. Back up the deployment (see `Back up a deployment`_).
+#. Upgrade Reef, and upgrade ``reef-client`` on each machine with an install.
+   An older ``reef-client`` fails on the new harness answers. A new one reads
+   an existing install, and updates the install at its next sync.
+#. Start Reef. It binds the artifact IDs of older records when it opens each
+   scenario. This step can run again after a stop.
+
+The first new record is the point of no return. An older Reef cannot read it,
+so a rollback needs the backup from step 2.
+
 Back up a deployment
 --------------------
 
