@@ -19,9 +19,9 @@ engines load its weights from files.
 |                          | and saves the job's own. Without a serving    |
 |                          | session, it also reserves the job's GPUs      |
 +--------------------------+-----------------------------------------------+
-| Slime serving session    | the rollout engines of task jobs, their       |
-| (from the first task job | router and the training GPUs, across jobs     |
-| until the component      |                                               |
+| Slime serving session    | the rollout engines of task jobs and dataset  |
+| (from the first such job | jobs, their router and the training GPUs,     |
+| until the component      | across jobs                                   |
 | closes)                  |                                               |
 +--------------------------+-----------------------------------------------+
 | Inference component      | SGLang or vLLM engines on their own GPUs,     |
