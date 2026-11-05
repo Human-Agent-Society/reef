@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Self
 
 from reef.pipeline_context import PipelineContext
-from reef.record2sample import Record2Sample, ReportContext, ReportSamples
+from reef.record2sample import Record2Sample, ReportContext, ReportSamples, SkippedReport
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample
@@ -34,8 +34,10 @@ class SAOSamples(ReportSamples):
     ) -> Self:
         return cls(context, SampleAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectorySample:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         sample = self.assembly.build(context, context.require_score())
+        if isinstance(sample, SkippedReport):
+            return sample
         return sample.with_training(rollout_created_at=context.ends[-1].created_at)
 
 

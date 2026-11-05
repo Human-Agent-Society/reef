@@ -28,7 +28,14 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import (
+    GroupDecision,
+    Record2Sample,
+    ReportContext,
+    ReportGrouping,
+    ReportSamples,
+    SkippedReport,
+)
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample, trajectories
@@ -156,11 +163,13 @@ class CoralSamples(ReportSamples):
     ) -> Self:
         return cls(context, CoralSettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectorySample:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         coral = coral_metadata(context)
         if coral is None:
             raise ValueError("CoralJobData requires metadata.coral with a commit_hash")
         sample = self.assembly.build(context, context.require_score())
+        if isinstance(sample, SkippedReport):
+            return sample
         artifact_ids = attempt_artifact_ids(context)
         if len(artifact_ids) > 1:
             raise ValueError(f"attempt {coral['commit_hash'][:12]} spans artifacts {sorted(artifact_ids)}")

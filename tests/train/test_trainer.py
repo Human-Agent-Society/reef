@@ -755,24 +755,65 @@ def test_the_slime_sao_row_defaults_the_action_mask_to_the_loss_mask_of_a_render
     assert producing_artifact_id == "artifact-1"
 
 
-def test_reported_samples_leave_rendering_and_tensor_validation_to_the_training_component() -> None:
-    from reef.train.slime_backend.data_builder import to_slime_rollout_data
-
+def test_reported_samples_without_policy_loss_are_skipped_before_training_component() -> None:
     processor = sao_pipeline(PipelineContext("math"))
     processor.push(served_call("i1", 1))
     processor.push(report("r1", "i1", 1.0))
-    batch = processor.build_job_data(1)
-    (sample,) = batch.samples
-    # The stage stores the trajectory without tensors; a job that is prepared without rendering it fails explicitly.
-    assert "tokens" not in sample.training
-    prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
-    assert prepared.payload is not None
-    with pytest.raises(ValueError):
-        to_slime_rollout_data(prepared.payload)
-    assert processor.build_job_data(1) is batch
-    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
-    processor.release_job_data(batch.data_id)
-    assert processor.build_job_data(1).samples == batch.samples
+    assert processor.build_job_data(1) is None
+    assert processor.operational_metrics()["skipped_reports_total"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("include_valid_reference", "accept_multi_turn"),
+    ((False, False), (True, False), (True, True)),
+    ids=("single-reference", "multi-reference-default", "multi-reference-enabled"),
+)
+def test_a_tensorless_report_is_skipped_and_later_reports_train(
+    include_valid_reference: bool, accept_multi_turn: bool, caplog
+) -> None:
+    records = SQLiteRecordStore()
+    references: tuple[str, ...] = ("tensorless",)
+    if include_valid_reference:
+        valid_first = inference("valid-first")
+        records.append(replace(valid_first, payload={**valid_first.payload, "artifact_id": "artifact-1"}))
+        references = ("valid-first", "tensorless")
+    records.append(served_call("tensorless", 1))
+    records.append(report("tensorless-report", references, 1.0))
+    component = RecordingComponent()
+    trainer = preparing_trainer(
+        records,
+        pipeline_factory=partial(sao_pipeline, accept_multi_turn=accept_multi_turn),
+        job_loop=JobLoop(component, scenario="math"),
+    )
+    make_samples(trainer)
+    assert trainer.run_once() is None
+    assert not component.batches
+    assert trainer.operational_metrics()["skipped_reports_total"] == 1
+    assert "skips report tensorless-report" in caplog.text
+
+    valid_later = served_call("valid-later", 1)
+    records.append(
+        replace(
+            valid_later,
+            payload={
+                **valid_later.payload,
+                "tokens": [1, 2],
+                "loss_mask": [0, 1],
+                "rollout_log_probs": [-0.2],
+            },
+        )
+    )
+    records.append(report("valid-later-report", "valid-later", 1.0))
+    make_samples(trainer)
+    submitted = trainer.run_once()
+
+    assert submitted is not None and submitted.metrics["training_job"]["event"] == "submitted"
+    assert len(component.batches) == 1
+    assert component.batches[0].samples[0].source_agent_record_ids == ("valid-later", "valid-later-report")
+    prepared = trainer.prepare_commit(submitted)
+    assert {*references, "tensorless-report"} <= prepared.consumed_ids
+    trainer.commit(prepared)
 
 
 def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp_path, caplog):

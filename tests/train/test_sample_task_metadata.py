@@ -12,7 +12,10 @@ TASK = {"name": "openenv-00012-003-deduction", "path": "/tasks/openenv-00012-003
 
 def inference(record_id: str) -> AgentRecord:
     return AgentRecord.create(
-        scenario="play", request_type=RequestType.INFERENCE, payload={}, agent_record_id=record_id
+        scenario="play",
+        request_type=RequestType.INFERENCE,
+        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+        agent_record_id=record_id,
     )
 
 
@@ -36,7 +39,9 @@ def assembled(metadata: dict[str, object] | None) -> TrajectorySample:
     assembly = PlainAssembly(SampleAssemblySettings())
     record = inference("rec-1")
     context = ReportContext(report=report("rec-1", metadata=metadata), score=1.0, inferences=(record,))
-    return assembly.build(context, 1.0)
+    sample = assembly.build(context, 1.0)
+    assert isinstance(sample, TrajectorySample)
+    return sample
 
 
 def test_a_report_that_names_its_task_puts_it_on_the_sample() -> None:

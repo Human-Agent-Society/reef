@@ -279,6 +279,7 @@ class ReportSamples(Record2Sample):
         #: Inference records that ended reports own. They are released once no live report references them.
         self.owned_sources: set[str] = set()
         self.groups: dict[Hashable, ReportGroup] = {}
+        self.skipped_reports_total = 0
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
@@ -302,6 +303,13 @@ class ReportSamples(Record2Sample):
         context = report_candidate(record_set).context
         sample = self.make_sample(context)
         if isinstance(sample, SkippedReport):
+            logger.warning(
+                "scenario %r skips report %s: %s",
+                self.scenario,
+                context.report.agent_record_id,
+                sample.reason,
+            )
+            self.skipped_reports_total += 1
             return SampleResult.skipped()
         if not isinstance(sample, (TrajectorySample, TaskSample)):
             raise TypeError(f"{type(self).__name__}.make_sample must return a Sample")
@@ -535,6 +543,7 @@ class ReportSamples(Record2Sample):
             "oldest_report_wait_seconds": (
                 max(0.0, time.time() - min(report.created_at for report in waiting)) if waiting else 0.0
             ),
+            "skipped_reports_total": self.skipped_reports_total,
         }
 
 
