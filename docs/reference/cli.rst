@@ -54,6 +54,21 @@ files. It prints each problem, and it exits with status 1 when it finds one and
 0 when it finds none. See the `upgrade steps
 <../user-guide/operate.rst#upgrade-to-commit-records-without-storage-locations>`__.
 
+Rewrite older commit records
+----------------------------
+
+.. code-block:: bash
+
+   reef migrate-commits -c path/to/stack.yaml
+   reef migrate-commits -c path/to/stack.yaml --apply
+
+Without ``--apply``, the command changes nothing, and it prints how many records
+of each scenario are not in the current format. With ``--apply``, it binds their
+artifact IDs and rewrites them. It prints each problem, and it exits with status
+1 when it finds one. A scenario with a problem keeps its records. Run it again
+at any time: a record in the current format stays as it is. See the `steps
+<../user-guide/operate.rst#rewrite-older-commit-records>`__.
+
 Selecting the model
 -------------------
 
