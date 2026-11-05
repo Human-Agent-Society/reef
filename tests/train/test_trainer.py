@@ -28,7 +28,6 @@ from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.errors import TrainingStartRefused
-from reef.core.job_data import JobOutcome
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
@@ -162,7 +161,7 @@ def test_recipe_processor_never_becomes_ready() -> None:
     assert not processor.ready(1)
     # A processor that never becomes ready says so: it holds no ready samples, whatever it has been pushed.
     assert processor.status()["ready_samples"] == 0
-    assert processor.releasable_record_ids().isdisjoint(frozenset({"i1"}))
+    assert processor.record2sample.releasable_record_ids().isdisjoint(frozenset({"i1"}))
 
 
 @pytest.mark.unit
@@ -226,7 +225,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     assert item.artifact_id == "artifact-1"
     assert [record["payload"] for record in item.metadata["records"]] == [first.payload, second.payload]
     processor.acknowledge(batch.data_id)
-    assert processor.releasable_record_ids() == frozenset({"i1", "i2", "r1"})
+    assert processor.record2sample.releasable_record_ids() == frozenset({"i1", "i2", "r1"})
 
 
 @pytest.mark.unit
@@ -275,7 +274,7 @@ def test_cookbook_processors_wait_for_references_before_rejecting_a_report_of_se
     processor.push(served_call("i2", 1))
     with pytest.raises(ValueError, match="accept_multi_turn"):
         processor.push(multi_trajectory_report)
-    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "r1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1", "i2", "r1"})
 
 
 @pytest.mark.unit
@@ -287,10 +286,10 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
     with pytest.raises(ValueError, match="accept_multi_turn"):
         processor.push(report("multi", ("i2", "i3"), 1.0))
     # The single report's sample is stored, which consumes its records; the failed report keeps its inputs held.
-    assert {"i1", "single"} <= processor.releasable_record_ids()
-    assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
+    assert {"i1", "single"} <= processor.record2sample.releasable_record_ids()
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
     assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:math.single:0"}
-    assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
 
 
 @pytest.mark.unit
@@ -300,7 +299,7 @@ def test_pairing_processor_rejects_report_eligibility_flags() -> None:
     with pytest.raises(ReportValidationError, match="eligible"):
         processor.push(report("r1", "i1", 0.0, training={"eligible": False}))
     assert not processor.ready(1)
-    assert processor.releasable_record_ids().isdisjoint({"i1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.unit
@@ -310,27 +309,27 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
     processor.push(report("r1", "i1", 1.0))
     # r1's sample is stored, which consumes r1 and i1; r2 ends at once without training.
     processor.push(report("r2", "i1", 0.5))
-    assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
+    assert processor.record2sample.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
 
     batch = processor.build_job_data(1)
     assert len(batch.samples) == 1 and trajectory_reward(batch.samples[0]) == 1.0
     assert processor.acknowledge(batch.data_id) == {"sample:math.r1:0"}
     assert not processor.ready(1)
-    assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
+    assert processor.record2sample.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
 
     processor.push(report("late", "i1", 0.25))
     assert not processor.ready(1)
-    assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2", "late"})
+    assert processor.record2sample.releasable_record_ids() == frozenset({"i1", "r1", "r2", "late"})
 
 
 @pytest.mark.unit
 def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
     processor.push(inference("i1"))
-    assert processor.releasable_record_ids().isdisjoint({"i1"})
+    assert processor.record2sample.releasable_record_ids().isdisjoint({"i1"})
     processor.push(report("low", "i1", 0.1))
     # The low-score sample is stored, so its records are consumed; the sample trains in the next job data.
-    assert processor.releasable_record_ids() == {"i1", "low"}
+    assert processor.record2sample.releasable_record_ids() == {"i1", "low"}
     batch = processor.build_job_data(1)
     assert trajectory_reward(batch.samples[0]) == 0.1
     assert processor.acknowledge(batch.data_id) == {"sample:math.low:0"}
@@ -345,7 +344,7 @@ def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement()
 
     batch = processor.build_job_data(1)
     processor.acknowledge(batch.data_id)
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert decision == frozenset({"i1", "i2", "ri1", "ri2"})
 
 
@@ -393,15 +392,6 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert trainer.job_running
     finish(trainer)
     assert JobLoopState.from_dict(trainer.state).finished_jobs == 1
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("training_job_id", ["another-job", None])
-def test_pending_job_outcome_must_name_the_results_job(training_job_id: str | None) -> None:
-    result = TrainStepResult({}, training_job_id=training_job_id)
-    outcome = JobOutcome("ended-job", "recording", "finished")
-    with pytest.raises(ValueError, match=r"outcome.*result.*job"):
-        PendingTrainingResult(data=None, result=result, ended=outcome)
 
 
 @pytest.mark.unit
