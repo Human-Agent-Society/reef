@@ -35,7 +35,7 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 MARKER = "SHOW-YOUR-WORK"
 SEED_TEXT = "Answer briefly."
@@ -99,7 +99,7 @@ def gepa_backend(
     return build_harness_backend(recipe, "demo", releases), releases
 
 
-def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainStepResult:
+def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainingCommit:
     """Step ``number`` on ``samples``, decided by the compare policy on the mean."""
     policy = ComparePolicy(backend, statistic="mean")
     return backend_step(backend, JobData(f"demo:{number}", samples), state, policy, scenario_step=number - 1)
@@ -119,7 +119,7 @@ def committed(archive: Archive) -> dict[str, Any]:
     return HarnessState(method_files={ARCHIVE_FILE: json.dumps(archive.to_state())}).to_json()
 
 
-def archive_of(result: TrainStepResult) -> Archive:
+def archive_of(result: TrainingCommit) -> Archive:
     """The archive a step committed."""
     return Archive.from_state(json.loads(HarnessState.from_json(result.state).method_files[ARCHIVE_FILE]))
 

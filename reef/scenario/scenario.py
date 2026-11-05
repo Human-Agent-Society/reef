@@ -34,7 +34,7 @@ from reef.storage.scenario import ScenarioStore
 from reef.train.component import TrainingComponent
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.training_requests import ScenarioTrainingRequests
-from reef.train.types import TrainStepResult
+from reef.train.types import TrainingCommit
 
 #: The keys of a ``Scenario.harness_snapshot_rows`` row that hold private storage locators.
 SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot"})
@@ -341,14 +341,13 @@ class Scenario:
             self.job_ends_read_step[component_trainer.component] = new[-1].step
         return component_trainer.trainer.produce_samples()
 
-    def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
+    def next_commit(self, component: str | None = None) -> TrainingCommit | None:
         """Prepare ``component``'s next commit: a job's submission, or a running job's checkpoint or end.
 
         The caller runs one step of the scenario at a time, as the dispatcher's cycle lock does. Thus no training
         commit of another trainer lands while the step runs, and an activation refuses to run while the job data is
         reserved. A running job's step reads only the job's state, so it takes no commit lock and reads no pipeline.
-        Another step of a lone trainer holds the commit lock. With several trainers it runs outside that lock, so a
-        trainer without a backend advances its record cursor without waiting for a long evaluation.
+        Another step of a lone trainer holds the commit lock. With several trainers it runs outside that lock.
         """
         trainer = self.trainer_for(component)
         # The staleness check measures data against the weights that serve; a scenario that loads no weights
@@ -365,13 +364,13 @@ class Scenario:
         ):
             return None
         if trainer.job_running:
-            return trainer.run_once()
+            return trainer.advance_job()
         if len(self.trainers) > 1:
             return self.prepare_job(component, serving)
         with self._committer.lock:
             return self.prepare_job(component, serving)
 
-    def prepare_job(self, component: str | None, serving: str | None) -> TrainStepResult | None:
+    def prepare_job(self, component: str | None, serving: str | None) -> TrainingCommit | None:
         """Give ``component``'s trainer the requests and the served artifacts of the commit history, and take its next
         step: a job's submission when its data is ready."""
         component_trainer = self._committer.component_trainer(component)
@@ -388,7 +387,7 @@ class Scenario:
         train_from_artifact_id = (
             self.artifact_status()[component_trainer.component]["training_start"] if trainer.job_due() else None
         )
-        return trainer.run_once(serving_artifact_id=serving, train_from_artifact_id=train_from_artifact_id)
+        return trainer.advance_job(serving_artifact_id=serving, train_from_artifact_id=train_from_artifact_id)
 
     def fail_pending_request(self, error: str, component: str | None = None) -> bool:
         """Store that ``component``'s reserved request failed with ``error``, so that its next job data is a skip row,
@@ -619,7 +618,7 @@ class Scenario:
             artifact, component=component, expected_selection=expected_selection, metrics=metrics
         )
 
-    def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
+    def commit(self, result: TrainingCommit, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record."""
         return self._committer.commit(result, component=component)
 

@@ -263,11 +263,11 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
         root=STUB_ROOT,
     )
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == {"i1", "r1", "drop-1", consumed_sample_id(stage_item_id("s", "r1:0"))}
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     assert "drop-1" in trainer.consumed_record_ids
     assert "drop-1" in trainer.pipeline.record2sample.releasable_record_ids(), "the commit does not reach the stage"
     make_samples(trainer)
@@ -394,13 +394,13 @@ def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
         root=STUB_ROOT,
     )
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert trainer.holds_untrained_records(), "the trainer keeps polling while the set waits"
     processor = trainer.pipeline
     assert isinstance(processor, WaitingPipeline)
     processor.later_tasks.finish("i1", SampleResult.ready((named_task("t1"),)))
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     batch = trainer.pending_job_data
     assert batch is not None and task_names(batch) == ["t1"]
 
@@ -495,7 +495,7 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
             samples=samples.for_trainer(component),
             root=STUB_ROOT,
         )
-        consumed[component] = trainer.prepare_commit(trainer.run_once()).consumed_ids
+        consumed[component] = trainer.prepare_commit(trainer.advance_job()).consumed_ids
     # Component a trained t1, so its next job takes t2; component b has not trained t1 yet.
     assert consumed == {"a": {consumed_sample_id("t2")}, "b": {consumed_sample_id("t1")}}
     session.close()
@@ -759,7 +759,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     if replay_before_commit:
         trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None
     batch = trainer.pending_job_data
     assert batch is not None
@@ -773,7 +773,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
         *references,
         consumed_sample_id(stage_item_id("s", "valid-report:0")),
     }
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     make_samples(trainer)
     assert not trainer.pipeline.record2sample.releasable_record_ids()
 
@@ -787,7 +787,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
     records.append(report("later-report", "aborted"))
     make_samples(restored)
-    assert restored.run_once() is None
+    assert restored.advance_job() is None
     assert "later-report" in restored.skipped_record_ids
     # Consumption changes training eligibility, not the stored diagnostic payload.
     assert records.get("s", "aborted") == aborted

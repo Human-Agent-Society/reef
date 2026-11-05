@@ -121,12 +121,12 @@ def commit_job(scenario: Scenario) -> bool:
     end; False when no job starts. The dispatcher's training service runs the job meanwhile."""
     trainer = scenario.trainer
     if not trainer.job_running:
-        submitted = scenario.prepare_training_step()
+        submitted = scenario.next_commit()
         if submitted is None:
             return False
         scenario.commit(submitted)
     while trainer.job_running:
-        result = scenario.prepare_training_step()
+        result = scenario.next_commit()
         if result is None:
             time.sleep(1.0)
             continue
