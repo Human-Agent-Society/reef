@@ -2,7 +2,7 @@
 
 A Tinker release holds only the manifest ``MANIFEST``. The training component
 writes the whole manifest (``reef.train.tinker_backend.checkpoint``), and the
-serving side reads only the sampler that it names (``TinkerRelease``).
+serving side reads only the sampler that it names (``TinkerArtifact``).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ MANIFEST = "tinker-checkpoint.json"
 
 
 @dataclass(frozen=True)
-class TinkerRelease:
+class TinkerArtifact:
     """The sampler weights that a Tinker release serves, on the service that holds them.
 
     Values: ``base_model`` is non-empty. ``sampler_path`` is a ``tinker://`` path to the weights that the service's
@@ -50,7 +50,7 @@ class TinkerRelease:
             )
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> TinkerRelease:
+    def from_dict(cls, value: Mapping[str, Any]) -> TinkerArtifact:
         """The sampler of the manifest ``value``; ``ValueError`` for a manifest of another version.
 
         The training fields of the manifest are ignored.
@@ -60,6 +60,6 @@ class TinkerRelease:
         return cls(value.get("base_model", ""), value.get("sampler_path", ""), value.get("service"))
 
     @classmethod
-    def read(cls, directory: Path) -> TinkerRelease:
+    def read(cls, directory: Path) -> TinkerArtifact:
         """The sampler of the manifest ``MANIFEST`` in ``directory``, as ``from_dict`` reads it."""
         return cls.from_dict(json.loads((directory / MANIFEST).read_text()))

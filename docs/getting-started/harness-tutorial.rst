@@ -142,9 +142,9 @@ starts on it. List the steps and their results:
 
 .. code:: bash
 
-   curl -s -H "x-reef-scenario: $SCENARIO" http://127.0.0.1:8901/reef/harness/releases
+   curl -s -H "x-reef-scenario: $SCENARIO" http://127.0.0.1:8901/reef/harness/artifacts
 
-Each step has a page, ``/reef/harness/releases/<step>/page``. A change to
+Each step has a page, ``/reef/harness/artifacts/<step>/page``. A change to
 code, such as a pi extension, waits for you to promote it.
 
 When you and Reef change the same file

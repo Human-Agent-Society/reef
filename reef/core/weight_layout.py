@@ -1,7 +1,7 @@
 """Saved weight files: what a training component's releases hold and what serving engines load.
 
-``ReleaseFormat`` is what a training component declares about its releases.
-``ReleaseWeights`` gives a serving runtime the ``WeightFiles`` of one release.
+``ArtifactFormat`` is what a training component declares about its releases.
+``ArtifactWeights`` gives a serving runtime the ``WeightFiles`` of one release.
 Training and inference both read these values, and neither imports the other.
 """
 
@@ -44,7 +44,7 @@ class WeightFiles:
 
 
 @dataclass(frozen=True)
-class ReleaseFormat:
+class ArtifactFormat:
     """The weight files that each release of a training component holds, which a serving runtime loads.
 
     ``layout`` is ``"full"``, a Hugging Face checkpoint at the release's root,
@@ -53,7 +53,7 @@ class ReleaseFormat:
     positive LoRA rank, and ``adapter_target_modules`` the non-empty names of
     the modules it adapts in the serving engine's naming (``("all",)`` for
     every linear module); both are set exactly for ``"adapter"``. A training
-    component declares the value (``TrainingComponent.release_format``), and
+    component declares the value (``TrainingComponent.artifact_format``), and
     the serving assembly reads it to configure the engines and to refuse a
     serving runtime that cannot load the releases.
     """
@@ -64,21 +64,21 @@ class ReleaseFormat:
 
     def __post_init__(self) -> None:
         if self.layout not in WEIGHT_LAYOUTS:
-            raise ValueError(f"ReleaseFormat.layout must be 'full' or 'adapter', got {self.layout!r}")
+            raise ValueError(f"ArtifactFormat.layout must be 'full' or 'adapter', got {self.layout!r}")
         if self.layout == "full":
             if self.adapter_rank is not None or self.adapter_target_modules:
-                raise ValueError("a full-weight ReleaseFormat has no adapter rank or target modules")
+                raise ValueError("a full-weight ArtifactFormat has no adapter rank or target modules")
             return
         rank = self.adapter_rank
         if isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0:
-            raise ValueError(f"an adapter ReleaseFormat needs a positive int adapter_rank, got {rank!r}")
+            raise ValueError(f"an adapter ArtifactFormat needs a positive int adapter_rank, got {rank!r}")
         modules = self.adapter_target_modules
         if (
             not isinstance(modules, tuple)
             or not modules
             or any(not isinstance(name, str) or not name for name in modules)
         ):
-            raise ValueError("an adapter ReleaseFormat needs a non-empty tuple of module names")
+            raise ValueError("an adapter ArtifactFormat needs a non-empty tuple of module names")
 
     def to_dict(self) -> dict[str, Any]:
         """The value as a JSON object, which ``from_dict`` reads back to an equal value."""
@@ -89,7 +89,7 @@ class ReleaseFormat:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ReleaseFormat:
+    def from_dict(cls, value: Mapping[str, Any]) -> ArtifactFormat:
         """Read a ``to_dict`` value; raise ``ValueError`` for another shape."""
         if (
             not isinstance(value, Mapping)
@@ -103,7 +103,7 @@ class ReleaseFormat:
         return cls(value["layout"], value.get("adapter_rank"), tuple(modules))
 
 
-class ReleaseWeights(ConfiguredPlugin, ABC):
+class ArtifactWeights(ConfiguredPlugin, ABC):
     """Where a serving runtime gets the weight files of a published release.
 
     ``weight_files(release, layout)`` takes the local directory ``release`` of
@@ -112,7 +112,7 @@ class ReleaseWeights(ConfiguredPlugin, ABC):
     releases give files of equal content. It raises ``ReefError`` when the
     release gives no files of ``layout``.
 
-    Purpose: the serving runtimes of ``reef.inference.serving`` call it at each load. ``ReleaseFiles``,
+    Purpose: the serving runtimes of ``reef.inference.serving`` call it at each load. ``ArtifactWeightFiles``,
     the default, reads the release's own files. A training backend whose
     releases name weights on a service instead names the plugin that fetches
     them (``TrainingDeployment.engine_weights``).

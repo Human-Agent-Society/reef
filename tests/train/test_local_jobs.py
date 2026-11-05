@@ -15,7 +15,7 @@ from tests.support.job_data import job_data_ref
 
 from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import write_json
 from reef.train import local_jobs
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
@@ -47,8 +47,8 @@ class GatedComponent(LocalJobComponent):
         return "gated"
 
     @property
-    def release_format(self) -> ReleaseFormat:
-        return ReleaseFormat("full")
+    def artifact_format(self) -> ArtifactFormat:
+        return ArtifactFormat("full")
 
     def default_start(self) -> DefaultStart:
         return DefaultStart()
