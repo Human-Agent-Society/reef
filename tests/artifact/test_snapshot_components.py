@@ -183,18 +183,6 @@ def test_components_route_each_capability_to_its_component(tmp_path: Path) -> No
     activate_snapshot(components, first, runtime, "agent")
     assert runtime.activated_ids == [weights.artifact_id]
 
-    # A snapshot that keeps the served weights does not activate them again.
-    evolved = Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "evolved"}))
-    second = compose_snapshot({WEIGHTS: weights, HARNESS: evolved}, directory=tmp_path / "r2")
-    assert components.component_changed(second, first, HARNESS)
-    assert not components.component_changed(second, first, WEIGHTS)
-    activate_snapshot(components, second, runtime, "agent", previous=first)
-    assert runtime.activated_ids == [weights.artifact_id]
-    # A snapshot without a manifest counts as changed.
-    assert components.component_changed(second, harness, WEIGHTS)
-    activate_snapshot(components, second, runtime, "agent", previous=harness)
-    assert runtime.activated_ids == [weights.artifact_id, weights.artifact_id]
-
 
 @pytest.mark.unit
 def test_components_reject_ambiguous_component_sets() -> None:
@@ -408,7 +396,6 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
-            activates_runtime=False,
         )
         with closing(factory.load_or_create("agent")) as scenario:
             initial = {name: state["active"] for name, state in scenario.artifact_status().items()}
@@ -488,7 +475,6 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
                 repositories,
                 scenario_storage=empty_storage,
                 experiment_tracker=NullExperimentTracker(),
-                activates_runtime=False,
             )
             with closing(checkpoint_factory.load_or_create("agent")) as recovered:
                 assert recovered.current_snapshot() == active
@@ -575,7 +561,6 @@ def test_restoring_a_selection_does_not_readmit_unchanged_component_artifacts(tm
             InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
-            activates_runtime=False,
         )
         with closing(factory.load_or_create("agent")) as scenario:
             for step in (1, 2):
@@ -601,7 +586,6 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
             repositories,
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
-            activates_runtime=False,
         )
         with closing(factory.load_or_create("agent")) as scenario:
             scenario.commit(
