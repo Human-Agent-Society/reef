@@ -36,7 +36,7 @@ from reef.storage.tasks import TaskStorage
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, PreparedCommit, TrainStepResult
+from reef.train.types import JobData, PreparedCommit, TrainingCommit
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ class JobDataReservation:
     Values: ``data`` is JobData. ``consumed_ids`` is None while the pipeline holds the reservation. Otherwise,
     ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})``: a failed request released
     its samples and consumed only that request.
-    Purpose: Trainer.reserve_job_data makes this phase; run_once replaces it with PendingTrainingResult once
+    Purpose: Trainer.reserve_job_data makes this phase; advance_job replaces it with PendingTrainingResult once
     submission or request skipping returns. It contains no training result or prepared commit.
     """
 
@@ -73,27 +73,27 @@ class JobDataReservation:
 class PendingTrainingResult:
     """A completed submission or job update awaiting its durable scenario commit.
 
-    Values: ``result`` is TrainStepResult. ``data`` is the reserved JobData for a submission or None for a polled
+    Values: ``result`` is TrainingCommit. ``data`` is the reserved JobData for a submission or None for a polled
     job update. ``consumed_ids`` is None,
     or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped request.
     ``prepared_commit`` is None until Trainer.prepare_commit prepares the commit. When set,
     ``result.state`` is a mapping, ``prepared_commit.algorithm_state == result.state`` and
     ``prepared_commit.training_job_id == result.training_job_id``.
-    Purpose: Trainer.run_once makes this phase. prepare_commit acknowledges its data once and records the snapshot,
-    which a retry of the preparation returns. Trainer.commit reads it only after scenario settlement and then clears
+    Purpose: Trainer.advance_job makes this phase. prepare_commit acknowledges its data once and records the snapshot,
+    which a retry of the preparation returns. Trainer.settle_commit reads it only after scenario settlement and then clears
     the pending phase.
     """
 
     data: JobData | None
-    result: TrainStepResult
+    result: TrainingCommit
     consumed_ids: frozenset[str] | None = None
     prepared_commit: PreparedCommit | None = None
 
     def __post_init__(self) -> None:
         if self.data is not None and not isinstance(self.data, JobData):
             raise TypeError("data must be JobData or None")
-        if not isinstance(self.result, TrainStepResult):
-            raise TypeError("a pending result needs TrainStepResult")
+        if not isinstance(self.result, TrainingCommit):
+            raise TypeError("a pending result needs TrainingCommit")
         if self.consumed_ids is not None and (
             self.data is None
             or not isinstance(self.consumed_ids, frozenset)
@@ -260,7 +260,7 @@ class Trainer:
             self.job_ends_read = restored.finished_jobs - (restored.job is None and restored.last_job is not None)
         self.pending_step: JobDataReservation | PendingTrainingResult | None = None
         # The result of the last pending step a commit put on record: committing it again is a second step.
-        self.recorded_result: TrainStepResult | None = None
+        self.recorded_result: TrainingCommit | None = None
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -378,7 +378,7 @@ class Trainer:
             return self._job_loop is not None and JobLoopState.from_dict(self._state).job is not None
 
     def job_due(self) -> bool:
-        """Whether ``run_once`` submits a job now: no job runs, no result waits for its commit, and the job's data
+        """Whether ``advance_job`` submits a job now: no job runs, no result waits for its commit, and the job's data
         is reserved or ready."""
         with self._lock:
             if self._job_loop is None or isinstance(self.pending_step, PendingTrainingResult):
@@ -567,10 +567,16 @@ class Trainer:
             self.job_ends_read = state.finished_jobs
             self._pipeline.job_ended(state.last_job)
 
+    def read_new_records(self) -> None:
+        """Move the record cursor of a trainer that trains nothing past the new records, which its pipeline ends. The
+        dispatcher calls it when records arrive."""
+        with self._lock:
+            self.read_records()
+
     def read_records(self) -> None:
         """Push every record after the record cursor into the pipeline and move the cursor. The samples service
-        calls it for a trainer that trains (``produce_samples``); a trainer that trains nothing calls it in its own
-        cycle, only to move the cursor. The caller holds the lock."""
+        calls it for a trainer that trains (``produce_samples``); ``read_new_records`` calls it for one that trains
+        nothing. The caller holds the lock."""
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -584,21 +590,19 @@ class Trainer:
                 self._data_offset += 1
                 self._data_sequence = sequence
 
-    def run_once(
+    def advance_job(
         self, *, serving_artifact_id: str | None = None, train_from_artifact_id: str | None = None
-    ) -> TrainStepResult | None:
-        """Consume available data and prepare the next commit, if any.
+    ) -> TrainingCommit | None:
+        """Move the job forward: submit the next job when its data is ready, or read the running job's progress. Return
+        the next commit, if any.
 
-        Returns ``None`` when this trainer trains nothing (it only advances
-        record consumption, because a non-training scenario still has to
-        advance its record cursor), when no job data is ready, or while a job runs
+        Returns ``None`` when this trainer trains nothing, when no job data is ready, or while a job runs
         with nothing new to commit. ``serving_artifact_id`` is the artifact
         that serves the scenario now, for the staleness check of the pipeline. ``train_from_artifact_id`` is the
         artifact of the training start, which a submitted job records for the job listing.
         """
         with self._lock:
             if not self.trains:
-                self.read_records()
                 return None
             if isinstance(self.pending_step, PendingTrainingResult):
                 return self.pending_step.result
@@ -611,7 +615,7 @@ class Trainer:
         # Submitting a job or reading its checkpoints can take a while.
         # Keep the job data reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
-            result: TrainStepResult | None
+            result: TrainingCommit | None
             failure = None if data is None or data.request is None else self._pipeline.request_failure(data.request.id)
             if data is None:
                 polled = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
@@ -648,7 +652,7 @@ class Trainer:
                 )
             return result
 
-    def skip_failed_request(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
+    def skip_failed_request(self, data: JobData, request: TrainingRequest, error: str) -> TrainingCommit:
         """Consume the request alone; the samples of its job data stay untrained."""
         with self._lock:
             pending = self.pending_step
@@ -656,7 +660,7 @@ class Trainer:
                 raise RuntimeError("trainer reservation changed while its request was being skipped")
             self._pipeline.release_job_data(data.data_id)
             self.pending_step = replace(pending, consumed_ids=self._pipeline.discard_request(request.id))
-        return TrainStepResult(dict(self._state), {"skipped": "request failed", "error": error})
+        return TrainingCommit(dict(self._state), {"skipped": "request failed", "error": error})
 
     def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
@@ -676,7 +680,7 @@ class Trainer:
         return data
 
     def prepare_commit(
-        self, result: TrainStepResult | None, correlation_metrics: Mapping[str, Any] | None = None
+        self, result: TrainingCommit | None, correlation_metrics: Mapping[str, Any] | None = None
     ) -> PreparedCommit:
         """Prepare the pending result without exposing its state as committed.
 
@@ -736,7 +740,7 @@ class Trainer:
             self.pending_step = replace(pending, prepared_commit=prepared)
             return prepared
 
-    def commit(self, prepared: PreparedCommit) -> None:
+    def settle_commit(self, prepared: PreparedCommit) -> None:
         """Expose one prepared state after its scenario commit has settled."""
         with self._lock:
             if self.pending_step is None:

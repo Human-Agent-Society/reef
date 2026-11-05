@@ -26,7 +26,7 @@ class HarnessState:
     directory to its text.
     Purpose: ``HarnessBackend`` reads it from the committed algorithm state
     with ``from_json`` and returns ``to_json`` of the next one in each
-    ``TrainStepResult``.
+    ``TrainingCommit``.
     """
 
     failure_streak: int = 0
