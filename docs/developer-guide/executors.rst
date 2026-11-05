@@ -57,7 +57,7 @@ model. Reef reads none of the parameters. The component contract is:
    ``start``, which the scenario's activation rule reads. The default is
    none; the harness component diffs the trees.
 ``import_start(release)``
-   Copy a published release into the component's own storage and return it
+   Copy a published snapshot into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
    when the component cannot start from those weights.
 ``start_jobs()``
@@ -68,7 +68,7 @@ model. Reef reads none of the parameters. The component contract is:
    keeps its job state on disk, such as Tinker's ``state_dir``, locks it
    here, so one process at a time runs its jobs.
 ``starts_from_artifacts``
-   False when ``import_start`` refuses every release; the default is true.
+   False when ``import_start`` refuses every snapshot; the default is true.
    A client reads it in the scenario contract before it offers a
    ``train-from``.
 ``name``
@@ -97,10 +97,10 @@ through ``reef.train.jobs.JobLoop``:
    served.
 #. A failed job ends like a finished one. Reef consumed the records of its data
    when it submitted the job, so they do not train again.
-#. For a ``train-from``, Reef first imports the release with
+#. For a ``train-from``, Reef first imports the snapshot with
    ``import_start`` and cancels the running job. It then writes the
-   ``train_from`` commit. The next job starts from the imported release. A
-   component that cannot load a release refuses it, and Reef answers the
+   ``train_from`` commit. The next job starts from the imported snapshot. A
+   component that cannot load a snapshot refuses it, and Reef answers the
    request with HTTP 400. Activating an artifact changes only what serves; the
    component never sees it.
 
@@ -130,8 +130,8 @@ Serving saved weights
 ---------------------
 
 Serving loads only the weights that a job saved and Reef published. It loads
-them when a scenario starts, when a committed release is activated, and when
-a person activates a release. No trainer holds a serving engine.
+them when a scenario starts, when a committed snapshot is activated, and when
+a person activates a snapshot. No trainer holds a serving engine.
 
 ``reef.inference.serving`` has two runtimes over an ``InferenceBackend``:
 
@@ -143,7 +143,7 @@ a person activates a release. No trainer holds a serving engine.
   current one.
 - ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
   weights. The engines start with the base model. Activating the base
-  artifact after another release loads its files from the artifact
+  artifact after another snapshot loads its files from the artifact
   repository.
 
 Each load gets a new runtime load ID, and every engine reports it afterwards.
@@ -166,7 +166,7 @@ The serving runtime checks the component's health every 30 seconds. The
 component names its process in each health report, so the control plane sees
 a component that restarted and runs no engines. After a failed check, the
 runtime pauses generation, starts the lost engines again (or replaces the
-dead ones), loads each scenario's active release into them, and resumes.
+dead ones), loads each scenario's active selection into them, and resumes.
 
 Engine supervision
 ------------------
@@ -266,7 +266,7 @@ training). Without the job parameter ``save_interval``, the job is one
 rollout. With it, each run of ``save_interval`` optimizer steps is one
 rollout. The workers train the rollout's optimizer steps, and the component
 then saves the paired Hugging Face and Megatron checkpoints. A checkpoint's
-step is the job's optimizer steps up to it. The release is the Hugging Face export, or with LoRA
+step is the job's optimizer steps up to it. The snapshot is the Hugging Face export, or with LoRA
 the PEFT adapter. A job's ``objective`` parameter selects the loss family, and its
 ``learning_rate_schedule`` parameter the learning-rate schedule. The actor workers switch to it when they receive the
 job's data.
@@ -280,11 +280,11 @@ the start's weights and objective state. The Tinker component does the same.
 Every driver loads Slime's latest checkpoint. A job therefore starts from
 the component's latest checkpoint; the start of the startup weights names the
 untrained weights, until the first rollout is saved. A scenario trains on Slime
-only when its root release holds the default start of the configured inputs
+only when its root snapshot holds the default start of the configured inputs
 (``root_start``). The component checks the start
 when Reef submits the job, and the driver again when the job runs: a queued
 job whose start an earlier job moved past fails. ``import_start`` refuses
-every release, so a Slime scenario refuses ``train-from``. Because the jobs
+every snapshot, so a Slime scenario refuses ``train-from``. Because the jobs
 continue one save root, a Slime deployment trains one scenario. A restarted
 job continues after its last recorded checkpoint. A restart can also stop a job after Megatron saved a
 rollout but before the component recorded it. The job then records that

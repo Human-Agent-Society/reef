@@ -25,7 +25,7 @@ DefaultServing = Literal["engines", "trainer"]
 class EngineWeights:
     """How Reef's engines serve releases that hold no weight files: what they load, and the plugin that fetches it.
 
-    Values: ``artifact_format`` is the format of the files that ``weights`` gives for each release. ``weights`` is a
+    Values: ``artifact_format`` is the format of the files that ``weights`` gives for each snapshot. ``weights`` is a
     ``ArtifactWeights`` plugin reference, ``package.module:ClassName`` or a module and config. Purpose: a training
     deployment returns it from ``engine_weights``; the serving assembly writes both into the engine runtime's
     config.

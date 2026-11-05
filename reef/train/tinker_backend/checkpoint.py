@@ -31,7 +31,7 @@ class TinkerCheckpoint:
     adapter that a serving runtime downloads to load into its own engines) are ``tinker://`` paths. ``service`` is the base URL of
     the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
-    writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole release, and reads them
+    writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole snapshot, and reads them
     back to start a job. The serving side reads the same manifest as a ``TinkerArtifact``.
     ``check_compatible`` is how the component refuses a checkpoint of another model or service.
     """

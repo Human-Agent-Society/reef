@@ -123,7 +123,7 @@ Implementation
   with ``reef.train.algos.schedule.schedule_job_data`` when it fits. Write each
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
-- Implement ``import_start`` to load a published release as the start of the
+- Implement ``import_start`` to load a published snapshot as the start of the
   next job. Raise ``ValueError`` when the framework cannot do this; Reef then
   refuses a ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
@@ -178,7 +178,7 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   they must not import a concrete integration or ``reef.train``. Implement
   ``InferenceBackend`` from ``reef/inference/interfaces.py``, including
   ``load_weight_files``, so that the serving runtimes in
-  ``reef/inference/serving.py`` can load published releases. Expose an inference
+  ``reef/inference/serving.py`` can load published snapshots. Expose an inference
   service factory through a dotted reference or the
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. Shared monitoring and engine recovery belong in
@@ -239,7 +239,7 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 - Declare the components in the owning recipe's ``build_components``; do not
   make a component choose a method or evaluate a candidate.
 - Test component behavior in ``tests/artifact/test_scenario_components.py`` or
-  ``tests/artifact/test_release_components.py``. Test storage backends against
+  ``tests/artifact/test_snapshot_components.py``. Test storage backends against
   the contracts in ``tests/artifact/test_reef_artifacts.py``.
 - Add scenario commit, activation, train-from, and recovery tests whenever
   persistence or activation ordering changes. Persisted-format changes require an RFC and a

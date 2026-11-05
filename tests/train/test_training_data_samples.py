@@ -268,7 +268,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
             )
         )
     ids = frozenset({"inference-0", "report-0", "inference-1", "report-1"})
-    assert ids <= processor.releasable_record_ids()
+    assert ids <= processor.record2sample.releasable_record_ids()
     # One job's data holds samples of one kind, in store order: the trajectory first, then the task.
     assert not processor.ready(2)
     batch = processor.build_job_data(1)

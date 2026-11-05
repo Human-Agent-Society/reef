@@ -433,7 +433,7 @@ def test_a_packed_job_trains_global_batch_size_packs_per_step(tmp_path, stacks) 
 @pytest.mark.unit
 def test_a_job_starts_only_from_the_weights_the_workers_hold(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    with pytest.raises(ValueError, match="cannot load a published release"):
+    with pytest.raises(ValueError, match="cannot load a published snapshot"):
         stack.component.import_start(tmp_path)
     job = TrainingJob(
         "elsewhere",
@@ -536,7 +536,7 @@ def test_the_default_start_is_the_startup_model_and_the_base_start_names_the_sta
 
 @pytest.mark.unit
 def test_a_trainer_starts_from_the_startup_weights_only_for_a_root_of_the_configured_inputs(tmp_path, stacks) -> None:
-    """Slime's workers load ``hf_checkpoint`` and cannot load a release, so a scenario trains only when its root came
+    """Slime's workers load ``hf_checkpoint`` and cannot load a snapshot, so a scenario trains only when its root came
     from the default start of the configured inputs; the refusal names both."""
     model = tmp_path / "model"
     model.mkdir()

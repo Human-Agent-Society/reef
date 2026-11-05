@@ -1,13 +1,13 @@
 """One HTML page per catalog step: why the version exists, what it changed, the evaluation's result, its setup, its chain.
 
-``GET /reef/harness/artifacts/{step}/page`` builds it from the releases row
-plus the source files of the release the step ran on, which each updated
+``GET /reef/harness/artifacts/{step}/page`` builds it from the snapshots row
+plus the source files of the snapshot the step ran on, which each updated
 file of the step's patch is read against. A step whose method returned a
 summary (``method_summary``) gets a Method summary section after Why, and a
 step whose method returned notes (``method_notes``) gets a Method notes
 section after Result. The step is the row's position in the catalog oldest
 first, the creation row being 0: a rejected step publishes nothing and its
-row carries the id of the release it ran on, so only the step names it.
+row carries the id of the snapshot it ran on, so only the step names it.
 
 The row readers here serve the request page too: the result, what the
 method said, the runs a rejected step missed and an evaluation that
@@ -85,16 +85,16 @@ RESULT_LABELS = {
 
 #: What each result means for the person reading the step, under the headline.
 RESULT_WORDS = {
-    "inactive": "Passed the checks and made a release that does not serve yet; a person activates it first.",
-    "selected": "Passed the checks and made a release.",
-    "rejected": "Did not pass the checks. The active release did not change.",
+    "inactive": "Passed the checks and made a snapshot that does not serve yet; a person activates it first.",
+    "selected": "Passed the checks and made a snapshot.",
+    "rejected": "Did not pass the checks. The active selection did not change.",
     "skipped": "No candidate reached the evaluation, so nothing changed.",
     "failed": "The step failed before evaluation. Nothing was published; see the error below before retrying.",
     "creation": "The tree this scenario started from, before any step ran.",
     "import": "A person imported an artifact beside the chain. It does not serve until a person activates it.",
     "sync": "A person synced the harness from their machine. It serves now, and the next step trains from it. "
     "Reef did not evaluate it.",
-    "recovery": "The release this process recovered at boot.",
+    "recovery": "The snapshot this process recovered at boot.",
 }
 
 
@@ -213,17 +213,17 @@ def result_of(row: Mapping[str, Any]) -> str:
 
 
 def served_step(rows: Sequence[Mapping[str, Any]]) -> int | None:
-    """The step of the active release: the index of the row the catalog marks ``active``; ``None`` when no
+    """The step of the active selection: the index of the row the catalog marks ``active``; ``None`` when no
     listed row is active."""
     return next((index for index, row in enumerate(rows) if row.get("active")), None)
 
 
 def before_artifact_id(row: Mapping[str, Any]) -> str | None:
-    """The release the step ran on: the parent of a release the step made, the release a rejected or skipped step
+    """The snapshot the step ran on: the parent of a snapshot the step made, the snapshot a rejected or skipped step
     ran on.
 
-    A rejected or skipped step's row carries the id of the release it ran
-    on, so its parent would be one release too far back."""
+    A rejected or skipped step's row carries the id of the snapshot it ran
+    on, so its parent would be one snapshot too far back."""
     selection_result = result_of(row)
     if selection_result in ("selected", "inactive"):
         parent = row.get("parent_artifact_id")
@@ -352,7 +352,7 @@ def why_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
             "import": "A person imported this artifact; Reef checked its files and did not evaluate it.",
             "sync": "A person synced the harness from their machine; Reef checked its files and did not "
             "evaluate it. It serves, and the next step trains from it.",
-            "recovery": "The release this process recovered at boot.",
+            "recovery": "The snapshot this process recovered at boot.",
         }
         return f"<p>{escape(words.get(str(operation), f'A {operation} commit.'))}</p>"
     request = metrics.get("training_request")
@@ -407,9 +407,9 @@ def diff_block(path: str, before: str, after: str, before_id: str | None, artifa
 def changed_file_html(
     path: str, after: str | None, row: Mapping[str, Any], before_files: Mapping[str, str] | None
 ) -> str:
-    """One file of a step's patch: a removal, a diff against the release the step ran on, or the new file's text.
+    """One file of a step's patch: a removal, a diff against the snapshot the step ran on, or the new file's text.
 
-    Without ``before_files`` (the release the step ran on is not restorable), a written file shows its new text
+    Without ``before_files`` (the snapshot the step ran on is not restorable), a written file shows its new text
     under ``write``, since the page cannot tell an update from a new file.
     """
     if after is None:
@@ -439,8 +439,8 @@ def what_changed_html(
     if row.get("operation") == "training":
         return '<p class="empty">no patch on record</p>'
     if row.get("operation") == "creation":
-        return '<p class="empty">nothing: this release is the seed tree</p>'
-    return '<p class="empty">nothing: the release changed without a step</p>'
+        return '<p class="empty">nothing: this snapshot is the seed tree</p>'
+    return '<p class="empty">nothing: the snapshot changed without a step</p>'
 
 
 def evaluation_token_counts(metrics: Mapping[str, Any]) -> tuple[int, int] | None:
@@ -466,7 +466,7 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     if unscored:
         words["rejected"] = (
             "The evaluation could not run: every candidate run failed before it was scored, so nothing judged "
-            "the change. The active release did not change."
+            "the change. The active selection did not change."
         )
     summary = (
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
@@ -538,12 +538,12 @@ def refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
 
 
 def setup_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
-    """The step's own ``training_request.requires`` items, then what its release carries from earlier steps.
+    """The step's own ``training_request.requires`` items, then what its snapshot carries from earlier steps.
 
-    ``GET /reef/harness`` answers the union over the release's chain
+    ``GET /reef/harness`` answers the union over the snapshot's chain
     (``required_by``) as ``requires``, so the page lists the same items split
     by the step that named them. A rejected or skipped row carries the id of
-    the release it ran on and published nothing, so only its own items show. The items the step
+    the snapshot it ran on and published nothing, so only its own items show. The items the step
     refused, under ``training_request.refused_requires``, close the section
     with their reason."""
     request = metrics.get("training_request")
@@ -579,13 +579,13 @@ def setup_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequenc
 
 
 def ran_on(other: Mapping[str, Any], artifact_id: Any) -> bool:
-    """Whether ``other`` is a child of ``artifact_id``: a step evaluated on it, or a sync whose release has it as
+    """Whether ``other`` is a child of ``artifact_id``: a step evaluated on it, or a sync whose snapshot has it as
     parent."""
     if not artifact_id:
         return False
     if other.get("operation") == "sync":
         return other.get("parent_artifact_id") == artifact_id
-    # Not the parent: a rejected or skipped row carries the id of the release it ran on, so its parent is the
+    # Not the parent: a rejected or skipped row carries the id of the snapshot it ran on, so its parent is the
     # grandparent.
     return before_artifact_id(other) == artifact_id
 
@@ -596,12 +596,12 @@ def chain_html(
     artifact_id = row.get("artifact_id")
     selection_result = result_of(row)
     if selection_result in ("rejected", "skipped", "failed"):
-        # The row carries the id of the release it ran on and published nothing, so that release's parent and
+        # The row carries the id of the snapshot it ran on and published nothing, so that snapshot's parent and
         # children are not its own.
         if selection_result == "rejected":
-            words = "the active release at this step; the candidate published nothing"
+            words = "the active selection at this step; the candidate published nothing"
         else:
-            words = "the active release at this step; nothing was evaluated"
+            words = "the active selection at this step; nothing was evaluated"
         return (
             '<dl class="details">'
             f'<div><dt>Ran on</dt><dd class="id">{escape(before_artifact_id(row) or "-")} ({escape(words)})</dd></div>'
@@ -682,7 +682,7 @@ def build_artifact_page(
 ) -> str:
     """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/artifacts`` lists them.
 
-    ``before_files`` is the source tree of the release the step ran on (see
+    ``before_files`` is the source tree of the snapshot the step ran on (see
     ``before_artifact_id``), which each updated file of the patch is read
     against; without it, a written file shows its new text instead of a diff.
     ``link_query`` is carried to the Chain's links, so a page opened through
@@ -698,7 +698,7 @@ def build_artifact_page(
     recorded = row.get("recorded_at")
     headline = [f'<span class="id">{escape(row.get("artifact_id"))}</span>']
     if served == step:
-        headline.append('<span class="chip">Active release</span>')
+        headline.append('<span class="chip">Active selection</span>')
     subtitle = f'<span class="headline">{"".join(headline)}</span>'
     if isinstance(recorded, (int, float)):
         subtitle += f"Recorded {stamp(recorded)}"
@@ -715,7 +715,7 @@ def build_artifact_page(
         eyebrow="Harness evolution",
         heading=f"Harness v{step}",
         subtitle=subtitle,
-        # The active release is this scenario's home; on its own page the crumb stays text.
+        # The active selection is this scenario's home; on its own page the crumb stays text.
         home="" if served is None or served == step else step_href(served, link_query),
         body=steps_nav(step, rows, link_query)
         + '<div class="stack">\n'

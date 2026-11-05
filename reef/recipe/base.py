@@ -66,7 +66,7 @@ class ServedEndpoint:
     """Where this Reef answers inference itself: what a recipe's own evaluation calls target.
 
     ``url`` is the service's base URL and ``token`` a bearer token it accepts.
-    ``component`` names the release component the recipe evolves when it is
+    ``component`` names the snapshot component the recipe evolves when it is
     one of several: its evaluation calls then leave that component's served
     hooks out, since the rollout runs a candidate of it.
     """
@@ -270,7 +270,7 @@ class Recipe:
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
@@ -295,7 +295,7 @@ class Recipe:
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: CommittedArtifacts | None = None,
+        artifacts: CommittedArtifacts | None = None,
         samples: SampleStore | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
@@ -311,9 +311,9 @@ class Recipe:
         the scenario session, and ``samples`` is the data items that it trains
         on. Each trainer gives them to its pipeline as its own
         (``SampleStore.for_trainer``, ``""`` for the only trainer).
-        ``releases`` reads the scenario's committed releases; each trainer
+        ``releases`` reads the scenario's committed snapshots; each trainer
         reads those of its own component. ``root`` is the scenario's root
-        release, where a new trainer starts; a recipe of several components
+        snapshot, where a new trainer starts; a recipe of several components
         gives each trainer its own component of it
         (``ScenarioComponents.component_artifact``).
         """
@@ -332,7 +332,7 @@ class Recipe:
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
-                    releases=None if releases is None else ComponentArtifacts(releases, component),
+                    artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
                     samples=None if samples is None else samples.for_trainer(""),
                     root=root,
                 ),
@@ -340,7 +340,7 @@ class Recipe:
         )
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        """The components that every release of the named scenario binds.
+        """The components that every snapshot of the named scenario binds.
 
         Each ``ComponentSpec`` gives the component's kind, the admission check
         run before it is published or restored, its import layout and the
@@ -350,13 +350,13 @@ class Recipe:
         return ScenarioComponents()
 
     def build_artifact_validator(self) -> ArtifactValidator:
-        """An admission check run beside the component's own before the recipe's release is published or restored.
+        """An admission check run beside the component's own before the recipe's snapshot is published or restored.
 
         Kept for recipes written before admission moved onto the component
         (``ComponentSpec.validator``, where a new recipe binds it):
         it joins the check of the one component the recipe serves, and on a
-        recipe that serves none it admits the release as a whole; inside a
-        composite that recipe's release is its component, so the check joins
+        recipe that serves none it admits the snapshot as a whole; inside a
+        composite that recipe's snapshot is its component, so the check joins
         that component's. A recipe that overrides it while serving several
         components is refused at build, since the check could not say which
         component it admits.
@@ -369,7 +369,7 @@ class Recipe:
         if type(self).build_artifact_validator is Recipe.build_artifact_validator:
             return components
         if not components.components:
-            # A release with no component is admitted as a whole, as it was before components existed.
+            # A snapshot with no component is admitted as a whole, as it was before components existed.
             return replace(components, validator=every_check(components.validator, self.build_artifact_validator()))
         if len(components.components) != 1:
             raise RecipeConfigError(
@@ -390,7 +390,7 @@ class Recipe:
             self.training_component.root_start(root)
 
     def default_start(self) -> DefaultStart:
-        """The content of a new scenario's root release when no artifact item starts the scenario; empty by
+        """The content of a new scenario's root snapshot when no artifact item starts the scenario; empty by
         default."""
         return DefaultStart()
 
@@ -407,7 +407,7 @@ class Recipe:
 
     @property
     def harness_adapter(self) -> str | None:
-        """The adapter this recipe's harness releases render for, as ``GET /reef/harness`` serves them.
+        """The adapter this recipe's harness artifacts render for, as ``GET /reef/harness`` serves them.
 
         ``None`` for a recipe that serves no harness tree. Every scenario of
         the process shares it, so the scenario list names it before a
@@ -587,7 +587,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
@@ -603,7 +603,7 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
-            releases=releases,
+            artifacts=artifacts,
             samples=samples,
             root=root,
         )
@@ -616,7 +616,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
@@ -635,7 +635,7 @@ class WeightTrainingRecipe(Recipe):
                 job_loop=JobLoop(
                     self.training_component,
                     scenario=scenario,
-                    scenario_component=None if releases is None else releases.component,
+                    scenario_component=None if artifacts is None else artifacts.component,
                     data_store=self.data_store,
                 ),
                 root=root,

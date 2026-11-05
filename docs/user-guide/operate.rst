@@ -28,7 +28,7 @@ It reports these values for every scenario:
 - the step counter and the latest committed step outcome
 - the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
-- whether inference is admitted or paused while a release loads
+- whether inference is admitted or paused while a snapshot loads
 - for a weight-training scenario, its running training job (``training_job``) and the number of jobs that ended, finished or failed (``finished_jobs``)
 
 The committed outcome includes the recipe-owned metrics. You can therefore tell a skipped or rejected update from one that is still running. Look here first when requests keep being served by an old version.
@@ -71,12 +71,12 @@ The creation row's ``source`` is ``{"kind": "default", "inputs": {...}}``, with 
 
 A new trainer starts its first job from its starting artifact. A train-from or the trainer's own training step changes the start later (`Train from an artifact`_). Activate that artifact to serve it again, or train from it to start training again from it; the ``slime`` backend refuses train-from, as it refuses every artifact.
 
-A change of the configuration does not change an existing scenario. It keeps its stored starting artifacts, and a new scenario gets the new default start. A start that no longer fits the configuration fails only its own scenario: the runtime refuses to activate it, or the training component refuses to start from it, with that component's message. The ``slime`` backend trains only the weights that its workers load from ``inference.model-path``. It refuses to create a scenario from an artifact item. A scenario whose starting artifact came from other inputs does not load, and the error names both inputs. Reef refuses a scenario that an earlier Reef stored with a shared base release (``reef-scenario/4`` metadata). Create such a scenario again.
+A change of the configuration does not change an existing scenario. It keeps its stored starting artifacts, and a new scenario gets the new default start. A start that no longer fits the configuration fails only its own scenario: the runtime refuses to activate it, or the training component refuses to start from it, with that component's message. The ``slime`` backend trains only the weights that its workers load from ``inference.model-path``. It refuses to create a scenario from an artifact item. A scenario whose starting artifact came from other inputs does not load, and the error names both inputs. Reef refuses a scenario that an earlier Reef stored with a shared base snapshot (``reef-scenario/4`` metadata). Create such a scenario again.
 
 Choose a scenario's start
 -------------------------
 
-The default inference routes answer from the scenario's active selection. No request header keeps a client on an older release. To keep an older artifact answering, serve it beside the active selection (`Serve an artifact beside the active selection`_).
+The default inference routes answer from the scenario's active selection. No request header keeps a client on an older snapshot. To keep an older artifact answering, serve it beside the active selection (`Serve an artifact beside the active selection`_).
 
 A new scenario uses the default starting artifacts. To start it from another artifact, name an artifact item of the scenario's owner in ``artifact_id`` when you create the scenario:
 
@@ -357,7 +357,7 @@ work, and inference starts the artifact.
      - data items, record items, artifact items, data sync requests
    * - ``harness``
      - Serves the routes that a harness client calls: the active tree, the
-       harness releases, the import of a person's files, and the adapters
+       harness artifacts, the import of a person's files, and the adapters
      - harness import requests
 
 Start each service with the same config and ``--component``:
@@ -395,7 +395,7 @@ fetches.
 coding agent and the evaluation runs. Install the adapter's binary and the
 sandbox where the training service runs. The training service writes the step
 records and the running step's progress under ``evolution.state_dir``. Control
-reads them for the release and request pages, so both must reach that
+reads them for the snapshot and request pages, so both must reach that
 directory, as they reach the artifact backend.
 
 .. _Harness clients:
@@ -403,13 +403,13 @@ directory, as they reach the artifact backend.
 **Harness clients.** Send ``GET /reef/harness``, ``GET /reef/harness/artifacts``,
 ``POST /reef/harness/import`` and ``GET /reef/harness/adapters`` to the harness
 service. It reads the commit history and the artifact backend, and loads a
-scenario without activating it. It writes no release: an import goes to control
+scenario without activating it. It writes no snapshot: an import goes to control
 as a ``harness_sync`` request, control merges the files onto the newest active
 tree and commits the sync, and the harness service answers with control's
 answer. It waits up to 30 seconds for control, and answers ``503`` when control
 did not commit the import in that time; the import stays queued, and the same
 files sent again wait for the same request. The harness service needs no control
-lease, so you can run several replicas of it behind one address. The release and
+lease, so you can run several replicas of it behind one address. The snapshot and
 request pages, the step records and ``/reef/status`` stay with control. Set
 ``harness.inference_url`` to the address at which clients reach the inference
 service: a client's layer then sends its model calls there, not to the harness
@@ -624,7 +624,7 @@ With all backends, each scenario needs one Reef writer.
 Choose the artifact backend
 ---------------------------
 
-The artifact backend stores the releases of each scenario. The default,
+The artifact backend stores the snapshots of each scenario. The default,
 ``git_lfs``, keeps them in the Git LFS repository that
 ``storage.artifact-repository`` names. Git and Git LFS must be installed.
 
@@ -648,12 +648,12 @@ and does not need its tools. Do not set ``storage.artifact-repository``: Reef
 refuses that configuration, because the plugin reads its own config.
 
 A change from one backend to another does not move releases. Keep the old
-store readable while scenarios refer to its releases, or use a new deployment.
+store readable while scenarios refer to its snapshots, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 
 To keep the Git LFS repository on Hugging Face, give the built-in factory with
-its options. Reef still reads every release from its local clone, and pushes
-each release to the Hub as it publishes it:
+its options. Reef still reads every snapshot from its local clone, and pushes
+each snapshot to the Hub as it publishes it:
 
 .. code-block:: yaml
 
@@ -665,7 +665,7 @@ each release to the Hub as it publishes it:
          refs: branches-and-tags
          token_env: HF_TOKEN
 
-- ``refs: branches-and-tags`` keeps each release on a tag
+- ``refs: branches-and-tags`` keeps each snapshot on a tag
   ``reef/releases/<revision>``, and the refs that move on branches under
   ``reef/``, because the Hub accepts no other refs. The default, ``reef``,
   keeps every ref under ``refs/reef/``. A repository keeps the layout it
@@ -875,7 +875,7 @@ by default.
      max-scenarios: 1000
 
 An unload keeps all durable state: the records, the commit history, the settings
-and the releases. The next request to the scenario loads it again, as after a
+and the snapshots. The next request to the scenario loads it again, as after a
 restart. Counters in memory, such as the operation metrics, start again from
 zero.
 
@@ -926,9 +926,16 @@ answers.
 
 #. Stop every Reef process that writes to the deployment.
 #. Back up the deployment (see `Back up a deployment`_).
-#. Upgrade Reef, and upgrade ``reef-client`` on each machine with an install.
-   An older ``reef-client`` fails on the new harness answers. A new one reads
-   an existing install, and updates the install at its next sync.
+#. Upgrade Reef, and do not start it yet. Upgrade ``reef-client`` on each machine
+   with an install. An older ``reef-client`` fails on the new harness answers. A
+   new one reads an existing install, and updates the install at its next sync.
+#. Run ``reef check-artifacts -c <config>``. It reads each scenario's commit
+   history and fetches each stored release that the history names, so it can
+   need as much disk space as all the releases. It prints each problem, and it
+   exits with status 1 when it finds one. Fix each problem before you continue.
+   You can run it again at any time. For each scenario, it also prints how many
+   artifacts hold the same files as another. Reef reuses a loaded artifact only by
+   its ID, so each of them can cost one more model load when it serves.
 #. Start Reef. It binds the artifact IDs of older records when it opens each
    scenario. This step can run again after a stop.
 

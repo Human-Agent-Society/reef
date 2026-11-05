@@ -42,7 +42,7 @@ method <write-a-harness-method.rst>`__.
            JOB["Training component<br/>runs the job"]
            EVAL["Evaluate checkpoint"]
            SELECT["Select or reject"]
-           VER["New release<br/>serves later requests ↻"]
+           VER["New snapshot<br/>serves later requests ↻"]
            PLAN -->|"job data + method"| JOB
            JOB -->|"saved checkpoint"| EVAL
            EVAL --> SELECT
@@ -220,7 +220,7 @@ name it.
   reach only some kinds.
 - To train again from the base weights with no training state, call
   ``POST /reef/scenarios/{scenario}/train-from`` with the scenario's root
-  release, when it holds the default start.
+  snapshot, when it holds the default start.
 - The parameters can also give the optional ``scheduling`` parameter, an object
   of ``epochs`` (a positive int, default 1), ``shuffle`` (default ``false``),
   ``remainder`` (``"partial"``, the default, ``"drop"`` or ``"error"``) and
@@ -251,7 +251,7 @@ Activate an artifact
 ~~~~~~~~~~~~~~~~~~~~
 
 A recipe trains; it does not decide what serves. Each artifact that a
-training job saves goes onto the scenario's release chain. The next job
+training job saves goes onto the scenario's snapshot chain. The next job
 starts from it. The deployment's activation rule decides whether the
 artifact also serves: at once, after an evaluation of it, or only when a
 person activates it. The rule applies to every recipe, so a recipe class
@@ -371,7 +371,7 @@ The ``TrainingComponentFactory`` that the config's ``type`` names returns the
 ``TrainingComponent`` alone. It runs in the HTTP service's process; Reef
 passes it to the recipe as ``training_component``. The backend does not build
 serving: the ``inference`` section selects it, and the component's
-``artifact_format`` tells the serving runtime what each release holds.
+``artifact_format`` tells the serving runtime what each snapshot holds.
 `Training components <executors.rst#training-components>`__ defines the
 component contract, and `Serving saved weights
 <executors.rst#serving-saved-weights>`__ defines how published weights reach

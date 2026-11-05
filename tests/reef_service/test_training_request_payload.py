@@ -16,7 +16,7 @@ def test_request_normalization_preserves_text_and_cleans_optional_fields() -> No
         "requires": [{"name": "TOKEN", "kind": "env", "prompt": "  Set the token  ", "extra": True}],
         "client": {
             "platform": "  darwin  ",
-            "release": "not; a release",
+            "release": "not; a snapshot",
             "commands": {"git": True, "node": False, "bad name": True, "python3": "yes"},
             "hostname": "not requested",
         },

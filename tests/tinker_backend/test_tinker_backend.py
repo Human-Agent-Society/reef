@@ -263,7 +263,7 @@ def test_a_job_saves_one_checkpoint_and_the_next_job_continues_from_it(component
 
 
 def test_a_release_holds_its_manifest_alone(component, objective):
-    # The weights stay on the service: engines that serve a release download its adapter (TinkerSamplerWeights).
+    # The weights stay on the service: engines that serve a snapshot download its adapter (TinkerSamplerWeights).
     assert component.artifact_format is None
     status = train(component, batch(), objective.name)
     release = Path(status.checkpoints[0].artifact_path)
@@ -709,7 +709,7 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     assert inference.served_model_name("s") == "tinker://update-1/sampler"
     assert inference.sampler_load("tinker://base/sampler") == ("tinker://base/sampler", first)
     assert inference.sampler_load("tinker://update-1/sampler") == ("tinker://update-1/sampler", selected)
-    # Each release's model is the base with that release's sampler, whichever release is served.
+    # Each snapshot's model is the base with that snapshot's sampler, whichever release is served.
     assert inference.artifact_model(published) == PolicyModel(MODEL, "tinker://update-1/sampler")
     assert inference.artifact_model(base) == PolicyModel(MODEL, "tinker://base/sampler")
     rollback = Artifact.local(base.local_path)
@@ -879,7 +879,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         # As the inference service does: the request names the row's model, the sampler that serves now.
         response = asyncio.run(
             handler.inference(
-                scenario.release_queries.artifact_for_version(base),
+                scenario.snapshot_queries.artifact_for_version(base),
                 "/v1/chat/completions",
                 handler.address_model(
                     {"messages": [{"role": "user", "content": "hello"}]}, inference.served_model_name("math")
@@ -927,8 +927,8 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         scenario = second.get_or_create_scenario("math")
         assert scenario.scenario_step == step
         assert loop_state(scenario) == state
-        # The creation is the scenario's root release: its artifact_id is the root's release ID.
-        base_artifact = scenario.release_queries.artifact_for_version(base).artifact_id
+        # The creation is the scenario's root snapshot: its artifact_id is the root's release ID.
+        base_artifact = scenario.snapshot_queries.artifact_for_version(base).artifact_id
         assert base_artifact == scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
         assert scenario.repository.start_artifact.revision == base
         scenario.activate(base_artifact)
@@ -937,7 +937,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert scenario.current_snapshot().revision == base
         wait_for_serving(second)
         assert inference.served_model_name("math") == UNTRAINED.sampler_path
-        # The root release imports as any release: the next job starts from the untrained adapter.
+        # The root snapshot imports as any snapshot: the next job starts from the untrained adapter.
         assert TinkerCheckpoint.read(Path(loop_state(scenario).start)) == UNTRAINED
     finally:
         second.close()

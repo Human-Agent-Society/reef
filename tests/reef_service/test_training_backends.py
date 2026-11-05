@@ -80,7 +80,7 @@ def test_invalid_options_fail_before_constructing_runtime(tmp_path, options):
     [
         {"training.ray-address": "auto"},
         {"execution.training.backend": "ray"},
-        # The backend serves its own releases; Reef's engines are not that serving.
+        # The backend serves its own snapshots; Reef's engines are not that serving.
         {"inference.serving": "trainer", "inference.backend": "sglang"},
         {"inference.serving": "trainer", "inference.tensor-parallel-size": "2"},
         {"recipe.runtime.type": "ray_training"},

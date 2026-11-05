@@ -95,7 +95,7 @@ def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the
     status = finished(stack.component, "job-0")
 
     assert status.state == "finished" and len(status.checkpoints) == 1
-    # The engines serve the workers' weights only from the sync to the release, around the rollouts.
+    # The engines serve the workers' weights only from the sync to the snapshot, around the rollouts.
     assert events == ["sync", "run_train_tasks", "release"]
     assert chats[0].runtime_load_id == "slime:base"
     assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}

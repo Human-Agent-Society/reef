@@ -312,7 +312,7 @@ def test_tttd_rejects_and_releases_a_step_spanning_artifact_ids(caplog) -> None:
             "artifact_ids": ["checkpoint-1", "checkpoint-2"],
         }
     ]
-    retention = processor.releasable_record_ids()
+    retention = processor.record2sample.releasable_record_ids()
     expected_ids = {
         f"{prefix}-0-{group}-{rollout}" for prefix in ("i", "r") for group in range(2) for rollout in range(3)
     }
