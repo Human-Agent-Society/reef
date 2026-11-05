@@ -1,8 +1,8 @@
 # opencode, driven headless per run.
 #
-# A release is an opencode plugin in plugin/. Reef's own plugin there
-# (index.ts) gives opencode the release's rules, skills, commands and config
-# through its config hook, and the hooks and tools of the release's
+# A snapshot is an opencode plugin in plugin/. Reef's own plugin there
+# (index.ts) gives opencode the snapshot's rules, skills, commands and config
+# through its config hook, and the hooks and tools of the snapshot's
 # extensions. A run loads it through OPENCODE_CONFIG_CONTENT; a person's
 # machine adds it to the global plugin list with opencode plugin -g, and
 # opencode loads it in place in every session.
@@ -83,9 +83,9 @@ run:
     argv: ["run", "--format", "json", "--auto", "{task}"]
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
-  # How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays.
+  # How a person's machine runs opencode on a snapshot: the person's own ~/.config/opencode stays.
   # register adds the plugin to its global plugin list, and opencode loads it in place in every
-  # session; on a key or name both define, the release's wins. opencode has no command that
+  # session; on a key or name both define, the snapshot's wins. opencode has no command that
   # removes a plugin, and it skips a plugin path that no longer exists, so the entry stays after
   # disconnect. A session that Reef starts also reads the config that binds the model.
   layer:
@@ -97,7 +97,7 @@ run:
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.
 config:
-  # The release's config, which Reef's plugin merges over opencode's own at the config hook.
+  # The snapshot's config, which Reef's plugin merges over opencode's own at the config hook.
   primary:
     path: "plugin/config.json"
     checks:
@@ -123,7 +123,7 @@ config:
     checks:
       - key: "."
         match: Each(Key(IsIn(["autoupdate", "share", "enabled_providers", "permission", "provider", "model"])))
-        reason: the release's config is config/primary.json
+        reason: the snapshot's config is config/primary.json
       # Keep a benchmark run hermetic and on the binding's provider only.
       - key: [autoupdate, share, enabled_providers, permission]
         match: IsDefault()

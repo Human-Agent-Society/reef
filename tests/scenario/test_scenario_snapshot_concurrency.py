@@ -64,7 +64,7 @@ class _LocalRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -179,8 +179,8 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
             # taking the publication lock and starving the read-side callers.
             catalog = executor.submit(scenario.artifact_rows)
             selection = executor.submit(scenario.artifact_selection)
-            version = executor.submit(scenario.release_queries.artifact_for_version, current_ref.revision)
-            old_version = executor.submit(scenario.release_queries.artifact_for_version, initial_ref.revision)
+            version = executor.submit(scenario.snapshot_queries.artifact_for_version, current_ref.revision)
+            old_version = executor.submit(scenario.snapshot_queries.artifact_for_version, initial_ref.revision)
 
             assert catalog.result(timeout=2) == expected_rows
             assert selection.result(timeout=2) == expected_selection
@@ -240,7 +240,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
 
     def read_version():
         readers_started[2].set()
-        return scenario.release_queries.artifact_for_version(previous_ref.revision)
+        return scenario.snapshot_queries.artifact_for_version(previous_ref.revision)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         writer = (
@@ -288,7 +288,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
         raise ArtifactPublicationError("storage unavailable")
 
     with monkeypatch.context() as patch:
-        patch.setattr(backend, "commit_release", unavailable)
+        patch.setattr(backend, "commit_snapshot", unavailable)
         scenario.commit(first)
         committed = scenario.current_snapshot()
         # The job's submission, then its checkpoint.
@@ -334,16 +334,16 @@ def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_bac
     foreign_path = tmp_path / "foreign"
     foreign_path.mkdir()
     (foreign_path / "model.txt").write_text("another writer")
-    commit_release = backend.commit_release
+    commit_snapshot = backend.commit_snapshot
     unrelated = None
 
     def competing_writer(ref, *, expected_parent):
         nonlocal unrelated
         unrelated = backend.publish(Artifact.local(foreign_path), expected_parent=expected_parent)
-        commit_release(ref, expected_parent=expected_parent)
+        commit_snapshot(ref, expected_parent=expected_parent)
 
     with monkeypatch.context() as patch:
-        patch.setattr(backend, "commit_release", competing_writer)
+        patch.setattr(backend, "commit_snapshot", competing_writer)
         scenario.commit(first)
     assert scenario.scenario_step == 2
     assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
@@ -370,7 +370,7 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
         raise ArtifactPublicationError("storage unavailable")
 
     with monkeypatch.context() as patch:
-        for method in ("commit_release", "publish", "register"):
+        for method in ("commit_snapshot", "publish", "register"):
             patch.setattr(backend, method, unavailable)
         activated = scenario.activate(scenario.repository.resolve(initial).artifact_id)
     assert activated.artifact_id == scenario.repository.resolve(initial).artifact_id
@@ -406,7 +406,7 @@ def test_committed_record_retry_reports_pointer_failure_without_repeating_step(l
     def unavailable(*args, **kwargs):
         raise ArtifactPublicationError("storage unavailable")
 
-    monkeypatch.setattr(scenario.repository.backend, "commit_release", unavailable)
+    monkeypatch.setattr(scenario.repository.backend, "commit_snapshot", unavailable)
     scenario.commit(result)
     assert scenario.scenario_step == 2
     assert len(scenario.store.history()) == 2

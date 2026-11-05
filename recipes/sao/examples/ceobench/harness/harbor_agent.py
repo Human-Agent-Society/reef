@@ -20,7 +20,7 @@ is what Reef adds around that agent:
   weeks left) and the discounted changes of the weeks after it, scaled
   against the weeks before;
 - the pace of the game: every model call waits until the batches the
-  reported turns filled have committed a training release.
+  reported turns filled have committed a training snapshot.
 
 What the model is asked, what it may call, and what its tools return are
 the benchmark's; what this module decides is where the calls go, when a
@@ -68,7 +68,7 @@ and trains nothing. The pacer is off with it.
 
 ``CEOBENCH_PACE_BATCH`` (0 or unset: off) paces the game to the trainer. Set
 to the recipe's batch size, every model call waits until each batch the
-reported turns filled has committed a training release, so a week is played
+reported turns filled has committed a training snapshot, so a week is played
 by a policy trained on every week the credit window has closed, and no turn
 is generated while a step publishes its adapter.
 ``CEOBENCH_PACE_TIMEOUT_S`` (default 1800) bounds one such wait.

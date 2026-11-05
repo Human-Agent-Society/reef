@@ -23,7 +23,7 @@ from tests.support.serving import wait_for_serving
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
-from reef.artifact.composite import compose_release
+from reef.artifact.composite import compose_snapshot
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
@@ -98,7 +98,7 @@ class _TreeRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -169,13 +169,13 @@ def _served_composite(tmp_path: Path) -> CompositeRecipe:
 
 
 def _root_of(recipe: CompositeRecipe, directory: Path) -> ScenarioRoot:
-    """The root release of a scenario created from ``recipe``'s default start, composed under ``directory``."""
+    """The root snapshot of a scenario created from ``recipe``'s default start, composed under ``directory``."""
     start = recipe.default_start()
     (directory / "start").mkdir(parents=True)
     start.write(directory / "start")
     components = {name: Artifact.local(directory / "start" / name) for name in recipe.components}
     return ScenarioRoot(
-        compose_release(components, directory=directory / "root"), RootSource("default", inputs=start.inputs)
+        compose_snapshot(components, directory=directory / "root"), RootSource("default", inputs=start.inputs)
     )
 
 
@@ -274,7 +274,7 @@ def test_composite_recipe_names_its_weight_training_component() -> None:
     assert CompositeRecipe.select_weight_training({"components": {"harness": _WEIGHTS_AND_HARNESS["harness"]}}) is None
     assert _TreeRecipe.select_weight_training({}) is None
     assert SAORecipe.select_weight_training({"data": {}}) == (SAORecipe, {"data": {}})
-    # A release loads one component, so two weight components are refused before any runtime is connected.
+    # A snapshot loads one component, so two weight components are refused before any runtime is connected.
     with pytest.raises(RecipeConfigError, match=r"\['weights', 'weights2'\] all train weights"):
         CompositeRecipe.select_weight_training(
             {"components": {**_WEIGHTS_AND_HARNESS, "weights2": _WEIGHTS_AND_HARNESS["weights"]}}
@@ -455,7 +455,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         assert result is not None
         scenario.commit(result, component="harness")
 
-        rows = scenario.release_queries.snapshot_rows(scenario.scenario_step)
+        rows = scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)
         assert rows[0]["component"] == "harness"
         assert "component" not in rows[1]
         # The config component runs no step: the one commit is the harness's job submission, naming the rows it
@@ -633,7 +633,7 @@ def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None
 
 @pytest.mark.unit
 def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: Path) -> None:
-    """The harness head of a flat scenario is the served release, found on the chain when the log keeps no rows."""
+    """The harness head of a flat scenario is the served artifact, found on the chain when the log keeps no rows."""
     tree = tmp_path / "seed"
     tree.mkdir()
     (tree / "rules.md").write_text("seed")
@@ -868,8 +868,8 @@ class _GuardedRecordOnlyRecipe(Recipe):
 
 @pytest.mark.unit
 def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_validator(tmp_path: Path) -> None:
-    """With no component to join, the check admits the release as a whole, as every recipe's did before components
-    existed: the scenario builds, and a release the check refuses is not published."""
+    """With no component to join, the check admits the snapshot as a whole, as every recipe's did before components
+    existed: the scenario builds, and a snapshot the check refuses is not published."""
     dispatcher = _serve(_GuardedRecordOnlyRecipe(), tmp_path)  # type: ignore[arg-type]
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -888,7 +888,7 @@ def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_vali
 
 
 class _RefuseUnvetted(ArtifactValidator):
-    """Refuse a release any file of which says unvetted."""
+    """Refuse a snapshot any file of which says unvetted."""
 
     def validate(self, artifact: Artifact) -> None:
         root = artifact.materialize().local_path
@@ -919,8 +919,8 @@ def _tree(tmp_path: Path, name: str, text: str) -> Artifact:
 def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_through_its_validator(
     tmp_path: Path,
 ) -> None:
-    """Flat, such a recipe's release is the whole artifact; inside a composite its release is its component, so its
-    check admits that component's steps as it admitted its whole release flat."""
+    """Flat, such a recipe's snapshot is the whole artifact; inside a composite its snapshot is its component, so its
+    check admits that component's steps as it admitted its whole snapshot flat."""
     composite = CompositeRecipe(
         components={
             "notes": _LegacyTreeRecipe(label="notes", artifact_dir=tmp_path / "steps"),
@@ -941,8 +941,8 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
 
 
 @dataclass(frozen=True)
-class _ReleaseCheckedComposite(CompositeRecipe):
-    """A composite that sets the release's own check itself, beside each component's."""
+class _SnapshotCheckedComposite(CompositeRecipe):
+    """A composite that sets the snapshot's own check itself, beside each component's."""
 
     def build_components(self, scenario: str) -> ScenarioComponents:
         return replace(super().build_components(scenario), validator=_RefuseUnvetted())
@@ -950,9 +950,9 @@ class _ReleaseCheckedComposite(CompositeRecipe):
 
 @pytest.mark.unit
 def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_path: Path) -> None:
-    """The release's own check runs on the composed release a step publishes, as an activation of it runs it: a
-    release the commit admits can be activated again, and one the activation would refuse is never published."""
-    composite = _ReleaseCheckedComposite(
+    """The snapshot's own check runs on the composed snapshot a step publishes, as an activation of it runs it: a
+    snapshot the commit admits can be activated again, and one the activation would refuse is never published."""
+    composite = _SnapshotCheckedComposite(
         components={
             "harness": _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
             "config": _ConfigRecipe(),
@@ -968,7 +968,7 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
         published = scenario.current_snapshot()
         assert published != seed
-        # The root release made the creation's artifacts, under its own release ID.
+        # The root snapshot made the creation's artifacts, under its own release ID.
         seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.revision)["harness"]
         assert (
             seed_harness
@@ -1015,7 +1015,7 @@ class _UnseededConfigRecipe(_ConfigRecipe):
 @pytest.mark.unit
 def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
     """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. An
-    activation of one of those steps, or of a held one, runs only the release's own check: each component was
+    activation of one of those steps, or of a held one, runs only the snapshot's own check: each component was
     admitted when its step published it, and judging the carried one would refuse releases their commits admitted."""
     checks = _CountedChecks()
     composite = CompositeRecipe(
@@ -1066,7 +1066,7 @@ def test_composed_release_links_carried_files_and_tolerates_an_empty_component(t
     weights.mkdir()
     (weights / "adapter.bin").write_bytes(b"\x00" * 16)
     harness = Artifact.local(tmp_path / "missing")
-    composed = compose_release({"weights": Artifact.local(weights), "harness": harness}, directory=tmp_path / "r")
+    composed = compose_snapshot({"weights": Artifact.local(weights), "harness": harness}, directory=tmp_path / "r")
     linked = tmp_path / "r" / "weights" / "adapter.bin"
     assert linked.read_bytes() == b"\x00" * 16
     assert linked.stat().st_nlink == 2
