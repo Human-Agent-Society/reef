@@ -23,8 +23,8 @@ are local; a split deployment gives control and the training service one volume 
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
 (``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
-store before the component runs the job. An item that an earlier Reef added holds its data inline; the
-worker writes that data to the data store when it reads the item.
+store before the component runs the job. A job that an earlier Reef added held its data inline: the worker runs no
+such item, and the job listing still reads its counts and its request.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ from typing import Any, cast
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.job_data import JobData
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.observability.base import (
@@ -102,20 +101,11 @@ def json_text(value: JsonValue, name: str) -> str:
 
 def job_from_item(item: WorkItem, data_store: DataStore) -> TrainingJob:
     """The ``TrainingJob`` that ``job_payload`` wrote into ``item``, with its data directory opened in
-    ``data_store``; ``ValueError`` for another payload.
-
-    An item that an earlier Reef added holds ``JobData.to_dict`` as its data: the function writes it to
-    ``data_store`` first.
-    """
+    ``data_store``; ``ValueError`` for another payload."""
     payload = item.payload
     data = json_object(payload.get("data"), "a job's data")
     request = request_summary(item)
-    # An item that an earlier Reef added holds its data inline.
-    ref = (
-        data_store.write_job_directory(JobData.from_dict(data))
-        if "samples" in data
-        else data_store.open_job_directory(data)
-    )
+    ref = data_store.open_job_directory(data)
     return TrainingJob(
         item.id,
         json_text(payload.get("backend"), "a job's backend"),
