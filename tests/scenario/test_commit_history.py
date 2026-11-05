@@ -624,7 +624,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             records,
             pipeline_factory=ProtectAllPipeline,
             job_loop=JobLoop(component, scenario=scenario),
-            job_parameters={kind: {"method": {"objective": "sft"}} for kind in SAMPLE_KINDS},
+            job_parameters={kind: {"objective": "sft"} for kind in SAMPLE_KINDS},
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             root=root,
@@ -840,7 +840,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 2
     # The component saved no checkpoint, so the job failed and published no snapshot.
-    assert component.submitted[0].parameters == {"method": {"objective": "sft"}}
+    assert component.submitted[0].parameters == {"objective": "sft"}
     assert committed["metrics"]["training_job"]["event"] == "failed"
     assert not list(tmp_path.rglob("*.sqlite3"))
 

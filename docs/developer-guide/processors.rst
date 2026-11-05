@@ -777,7 +777,7 @@ rollouts.
 1. ``GeneratedTaskJobData`` makes one job's data of the next job's tasks: the
    ``TaskSample`` values. A job takes at least ``job_samples`` tasks, 1 by
    default, and at most ``buffer_size``, 4 by default.
-2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
+2. The trainer submits the job. Its rollouts parameter (``rollout`` on Tinker, ``harbor`` on Slime, in ``recipe.config.job_parameters``)
    tells the component how many rollouts of each task to run, and with which
    agent and sandbox. The Tinker component runs them, assembles one sample
    from each rollout that ran, scored with the task's verifier reward, and
@@ -809,9 +809,8 @@ the next job, and later generations still go out.
 A generator can run rollouts of a task through the generator service, as
 SPADE does for its hint plays; those rollouts are not records, and do not
 train.
-The ``task_group`` objective centers and scales each reward within its task
-group, on the ``importance_sampling`` loss family (Tinker's built-in loss, or
-truncated importance sampling on Slime). The stage trains on no
+The deployment names the objective that trains the samples, as a dotted reference
+in ``recipe.config.job_parameters.objective``. The stage trains on no
 report: it holds the reports that are source sessions, and releases the others,
 such as a generator's own reports, without assembling them.
 
