@@ -73,17 +73,17 @@ def collect(work: Path) -> dict:
     commits.sort(key=lambda commit: commit.recorded_at)
     releases = [{"artifact_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
     previous = seed_files
-    # The tree of each release by id, so an activation or a new training start shows the tree it names.
-    files_by_snapshot: dict[str, dict] = {"seed": seed_files}
+    # The tree of each artifact, so an activation or a new training start shows the tree it names.
+    files_by_artifact: dict[str, dict] = {}
     for commit in commits:
         metrics = commit.metrics or {}
         operation = commit.operation
-        revision, parent_revision = commit.snapshot.revision, commit.snapshot.parent_revision
-        # A record of one flat component names its artifact by its storage revision.
-        artifact_id = (commit.artifact_ids or {}).get("harness", revision)
+        # An older record of one flat component names its artifact by its storage revision.
+        artifact_id = (commit.artifact_ids or {}).get("harness", commit.snapshot.revision)
         if operation in ("activate", "train_from"):
             # Not a step: a person activated a release or set the training start. The row carries no state.
-            named = files_by_snapshot.get(revision, previous)
+            # No step made an artifact that this log does not list, except the seed.
+            named = files_by_artifact.get(artifact_id, seed_files)
             releases.append(
                 {
                     "artifact_id": artifact_id,
@@ -102,8 +102,6 @@ def collect(work: Path) -> dict:
             continue
         if operation != "training":
             continue
-        # A step builds on its parent release, so the first step names the seed's release id.
-        files_by_snapshot.setdefault(parent_revision, previous)
         published = bool(metrics.get("selected"))
         selection = metrics.get("selection") or {}
         patch = metrics.get("patch") or {}
@@ -133,7 +131,7 @@ def collect(work: Path) -> dict:
             }
         )
         if published:
-            files_by_snapshot[revision] = files
+            files_by_artifact[artifact_id] = files
         previous = files
 
     sessions = []
