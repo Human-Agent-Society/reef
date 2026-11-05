@@ -65,7 +65,6 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     Invalid request fields, requirements or parameters raise ValueError. Client machine
     information is advisory: malformed entries are dropped. Text is preserved,
     absent requirements become an empty list, and an empty client or empty parameters are omitted.
-    Older clients may send ``release_id`` instead of ``artifact_id``; normalized records use ``artifact_id``.
     ``parameters`` is a JSON object with string keys, at most ``MAX_PARAMETERS_BYTES`` bytes of JSON: the
     parameters of the request's training job, merged into the recipe's (``Sample2Job.job_parameters``).
     ``samples`` is a list of 1 to ``MAX_REQUEST_SAMPLES`` distinct non-empty sample IDs: the samples that the
@@ -74,8 +73,6 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     fields: dict[str, str] = {}
     for key in ("text", "session", "artifact_id"):
         value = payload.get(key)
-        if key == "artifact_id" and key not in payload:
-            value = payload.get("release_id")
         if not isinstance(value, str):
             raise ValueError(f"{key} must be a string")
         fields[key] = value

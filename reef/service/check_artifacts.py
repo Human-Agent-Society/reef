@@ -39,9 +39,8 @@ def check_scenario(name: str, backend: RepositoryBackend, store: ScenarioStore) 
         return [f"{name}: cannot read the history: {exc}"]
     releases: dict[str, SnapshotRef] = {start.revision: start, backend.current().revision: backend.current()}
     for record in records:
-        for ref in (record.snapshot, *record.legacy_locators.values()):
-            if ref.durable:
-                releases[ref.revision] = ref
+        if record.snapshot.durable:
+            releases[record.snapshot.revision] = record.snapshot
     problems = []
     stored_ids: set[str] = set()
     for revision, ref in releases.items():

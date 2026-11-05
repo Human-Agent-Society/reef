@@ -23,8 +23,7 @@ are local; a split deployment gives control and the training service one volume 
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
 (``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
-store before the component runs the job. A job that an earlier Reef added held its data inline: the worker runs no
-such item, and the job listing still reads its counts and its request.
+store before the component runs the job.
 """
 
 from __future__ import annotations
@@ -129,9 +128,7 @@ def optional_text(value: JsonValue, name: str) -> str | None:
 def request_summary(item: WorkItem) -> dict[str, JsonValue] | None:
     """The ``{id, text, parameters}`` of the training request of the job in ``item``, or None."""
     payload = item.payload
-    data = json_object(payload.get("data"), "a job's data")
-    # An item that an earlier Reef added keeps the request in its inline data.
-    value = data.get("request") if "samples" in data else payload.get("request")
+    value = payload.get("request")
     if value is None:
         return None
     given = json_object(value, "a job's request")
@@ -208,7 +205,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     - ``request``: ``{id, text, parameters}`` of the training request (``POST /reef/train``) that the job
       trains, where ``parameters`` is the JSON object that the request gave, ``{}`` when it gave none; None for
       a job that the training mode ``auto`` made without a request.
-    - ``train_from_artifact_id``: the artifact that the job started from; None for an item that an earlier Reef added.
+    - ``train_from_artifact_id``: the artifact that the job started from.
     - ``created_at``, ``started_at`` and ``ended_at``: ISO 8601 UTC times of the item, when control added the job,
       when a worker first took it, and when it finished or failed. ``started_at`` is None until a worker takes the
       job, and ``ended_at`` until the job ends.
@@ -218,17 +215,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     """
     payload = item.payload
     data = json_object(payload.get("data"), "a job's data")
-    if "samples" in data:
-        samples = data.get("samples")
-        if not isinstance(samples, list):
-            raise ValueError("a job's samples are a JSON array")
-        kinds = {json_text(json_object(sample, "a job's sample").get("kind"), "a sample's kind") for sample in samples}
-        if len(kinds) > 1:
-            raise ValueError(f"job {item.id} mixes the sample kinds {sorted(kinds)}")
-        sample_count: JsonValue = len(samples)
-        sample_kind: JsonValue = next(iter(kinds), None)
-    else:
-        sample_count, sample_kind = data.get("sample_count"), data.get("kind")
+    sample_count, sample_kind = data.get("sample_count"), data.get("kind")
     experiment = item.metadata.get(EXPERIMENT_METADATA_KEY)
     return {
         "id": item.id,
