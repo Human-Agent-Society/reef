@@ -17,7 +17,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -28,6 +28,8 @@ from reef.storage.tasks import LocalTaskFileStore, SplitName
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
+#: The prefix of a record ID in a ``TrainingState`` that a stage ended and no commit named when it was stored.
+ENDED_RECORD_PREFIX = "ended:"
 
 SampleKind = Literal["trajectory", "task"]
 SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
@@ -334,7 +336,29 @@ class TrainerSamples:
 
     def consumed_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` consumed."""
-        return self.store.state.consumed_record_ids(self.trainer)
+        return frozenset(
+            record_id
+            for record_id in self.store.state.consumed_record_ids(self.trainer)
+            if not record_id.startswith(ENDED_RECORD_PREFIX)
+        )
+
+    def end_records(self, record_ids: Iterable[str]) -> None:
+        """Store that the stages of ``trainer`` ended ``record_ids``, for its next commit to name.
+
+        An ended record is not consumed until a commit names it: a restart before that commit reads it again, so a
+        stage rebuilds what it decided about the record.
+        """
+        self.store.state.consume_records(
+            self.trainer, [f"{ENDED_RECORD_PREFIX}{record_id}" for record_id in sorted(record_ids)]
+        )
+
+    def ended_record_ids(self) -> frozenset[str]:
+        """The records that the stages of ``trainer`` ended (``end_records``), whether a commit names them or not."""
+        return frozenset(
+            record_id.removeprefix(ENDED_RECORD_PREFIX)
+            for record_id in self.store.state.consumed_record_ids(self.trainer)
+            if record_id.startswith(ENDED_RECORD_PREFIX)
+        )
 
 
 __all__ = [
