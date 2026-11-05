@@ -1,9 +1,8 @@
-"""Slime's task jobs: rollouts on the component's own rollout group, synced to the workers' weights, then trained."""
+"""Slime's task jobs: Harbor rollouts as the generate step of Slime's own loop, on the component's rollout group."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,33 +15,59 @@ from tests.slime_backend.test_slime_component import Stack, batch_for, parameter
 from tests.support.job_data import job_data_ref
 from tests.support.slime_component import finished
 
-from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample
 from reef.execution.executor.placement import GpuBundles
+from reef.storage.durable_files import read_json
 from reef.train.component import TrainingJob
-from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import rollout_group as rollout_group_module
-from reef.train.slime_backend.component import ROLLOUTS_FILE
+from reef.train.slime_backend.dataset import DATASET_FILE
+from reef.train.slime_backend.harbor_rollouts import TASK_ROLLOUTS_FILE, TaskJobSource
 from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective, unregister_slime_objective
-from reef.train.slime_backend.parameters import harbor_settings
-from reef.train.slime_backend.rollout_group import EngineChat, SlimeRolloutGroup
-from reef.train.task_rollouts import TaskJobRollouts
+from reef.train.slime_backend.rollout_group import SlimeRolloutGroup
 
-ROLLOUT = {"rollouts_per_task": 2}
+OBJECTIVE = "slime_dataset"
+FAMILY = "reef.train.slime_backend.native:SlimeNativeAlgorithm"
+HARBOR = {"environment": "modal", "concurrency": 4}
 
 
-class FakeRolloutGroup(SlimeRolloutGroup):
-    """A rollout group that records when the engines take the workers' weights, release them, and close."""
+class TaskRolloutGroup(SlimeRolloutGroup):
+    """The serving session's engines: each rollout writes the results that the rollout manager would write.
 
-    def __init__(self, events: list[str]) -> None:
+    ``outcomes`` holds one ``(group_index, assembled)`` list per rollout; the default is a group of two samples.
+    """
+
+    def __init__(self, events: list[str], root: Path, outcomes: list[list[tuple[int, bool]]] | None = None) -> None:
         super().__init__(SimpleNamespace(manager=None), colocated=True, router_url="http://router:3000")
         self.events = events
+        self.root = root
+        self.outcomes = outcomes or []
+        # The data source's record when each rollout generated.
+        self.records: list[dict[str, Any]] = []
 
     def sync(self, actor_group) -> None:
         self.events.append("sync")
 
     def release(self) -> None:
         self.events.append("release")
+
+    def generate(self, rollout_id: int) -> str:
+        self.events.append(f"generate:{rollout_id}")
+        record = read_json(self.root / DATASET_FILE)
+        self.records.append(record)
+        source = TaskJobSource.from_record(record)
+        outcome = self.outcomes.pop(0) if self.outcomes else [(0, True), (0, True)]
+        with open(Path(source.job_directory) / TASK_ROLLOUTS_FILE, "a", encoding="utf-8") as results:
+            for group_index, assembled in outcome:
+                result = {
+                    "token": source.token,
+                    "task": source.tasks[0][0],
+                    "group_index": group_index,
+                    "reward": 1.0 if assembled else None,
+                    "assembled": assembled,
+                    "error": "" if assembled else "the sandbox did not start",
+                }
+                results.write(json.dumps(result) + "\n")
+        return f"rollout-data-{rollout_id}"
 
     def close(self) -> None:
         self.events.append("close")
@@ -54,89 +79,146 @@ def task(root: Path, name: str) -> TaskSample:
     return TaskSample(path, metadata={"task": {"name": name}})
 
 
-def grouped() -> TaskJobRollouts:
-    """Two rollouts of the task ``add``, one that solved it, as their samples."""
-    samples = tuple(replace(sample, group_id="add") for sample in batch_for(0, rewards=(1.0, 0.0)).samples)
-    return TaskJobRollouts(samples, RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),)))
-
-
 @pytest.fixture
 def task_stack(tmp_path, monkeypatch):
-    """A Slime component with a fake rollout group; ``run_train_tasks`` records the chat it answers with, in ``events``."""
+    """A Slime component on the slime family, with a fake rollout group."""
+    from tests.slime_backend import test_slime_component
+
+    original = test_slime_component.worker_args
+
+    def worker_args(tmp_path, **overrides):
+        return original(
+            tmp_path,
+            **{
+                "loss_family": "slime",
+                "loss_type": "policy_loss",
+                "compute_advantages_and_returns": True,
+                "rollout_batch_size": 2,
+                **overrides,
+            },
+        )
+
+    monkeypatch.setattr(test_slime_component, "worker_args", worker_args)
     events: list[str] = []
-    chats: list[EngineChat] = []
-
-    def fake_roll_out(tasks, settings, chat, **options):
-        events.append("run_train_tasks")
-        chats.append(chat)
-        if "failing" in options["work_dir"].parts:
-            raise RuntimeError("the sandbox did not start")
-        return grouped()
-
-    monkeypatch.setattr(slime_component, "run_train_tasks", fake_roll_out)
-    stack = Stack(tmp_path, rollout_group=FakeRolloutGroup(events), hf_checkpoint=str(tmp_path / "model"))
-    yield stack, events, chats
+    group = TaskRolloutGroup(events, tmp_path)
+    stack = Stack(
+        tmp_path,
+        loss_family=FAMILY,
+        rollout_group=group,
+        rank_metrics=[{"rollout/raw_reward": 0.25}],
+        hf_checkpoint=str(tmp_path / "model"),
+    )
+    group.root = stack.root
+    yield stack, events, group
     stack.component.close()
 
 
-@pytest.mark.unit
-def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the_rollouts(tmp_path, task_stack):
-    stack, events, chats = task_stack
-    job = TrainingJob(
-        "job-0",
-        "slime",
-        stack.component.base_start,
-        job_data_ref(JobData("tasks", (task(tmp_path / "tasks", "add"),))),
-        {**parameters("sft"), "harbor": ROLLOUT},
-        scenario="s",
+def task_job(stack: Stack, root: Path, *, count: int = 3, save_interval: int | None = None) -> TrainingJob:
+    tasks = tuple(task(root / "tasks", f"task-{index}") for index in range(count))
+    job_parameters: dict[str, Any] = {"objective": OBJECTIVE, "harbor": HARBOR}
+    if save_interval is not None:
+        job_parameters["save_interval"] = save_interval
+    return TrainingJob(
+        "job-0", "slime", stack.start, job_data_ref(JobData("tasks", tasks)), job_parameters, scenario="s"
     )
 
+
+@pytest.mark.unit
+def test_a_task_job_runs_slimes_loop_over_its_tasks_and_reports_their_rewards(tmp_path, task_stack) -> None:
+    stack, events, group = task_stack
+    job = task_job(stack, tmp_path, count=3)
     stack.component.submit(job)
     status = finished(stack.component, "job-0")
+    assert status.state == "finished", status.error
+    # Three tasks in batches of two: two rollouts of Slime's own sequence, so the last wraps to the first task.
+    assert events == [event for rollout in range(2) for event in ("sync", f"generate:{rollout}", "release")]
+    assert stack.group.train_calls == [(rollout, f"rollout-data-{rollout}") for rollout in range(2)]
+    assert status.metrics["task_rollouts"] == 2
+    assert [Path(checkpoint.path).name for checkpoint in status.checkpoints] == ["rollout_1"]
+    # The rollout manager reads how to run Harbor from the record, which holds no training method.
+    record = group.records[0]
+    assert [name for name, _ in record["tasks"]] == ["task-0", "task-1", "task-2"]
+    assert (record["skip_rollouts"], record["harbor"]["environment"]) == (0, "modal")
+    assert status.metrics["rollout_rewards"] == {"task-0": [1.0] * 4, "task-1": [], "task-2": []}
+    assert (status.metrics["rollout_samples"], status.metrics["removed_rollouts"]) == (4, 0)
 
-    assert status.state == "finished" and len(status.checkpoints) == 1
-    # The engines serve the workers' weights only from the sync to the snapshot, around the rollouts.
-    assert events == ["sync", "run_train_tasks", "release"]
-    assert chats[0].runtime_load_id == "slime:base"
-    assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}
-    assert status.metrics["rollout_samples"] == 2
-    # The rollouts' two samples train as the job's two optimizer steps.
-    assert stack.processor.calls[0]["rollout_ids"] == [0, 1]
-    # The rollouts are kept: a resumed job trains them without rolling out again.
+
+@pytest.mark.unit
+def test_a_group_left_with_two_samples_trains_with_the_others_removed(tmp_path, task_stack) -> None:
+    stack, _, group = task_stack
+    group.outcomes = [[(0, True), (0, True), (1, False), (1, True)]]
+    stack.component.submit(task_job(stack, tmp_path, count=2))
+    status = finished(stack.component, "job-0")
+    assert status.state == "finished", status.error
+    assert (status.metrics["rollout_samples"], status.metrics["removed_rollouts"]) == (3, 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        [(0, False), (0, False)],
+        # A group of one sample has advantage 0 with Slime's group baseline.
+        [(0, True), (0, False), (1, True), (1, False)],
+    ],
+)
+def test_a_rollout_with_no_group_to_train_fails_the_job_before_the_workers_train(
+    tmp_path, task_stack, outcome
+) -> None:
+    stack, events, group = task_stack
+    group.outcomes = [outcome]
+    stack.component.submit(task_job(stack, tmp_path, count=2))
+    status = finished(stack.component, "job-0")
+    assert status.state == "failed" and "the sandbox did not start" in status.error
+    assert stack.group.train_calls == [] and not status.checkpoints
+    # The engines released their memory first.
+    assert events == ["sync", "generate:0", "release"]
+
+
+@pytest.mark.unit
+def test_a_resumed_task_job_skips_the_rollouts_it_saved(tmp_path, task_stack, monkeypatch) -> None:
+    stack, _, group = task_stack
+    job = task_job(stack, tmp_path, count=4, save_interval=1)
     directory = stack.component.job_directory("job-0")
-    assert json.loads((directory / ROLLOUTS_FILE).read_text())["scores"] == [{"task": "add", "scores": [1.0, 0.0]}]
-    settings = harbor_settings(job.parameters)
-    assert stack.component.task_rollouts(job, directory, settings) == grouped()
-    assert events == ["sync", "run_train_tasks", "release"]
+    directory.mkdir(parents=True)
+    # The first driver stops after its first checkpoint, one of the job's two rollouts.
+    monkeypatch.setattr(stack.component, "stopping", lambda directory: len(stack.group.saved) == 1)
+    stack.component.run(job, directory)
+    assert [checkpoint.step for checkpoint in stack.component.saved(directory)] == [1]
+    first_token = group.records[0]["token"]
+    monkeypatch.setattr(stack.component, "stopping", lambda directory: False)
+    group.records.clear()
+    stack.group.train_calls.clear()
+    metrics = stack.component.run(job, directory)
+    # The data source skips the saved rollout's tasks, under the new driver's token.
+    assert [record["skip_rollouts"] for record in group.records] == [1]
+    assert group.records[0]["token"] != first_token
+    assert [rollout for rollout, _ in stack.group.train_calls] == [1]
+    assert [checkpoint.step for checkpoint in stack.component.saved(directory)] == [1, 2]
+    assert metrics["rollout_samples"] == 4, "both drivers' rollouts report"
 
 
 @pytest.mark.unit
-def test_failed_rollouts_still_release_the_engines(tmp_path, task_stack):
-    stack, events, _ = task_stack
-    job = TrainingJob(
-        "job-0",
-        "slime",
-        stack.component.base_start,
-        job_data_ref(JobData("tasks", (task(tmp_path / "tasks", "add"),))),
-        {**parameters("sft"), "harbor": ROLLOUT},
-        scenario="s",
-    )
-    (tmp_path / "failing").mkdir()
-    with pytest.raises(RuntimeError, match="sandbox did not start"):
-        stack.component.task_rollouts(job, tmp_path / "failing" / "job", harbor_settings(job.parameters))
-    assert events == ["sync", "run_train_tasks", "release"]
-
-
-@pytest.mark.unit
-def test_a_task_job_is_checked_at_submit(tmp_path, task_stack):
+def test_a_task_job_is_checked_at_submit(tmp_path, task_stack) -> None:
     stack, events, _ = task_stack
     add = task(tmp_path / "a", "add")
-    method = parameters("sft")
+    method = {"objective": OBJECTIVE}
     for items, job_parameters, message in (
         ((add,), method, "needs the harbor parameter"),
-        ((add, *batch_for(0).samples), {**method, "harbor": ROLLOUT}, "both trajectories and tasks"),
-        ((add, task(tmp_path / "b", "add")), {**method, "harbor": ROLLOUT}, "distinct names"),
-        ((add,), {**method, "harbor": {"rollouts_per_task": 1}}, "rollouts_per_task must be an int of at least 2"),
+        ((add, *batch_for(0).samples), {**method, "harbor": HARBOR}, "both trajectories and tasks"),
+        ((add, task(tmp_path / "b", "add")), {**method, "harbor": HARBOR}, "distinct names"),
+        ((add,), {**method, "harbor": {"rollouts_per_task": 2}}, r"takes no \['rollouts_per_task'\]"),
+        ((add,), {"objective": "sft", "harbor": HARBOR}, "needs the 'slime' loss family, not 'sft'"),
+        ((add,), {**method, "harbor": HARBOR, "scheduling": {"shuffle": True}}, "remove learning_rate_schedule"),
+        (
+            (add,),
+            {
+                **method,
+                "harbor": HARBOR,
+                "learning_rate_schedule": {"name": "warmup", "peak_learning_rate": 1e-5, "warmup_steps": 2},
+            },
+            "remove learning_rate_schedule",
+        ),
     ):
         with pytest.raises(ValueError, match=message):
             stack.component.submit(
@@ -152,6 +234,15 @@ def test_a_task_job_is_checked_at_submit(tmp_path, task_stack):
     assert events == []
 
 
+@pytest.mark.unit
+def test_slimes_options_that_cannot_work_refuse_a_task_job_at_submit(tmp_path, task_stack) -> None:
+    stack, events, _ = task_stack
+    stack.args.group_rm = True
+    with pytest.raises(ValueError, match="--group-rm"):
+        stack.component.submit(task_job(stack, tmp_path))
+    assert events == []
+
+
 class ImportanceSamplingObjective(SlimeObjective):
     """A method that a deployment provides, on the importance_sampling family."""
 
@@ -163,61 +254,45 @@ class ImportanceSamplingObjective(SlimeObjective):
 
 
 @pytest.mark.unit
-def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path, task_stack):
-    stack, events, _ = task_stack
-    add = task(tmp_path / "a", "add")
-    # A provided method's family, importance_sampling, is Slime's too.
-    stack.component.check_job(
-        TrainingJob(
-            "j",
-            "slime",
-            stack.component.base_start,
-            job_data_ref(JobData("d", (add,))),
-            {**parameters(f"{__name__}:ImportanceSamplingObjective"), "harbor": ROLLOUT},
-            scenario="s",
-        )
-    )
-
-    class Elsewhere(SlimeObjective):
-        name = "elsewhere"
-        loss_family = "only-on-another-backend"
-
-        def prepare(self, data, state):
-            raise AssertionError("a refused job prepares nothing")
-
-    register_slime_objective(Elsewhere())
+def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path) -> None:
+    stack = Stack(tmp_path)
     try:
-        with pytest.raises(ValueError, match="no loss family 'only-on-another-backend'"):
-            stack.component.submit(
-                TrainingJob(
-                    "j",
-                    "slime",
-                    stack.component.base_start,
-                    job_data_ref(JobData("d", (add,))),
-                    {**parameters("elsewhere"), "harbor": ROLLOUT},
-                    scenario="s",
-                )
+        # A provided method's family, importance_sampling, is Slime's too. It trains trajectories.
+        stack.component.check_job(
+            TrainingJob(
+                "j",
+                "slime",
+                stack.component.base_start,
+                job_data_ref(batch_for(0)),
+                parameters(f"{__name__}:ImportanceSamplingObjective"),
+                scenario="s",
             )
-    finally:
-        unregister_slime_objective("elsewhere")
-    assert events == []
-
-
-@pytest.mark.unit
-def test_a_task_job_with_score_centering_trains_the_untruncated_distribution_at_temperature_one():
-    def checked(**sampling):
-        args = SimpleNamespace(
-            score_centering=True,
-            score_centering_top_k=4,
-            score_centering_min_tail_mass=1e-6,
-            **{"rollout_temperature": 1.0, "rollout_top_p": 1.0, "rollout_top_k": -1, **sampling},
         )
-        slime_component.SlimeJobs.check_task_jobs(SimpleNamespace(args=args), {"objective": "sft", "harbor": ROLLOUT})
 
-    checked()
-    for sampling in ({"rollout_temperature": 0.7}, {"rollout_top_p": 0.9}, {"rollout_top_k": 20}):
-        with pytest.raises(ValueError, match="--rollout-temperature 1, --rollout-top-p 1 and --rollout-top-k -1"):
-            checked(**sampling)
+        class Elsewhere(SlimeObjective):
+            name = "elsewhere"
+            loss_family = "only-on-another-backend"
+
+            def prepare(self, data, state):
+                raise AssertionError("a refused job prepares nothing")
+
+        register_slime_objective(Elsewhere())
+        try:
+            with pytest.raises(ValueError, match="no loss family 'only-on-another-backend'"):
+                stack.component.submit(
+                    TrainingJob(
+                        "j",
+                        "slime",
+                        stack.component.base_start,
+                        job_data_ref(batch_for(0)),
+                        parameters("elsewhere"),
+                        scenario="s",
+                    )
+                )
+        finally:
+            unregister_slime_objective("elsewhere")
+    finally:
+        stack.component.close()
 
 
 class FakeManager:
@@ -282,111 +357,3 @@ def test_closing_the_rollout_group_detaches_the_driver_and_keeps_the_session() -
     group.close()
     # Slime's failure cleanup detaches the driver; its success cleanup would dispose the session.
     assert closes == [True]
-
-
-class Chat(EngineChat):
-    """An engine chat whose template renders three prompt tokens and whose router answers ``answer``."""
-
-    def __init__(self, answer: tuple[int, Any], topk_logprobs: int = 0) -> None:
-        super().__init__(
-            "http://router:3000",
-            model_path="/models/m",
-            timeout_s=10.0,
-            runtime_load_id="slime:base",
-            topk_logprobs=topk_logprobs,
-        )
-        self.reply = answer
-        self.bodies: list[Any] = []
-
-    def render(self, messages, template_kwargs):
-        return [1, 2, 3]
-
-    def generate(self, body):
-        self.bodies.append(body)
-        return self.reply
-
-
-GENERATED = {
-    "text": "done",
-    "meta_info": {"output_token_logprobs": [[-0.1, 7, None], [-0.2, 8, None]], "finish_reason": {"type": "length"}},
-}
-CHAT = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "temperature": 0.7, "seed": 3}
-
-
-@pytest.mark.unit
-def test_the_engine_chat_answers_with_the_capture_of_the_engines_tokens():
-    chat = Chat((200, GENERATED))
-    status, body = chat.answer("/v1/chat/completions", CHAT)
-    assert status == 200
-    assert chat.bodies == [
-        {
-            "input_ids": [1, 2, 3],
-            "sampling_params": {"max_new_tokens": 2, "temperature": 0.7, "sampling_seed": 3},
-            "return_logprob": True,
-        }
-    ]
-    assert body["choices"][0] == {
-        "index": 0,
-        "message": {"role": "assistant", "content": "done"},
-        "finish_reason": "length",
-    }
-    training = body["training"]
-    assert (training["tokens"], training["loss_mask"], training["rollout_log_probs"]) == (
-        [1, 2, 3, 7, 8],
-        [1, 1],
-        [-0.1, -0.2],
-    )
-    assert (training["prompt_length"], training["runtime_load_id"]) == (3, "slime:base")
-
-
-HEADS = [[[-0.1, 7, None], [-2.5, 9, None]], [[-0.2, 8, None], [-1.9, 7, None]]]
-
-
-@pytest.mark.unit
-def test_the_engine_chat_records_the_engines_heads_at_temperature_one_only():
-    answer = {"text": "done", "meta_info": {**GENERATED["meta_info"], "output_top_logprobs": HEADS}}
-    chat = Chat((200, answer), topk_logprobs=2)
-    status, body = chat.answer("/v1/chat/completions", {**CHAT, "temperature": 1})
-    assert status == 200
-    assert chat.bodies[0]["top_logprobs_num"] == 2
-    assert (body["training"]["topk_indices"], body["training"]["topk_log_probs"]) == (
-        [[7, 9], [8, 7]],
-        [[-0.1, -2.5], [-0.2, -1.9]],
-    )
-    # A head must be of the distribution the trainer reads: the untruncated one at temperature 1.
-    for sampling in ({"temperature": 0.7}, {"top_p": 0.9}, {"top_k": 20}):
-        status, body = chat.answer("/v1/chat/completions", {**CHAT, "temperature": 1, **sampling})
-        assert status == 400 and "untruncated distribution at temperature 1" in body["error"]["message"]
-    for heads in (None, HEADS[:1], [HEADS[0], HEADS[1][:1]], [HEADS[0], [[float("inf"), 8, None], HEADS[1][1]]]):
-        meta = {**GENERATED["meta_info"], "output_top_logprobs": heads}
-        status, _ = Chat((200, {"text": "done", "meta_info": meta}), topk_logprobs=2).answer(
-            "/v1/chat/completions", {**CHAT, "temperature": 1}
-        )
-        assert status == 502
-    # Without score centering the engines record no head, at any temperature.
-    status, body = Chat((200, GENERATED)).answer("/v1/chat/completions", CHAT)
-    assert status == 200 and "topk_indices" not in body["training"]
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("path", "payload", "answer", "status"),
-    [
-        ("/v1/messages", CHAT, (200, GENERATED), 404),
-        ("/v1/chat/completions", ["not", "an", "object"], (200, GENERATED), 400),
-        ("/v1/chat/completions", {**CHAT, "tools": [{"type": "function"}]}, (200, GENERATED), 400),
-        ("/v1/chat/completions", {**CHAT, "n": 2}, (200, GENERATED), 400),
-        ("/v1/chat/completions", {**CHAT, "max_tokens": 0}, (200, GENERATED), 400),
-        # An engine refusal keeps its status, so an agent can shrink a request that overflows the context.
-        ("/v1/chat/completions", CHAT, (400, "the prompt is too long"), 400),
-        ("/v1/chat/completions", CHAT, (200, {"text": "done", "meta_info": {}}), 502),
-        (
-            "/v1/chat/completions",
-            CHAT,
-            (200, {"text": "x", "meta_info": {"output_token_logprobs": [[float("nan"), 7, None]]}}),
-            502,
-        ),
-    ],
-)
-def test_the_engine_chat_answers_each_call_with_its_status(path, payload, answer, status):
-    assert Chat(answer).answer(path, payload)[0] == status

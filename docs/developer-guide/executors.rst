@@ -242,10 +242,10 @@ HTTP service's process and holds no GPU. It parses Slime's arguments once at
 startup and, for each job, starts a driver process
 (``reef.train.slime_backend.driver``) with the job's directory. The driver owns
 one Ray session and runs ``SlimeJobRunner``: Slime's actor (and critic) workers
-and, for a task job, Slime's own rollout engines
+and, for a dataset job or a task job, Slime's own rollout engines
 (``reef.train.slime_backend.rollout_group``). The engines belong to Slime's
 serving session, a detached ``ServingCluster`` named after the save root, which
-the first task job's driver creates and the next drivers attach to through
+the first such job's driver creates and the next drivers attach to through
 Slime's ``create_rollout_manager``. The session holds the engines, their router
 and the placement group of the training GPUs; while it runs, every driver
 trains on its placements, and a driver detaches from it when it exits, also
