@@ -194,9 +194,9 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     base_artifact_id = scenario.serving_artifact_id()
     original_prepare_commit = scenario.trainer.prepare_commit
 
-    def slow_prepare_commit(result):
+    def slow_prepare_commit(result, correlation_metrics=None):
         time.sleep(0.05)
-        return original_prepare_commit(result)
+        return original_prepare_commit(result, correlation_metrics)
 
     monkeypatch.setattr(scenario.trainer, "prepare_commit", slow_prepare_commit)
 
