@@ -1731,7 +1731,7 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     # job, and it is within the limit of the stage, so they train in the next job, which starts from the checkpoint.
     component = scenario.served_component()
     assert component is not None
-    served = scenario.release_queries.served_history(scenario.scenario_step, component, scenario.components.names)
+    served = scenario.snapshot_queries.served_history(scenario.scenario_step, component, scenario.components.names)
     assert len(served) == 2 and served[-1] == scenario.serving_artifact_id()
     assert _wait_for(lambda: len(training.submitted) == 2)
     assert [item.source_agent_record_ids for item in read_job_data(training.submitted[1].data_dir).samples] == [

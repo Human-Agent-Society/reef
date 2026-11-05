@@ -379,7 +379,7 @@ class Scenario:
         self.refresh_requests()
         served_component = self.served_component()
         if serving is not None and served_component is not None:
-            history = self.release_queries.served_history(
+            history = self.snapshot_queries.served_history(
                 self._committer.step, served_component, self._committer.component_names()
             )
             if history:
