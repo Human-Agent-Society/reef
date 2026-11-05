@@ -916,53 +916,25 @@ Reef makes these calls one at a time, so the methods must return quickly.
 ``ScenarioLimits``. If you set ``scenario-admission``, do not set them: Reef
 refuses that configuration.
 
-Upgrade to commit records without storage locations
----------------------------------------------------
+Upgrade from a Reef that wrote older formats
+--------------------------------------------
 
-This Reef writes ``reef-commit/8`` records. These records hold artifact IDs, and
-no storage location. Older records stay as they are, and Reef still reads them.
-Reef also stops sending ``release_id`` and ``parent_release_id`` in harness
-answers.
+This Reef reads only ``reef-commit/8`` commit records and ``reef-scenario/7``
+scenario metadata. It also reads no older record locator, consumption receipt,
+queued work item or ``release_id`` selector. A scenario with older data does not
+load, and its error names the format. Reef does not change or delete that data.
+
+To keep a scenario, rewrite its commit records with the last Reef that has
+``reef migrate-commits``, before you upgrade to this Reef:
 
 #. Stop every Reef process that writes to the deployment.
 #. Back up the deployment (see `Back up a deployment`_).
-#. Upgrade Reef, and do not start it yet. Upgrade ``reef-client`` on each machine
-   with an install. An older ``reef-client`` fails on the new harness answers. A
-   new one reads an existing install, and updates the install at its next sync.
-#. Run ``reef check-artifacts -c <config>``. It reads each scenario's commit
-   history and fetches each stored release that the history names, so it can
-   need as much disk space as all the releases. It prints each problem, and it
-   exits with status 1 when it finds one. Fix each problem before you continue.
-   You can run it again at any time. For each scenario, it also prints how many
-   artifacts hold the same files as another. Reef reuses a loaded artifact only by
-   its ID, so each of them can cost one more model load when it serves.
-#. Start Reef. It binds the artifact IDs of older records when it opens each
-   scenario. This step can run again after a stop.
+#. Run ``reef migrate-commits -c <config>``, and then run it with ``--apply``.
+#. Upgrade Reef, and upgrade ``reef-client`` on each machine with an install.
 
-The first new record is the point of no return. An older Reef cannot read it,
-so a rollback needs the backup from step 2.
-
-Rewrite older commit records
-----------------------------
-
-Reef reads commit records of older formats. A later Reef can stop reading them.
-Rewrite them before you upgrade to that Reef.
-
-#. Stop every Reef process that writes to the deployment.
-#. Back up the deployment (see `Back up a deployment`_). A rewrite cannot be
-   undone without the backup.
-#. Run ``reef migrate-commits -c <config>``. It changes nothing. It prints how
-   many records of each scenario it would rewrite, and each problem. It fetches
-   each stored snapshot that the history names, so it can need as much disk space
-   as all the snapshots.
-#. Fix each problem. A flat snapshot needs a component name in the scenario's
-   manifest, so a scenario without one stays as it is.
-#. Run ``reef migrate-commits -c <config> --apply``. It rewrites the records of
-   each scenario in one transaction. If it stops, run it again.
-#. Run ``reef check-artifacts -c <config>``, and then start Reef.
-
-The command does not change Git history. A snapshot without an explicit artifact
-ID keeps its revision-based ID.
+The command does not rewrite stored records or Git history. A scenario that
+holds an older record locator or a snapshot without an artifact ID does not load
+after the upgrade, so create it again.
 
 Back up a deployment
 --------------------

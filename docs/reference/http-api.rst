@@ -224,7 +224,7 @@ Client artifact tags
 
 ``x-reef-tag-artifact_id`` identifies the harness artifact installed by the native client.
 Reef stores it under ``metadata.tags`` like any other tag, so a processor can
-read which harness artifact made the call. Older clients can send ``x-reef-tag-release``.
+read which harness artifact made the call.
 The tag does not change which artifact
 serves inference, and it does not change the record's ``artifact_id``: the
 record names the artifact that answered. This tag is separate
@@ -503,10 +503,6 @@ owner:
   "origin": {"scenario", "artifact_id"}}``. ``artifact_id`` names the artifact
   that answered the call, or is null when the record names none.
 
-New record items store ``artifact_id`` directly. Older archives containing
-``artifact_ref`` remain readable and retain their original content hashes.
-When copying an old record, Reef uses its recorded component ID when present.
-Older ``origin.release_id`` input is accepted but adds no public identity.
 
 The data service makes the items after the records are stored, so an item
 can arrive a short time after its record. When a scenario loads for the first
@@ -1198,8 +1194,7 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
   from 0.
 - ``sample_kind``: ``trajectory`` or ``task``, the kind of the job's samples.
   It is ``null`` for a job with no sample.
-- ``train_from_artifact_id``: the artifact that the job started from. It is
-  ``null`` for a job that an earlier Reef added.
+- ``train_from_artifact_id``: the artifact that the job started from.
 - ``request``: ``{id, text, parameters}`` of the training request
   (``POST /reef/train``) that the job trains. ``parameters`` is what the
   request gave, ``{}`` when it gave none. It is ``null`` for a job that
@@ -1734,9 +1729,7 @@ the combined list. Reef runs no check: the client checks each item before it
 runs the artifact. `Manual training <#manual-training>`__ gives the shape.
 
 Use ``?artifact_id=`` to request a specific harness artifact, in any form.
-An unknown or unrestorable artifact returns HTTP 404. ``?release_id=`` remains
-an alias for older clients. Send either ``artifact_id`` or ``release_id``;
-sending both returns HTTP 400, even when their values are equal.
+An unknown or unrestorable artifact returns HTTP 404.
 
 Catalog and manifest reads do not wait for an evolve step's method or
 evaluation runs: they continue serving the existing artifacts while a
@@ -1768,7 +1761,6 @@ for serving and as the harness trainer's start.
   listed in ``ignored``. A file of the base that ``files`` lacks is one the
   person removed. Config files are not read: the model binding owns them.
 - ``base_artifact_id`` is required: the artifact the client installed.
-  Older clients can send ``base_release_id`` as a compatibility alias.
 - The head here is the active selection, not the training start: a sync
   serves its result at once, so it never carries a kept tree that the
   activation rule left inactive.

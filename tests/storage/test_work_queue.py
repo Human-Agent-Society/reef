@@ -456,7 +456,7 @@ def test_serving_routes_and_the_finished_request_commit_together_and_survive_ret
     lease = stores.lease.acquire("control", now=0)
     table, queue = stores.served, stores.queue
     assert table.current_request("s") is None
-    payload = {"artifact_id": "a", "release_id": "r1"}
+    payload = {"artifact_id": "a"}
     requested = table.request("s", payload, control_lease_number=lease.number, now=0)
     assert requested.state == "queued" and requested.started_at is None
     assert table.request("s", payload, control_lease_number=lease.number, now=1).id == requested.id

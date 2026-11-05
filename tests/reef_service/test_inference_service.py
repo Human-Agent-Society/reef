@@ -153,9 +153,8 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
             "math",
             {
                 "artifact_id": "release-1",
-                "release_id": "release-1",
                 "aliases": ["release-1:weights"],
-                "beside": {"release-0": {"component": "weights", "release_id": "release-0"}},
+                "beside": {"release-0": {"component": "weights", "artifact_id": "release-0"}},
             },
             control_lease_number=lease.number,
         )
