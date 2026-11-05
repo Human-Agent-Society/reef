@@ -92,8 +92,7 @@ Snapshot
 An internal repository snapshot that stores artifact bytes and recovery
 metadata. Backend interfaces locate it with ``SnapshotRef.revision``.
 Artifact callers use ``artifact_id``. Activation and serving
-change scenario state without publishing a snapshot. Older harness protocol
-fields named ``release_id`` remain compatibility aliases.
+change scenario state without publishing a snapshot.
 
 Creation artifact
 -----------------

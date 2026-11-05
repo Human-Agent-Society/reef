@@ -41,7 +41,7 @@ PLAIN = TreePatch(changed_rules("plain rules\n"))
 
 
 def train_request(text: str = TEXT, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
-    return {"text": text, "session": session, "release_id": release_id}
+    return {"text": text, "session": session, "artifact_id": release_id}
 
 
 async def post_request(client: TestClient, body: object, scenario: str = "agents"):
@@ -661,16 +661,16 @@ def test_a_request_carries_the_clients_machine_and_drops_what_does_not_fit() -> 
         "commands": {"afplay": True, "ffplay": False},
         "hostname": "not asked for",
     }
-    request = TrainingRequest.from_dict({"text": "speak", "session": "s", "release_id": "r", "client": report})
+    request = TrainingRequest.from_dict({"text": "speak", "session": "s", "artifact_id": "r", "client": report})
     assert request.client == {k: v for k, v in report.items() if k != "hostname"}
     assert request.to_dict()["client"] == request.client
     # Advisory data never refuses a request: what does not fit is dropped, and none is none.
     odd = {"platform": "linux", "release": "#1 SMP; rm -rf", "commands": {"ok": True, "bad name": True, "x": "yes"}}
-    assert TrainingRequest.from_dict({"text": "t", "session": "s", "release_id": "r", "client": odd}).client == {
+    assert TrainingRequest.from_dict({"text": "t", "session": "s", "artifact_id": "r", "client": odd}).client == {
         "platform": "linux",
         "commands": {"ok": True},
     }
-    plain = TrainingRequest.from_dict({"text": "t", "session": "s", "release_id": "r", "client": "darwin"})
+    plain = TrainingRequest.from_dict({"text": "t", "session": "s", "artifact_id": "r", "client": "darwin"})
     assert plain.client == {} and "client" not in plain.to_dict()
 
 
@@ -699,19 +699,16 @@ def test_requirements_follow_component_artifact_parents_instead_of_snapshot_orde
         {
             "artifact_id": "artifact:root",
             "parent_artifact_id": None,
-            "release_id": "storage:root",
             "metrics": {"training_request": {"requires": [{"name": "ROOT", "kind": "env"}]}},
         },
         {
             "artifact_id": "artifact:sibling",
             "parent_artifact_id": "artifact:root",
-            "release_id": "storage:sibling",
             "metrics": {"training_request": {"requires": [{"name": "SIBLING", "kind": "env"}]}},
         },
         {
             "artifact_id": "artifact:selected",
             "parent_artifact_id": "artifact:root",
-            "release_id": "storage:selected",
             "parent_release_id": "storage:sibling",
             "metrics": {"training_request": {"requires": [{"name": "SELECTED", "kind": "env"}]}},
         },

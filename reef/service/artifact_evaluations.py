@@ -104,9 +104,7 @@ class NewArtifacts(RecordObserver):
         revision = commit.snapshot.revision
         selected = commit.artifact_ids
         if selected is None:
-            # Legacy flat commits used their storage revision as their artifact identity.
-            self.queue.put(NewArtifact(commit.scenario, revision, commit.component, revision))
-            return
+            raise ValueError(f"commit step {commit.step} made an artifact and names no artifact ID")
         names = tuple(selected) if commit.component is None else (commit.component,)
         for name in names:
             component = None if len(selected) == 1 and commit.component is None else name
