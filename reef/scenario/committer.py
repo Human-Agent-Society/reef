@@ -42,7 +42,7 @@ from reef.storage.commits import (
 )
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.train.trainer import ComponentTrainer, Trainer
-from reef.train.types import NoArtifactPublication, PreparedCommit, SavedArtifactPublication, TrainStepResult
+from reef.train.types import NoArtifactPublication, PreparedCommit, SavedArtifactPublication, TrainingCommit
 
 logger = logging.getLogger(__name__)
 
@@ -722,7 +722,7 @@ class ScenarioCommitter:
         artifact = self._binding.components.component_artifact(snapshot, component_trainer.component).materialize()
         component_trainer.trainer.start_from(artifact)
 
-    def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
+    def commit(self, result: TrainingCommit, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending training result as one atomic version record.
 
         The trainers of one scenario run one step at a time, so no other
@@ -762,7 +762,7 @@ class ScenarioCommitter:
                 return result.state
 
     def prepare_experiment(
-        self, trainer: Trainer, step: int, component: str | None, result: TrainStepResult
+        self, trainer: Trainer, step: int, component: str | None, result: TrainingCommit
     ) -> Mapping[str, Any] | None:
         """The experiment tracker's correlation fields for the commit of ``result``, or None without a tracker."""
         observer = self.experiment_observer
@@ -1027,7 +1027,7 @@ class ScenarioCommitter:
                     expected_checkpoint=expected_checkpoint,
                     activate=record.activated,
                 )
-        trainer.commit(prepared)
+        trainer.settle_commit(prepared)
         if not self._store.durable:
             self._artifact_head_sync = ArtifactHeadSync("synchronized")
         if record.operation == "training":

@@ -42,7 +42,7 @@ from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.records import StepRecord
 from reef.train.harness_backend.state import HarnessState
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 # A harness shaped like the native loop: the root session, one delegated checker
 # turn under agents/, and the rendered rules echoed into the header for the scorer.
@@ -127,7 +127,7 @@ def steps_dir(tmp_path: Path) -> Path:
     return (tmp_path / "harness" / "demo" / COMPONENT / "steps").resolve()
 
 
-def step(backend: HarnessBackend, state=None, scenario_step: int | None = None) -> TrainStepResult:
+def step(backend: HarnessBackend, state=None, scenario_step: int | None = None) -> TrainingCommit:
     state = HarnessState().to_json() if state is None else state
     return backend_step(backend, JobData("demo:1"), state, scenario_step=scenario_step)
 

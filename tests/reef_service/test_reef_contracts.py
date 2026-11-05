@@ -35,7 +35,7 @@ from reef.record2sample.service import SAMPLES_QUEUE
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import TrainStepResult
+from reef.train import TrainingCommit
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -628,7 +628,7 @@ def test_published_candidate_is_used_after_inference_startup(tmp_path) -> None:
     candidate_path.mkdir()
     (candidate_path / "model.txt").write_text("trained")
     committed = dispatcher.registry.get("chat")
-    committed.commit(TrainStepResult(state=None, artifact=Artifact.local(candidate_path)))
+    committed.commit(TrainingCommit(state=None, artifact=Artifact.local(candidate_path)))
     dispatcher.scenario_committed(committed)
     new_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
@@ -654,7 +654,7 @@ def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) ->
     checkpoint.mkdir()
     (checkpoint / "model.txt").write_text(version)
     current = dispatcher.registry.get(scenario)
-    current.commit(TrainStepResult(state=None, artifact=Artifact.local(checkpoint)))
+    current.commit(TrainingCommit(state=None, artifact=Artifact.local(checkpoint)))
     dispatcher.scenario_committed(current)
 
 
@@ -928,7 +928,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
-    dispatcher.registry.get("math").commit(TrainStepResult(state={"label": "no artifact"}))
+    dispatcher.registry.get("math").commit(TrainingCommit(state={"label": "no artifact"}))
     # A no-artifact commit advances the step (the trainer consumed records and
     # state) but does not move the serving head: there is no candidate to publish.
     assert dispatcher.get_or_create_scenario("math").scenario_step == 1
@@ -939,7 +939,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
         candidate = tmp_path / f"{scenario}-{version}"
         candidate.mkdir()
         dispatcher.registry.get(scenario).commit(
-            TrainStepResult(state={"version": version}, artifact=Artifact.local(candidate))
+            TrainingCommit(state={"version": version}, artifact=Artifact.local(candidate))
         )
 
     assert dispatcher.get_or_create_scenario("math").scenario_step == 3
@@ -966,7 +966,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
 
     with pytest.raises(ArtifactPublicationError, match="repository failed"):
         dispatcher.registry.get("chat").commit(
-            TrainStepResult(state={"label": "new"}, artifact=Artifact.local(candidate))
+            TrainingCommit(state={"label": "new"}, artifact=Artifact.local(candidate))
         )
 
     assert (
@@ -1123,7 +1123,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
             candidate.mkdir()
             (candidate / "rules.md").write_text(f"v{version}")
             current = dispatcher.registry.get("chat")
-            current.commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+            current.commit(TrainingCommit(state=None, artifact=Artifact.local(candidate)))
             dispatcher.scenario_committed(current)
         artifacts.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
     assert len(set(artifacts)) == 3
