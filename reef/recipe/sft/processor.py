@@ -89,7 +89,7 @@ class SFTSamples(ReportSamples):
     def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """An uploaded ATIF conversation, which trains with every agent turn that is not copied context.
 
-        ``ValueError``: the trajectory has no turn that trains (``trained_turns``).
+        ``ValueError``: the trajectory holds a part that is not text, or has no turn that trains (``trained_turns``).
         """
         trained_turns(trajectory.trajectory)
         return self.limited(trajectory)

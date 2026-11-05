@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 
 from reef.core.records_types import AgentRecord
+from reef.core.trajectories import has_image_content
 from reef.storage.data import DataStore, NewItem, StoredItem
 from reef.storage.data_queue import DATA_QUEUE, RECORD_COPY_KIND
 from reef.storage.item_kinds import copied_record
@@ -136,13 +137,17 @@ def copy_scenario_records(storage: ScenarioStorage, data: DataStore, marks: Mark
         store.close()
 
 
-def sync_scenario_records(records: RecordStore, data: DataStore, owner: str, scenario: str) -> tuple[str, ...]:
+def sync_scenario_records(
+    records: RecordStore, data: DataStore, owner: str, scenario: str, *, refuses_images: bool
+) -> tuple[str, ...]:
     """Append to ``records``, the record store of ``scenario``, the copy of each record item that it uses.
 
     The record items are those of ``owner`` whose ``scenarios`` names ``scenario`` and that another scenario made,
     in arrival order. A copy that ``records`` holds already changes nothing. A copy that ``records`` holds with
-    other content stays, and the sync logs it: the item was deleted and made again. Return the IDs of the copies
-    that the sync appended.
+    other content stays, and the sync logs it: the item was deleted and made again. With ``refuses_images``, the sync
+    logs and skips an item that holds an image, such as one that Reef stored before the recipe refused images: no
+    client waits for this sync, so it cannot refuse the item with an error. Return the IDs of the copies that the sync
+    appended.
     """
     added: list[str] = []
     after = 0
@@ -150,6 +155,13 @@ def sync_scenario_records(records: RecordStore, data: DataStore, owner: str, sce
         after = page[-1].sequence
         for item in page:
             if item.content is None or origin_of(item) == scenario:
+                continue
+            if refuses_images and has_image_content(item.content["payload"]):
+                logger.warning(
+                    "scenario %r skips record item %r: it holds an image, and the recipe does not support images",
+                    scenario,
+                    item.item_id,
+                )
                 continue
             copy = copied_record(item.item_id, item.content, origin_of(item), scenario)
             try:

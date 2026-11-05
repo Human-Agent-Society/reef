@@ -13,7 +13,11 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 
 
-def step(source: str, message: str, **fields: Any) -> dict[str, Any]:
+TEXT = {"type": "text", "text": "q"}
+IMAGE = {"type": "image", "source": {"media_type": "image/png", "path": "data:image/png;base64,AAAA"}}
+
+
+def step(source: str, message: str | list[dict[str, Any]], **fields: Any) -> dict[str, Any]:
     return {"source": source, "message": message, **fields}
 
 
@@ -60,11 +64,42 @@ def test_the_agent_tools_render_with_every_part() -> None:
         ((step("user", "q"), step("agent", "a", is_copied_context=True)), "agent steps to train"),
         ((step("agent", "a"),), "before its first trained agent step"),
         ((step("user", "q"), step("agent", "a", is_copied_context="yes")), "must be a boolean"),
+        ((step("user", [TEXT, IMAGE]), step("agent", "a")), "renders text only"),
+        (
+            (step("user", "q"), step("agent", "a", observation={"results": [{"content": [IMAGE]}]})),
+            "renders text only",
+        ),
+        ((step("user", [{"type": "audio"}]), step("agent", "a")), "renders text only"),
     ],
 )
 def test_a_trajectory_that_cannot_train_is_refused(steps, error) -> None:
     with pytest.raises(ValueError, match=error):
         render_trajectory(CharTemplate(), trajectory(*steps))
+
+
+def test_a_list_of_text_parts_renders() -> None:
+    (rendered,) = render_trajectory(CharTemplate(), trajectory(step("user", [TEXT]), step("agent", "a")))
+    assert rendered.tokens == [2, 213, 9, 197]
+
+
+def test_a_recorded_call_with_an_image_is_left_out_with_a_warning(caplog) -> None:
+    record = AgentRecord.create(
+        agent_record_id="call",
+        scenario="s",
+        request_type=RequestType.INFERENCE,
+        payload={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [TEXT, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}],
+                }
+            ],
+            "response": {"choices": [{"message": {"role": "assistant", "content": "a"}}]},
+        },
+    )
+    data, left_out = rendered_job_data(JobData("d", (make_trajectory((record,), 1.0),)), CharTemplate())
+    assert left_out == (0,) and data.samples == ()
+    assert "sample call is left out of its job: training renders text only" in caplog.text
 
 
 def test_a_template_that_drops_earlier_turns_trains_each_turn_as_its_call_rendered_it() -> None:

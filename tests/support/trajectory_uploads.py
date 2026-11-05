@@ -148,7 +148,7 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     dispatcher = Dispatcher(
         recipe,
         factory or InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
-        scenario_storage=DataScenarioStorage(storage, data),
+        scenario_storage=DataScenarioStorage(storage, data, refuses_images=recipe.refuses_images),
         record_storage=storage,
         data_store=data,
         coordination=memory_coordination(),

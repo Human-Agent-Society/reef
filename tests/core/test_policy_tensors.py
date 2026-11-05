@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.core.trajectories import has_image_content, make_trajectory, source_record_id, trajectory_reward
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 from reef.service.inference_service import provider_response
 
@@ -305,3 +305,91 @@ def test_multi_turn_scaffold_tolerance_realls_masked_scaffold_only() -> None:
         _turn("i2", [9, 9, 9, 9, 9, 6], [1], [-0.3]),
     ]
     assert make_multi_turn_policy_trajectory(forked, 1.0, source_agent_record_id="r1", scaffold_tolerance=2) is None
+
+
+PNG_URL = "data:image/png;base64,AAAA"
+IMAGE_URL_PART = {"type": "image_url", "image_url": {"url": PNG_URL}}
+ANTHROPIC_IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"messages": [{"role": "user", "content": [IMAGE_URL_PART]}]},
+        {"messages": [{"role": "user", "content": [{"image_url": {"url": PNG_URL}}]}]},
+        {
+            "messages": [
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/bmp;base64,A"}}]}
+            ]
+        },
+        {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x.test/a"}}]}]},
+        {"messages": [{"role": "user", "content": [ANTHROPIC_IMAGE]}]},
+        {"messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "file", "file_id": "f"}}]}]},
+        {"messages": [{"role": "user", "content": [{"type": "tool_result", "content": [ANTHROPIC_IMAGE]}]}]},
+        {"messages": [{"role": "tool", "tool_call_id": "c", "content": [IMAGE_URL_PART]}]},
+        {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": PNG_URL}]}]},
+        {"input": [{"type": "computer_call_output", "output": {"type": "computer_screenshot", "image_url": PNG_URL}}]},
+        {"input": [{"type": "function_call_output", "output": {"type": "input_image", "image_url": PNG_URL}}]},
+        {"input": [{"type": "custom_tool_call_output", "output": [{"type": "input_image", "file_id": "f"}]}]},
+        {"messages": [], "response": {"output": [{"type": "image_generation_call", "result": "AAAA"}]}},
+        {"messages": [], "response": {"choices": [{"message": {"content": [IMAGE_URL_PART]}}]}},
+        {"steps": [{"source": "user", "message": [{"type": "image", "source": {"path": PNG_URL}}]}]},
+        {"steps": [{"source": "agent", "observation": {"results": [{"content": [{"type": "image", "source": {}}]}]}}]},
+        {"system": [ANTHROPIC_IMAGE]},
+        {"instructions": [IMAGE_URL_PART]},
+        {"prompt": [{"role": "user", "content": [IMAGE_URL_PART]}]},
+        {"messages": [{"role": "user", "content": [{"type": "document", "source": {"content": [ANTHROPIC_IMAGE]}}]}]},
+        {"input": [{"type": "computer_call_output", "output": {"type": "computer_screenshot", "file_id": "f"}}]},
+        {"input": [{"type": "code_interpreter_call", "outputs": [{"type": "image", "url": PNG_URL}]}]},
+        {"response": {"training": {"request_messages": [{"role": "user", "content": [IMAGE_URL_PART]}]}}},
+        {"response": {"training": {"response_message": {"content": [IMAGE_URL_PART]}}}},
+    ],
+)
+def test_has_image_content_finds_an_image_in_each_shape(payload) -> None:
+    assert has_image_content(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"messages": [{"role": "user", "content": "an image_url"}]},
+        {"messages": [{"role": "user", "content": [{"type": "text", "text": "image"}]}]},
+        # A tool's definition and its call's arguments are not conversation content.
+        {"messages": [], "tools": [{"type": "function", "function": {"parameters": {"type": "image"}}}]},
+        {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "input": {"type": "image"}}]}]},
+        {"input": "plain text"},
+        {"steps": [{"source": "user", "message": "q"}]},
+        {"messages": [{"role": "user", "content": [{"type": "text", "text": "q", "image_url": None}]}]},
+        {"messages": [{"role": "user", "content": [{"type": "text", "text": "q", "image_url": "a"}]}]},
+        {"messages": [{"role": "user", "content": "q", "image_url": None}]},
+        {"input": [{"type": "input_text", "text": "q", "image_url": None}]},
+        {"messages": [{"role": "user", "content": [{"type": ["image"], "text": "q"}]}]},
+        {},
+    ],
+)
+def test_has_image_content_ignores_text_and_tools(payload) -> None:
+    assert not has_image_content(payload)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {
+            "type": "computer_call_output",
+            "call_id": "c",
+            "output": {"type": "computer_screenshot", "image_url": PNG_URL},
+        },
+        {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/bmp;base64,AAAA"}]},
+    ],
+)
+def test_has_image_content_finds_an_image_that_an_atif_step_does_not_keep(item) -> None:
+    payload = {
+        "model": "m",
+        "input": [{"role": "user", "content": "q"}, item],
+        "response": {
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a"}]}]
+        },
+    }
+    document = make_trajectory((_inference(payload),), 1.0).trajectory
+    assert has_image_content(document)
+    assert not has_image_content({**document, "extra": {"reef": {}}}), "only the captured records hold it"

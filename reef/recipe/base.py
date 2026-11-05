@@ -264,6 +264,27 @@ class Recipe:
         """
         return None
 
+    @property
+    def supports_images(self) -> bool:
+        """Whether this recipe trains on image content. The default is ``False``; no built-in recipe returns ``True``.
+
+        A recipe returns ``True`` only when its training path renders images: ``reef.core.chat_rendering.trained_turns``
+        refuses every part that is not text. A ``CompositeRecipe`` trains nothing itself, so it keeps ``False``, and its
+        ``refuses_images`` reads its components. This is a runtime capability, not a dataclass field or recipe
+        configuration.
+        """
+        return False
+
+    @property
+    def refuses_images(self) -> bool:
+        """Whether Reef refuses image content that enters this recipe's scenarios. The default is ``False``: a recipe
+        that trains no weights keeps image content in its records.
+
+        The inference service, the record import and the data items read it, and they find an image with
+        ``reef.core.trajectories.has_image_content``.
+        """
+        return False
+
     def build(
         self,
         scenario: str,
@@ -456,6 +477,9 @@ WEIGHTS_COMPONENT = "weights"
 class WeightTrainingRecipe(Recipe):
     """Shared recipe contract for backend algorithms that update weights.
 
+    Such a recipe refuses image content unless it supports images (``refuses_images``), so that it does not store an
+    image that it will not train on, and does not train on the text that remains without the image.
+
     Requires a :class:`~reef.train.component.TrainingComponent` in
     ``training_component`` (the first positional argument of every training
     recipe), which runs the recipe's training jobs.
@@ -487,6 +511,10 @@ class WeightTrainingRecipe(Recipe):
             "refuses a parameter it does not take."
         ),
     )
+
+    @property
+    def refuses_images(self) -> bool:
+        return not self.supports_images
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:

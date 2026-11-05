@@ -77,16 +77,18 @@ class TaskImport:
 class DataScenarioStorage(ScenarioStorage):
     """Scenario storage that prepares the data of each scenario in the deployment's data store when it opens.
 
-    Values: ``(inner, data, task_import)`` is such a storage if and only if
-    ``inner`` is a scenario storage, ``data`` is the deployment's data store,
-    and ``task_import`` is a task import or ``None``. Each operation is the
-    operation of ``inner``, except ``open``, which opens the session of
-    ``inner`` and then, in order:
+    Values: ``(inner, data, task_import, refuses_images)`` is such a storage if
+    and only if ``inner`` is a scenario storage, ``data`` is the deployment's
+    data store, ``task_import`` is a task import or ``None``, and
+    ``refuses_images`` says whether the deployment's recipe refuses image
+    content. Each operation is the operation of ``inner``, except ``open``,
+    which opens the session of ``inner`` and then, in order:
 
     1. sets the owner of a scenario that has none to the scenario's name;
     2. runs ``task_import`` for the owner, when it is set;
     3. appends to its record store the copy of each record item of the owner
-       that it uses and that another scenario made (``sync_scenario_records``);
+       that it uses and that another scenario made (``sync_scenario_records``),
+       and with ``refuses_images`` skips an item that holds an image;
     4. returns the session.
 
     ``sample_store`` gives the items of the owner that the scenario uses.
@@ -99,10 +101,18 @@ class DataScenarioStorage(ScenarioStorage):
     scenario factory opens each scenario's session through it.
     """
 
-    def __init__(self, inner: ScenarioStorage, data: DataStore, task_import: TaskImport | None = None) -> None:
+    def __init__(
+        self,
+        inner: ScenarioStorage,
+        data: DataStore,
+        task_import: TaskImport | None = None,
+        *,
+        refuses_images: bool,
+    ) -> None:
         self.inner = inner
         self.data = data
         self.task_import = task_import
+        self.refuses_images = refuses_images
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
@@ -128,7 +138,7 @@ class DataScenarioStorage(ScenarioStorage):
                 self.inner.write_settings(scenario, replace(settings, owner=owner))
             if self.task_import is not None:
                 self.task_import.run(self.data, owner, scenario)
-            sync_scenario_records(session.records, self.data, owner, scenario)
+            sync_scenario_records(session.records, self.data, owner, scenario, refuses_images=self.refuses_images)
         except BaseException:
             session.close()
             raise

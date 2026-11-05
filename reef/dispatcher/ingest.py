@@ -14,6 +14,7 @@ from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
+from reef.core.trajectories import has_image_content
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
@@ -84,6 +85,14 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
     report may reference before they are stored.
     """
     try:
+        if item.request_type is RequestType.INFERENCE and current.refuses_images and has_image_content(item.payload):
+            # An identical retry of a record that this check did not refuse keeps its receipt.
+            if (existing := current.records.existing_receipt(item)) is not None:
+                return existing
+            raise ValueError(
+                f"record {item.agent_record_id!r} holds an image, "
+                f"and the recipe of scenario {current.name!r} does not support images"
+            )
         # Reject a malformed report before it is appended. Then the producer's
         # POST fails with an error that names the broken field. Otherwise the
         # record would fail silently at training time. A recipe without a

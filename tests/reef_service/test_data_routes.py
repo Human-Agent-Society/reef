@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import tarfile
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
+from reef.storage.data import NewItem
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -101,6 +103,96 @@ def test_a_deployment_without_a_data_store_serves_no_data_route(tmp_path: Path) 
         response = await client.get("/reef/namespaces/acme/data", headers=AUTH)
         assert response.status == 503
         assert "no data store" in await response.text()
+
+    served(dispatcher, check)
+
+
+class TextOnlyRecipe(UploadRecipe):
+    @property
+    def refuses_images(self) -> bool:
+        return True
+
+
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
+def record_item_body(record_id: str, content: object, scenarios: dict[str, str]) -> dict[str, object]:
+    payload = {"messages": [{"role": "user", "content": content}], "response": {"content": "a"}}
+    return {
+        "items": [
+            {
+                "id": f"old/{record_id}",
+                "content": {
+                    "agent_record_id": record_id,
+                    "request_type": "inference",
+                    "payload": payload,
+                    "created_at": 1.0,
+                    "references": [],
+                    "artifact_id": None,
+                },
+                "metadata": {
+                    "kind": "record",
+                    "scenarios": scenarios,
+                    "origin": {"scenario": "old", "artifact_id": None},
+                },
+            }
+        ]
+    }
+
+
+def test_a_recipe_that_refuses_images_refuses_each_item_that_holds_one(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, TextOnlyRecipe())
+    data = "/reef/namespaces/s/data"
+    image_step = {"step_id": 1, "source": "user", "message": [{"type": "image", "source": {"path": "a.png"}}]}
+    trajectory = {
+        "schema_version": "ATIF-v1.4",
+        "session_id": "t",
+        "agent": {"name": "a"},
+        "steps": [image_step, {"step_id": 2, "source": "agent", "message": "a"}],
+    }
+
+    async def check(client: TestClient) -> None:
+        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status in (200, 201)
+        refused = await client.post(data, headers=AUTH, json=record_item_body("r1", [IMAGE_PART], {"s": "train"}))
+        assert refused.status == 400
+        assert "item 'old/r1' holds an image" in await refused.text()
+        lines = (json.dumps(trajectory) + "\n").encode()
+        refused = await upload_trajectories(client, AUTH, lines=lines, base=data)
+        assert refused.status == 400
+        assert "item 't' holds an image" in await refused.text()
+        assert dispatcher.data_store.query("s") == ()
+        # A scenario that does not exist yet refuses it too.
+        later = await client.post(data, headers=AUTH, json=record_item_body("r4", [IMAGE_PART], {"later": "train"}))
+        assert later.status == 400
+        # An item that names no scenario is stored. A metadata update cannot add it to a scenario.
+        stored = await client.post(data, headers=AUTH, json=record_item_body("r2", [IMAGE_PART], {}))
+        assert stored.status == 201, await stored.text()
+        patch = {"ids": ["old/r2"], "patch": {"scenarios": {"s": "train"}}}
+        refused = await client.post(f"{data}/metadata", headers=AUTH, json=patch)
+        assert refused.status == 400
+        assert "item 'old/r2' holds an image" in await refused.text()
+        assert (await client.post(data, headers=AUTH, json=record_item_body("r3", "q", {"s": "train"}))).status == 201
+
+    served(dispatcher, check)
+
+
+def test_each_sync_skips_a_stored_record_item_with_an_image(tmp_path: Path, caplog) -> None:
+    dispatcher = dispatcher_for(tmp_path, TextOnlyRecipe())
+    data = "/reef/namespaces/s/data"
+    entry = record_item_body("image", [IMAGE_PART], {"s": "train"})["items"][0]
+    # Reef stored this item before the recipe refused images.
+    dispatcher.data_store.create("s", [NewItem(entry["id"], entry["content"], entry["metadata"])])
+
+    async def check(client: TestClient) -> None:
+        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status in (200, 201)
+        assert "skips record item 'old/image'" in caplog.text
+        caplog.clear()
+        created = await client.post(data, headers=AUTH, json=record_item_body("text", "q", {"s": "train"}))
+        assert created.status == 201, await created.text()
+        records = dispatcher.get_or_create_scenario("s").records
+        assert records.get("s", "old/text") is not None
+        assert records.get("s", "old/image") is None
+        assert "skips record item 'old/image'" in caplog.text
 
     served(dispatcher, check)
 

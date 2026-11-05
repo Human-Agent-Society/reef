@@ -307,6 +307,11 @@ class CompositeRecipe(Recipe):
         )
 
     @property
+    def refuses_images(self) -> bool:
+        """Whether any component refuses image content: each record of the scenario reaches each component."""
+        return any(recipe.refuses_images for recipe in self.components.values())
+
+    @property
     def report_type(self) -> type[ReportBase] | None:
         """The report contract ingress checks: a report any component accepts; ``None`` keeps ingress open.
 

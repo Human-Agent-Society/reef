@@ -360,6 +360,29 @@ def test_the_inference_component_answers_from_served_models_alone(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_the_inference_component_refuses_an_image_for_a_recipe_that_refuses_images(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class TextOnlyRecipe(Recipe):
+        @property
+        def refuses_images(self) -> bool:
+            return True
+
+    monkeypatch.setattr("reef.service.components.serving_recipe", lambda *_: TextOnlyRecipe())
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    body = {"model": "m", "messages": [{"role": "user", "content": [image]}]}
+
+    async def run() -> None:
+        async with TestClient(TestServer(build_component_app("inference", settings(tmp_path)))) as client:
+            headers = {"Authorization": f"Bearer {TOKEN}", "x-reef-scenario": "math"}
+            refused = await client.post("/v1/chat/completions", headers=headers, json=body)
+            assert refused.status == 400
+            assert "does not support images" in await refused.text()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_the_evaluation_service_runs_on_its_own_and_an_unknown_service_is_refused(tmp_path: Path) -> None:
     # It serves its candidates itself, so it starts with the config alone: no other service's URL.
     async def run() -> None:

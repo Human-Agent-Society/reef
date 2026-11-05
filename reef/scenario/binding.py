@@ -29,6 +29,8 @@ class ScenarioBinding:
     #: when set, every report on this scenario is parsed through it at
     #: ingress. ``None`` keeps open ingress.
     report_type: type[ReportBase] | None = None
+    #: Whether the record import and the data items refuse image content (``Recipe.refuses_images``).
+    refuses_images: bool = False
     #: The training component of a weight-training recipe, which its trainer submits jobs to.
     training_component: TrainingComponent | None = None
     #: Standalone scenarios activate their runtime directly. Service scenarios leave activation to inference.

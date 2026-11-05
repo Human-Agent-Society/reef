@@ -141,7 +141,9 @@ Three things to get right:
    serving engine's chat template arguments in
    ``training.options.apply-chat-template-kwargs``, for example
    ``'{"enable_thinking": false}'``. A sample that cannot render does not
-   train, and the job metric ``unrenderable_samples`` counts it.
+   train, and the job metric ``unrenderable_samples`` counts it. A recipe that
+   trains weights refuses images unless it supports them (see `Recipe
+   <../reference/python-api.rst#recipe>`__).
 
 Keep the ``training.options`` mapping from the closest working config and change only what
 your model or recipe needs.

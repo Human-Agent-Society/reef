@@ -63,7 +63,7 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
         TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
         UriBackend.factory(directory=root / "repository"),
         local_artifact_dir=root / "staged",
-        scenario_storage=DataScenarioStorage(storage, data),
+        scenario_storage=DataScenarioStorage(storage, data, refuses_images=False),
         record_storage=storage,
         data_store=data,
         coordination=memory_coordination(),

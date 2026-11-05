@@ -258,9 +258,25 @@ reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
 adapter ``GET /reef/harness`` renders the recipe's harness releases for
 (``None``, the default, for a recipe with no harness tree;
 ``HarnessEvolutionRecipe`` names ``evolution.adapter``).
-The scenario list names it for every scenario. Every recipe declares
-``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
-stages <#pipeline-stages>`__). Weight-training recipes add these members:
+The scenario list names it for every scenario.
+
+A recipe may also declare ``supports_images``, whether it trains on image
+content. The default is ``False``, and no built-in recipe returns ``True``.
+``refuses_images`` says whether Reef refuses image content that enters the
+recipe's scenarios. The default is ``False``, so a recipe that trains no
+weights keeps image content in its records. A ``WeightTrainingRecipe`` refuses
+images unless it supports them, and a composite refuses them when any component
+does. Reef then answers 400 to a recorded call, an imported inference record, and
+a trajectory or record item that names a scenario, when it holds an image
+(``reef.core.trajectories.has_image_content``). It stores none of them. An
+unrecorded call, such as an evaluation rollout's, is not checked. An item that
+names no scenario is stored, and a metadata update cannot add it to a scenario.
+A scenario skips a record item with an image that Reef stored earlier, with a
+warning.
+
+Every recipe declares ``pipeline_spec()``, the default class of each pipeline
+stage (see `Pipeline stages <#pipeline-stages>`__). Weight-training recipes add
+these members:
 
 - ``training_spec()`` binds the registered or dotted training objective.
   The objective declares the backend loss family.
@@ -1643,8 +1659,10 @@ it. ``reef.core.chat_rendering`` holds the shared rendering:
   its tokens. A turn whose call's prompt extends the tokens of the turn
   before it continues that segment. Else it starts a new segment. The result
   is one ``RenderedTrajectory`` for each segment. It raises ``ValueError``
-  when the trajectory has no trained step, or when the template does not
-  render a turn after its own generation prompt.
+  when a message or an observation result holds a part that is not text, such
+  as an image. It also raises ``ValueError`` when the trajectory has no
+  trained step, or when the template does not render a turn after its own
+  generation prompt.
 - ``TeacherRequest`` is the ``extra.reef.teacher`` value. Its
   ``teacher_tokens`` is the rendered teacher prompt followed by the student's
   reply tokens verbatim, or the student's own tokens when it names no

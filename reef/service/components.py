@@ -106,6 +106,7 @@ class InferenceApp(ComponentApp):
             evaluation_tokens=evaluation_token_for(settings.tokens),
             timeout_seconds=timeout_seconds,
             for_codex=recipe.harness_adapter == "codex",
+            refuses_images=recipe.refuses_images,
         )
 
         worker = None

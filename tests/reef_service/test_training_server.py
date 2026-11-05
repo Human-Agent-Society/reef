@@ -454,6 +454,8 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
     # The training backend built the component (the inference branch builds none).
     component = dispatcher.recipe.training_component.component
     assert component.received_model_path == "/models/demo"
+    # A weight recipe that does not support images: each scenario's data sync skips an item with an image.
+    assert dispatcher.refuses_images and dispatcher.storage.refuses_images
 
 
 @pytest.mark.unit

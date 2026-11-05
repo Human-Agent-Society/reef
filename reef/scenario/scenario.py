@@ -202,6 +202,11 @@ class Scenario:
         return self._binding.report_type
 
     @property
+    def refuses_images(self) -> bool:
+        """Whether the recipe refuses image content that enters this scenario (``Recipe.refuses_images``)."""
+        return self._binding.refuses_images
+
+    @property
     def repository(self) -> Repository:
         """The release chain's scenario-scoped artifact repository.
 
