@@ -12,6 +12,7 @@ the inference component.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,9 @@ import ray
 from reef.execution.executor.placement import DeploymentResources, GpuBundles
 from reef.execution.executor.process_guard import DEPLOYMENT_ENV, retire
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+
+
+logger = logging.getLogger(__name__)
 
 
 class SlimeDeploymentResources(DeploymentResources):
@@ -128,4 +132,4 @@ def retire_lease(lease: str, nodes: list[str]) -> None:
     ]
     # A lost node cannot confirm process retirement. Do not reuse its GPU
     # reservations automatically or mutate an externally owned cluster.
-    ray.get(pending, timeout=45)
+    logger.info("retired the processes of the job on each node: %s", ray.get(pending, timeout=45))
