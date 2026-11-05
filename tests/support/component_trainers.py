@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -103,7 +103,8 @@ def finish_job(scenario: Scenario, component: str, checkpoint_metrics: Mapping[s
         result = scenario.prepare_training_step(component)
         assert result is not None, "a job that ended in submit has its checkpoint and its end to commit"
         if checkpoint_metrics is not None and result.metrics["training_job"]["event"] == "checkpoint":
-            result = trainer.add_commit_metrics(result, checkpoint_metrics)
+            result = replace(result, metrics={**result.metrics, **checkpoint_metrics})
+            trainer.pending_step = replace(trainer.pending_step, result=result)
         scenario.commit(result, component=component)
 
 
