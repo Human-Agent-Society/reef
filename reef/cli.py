@@ -16,14 +16,15 @@ from __future__ import annotations
 
 import sys
 
-_COMMANDS = {"serve"}
+_COMMANDS = {"serve", "check-artifacts"}
 
 
 def _help_text():
     return """\
 usage: reef <command> [options]
 
-  serve  Start inference, connect a provider, or run a configured stack
+  serve            Start inference, connect a provider, or run a configured stack
+  check-artifacts  Check that each commit history resolves to stored files, before an upgrade
 
   -c CONFIG   Optional config file; omitted means configuration-free startup
   --version   Print the installed reef version
@@ -64,6 +65,10 @@ def main(argv=None):
     from reef.service.deploy import main as _serve_main
 
     try:
+        if cmd == "check-artifacts":
+            from reef.service.check_artifacts import main as check_main
+
+            sys.exit(check_main(rest))
         _serve_main(rest)
     except DeployConfigError as exc:
         # Deploy config errors are typed library errors; the CLI owns the exit.
