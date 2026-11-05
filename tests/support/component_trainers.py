@@ -100,7 +100,7 @@ def finish_job(scenario: Scenario, component: str, checkpoint_metrics: Mapping[s
     if not isinstance(trainer.job_loop_required().component, ComponentJobs):
         return
     while trainer.job_running:
-        result = scenario.prepare_training_step(component)
+        result = scenario.next_commit(component)
         assert result is not None, "a job that ended in submit has its checkpoint and its end to commit"
         if checkpoint_metrics is not None and result.metrics["training_job"]["event"] == "checkpoint":
             result = replace(result, metrics={**result.metrics, **checkpoint_metrics})
