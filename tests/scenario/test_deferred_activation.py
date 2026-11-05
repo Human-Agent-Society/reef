@@ -31,7 +31,6 @@ def deferred_factory(tmp_path: Path):
             InMemoryRepositoryBackend.factory(directory=tmp_path / "releases"),
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
-            activates_runtime=False,
             served_models=coordination.served_models,
         )
         yield factory, runtime, coordination
