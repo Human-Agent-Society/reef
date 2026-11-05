@@ -1,7 +1,7 @@
 """Artifact-agnostic contracts for evaluating and selecting candidate updates.
 
 An evaluation runs rollouts and gives their scores (``RolloutScores``). A publication policy reads the scores
-and decides whether a release is published; training on tasks assembles the same rollouts into samples.
+and decides whether a snapshot is published; training on tasks assembles the same rollouts into samples.
 """
 
 from __future__ import annotations
@@ -291,7 +291,7 @@ class RolloutRequest:
 
 @dataclass(frozen=True)
 class ArtifactEvaluationRequest:
-    """A client's request to evaluate one artifact: a component of a release, with the other side of its policy.
+    """A client's request to evaluate one artifact: a component of a snapshot, with the other side of its policy.
 
     Values: ``artifact_id`` is the non-empty ID of one of the scenario's artifacts, and ``component`` a
     non-empty name of one of its components: the evaluated artifact. Exactly one of ``harness`` and ``model`` is set: ``harness``, the
@@ -371,7 +371,7 @@ class ArtifactEvaluationSettings:
     """How to evaluate an artifact that is not named yet: an ``ArtifactEvaluationRequest`` without its
     ``artifact_id``.
 
-    Values: ``component`` is None, for the one component of the releases that has a kind, or a non-empty
+    Values: ``component`` is None, for the one component of the snapshots that has a kind, or a non-empty
     component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task`` and ``environment`` meet the
     conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation request is these settings and an
     artifact ID, and a scenario keeps settings to evaluate each new artifact with; ``request`` makes the request
@@ -388,7 +388,7 @@ class ArtifactEvaluationSettings:
     def __post_init__(self) -> None:
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
             raise ValueError("an artifact evaluation's component is None or a non-empty string")
-        # The request of any release checks every other field.
+        # The request of any snapshot checks every other field.
         checked = self.request("any", self.component or "any")
         object.__setattr__(self, "harness", checked.harness)
 

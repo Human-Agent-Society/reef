@@ -253,7 +253,7 @@ class ScenarioRegistry:
         A missing scenario is created when ``allow_implicit_creation`` is true
         (defaulting to the registry's deployment flag); otherwise ``None`` is
         returned so the caller can surface an unknown-scenario error. A
-        created scenario's root release holds the artifact item ``start``, or
+        created scenario's root snapshot holds the artifact item ``start``, or
         the recipe's default start when ``start`` is ``None``
         (``ScenarioFactory.load_or_create``).
         """

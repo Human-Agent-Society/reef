@@ -2,7 +2,7 @@ Quickstart: serve inference and report feedback
 ===============================================
 
 Start Reef locally, send an inference request through a hosted provider,
-report feedback on the response, and inspect the release history. This
+report feedback on the response, and inspect the snapshot history. This
 quickstart needs no GPU; the final section links to recipes that learn
 from the records you collect.
 
@@ -25,14 +25,14 @@ This workflow touches a few key concepts:
 
 - **scenario** - A specific type of workload. For example, a code reviewer, or a
   math problem solver. Reef manages the training of each scenario separately,
-  i.e. records, training state and release chain.
+  i.e. records, training state and snapshot chain.
 - **receipt** - The id of a recorded inference exchange. It identifies the
-  request, the response, and the release that produced it.
+  request, the response, and the snapshot that produced it.
 - **report** - A feedback quoting one or more receipts.
 - **recipe** - How Reef use the report to evolve new versions of artifacts. A
   deployment serves one recipe, and every scenario on it evolves under that
   recipe.
-- **artifact** - The content a release selects: model weights, or a harness
+- **artifact** - The content a snapshot selects: model weights, or a harness
   tree of rules, prompts, skills, and config. Versioned.
 - **release** - One accepted publication in a scenario. The chain of them is
   the scenario's history.

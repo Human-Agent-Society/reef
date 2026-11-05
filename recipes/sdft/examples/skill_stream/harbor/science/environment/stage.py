@@ -10,7 +10,7 @@ For each step of ``PROMPTS_PER_STEP`` training prompts, in the order
               that sample's receipt
     learn   — Reef's recipe batches the step's reports, runs one optimizer
               step and publishes the weights; the loop blocks on that
-              release, so the next step samples from the updated policy
+              snapshot, so the next step samples from the updated policy
 
 Every ``EVAL_EVERY`` steps, and before the first, the stage submits its step
 number to the task's judge, which scores the served model on both skills'

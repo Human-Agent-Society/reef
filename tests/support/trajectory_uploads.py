@@ -100,7 +100,7 @@ class UploadRecipe(Recipe):
     batch_stage: type[Sample2Job] = UploadJobData
     task_stage: type[NoSamples] = NoSamples
     batches: list[JobData] = field(default_factory=list)
-    #: The content of a new scenario's root release.
+    #: The content of a new scenario's root snapshot.
     start: DefaultStart = field(default_factory=DefaultStart)
 
     def default_start(self) -> DefaultStart:
@@ -114,7 +114,7 @@ class UploadRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):

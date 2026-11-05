@@ -1,7 +1,7 @@
 tests/artifact/test_peft_validator.py
 tests/artifact/test_reef_artifacts.py
 tests/artifact/test_reef_git_lfs.py
-tests/artifact/test_release_components.py
+tests/artifact/test_snapshot_components.py
 tests/artifact/test_repository_backend_capabilities.py
 tests/artifact/test_scenario_components.py
 tests/contributing/test_contributor_docs.py
@@ -152,15 +152,15 @@ tests/reef_service/test_training_server.py
 tests/reef_service/test_training_startup.py
 tests/reef_service/test_vendor_install.py
 tests/reef_service/test_worker_resource_config.py
-tests/scenario/test_activate_release.py
+tests/scenario/test_activate_snapshot.py
 tests/scenario/test_commit_history.py
 tests/scenario/test_component_trainers.py
 tests/scenario/test_composite_activation_admission.py
 tests/scenario/test_composite_replay_parity.py
 tests/scenario/test_reef_concurrency.py
 tests/scenario/test_reef_scenarios.py
-tests/scenario/test_release_files.py
-tests/scenario/test_scenario_release_concurrency.py
+tests/scenario/test_snapshot_files.py
+tests/scenario/test_scenario_snapshot_concurrency.py
 tests/scenario/test_scenario_store_integration.py
 tests/scenario/test_training_status.py
 tests/slime_backend/test_checkpoint_storage.py

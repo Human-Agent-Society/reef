@@ -652,7 +652,7 @@ def unrestricted_agents(tree: HarnessTree, patch: TreePatch) -> list[str]:
 
 
 def widened_permissions(patch: TreePatch) -> list[str]:
-    """Why the patch's Claude Code permissions reach past what a request may grant: every session of the release
+    """Why the patch's Claude Code permissions reach past what a request may grant: every session of the snapshot
     runs under them, so a request may only add an allow rule for a tool in ``CLAUDE_PREAPPROVED`` (or a
     ``WebFetch(domain:<host>)`` rule), never a mode, a directory, a deny or ask edit, a shell or a wildcard."""
     data = json_object_of(patch.changes.get(PRIMARY_CONFIG))
