@@ -1114,8 +1114,9 @@ be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
 ``prune`` independently of record consumption.
 
 Training commits persist consumption progress without changing record
-visibility or deleting bodies. Processors expose ``releasable_record_ids()``
-and ``release_records(ids)`` for memory management. Storage controls capacity
+visibility or deleting bodies. Record-to-sample stages expose
+``releasable_record_ids()`` and ``release_records(ids)``, which the samples
+service calls for memory management. Storage controls capacity
 independently of these buffers. An earlier Reef version wrote a consumption
 receipt for each stale batch drop. With several trainers in one scenario, such
 a receipt carries ``component`` in its metadata, and each trainer skips on
@@ -2327,10 +2328,10 @@ algorithm state. This ``JobLoopState`` has four fields:
 A failed job ends like a finished one. Reef consumed the records of its data when
 it submitted the job, so they do not train again.
 
-Once the commit of a job's end is durable, the trainer calls
+Once the commit of a job's end is durable, the samples service calls
 ``Record2Sample.job_ended(outcome)`` with ``last_job``. The default does nothing.
 A trainer that starts with no running job calls it again for the last job
-that ended, before any other call to a new stage. The stage takes it as the
+that ended, before it reads a record. The stage takes it as the
 end of the last job that may have trained its samples.
 A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
 task's rollout results from the outcome's ``metrics``: the Tinker component

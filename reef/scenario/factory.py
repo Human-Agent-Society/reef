@@ -165,11 +165,16 @@ class ItemStart:
 
 @dataclass(frozen=True)
 class RecoveredTrainerState:
-    """What one component's trainer recovers from its own commits and drops: state, cursor, and consumed rows."""
+    """What one component's trainer recovers from its own commits and drops: state, cursor, and consumed rows.
+
+    ``committed_ids`` holds the IDs that its commits and drops named. ``consumed_ids`` holds those and the records that
+    its stored samples consumed.
+    """
 
     algorithm_state: Mapping[str, Any] | None
     high_water: tuple[int, int] | None
     consumed_ids: frozenset[str]
+    committed_ids: frozenset[str]
 
 
 def recovered_trainer_states(
@@ -214,15 +219,16 @@ def recovered_trainer_states(
         last = own[-1] if own else None
         # The records that the trainer's stages consumed: its key is "" when it is alone.
         stored = store.training_state.consumed_record_ids("" if alone else component)
+        committed = (
+            frozenset().union(*consumed_by_component.values())
+            if alone
+            else frozenset(consumed_by_component.get(component, ()))
+        )
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
-            consumed_ids=stored
-            | (
-                frozenset().union(*consumed_by_component.values())
-                if alone
-                else frozenset(consumed_by_component.get(component, ()))
-            ),
+            consumed_ids=stored | committed,
+            committed_ids=committed,
         )
     return states
 
@@ -557,6 +563,7 @@ class ScenarioFactory:
             for component_trainer in trainers:
                 # Scenario() checked that every trainer names a component the scenario serves: each has a state.
                 recovered = recovered_states[component_trainer.component]
+                component_trainer.trainer.restore_committed_records(recovered.committed_ids)
                 if recovered.high_water is not None:
                     scenario.replay_retained(
                         up_to_sequence=recovered.high_water[0],
