@@ -975,7 +975,7 @@ def test_a_legacy_install_resolves_its_snapshot_before_writing_artifact_metadata
     reef.release("artifact:harness", {**RULES, **_tool("shout")})
     reef.releases["storage:old"] = reef.releases["artifact:harness"]
     dest = _tree(tmp_path, reef, "artifact:harness")
-    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"release_id": "storage:old"}))
+    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"artifact_id": "storage:old"}))
     with _running(dest) as server:
         assert server.artifact_id == "artifact:harness"
         assert server.status()["artifact_id"] == "artifact:harness"

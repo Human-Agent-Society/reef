@@ -68,7 +68,7 @@ def inference(receipt, scenario="s"):
 
 def train_body(receipt, samples=()):
     """The ``POST /reef/train`` body of the request ``receipt``, which names the sample IDs ``samples``."""
-    body = {"text": receipt, "session": "session-1", "release_id": "release-1"}
+    body = {"text": receipt, "session": "session-1", "artifact_id": "release-1"}
     return {**body, "samples": list(samples)} if samples else body
 
 
@@ -316,8 +316,8 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
                 {},
                 {"text": ""},
                 {"text": "x", "session": "s"},
-                {"text": "x", "session": 1, "release_id": "r"},
-                {"text": "x" * 4001, "session": "s", "release_id": "r"},
+                {"text": "x", "session": 1, "artifact_id": "r"},
+                {"text": "x" * 4001, "session": "s", "artifact_id": "r"},
             ):
                 response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
                 assert response.status == 400, await response.text()
@@ -326,7 +326,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
                 "agent_record_id": "request-1",
                 "text": "Prefer tests first",
                 "session": "session-1",
-                "release_id": "release-1",
+                "artifact_id": "release-1",
             }
             response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
             assert response.status == 200, await response.text()
@@ -1063,7 +1063,7 @@ def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_pa
         "agent_record_id": "train-1",
         "text": "Prefer tests first",
         "session": "session-1",
-        "release_id": "release-1",
+        "artifact_id": "release-1",
         "parameters": {"learning_rate": 0.5},
         "samples": list(stored_samples_of(dispatcher, "a")),
     }

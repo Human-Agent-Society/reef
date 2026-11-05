@@ -21,7 +21,7 @@ from reef.train.types import JobData
 
 
 def payload(text: str) -> dict:
-    return normalize_training_request_payload({"text": text, "session": "s-1", "release_id": "r-1"})
+    return normalize_training_request_payload({"text": text, "session": "s-1", "artifact_id": "r-1"})
 
 
 def test_a_request_is_filed_once_and_another_payload_under_its_id_conflicts() -> None:
@@ -110,7 +110,7 @@ def test_a_new_pipeline_reads_a_stored_request_failure_and_a_consumed_request_le
 
 def test_retrying_a_request_written_before_artifact_identity_keeps_its_item():
     queue = memory_coordination().work_queue
-    legacy = {"text": "one", "session": "s-1", "release_id": "r-1", "requires": []}
+    legacy = {"text": "one", "session": "s-1", "artifact_id": "r-1", "requires": []}
     original = queue.add(
         NewWork(TRAINING_REQUESTS_QUEUE, "one", "s", training_request_kind("s"), legacy, serial_key="s")
     )

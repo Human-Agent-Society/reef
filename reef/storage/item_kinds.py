@@ -57,8 +57,7 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
     ``ValueError`` unless ``content`` has the keys ``RECORD_CONTENT_KEYS`` with the types that ``record_item``
     gives them, for an inference or a report, and ``item_id`` is ``<origin>/<agent_record_id>``.
     """
-    legacy_keys = RECORD_CONTENT_KEYS - {"artifact_id"} | {"artifact_ref"}
-    if not isinstance(content, Mapping) or set(content) not in (RECORD_CONTENT_KEYS, legacy_keys):
+    if not isinstance(content, Mapping) or set(content) != RECORD_CONTENT_KEYS:
         raise ValueError(f"a record item's content has exactly the keys {', '.join(sorted(RECORD_CONTENT_KEYS))}")
     record_id, request_type, payload = content["agent_record_id"], content["request_type"], content["payload"]
     created_at, references = content["created_at"], content["references"]
@@ -176,17 +175,6 @@ class RecordRules(JsonItemRules):
     """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``."""
 
     kind = "record"
-
-    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
-        """An older record names its artifact by ``artifact_ref``; the current one by ``artifact_id``."""
-        if not isinstance(content, Mapping) or "artifact_ref" not in content:
-            return content
-        payload = content.get("payload")
-        if not isinstance(payload, Mapping):
-            return content  # Malformed content: ``check_json`` rejects it.
-        current = {key: value for key, value in content.items() if key != "artifact_ref"}
-        current["artifact_id"] = stored_record_artifact_id(content, payload)
-        return current
 
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         origin = metadata["origin"]["scenario"]

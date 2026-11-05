@@ -19,7 +19,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord, CommitSnapshots
 from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, RecordLoss, RecordStore, StoredRecord
 from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
@@ -100,9 +100,6 @@ class ObservedRecordStore(RecordStore):
         self, scenario: str, *, after_sequence: int = 0, limit: int = 256, request_type: RequestType | None = None
     ) -> tuple[StoredRecord, ...]:
         return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
-
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        return self._inner.consumption_receipts(scenario)
 
     def loss(self, scenario: str) -> RecordLoss:
         return self._inner.loss(scenario)

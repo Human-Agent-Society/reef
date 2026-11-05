@@ -1690,7 +1690,7 @@ def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     assert held == (stage_item_id("agent", f"{WEIGHTS}:r1:0"),)
     dispatcher.accept_request(
         "agent",
-        {"text": "learn the tool", "session": "session-1", "release_id": "release-1", "samples": list(held)},
+        {"text": "learn the tool", "session": "session-1", "artifact_id": "release-1", "samples": list(held)},
         request_id="t1",
     )
     assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
