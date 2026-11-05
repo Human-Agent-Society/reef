@@ -726,8 +726,8 @@ def _seedless_snapshot(tmp_path: Path) -> Artifact:
     (release / "harness").mkdir(parents=True)
     (release / "harness" / "AGENTS.md").write_text("seed", encoding="utf-8")
     manifest = {
-        "harness": {"content_id": "content:harness", "metadata": {}},
-        "weights": {"content_id": "content:weights", "metadata": {}},
+        "harness": {"artifact_id": "artifact:harness", "metadata": {}},
+        "weights": {"artifact_id": "artifact:weights", "metadata": {}},
     }
     return Artifact(
         SnapshotRef("rel-1", None),

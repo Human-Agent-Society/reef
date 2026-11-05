@@ -194,7 +194,6 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
                     records, "math", frozenset({"first"}), receipt_id="step", metadata={"step": 1}
                 )
                 records.write_settings(ScenarioSettings(training_mode="manual"))
-                assert len(records.consumption_receipts("math")) == 1
                 assert records.read_settings().training_mode == "manual"
                 raise RuntimeError("abort outer transaction")
 
@@ -203,7 +202,6 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
                 assert records.read_settings() == ScenarioSettings()
                 records.write_settings(ScenarioSettings(activation={"module": "always"}))
                 assert records.audit_page("math") == ()
-                assert records.consumption_receipts("math") == ()
                 assert records.existing_receipt(original) is None
                 assert records.append_result(committed).inserted
                 write_consumption_receipt(
@@ -215,7 +213,6 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
                 assert records.append_result(committed).inserted is False
                 assert [entry.agent_record_id for entry in records.replay("math")] == ["first", "second"]
                 assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["first", "second"]
-                assert records.consumption_receipts("math")[0]["metadata"] == {"step": 2}
                 assert records.read_settings() == ScenarioSettings(activation={"module": "always"})
             records.close()
     finally:
@@ -311,19 +308,3 @@ def test_batch_uses_one_write_transaction_and_observes_only_committed_records(tm
         assert transactions == ["commit"]
     finally:
         store.close()
-
-
-def test_consumption_receipts_of_an_older_store_preserve_bodies(records: RecordStore) -> None:
-    original = record("source")
-    records.append(original)
-    metadata = {"outcome": "stale", "metrics": {"dropped": 1}}
-    write_consumption_receipt(records, "math", frozenset({"source"}), receipt_id="batch-1", metadata=metadata)
-    [receipt] = records.consumption_receipts("math")
-    assert receipt["consumed_ids"] == ("source",)
-    assert receipt["metadata"] == metadata
-    assert records.consumption_receipts("code") == ()
-    assert records.get("math", "source") == original
-    assert records.replay("math") == (original,)
-    assert records.append_result(original).inserted is False
-    # Storage accepts feedback independently of whether a consumer processed the source.
-    assert records.append_result(record("late", references=("source",))).inserted

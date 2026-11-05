@@ -18,7 +18,7 @@ def ids(listing: dict) -> list[str]:
 
 
 def train_body(record_id: str, *samples: str) -> dict:
-    body = {"agent_record_id": record_id, "text": "train these", "session": "session-1", "release_id": "release-1"}
+    body = {"agent_record_id": record_id, "text": "train these", "session": "session-1", "artifact_id": "release-1"}
     return {**body, "samples": list(samples)} if samples else body
 
 

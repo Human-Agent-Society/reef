@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
-from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
 from reef.core.snapshot import RootSource, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
 
@@ -125,7 +125,6 @@ class CommitRecord:
       with ``component`` and ``components`` both None. Several components
       use a local view and persist its complete ``selection``; ``component``
       names the changed component and ``components`` lists every artifact.
-      Older records may instead refer to a stored combination.
     - ``"restore"``: restore a previous complete active selection.
       ``component`` is None, ``selection`` is present, and ``components``
       lists its artifact ids. The operation creates no artifact.
@@ -201,9 +200,6 @@ class CommitRecord:
     components: Mapping[str, str] | None = None
     #: Complete component selection for a locally materialized view. These IDs survive cache loss.
     selection: ArtifactSelection | None = None
-    #: The storage snapshots that an older record's ``selection`` named, by component; empty for the current
-    #: format. ``from_dict`` reads them for recovery, and ``to_dict`` does not write them.
-    legacy_locators: Mapping[str, SnapshotRef] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.selection is not None:
@@ -314,7 +310,7 @@ class CommitRecord:
     def artifact_ids(self) -> Mapping[str, str] | None:
         """The artifact ID of each component that ``snapshot`` binds, from ``selection`` or ``components``.
 
-        None for a record that names no component IDs, such as a legacy flat snapshot.
+        None for a record of a local snapshot, which names no component IDs.
         """
         return self.selection.artifact_ids if self.selection is not None else self.components
 
@@ -379,15 +375,17 @@ class CommitRecord:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CommitRecord:
-        if value.get("record") not in ("reef-commit/5", "reef-commit/6", "reef-commit/7", RECORD_KIND):
-            raise CommitHistoryError(f"unknown commit record kind: {value.get('record')!r}")
+        if value.get("record") != RECORD_KIND:
+            raise CommitHistoryError(
+                f"commit record kind {value.get('record')!r} is not {RECORD_KIND}: this Reef reads no older record"
+            )
         scenario = value.get("scenario")
         if not isinstance(scenario, str) or not scenario:
             raise CommitHistoryError("commit record requires scenario")
         step = value.get("step")
         if not isinstance(step, int):
             raise CommitHistoryError("commit record step must be an integer")
-        raw_ref = value.get("snapshot", value.get("artifact_ref"))
+        raw_ref = value.get("snapshot")
         if not isinstance(raw_ref, Mapping) and (raw_ref is not None or value.get("selection") is None):
             raise CommitHistoryError("commit record requires snapshot or selection")
         checkpoint = value.get("checkpoint")
@@ -402,7 +400,6 @@ class CommitRecord:
         try:
             snapshot = UNLOCATED_SNAPSHOT if raw_ref is None else decode_snapshot_ref(raw_ref)
             selection = None if value.get("selection") is None else ArtifactSelection.from_dict(value["selection"])
-            legacy_locators = {} if value.get("selection") is None else legacy_selection_locators(value["selection"])
         except ValueError as exc:
             raise CommitHistoryError(f"commit record {exc}") from exc
         try:
@@ -432,7 +429,6 @@ class CommitRecord:
             component=value.get("component"),
             components=value.get("components"),
             selection=selection,
-            legacy_locators=legacy_locators,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -556,12 +552,11 @@ def parse_scenario_metadata(
 
     At step zero ``checkpoint_head`` is the root snapshot. ``components`` is the manifest of ``checkpoint_head``,
     read from the same snapshot metadata, so a commit rebuilt from it carries what a recorded one does. Raise
-    ``ValueError`` for metadata of another format, such as ``reef-scenario/4``, or a malformed value.
+    ``ValueError`` for metadata of another format, or a malformed value.
     """
-    if value.get("format") not in ("reef-scenario/5", "reef-scenario/6", SCENARIO_METADATA_KIND):
+    if value.get("format") != SCENARIO_METADATA_KIND:
         raise ValueError(
-            f"scenario metadata has the format {value.get('format')!r}; this Reef reads {SCENARIO_METADATA_KIND} "
-            "and legacy reef-scenario/5 or reef-scenario/6, "
+            f"scenario metadata has the format {value.get('format')!r}; this Reef reads {SCENARIO_METADATA_KIND}, "
             "so create the scenario again"
         )
     scenario = value.get("scenario")

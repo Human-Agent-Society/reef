@@ -409,7 +409,7 @@ Scenario stores
 ---------------
 
 ``RecordStore`` in ``reef.storage.records`` is the abstract base for appending,
-reading and auditing records, and for recording consumption receipts. ``ScenarioStore`` composes a ``RecordStore`` with committed
+reading and auditing records. ``ScenarioStore`` composes a ``RecordStore`` with committed
 scenario state, settling each step and its record progress together. Recipes
 and trainers use the record interface; ``Scenario`` coordinates training and
 artifact publication through its supplied scenario store.
@@ -523,7 +523,7 @@ The session contract is:
      - Contract
    * - ``records``
      - A ``RecordStore`` implementation preserving append deduplication,
-       ordered replay, scenario isolation, audit reads, and consumption receipts.
+       ordered replay, scenario isolation, and audit reads.
    * - ``durable``
      - Whether committed history survives session/process restart. A durable
        store requires a repository backend supporting staged snapshots.
@@ -561,8 +561,6 @@ flags, metrics and training job identity. Operations include ``training``,
 selection and leaves training starts unchanged. A sync selects its new
 artifact for serving and training in one commit. Activation and serving record a complete selection without
 publishing another artifact snapshot. A selection maps component names directly to artifact IDs.
-Older records without a selection
-remain readable through their stored artifact references.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
 prepared from the same step cannot both succeed. An identical recorded retry
@@ -742,8 +740,7 @@ task, which the task file store keeps in the owner's partition. Its metadata
 is a JSON object. Reef reads ``kind`` (``trajectory``, ``task`` or
 ``record``), ``owner``, ``scenarios`` (scenario name to ``train`` or
 ``eval``) and, for a record or artifact, ``origin``
-(``{scenario, artifact_id}``). Older origin metadata can carry ``release_id``;
-the input boundary accepts it for compatibility. ``kind``, ``owner`` and ``origin`` never change. A deployment
+(``{scenario, artifact_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
 selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
 built in. Every operation names one owner and reads or writes only its items.
@@ -899,9 +896,6 @@ A backend shares no snapshot between scenarios. It must:
   changes. The second returns a value that is equal for two snapshots exactly when they hold the same
   files and metadata for the artifact. The inherited ``bind_artifact_ids(snapshot)`` uses both, and
   raises ``ArtifactConflict`` for an ID that names other content. Call it before a head moves.
-- Implement ``index_snapshot(ref)`` to add ID bindings for older stored snapshots.
-  Recovery calls it before resolving artifacts from legacy records. Repeated
-  calls preserve existing bindings; conflicting bindings raise ``ArtifactConflict``.
 - Implement ``resolve_snapshot(revision)``. Return a ``SnapshotRef`` for a
   stored snapshot, or raise ``ArtifactNotFound``. Its ``revision`` and
   ``parent_revision`` are backend locators, separate from component IDs.
@@ -1117,10 +1111,7 @@ Training commits persist consumption progress without changing record
 visibility or deleting bodies. Record-to-sample stages expose
 ``releasable_record_ids()`` and ``release_records(ids)``, which the samples
 service calls for memory management. Storage controls capacity
-independently of these buffers. An earlier Reef version wrote a consumption
-receipt for each stale batch drop. With several trainers in one scenario, such
-a receipt carries ``component`` in its metadata, and each trainer skips on
-recovery only the rows its own commits and receipts consumed.
+independently of these buffers.
 
 ``get``, ``replay``, ``replay_page``, and ``count`` read all retained records.
 A one-time upgrade converts older retirement markers and receipts into
@@ -1151,11 +1142,6 @@ and keeps consumption metadata out of record reads.
        a record that capacity eviction deleted. A record without a message list,
        or a store that keeps no trajectories, gives a trajectory of one call;
        ``()`` for a record that is not stored.
-   * - ``consumption_receipts(scenario)``
-     - Ordered receipts with ``receipt_id``, ``consumed_ids``, ``metadata``,
-       and ``recorded_at``. Reef no longer writes receipts. A store that an
-       earlier version wrote holds them for skipped batches and legacy
-       retirement markers.
 
 ``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
 Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
