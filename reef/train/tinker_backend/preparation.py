@@ -46,8 +46,13 @@ def prepare_tinker_job(
     batch_size: int,
     kl_coef: float,
     score_centering: ScoreCentering | None,
+    max_sequence_tokens: int | None = None,
 ) -> TinkerSteps:
     """The optimizer steps of ``data`` under ``scheduling``, at most ``batch_size`` rollouts each.
+
+    With ``max_sequence_tokens``, the model's context, a row whose targets (every token but the first) are longer
+    leaves its step, since Tinker refuses the whole step for it; ``too_long_rollouts`` counts them, and a job whose
+    every row is too long trains nothing.
 
     The job trains the objective that ``objective_reference`` names, with that objective's Tinker loss, which must
     be registered in this process and accept ``kl_coef``. With ``score_centering``, a policy loss trains as ``ScoreCenteredLoss``, which
@@ -84,6 +89,7 @@ def prepare_tinker_job(
     ]
     schedule = schedule_job_data(data, objective.rollout_unit, scheduling, step_size=batch_size)
     steps: list[tuple[TokenRow, ...]] = []
+    too_long = 0
     cursor = 0
     next_rollout = 0
     for size in schedule.step_sizes:
@@ -92,10 +98,17 @@ def prepare_tinker_job(
         while cursor < len(schedule.row_indices) and schedule.rollout_ids[cursor] < next_rollout:
             indices.append(schedule.row_indices[cursor])
             cursor += 1
-        steps.append(tuple(rows[index] for index in indices))
-    return TinkerSteps(
-        loss,
-        tuple(steps),
-        signal.next_algorithm_state,
-        {**signal.metrics, "optimizer_steps": len(steps), "dropped_rollouts": schedule.dropped_rollouts},
-    )
+        kept = tuple(
+            rows[index]
+            for index in indices
+            if max_sequence_tokens is None or len(rows[index].tokens) - 1 <= max_sequence_tokens
+        )
+        too_long += len(indices) - len(kept)
+        if kept:
+            steps.append(kept)
+    metrics = {**signal.metrics, "optimizer_steps": len(steps), "dropped_rollouts": schedule.dropped_rollouts}
+    if max_sequence_tokens is not None:
+        metrics["too_long_rollouts"] = too_long
+    if not steps:
+        return TinkerSteps(None, (), dict(state), metrics)
+    return TinkerSteps(loss, tuple(steps), signal.next_algorithm_state, metrics)

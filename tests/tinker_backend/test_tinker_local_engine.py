@@ -71,6 +71,9 @@ class UnusedSampler:
     def __init__(self, *args, **kwargs):
         pass
 
+    def context_window(self):
+        return None
+
     def close(self):
         pass
 
