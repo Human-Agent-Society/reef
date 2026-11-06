@@ -328,7 +328,8 @@ this private interface.
 ``GET`` returns ``deployment_id``, ``generation``, ``snapshot_version``,
 ``router_config_hash`` (empty until the owner publishes a verified runtime),
 ``control_revision``, ``accepting``, ``stopping``, ``active_requests`` and
-``pending_writes``, plus ``drain_pending_writes`` and diagnostic
+``pending_writes``, plus ``drain_pending_writes``, ``policy_closed``,
+``pending_selections`` and diagnostic
 ``forced_requests`` and ``failed_writes`` counts. An admitted request keeps the
 manifest and router runtime hash it captured at admission, including while the
 router previews it. ``GET /healthz`` remains a
@@ -336,11 +337,19 @@ liveness check; it does not mean the managed
 routing deployment is ready to accept inference.
 
 ``POST`` takes the deployment ID, generation, a nonnegative integer
-``control_revision`` and an ``action``: ``open``, ``close``, ``stop`` or
-``activate``. ``activate`` also takes ``manifest_path``, ``snapshot_version``,
+``control_revision`` and an ``action``: ``open``, ``close``, ``close_policy``,
+``abort_policy``, ``stop`` or ``activate``.
+``close_policy`` closes admission for a normal policy update. The controller
+waits for ``pending_selections`` to reach zero before sending the SR update.
+Subsequent publication and reopening commands identify that close with
+``policy_close_revision``. If selection times out before an SR update was
+attempted, the controller can use ``abort_policy`` to reopen the verified
+original policy after readiness. A full close or stop supersedes the policy close.
+``activate`` also takes ``manifest_path``, ``snapshot_version``,
 ``expected_snapshot_version`` and a 64-hex ``router_config_hash``; it publishes
-them together while admission is closed and drained, and leaves admission
-closed. ``open`` also requires ``open_deadline_monotonic``: a positive, finite
+them together and leaves admission closed. During a policy close it may
+publish while previously selected requests and their writes are still active.
+``open`` and ``abort_policy`` require ``open_deadline_monotonic``: a positive, finite
 value of the owner's ``time.monotonic()`` clock, which the child shares because
 both run on the same host. ``open`` returns 409 until a router runtime hash has
 been published, and on a routed deployment first checks every provider and

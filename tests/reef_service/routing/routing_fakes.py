@@ -403,6 +403,8 @@ class FakeControl(ReefLifecycleClient):
         super().__init__(Path("/unused/control.sock"), "unit-routing", "generation-one", "unit-control-token")
         self.actions = actions
         self.active_requests = 0
+        self.pending_selections = 0
+        self.policy_close_revision: int | None = None
         self.pending_writes = 0
         self.failed_writes = 0
         self.forced_requests = 0
@@ -427,6 +429,7 @@ class FakeControl(ReefLifecycleClient):
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
         deadline: float | None = None,
+        policy_close_revision: int | None = None,
     ) -> LifecycleStatus:
         if not self.available:
             raise RoutingControlError("REEF child exited")
@@ -434,6 +437,18 @@ class FakeControl(ReefLifecycleClient):
         self.deadlines.append((action, deadline))
         if action is not None:
             self.revision += 1
+        if action in {"open", "abort_policy", "activate"} and policy_close_revision != self.policy_close_revision:
+            raise RoutingControlError("wrong policy close revision", retryable=False, status_code=409)
+        if action == "close_policy":
+            if not self.accepting:
+                raise RoutingControlError("admission already closed", retryable=False, status_code=409)
+            self.policy_close_revision = self.revision
+        if action in {"activate", "open"} and policy_close_revision is not None and self.pending_selections:
+            raise RoutingControlError("pending route selection", status_code=409)
+        if action == "abort_policy" and (
+            policy_close_revision is None or self.control_revision != policy_close_revision
+        ):
+            raise RoutingControlError("no unchanged policy to reopen", retryable=False, status_code=409)
         if action == "activate" and publication is not None:
             if self.activation_error is not None:
                 raise self.activation_error
@@ -442,18 +457,21 @@ class FakeControl(ReefLifecycleClient):
             self.publications.append(publication)
             self.snapshot_version = publication["snapshot_version"]
             self.router_config_hash = publication["router_config_hash"]
-        if action == "open":
+        if action in {"open", "abort_policy"}:
             if not self.router_config_hash:
                 raise RoutingControlError("REEF lifecycle returned HTTP 409", status_code=409)
             if self.open_error is not None:
                 raise self.open_error
         if action is not None:
             self.control_revision = self.revision
-        if action in {"open", "close", "stop"}:
-            self.accepting = action == "open"
+        if action in {"open", "abort_policy", "close", "stop", "close_policy"}:
+            self.accepting = action in {"open", "abort_policy"}
+            if action != "close_policy":
+                self.policy_close_revision = None
         if cancel_active:
             self.forced_requests += self.active_requests
             self.active_requests = 0
+            self.pending_selections = 0
         if action == "stop":
             self.stopping = True
         return self.status()
@@ -483,6 +501,8 @@ class FakeControl(ReefLifecycleClient):
             drain_pending_writes=self.pending_writes,
             failed_writes=self.failed_writes,
             forced_requests=self.forced_requests,
+            pending_selections=self.pending_selections,
+            policy_closed=self.policy_close_revision is not None,
         )
 
 

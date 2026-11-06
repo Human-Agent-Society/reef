@@ -62,6 +62,8 @@ class LifecycleStatus:
     ``accepting``. ``control_revision`` is an int ≥ -1, and -1 exactly before the child applies a command.
     ``active_requests``, ``pending_writes``, ``drain_pending_writes``, ``failed_writes`` and ``forced_requests`` are
     ints ≥ 0, and ``drain_pending_writes ≤ pending_writes``: the drain counts a subset of the pending writes.
+    ``pending_selections`` counts active requests still choosing a routing target. ``policy_closed`` is
+    true only while admission is closed for a normal policy update; a stopping child cannot be in that mode.
     Purpose: ``RequestAcceptance.status`` makes it, and ``to_json`` gives its wire form. ``from_json`` reads that
     form for ``ReefLifecycleClient.request``, whose deployment controller checks the identity and waits for
     ``idle``: no admitted request, including an upload in progress, and no pending write the drain waits for.
@@ -79,6 +81,8 @@ class LifecycleStatus:
     drain_pending_writes: int
     failed_writes: int
     forced_requests: int
+    pending_selections: int
+    policy_closed: bool
 
     def __post_init__(self) -> None:
         if any(not isinstance(text, str) or not text for text in (self.deployment_id, self.generation)):
@@ -91,6 +95,8 @@ class LifecycleStatus:
             raise ValueError("lifecycle status accepting and stopping must be booleans")
         if self.stopping and self.accepting:
             raise ValueError("a stopping lifecycle cannot accept requests")
+        if type(self.policy_closed) is not bool or (self.policy_closed and (self.accepting or self.stopping)):
+            raise ValueError("a policy close requires closed, non-stopping admission")
         if type(self.control_revision) is not int or self.control_revision < -1:
             raise ValueError("a lifecycle status control_revision must be an integer of at least -1")
         counts = (
@@ -99,11 +105,14 @@ class LifecycleStatus:
             self.drain_pending_writes,
             self.failed_writes,
             self.forced_requests,
+            self.pending_selections,
         )
         if any(type(count) is not int or count < 0 for count in counts):
             raise ValueError("lifecycle status counts must be nonnegative integers")
         if self.drain_pending_writes > self.pending_writes:
             raise ValueError("a lifecycle status cannot drain more writes than are pending")
+        if self.pending_selections > self.active_requests:
+            raise ValueError("a lifecycle status cannot have more selections than active requests")
 
     @property
     def idle(self) -> bool:
@@ -221,6 +230,7 @@ class ReefLifecycleClient:
         *,
         cancel_active: bool = False,
         publication: dict[str, str] | None = None,
+        policy_close_revision: int | None = None,
         deadline: float | None = None,
     ) -> LifecycleStatus:
         """Send one command, or read the status when ``action`` is None, and return the child's status.
@@ -234,6 +244,7 @@ class ReefLifecycleClient:
         the child already applied.
 
         Args:
+            policy_close_revision: For a policy activation, open or abort, the revision that closed admission.
             deadline: The caller's phase end on the ``time.monotonic`` clock. Each blocking step of every
                 attempt gets only the time left before it, no attempt starts after it, and a reply that
                 completes after it is rejected.
@@ -244,7 +255,8 @@ class ReefLifecycleClient:
                 status; that last error is not retryable.
         """
         phase_end = math.inf if deadline is None else deadline
-        first_attempt_seconds = self.open_timeout_seconds if action == "open" else self.timeout_seconds
+        opens_admission = action in ("open", "abort_policy")
+        first_attempt_seconds = self.open_timeout_seconds if opens_admission else self.timeout_seconds
         attempt_end = min(time.monotonic() + first_attempt_seconds, phase_end)
         body = None
         if action is not None:
@@ -257,7 +269,9 @@ class ReefLifecycleClient:
                 "cancel_active": cancel_active,
                 **(publication or {}),
             }
-            if action == "open":
+            if policy_close_revision is not None:
+                command["policy_close_revision"] = policy_close_revision
+            if opens_admission:
                 command["open_deadline_monotonic"] = attempt_end
             body = json.dumps(command).encode()
         attempt = 1

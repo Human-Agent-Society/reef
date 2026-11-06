@@ -52,7 +52,11 @@ from reef.service.deploy.routing.policy import (
     RouterRuntime,
     document_etag,
 )
-from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError, RoutingControlTimeout
+from reef.service.deploy.routing.reef_lifecycle_client import (
+    LifecycleStatus,
+    RoutingControlError,
+    RoutingControlTimeout,
+)
 from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
@@ -358,6 +362,7 @@ def started_case(tmp_path: Path, source: Path) -> Iterator[PolicyCase]:
     controller.management = RouterManagementClient(router.port, MANAGEMENT_TOKEN, timeout_seconds=1)
     # The child already serves the verified startup runtime.
     control.router_config_hash = controller.check_router_policy()
+    control.accepting = True
     try:
         yield PolicyCase(controller, control, router, source, actions, startup.version)
     finally:
@@ -384,7 +389,7 @@ def test_policy_update_activates_then_publishes_while_closed(case: PolicyCase, m
     # The child receives the new manifest together with the runtime the router actually activated.
     [publication] = case.control.publications
     assert publication["router_config_hash"] == case.router.active == runtime(case.router.document)
-    assert case.actions.index("control:close") < case.actions.index("control:activate")
+    assert case.actions.index("control:close_policy") < case.actions.index("control:activate")
     assert case.actions.index("control:activate") < case.actions.index("control:open")
     # A lost reply is inspected, never replayed.
     assert len(case.router.puts) == 1
@@ -398,6 +403,122 @@ def test_policy_update_activates_then_publishes_while_closed(case: PolicyCase, m
     # The journal and the committed manifest copy stay owner-only after every replacement.
     for private_file in (case.controller.registry.directory / "policy-state.json", Path(committed["source"])):
         assert stat.S_IMODE(private_file.stat().st_mode) == 0o600
+
+
+def test_reload_waits_for_selection_but_publishes_with_active_requests_and_writes(
+    case: PolicyCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_source(case.source, keyword="escalate")
+    case.control.active_requests, case.control.pending_selections, case.control.pending_writes = 2, 1, 1
+    original = case.controller.status_before
+    selections = []
+
+    def finish_selection(control: FakeControl, deadline: float) -> LifecycleStatus | None:
+        if control.pending_selections:
+            assert control.policy_close_revision is not None and not control.accepting
+            assert not case.router.puts
+            selections.append(control.pending_selections)
+            control.pending_selections = 0
+        return original(control, deadline)
+
+    monkeypatch.setattr(case.controller, "status_before", finish_selection)
+    reload(case)
+    assert selections == [1] and len(case.router.puts) == 1
+    assert case.control.accepting and case.control.snapshot_version != case.startup_version
+    assert (case.control.active_requests, case.control.pending_writes, case.control.forced_requests) == (2, 1, 0)
+
+
+@pytest.mark.parametrize("changed_runtime", [False, True])
+def test_selection_timeout_abandons_before_put_and_only_reopens_the_verified_old_pair(
+    case: PolicyCase, changed_runtime: bool
+) -> None:
+    write_source(case.source, keyword="escalate")
+    case.controller.policy = replace(case.controller.policy, drain_timeout_seconds=0)
+    case.control.active_requests, case.control.pending_selections, case.control.pending_writes = 2, 1, 1
+    if changed_runtime:
+        # Same document, but the SR runtime has changed behind the owner.
+        case.router.generated = case.router.active = "f" * 64
+        with pytest.raises(RoutingDeploymentError, match="committed policy"):
+            reload(case)
+        assert not case.control.accepting and "control:abort_policy" not in case.actions
+    else:
+        reload(case)
+        assert case.actions[-1] == "control:abort_policy" and case.control.accepting
+        assert case.controller.state == "ready"
+    assert not case.router.puts and not case.control.publications and "pending" not in case.state()
+    assert case.control.snapshot_version == case.startup_version
+    assert case.control.pending_selections == 1 and case.control.forced_requests == 0
+
+
+def test_stop_during_selection_wait_leaves_the_policy_closed_before_put(
+    case: PolicyCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_source(case.source, keyword="escalate")
+    case.control.active_requests = case.control.pending_selections = 1
+
+    def request_stop(control: FakeControl, deadline: float) -> LifecycleStatus:
+        case.controller.request_stop()
+        return control.status()
+
+    monkeypatch.setattr(case.controller, "status_before", request_stop)
+    reload(case)
+    assert not case.control.accepting and not case.router.puts and "pending" not in case.state()
+    assert "control:open" not in case.actions and "control:abort_policy" not in case.actions
+
+
+def test_a_lost_policy_open_reply_is_confirmed_without_opening_a_new_cycle(
+    case: PolicyCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = case.control.request
+
+    def lose_reply(action: str | None = None, **kwargs) -> LifecycleStatus:
+        status = original(action, **kwargs)
+        if action == "open":
+            raise RoutingControlTimeout("lost reply")
+        return status
+
+    monkeypatch.setattr(case.control, "request", lose_reply)
+    write_source(case.source, keyword="escalate")
+    reload(case)
+    assert case.actions.count("control:open") == 1
+    assert case.control.snapshot_version != case.startup_version and case.controller.state == "ready"
+
+
+@pytest.mark.parametrize("action", ["open", "abort_policy"])
+@pytest.mark.parametrize("unrelated_open", [False, True])
+def test_late_policy_open_is_recognized_only_if_its_revision_was_attempted(
+    case: PolicyCase, monkeypatch: pytest.MonkeyPatch, action: str, unrelated_open: bool
+) -> None:
+    write_source(case.source, keyword="escalate")
+    if action == "abort_policy":
+        case.controller.policy = replace(case.controller.policy, drain_timeout_seconds=0)
+        case.control.active_requests = case.control.pending_selections = 1
+    original = case.control.request
+    revisions = []
+
+    def lose_reply(request_action: str | None = None, **kwargs) -> LifecycleStatus:
+        if request_action != action:
+            return original(request_action, **kwargs)
+        # The first RPC loses its connection before the child finishes readiness. A status read still
+        # sees it closed. When the second OPEN arrives, the first has just applied in the child.
+        case.control.revision += 1
+        revisions.append(case.control.revision)
+        if len(revisions) == 1:
+            raise RoutingControlError("connection lost before the OPEN reply")
+        assert len(revisions) == 2 and case.control.policy_close_revision is not None
+        case.control.accepting = True
+        case.control.policy_close_revision = None
+        case.control.control_revision = revisions[0] if not unrelated_open else revisions[1] + 1
+        raise RoutingControlError("REEF lifecycle returned HTTP 409", status_code=409)
+
+    monkeypatch.setattr(case.control, "request", lose_reply)
+    if unrelated_open:
+        with pytest.raises(RoutingDeploymentError, match="policy close ended"):
+            reload(case)
+    else:
+        reload(case)
+        assert case.controller.state == "ready" and case.control.control_revision == revisions[0]
+    assert len(revisions) == 2 and len(case.router.puts) == (1 if action == "open" else 0)
 
 
 @pytest.mark.parametrize(
@@ -460,7 +581,7 @@ def test_catalog_changes_apply_in_place_after_the_child_checks_the_candidate(cas
     assert case.control.snapshot_version == case.controller.snapshot_version == candidate.version
     # The child checked the candidate's providers before anything closed, then published it with the router's runtime.
     assert case.control.checked == [candidate.version]
-    assert case.actions.index("control:check") < case.actions.index("control:close")
+    assert case.actions.index("control:check") < case.actions.index("control:close_policy")
     [publication] = case.control.publications
     assert publication["router_config_hash"] == case.router.active
     models = yaml.safe_load(case.router.document)["providers"]["models"]
@@ -607,6 +728,7 @@ def test_normalized_rollback_records_the_restored_identity_for_the_same_snapshot
     case.router.normalize = True
     write_source(case.source, keyword="escalate", rule="escalated")
     case.router.mode, case.router.next_mode = "failed", rollback_reply
+    case.control.active_requests, case.control.pending_writes = 1, 1
     reload(case)
     # The restored document means the same but has new bytes, ETag and runtime hash.
     restored = normalized(startup_document)
@@ -622,6 +744,7 @@ def test_normalized_rollback_records_the_restored_identity_for_the_same_snapshot
     assert publication["snapshot_version"] == case.startup_version
     assert case.actions.index("control:activate") < case.actions.index("control:open") == len(case.actions) - 1
     assert case.events()[-3:] == ["policy_rolled_back", "runtime_published", "ready"]
+    assert (case.control.accepting, case.control.active_requests, case.control.pending_writes) == (True, 1, 1)
 
 
 @pytest.mark.parametrize(("lost_replies", "outcome"), [(1, "active"), (10**6, "timeout")])
@@ -1189,7 +1312,7 @@ def test_a_classifier_change_is_rejected_and_the_serving_policy_stays(domain_cas
     assert domain_case.controller.state == "ready" and domain_case.router.puts == []
     controller, control = domain_case.controller, domain_case.control
     assert control.snapshot_version == controller.snapshot_version == domain_case.startup_version
-    assert "control:close" not in domain_case.actions
+    assert "control:close_policy" not in domain_case.actions
 
 
 @pytest.mark.parametrize("fault", ["oversized_threshold", "deep_label_json"])
@@ -1209,7 +1332,7 @@ def test_invalid_classifier_updates_leave_the_active_policy_serving(domain_case:
     assert (
         domain_case.control.snapshot_version == domain_case.controller.snapshot_version == domain_case.startup_version
     )
-    assert "control:close" not in domain_case.actions
+    assert "control:close_policy" not in domain_case.actions
 
 
 def test_adding_a_classifier_needs_a_restart(case: PolicyCase, tmp_path: Path) -> None:

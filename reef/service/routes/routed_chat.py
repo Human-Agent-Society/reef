@@ -11,7 +11,7 @@ from reef.core.errors import INFERENCE_ABORT_ERROR, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.inference.interfaces import InferenceStream
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, SSERelay
-from reef.service.lifecycle import ADMITTED_ROUTING
+from reef.service.lifecycle import ADMITTED_ROUTING, REQUEST_ACCEPTANCE
 from reef.service.request_service import RequestService
 from reef.service.routed_inference import RoutedAttempt
 from reef.service.routes.payload import read_object
@@ -95,14 +95,21 @@ def register_routed_chat(app: web.Application, *, request_service: RequestServic
     async def chat(request: web.Request) -> web.StreamResponse:
         # Before the upload: a managed deployment already captured its adapter when it admitted this request.
         routing = request.get(ADMITTED_ROUTING, request_service.routing)
-        if routing is None:
-            raise RoutingRequestError("routing is unavailable", code="routing_unpublished", status=503)
-        if request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true"):
-            raise RoutingRequestError("routed deployments do not serve rollout calls", code="unsupported_rollout")
-        scenario = routing.check_request(request.headers.items(), request.path)
-        client_payload = await read_object(request, strict=True)
-        decision = await request_service.routed.select_route(routing, scenario, client_payload)
-        handler = routing.handler_for(decision)
+        try:
+            if routing is None:
+                raise RoutingRequestError("routing is unavailable", code="routing_unpublished", status=503)
+            if request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true"):
+                raise RoutingRequestError("routed deployments do not serve rollout calls", code="unsupported_rollout")
+            scenario = routing.check_request(request.headers.items(), request.path)
+            client_payload = await read_object(request, strict=True)
+            decision = await request_service.routed.select_route(routing, scenario, client_payload)
+            handler = routing.handler_for(decision)
+        finally:
+            # The request has either failed or captured everything it needs from this routing policy.
+            acceptance = request.app.get(REQUEST_ACCEPTANCE)
+            task = asyncio.current_task()
+            if acceptance is not None and task is not None:
+                acceptance.release_selection(task)
         payload = {**client_payload, "model": decision.target.provider_model}
         if payload.get("stream") is True:
             stream, pending = await request_service.routed.start_routed_stream(

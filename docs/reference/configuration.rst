@@ -221,18 +221,25 @@ current policy keeps serving. Preview settings also need a restart.
 Before anything closes, the Reef child checks the new manifest's providers
 (their model lists) with its own credentials. A missing credential, a provider
 that does not list its model, or a check that runs past its deadline rejects
-the update as ``policy_rejected``, and the current policy keeps serving. An
-accepted update then pauses admission; it does not restart Reef or SR. It
-closes admission and drains requests and record writes, replaces the router's
-configuration through its authenticated management API, waits for that exact
-configuration to be active, then publishes the new manifest, new handlers for
-its provider endpoints and the SR runtime hash to Reef together, checks every
-provider and Scenario again, and reopens. An endpoint change leaves SR's
-configuration the same, and Reef still publishes the new manifest. New
-inference receives 503 during the pause; an admitted request keeps the
-manifest, provider endpoint and runtime hash it captured. A failed activation
-restores the previous configuration; SR re-encodes stored documents, so the
-restored runtime can have a new hash, which is published before reopening.
+the update as ``policy_rejected``, and the current policy keeps serving.
+Reef then pauses admission. It waits for admitted requests to finish selecting
+a target and provider handler, including requests still uploading their body.
+Reef updates SR in place through its authenticated management API, verifies the
+active runtime, publishes its matching manifest and provider handlers, checks
+each provider and Scenario, and reopens. New inference receives HTTP 503
+during this pause. An endpoint-only change can reuse the same SR configuration.
+
+Requests that already selected a provider continue on their original endpoint.
+A stream can still deliver tokens and its original receipt after the new policy
+starts serving. Keep replaced model endpoints available until those requests
+finish. Deployment shutdown and router recovery still drain whole requests and
+record writes. When SR rejects a change, Reef restores the previous
+configuration. SR can assign it a new runtime hash, which Reef publishes
+before reopening.
+If an admitted request is still selecting when ``drain_timeout_seconds``
+expires, Reef abandons the update before it sends an SR configuration change.
+It rechecks the original snapshot, SR configuration and readiness before
+reopening the old policy. The original request can finish selecting under it.
 Another writer, an unconfirmed result, or a failed publication stops the
 deployment instead of reopening. The early provider check cannot promise that
 a provider stays available: once SR runs the new configuration, a failed final

@@ -391,13 +391,15 @@ Reef.
 
 Reef first checks the new manifest's providers with its own credentials. If a
 credential is missing or a provider does not list its model, the update is
-rejected and the current policy keeps serving. Otherwise Reef pauses
-admission: it stops admitting requests, waits for admitted requests and record
-writes, updates SR's configuration, waits until SR runs it, publishes the new
-manifest, provider endpoints and runtime hash to Reef together, checks the
-providers and Scenarios again, and reopens. Neither Reef nor SR restarts.
-Requests admitted earlier keep the policy and provider they started with; new
-requests get 503 meanwhile. An invalid or unchanged manifest is logged
+rejected and the current policy keeps serving. Otherwise Reef pauses admission
+and waits for admitted requests to select their provider, including requests
+still uploading. It updates SR in place, verifies the active runtime, publishes
+the matching manifest and handlers in Reef, checks providers and Scenarios, and
+reopens. New inference requests get 503 during this pause. A teacher stream
+that already selected its provider can finish after the new policy starts
+serving. Its receipt still names the old target and snapshot. If you replace an
+endpoint, keep the old model service available for those requests and their
+internal retries. An invalid or unchanged manifest is logged
 (`policy_rejected`, `policy_unchanged`) and the current policy keeps serving.
 If SR does not accept the update, Reef restores the previous policy and
 reopens with it; if Reef cannot confirm what SR runs, or the final provider

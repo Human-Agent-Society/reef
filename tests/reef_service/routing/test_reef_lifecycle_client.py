@@ -30,7 +30,7 @@ pytestmark = pytest.mark.unit
 
 def status_json(revision: int = -1, **changes: object) -> dict[str, object]:
     """A closed child's status in its wire form, with ``changes`` applied unchecked."""
-    status = LifecycleStatus("test", "generation", "snapshot", "", False, False, revision, 0, 0, 0, 0, 0)
+    status = LifecycleStatus("test", "generation", "snapshot", "", False, False, revision, 0, 0, 0, 0, 0, 0, False)
     return {**status.to_json(), **changes}
 
 
@@ -260,14 +260,16 @@ def test_a_reply_within_the_callers_deadline_is_accepted() -> None:
         assert client_for(path).request("close", deadline=time.monotonic() + 1).control_revision == 1
 
 
-def test_an_open_carries_the_end_of_its_first_attempt_and_every_retry_reuses_it() -> None:
+@pytest.mark.parametrize("action", ["open", "abort_policy"])
+def test_an_open_carries_the_end_of_its_first_attempt_and_every_retry_reuses_it(action: str) -> None:
     child = SlowChild([0.6])
     with serving(child) as path:
         client = client_for(path, open_timeout_seconds=0.3)
         started = time.monotonic()
-        assert client.request("open").control_revision == 1
+        assert client.request(action, policy_close_revision=0).control_revision == 1
     first, retry = child.bodies
     assert first == retry
+    assert json.loads(first)["policy_close_revision"] == 0
     deadline = json.loads(first)["open_deadline_monotonic"]
     # A retry waits at most the ordinary allowance and never moves the open's deadline.
     assert started + 0.3 <= deadline < started + 0.35
@@ -405,6 +407,10 @@ def test_invalid_control_json_is_a_typed_error(body: bytes) -> None:
         {"active_requests": -1},
         {"failed_writes": False},
         {"forced_requests": None},
+        {"pending_selections": 1, "active_requests": 0},
+        {"pending_selections": True},
+        {"policy_closed": True, "accepting": True},
+        {"policy_closed": True, "stopping": True},
     ],
 )
 def test_a_lifecycle_status_refuses_values_outside_its_domains(changes: dict[str, object]) -> None:
@@ -421,6 +427,13 @@ def test_a_lifecycle_status_keeps_the_initial_and_published_values_of_a_child() 
     )
     assert published.accepting and not published.idle
     assert LifecycleStatus.from_json(json.loads(json.dumps(published.to_json()))) == published
+
+
+def test_a_missing_selection_count_is_not_an_empty_selection_set() -> None:
+    body = status_json(2, active_requests=1, policy_closed=True, pending_selections=1)
+    body.pop("pending_selections")
+    with pytest.raises(ValueError):
+        LifecycleStatus.from_json(body)
 
 
 @pytest.mark.parametrize(

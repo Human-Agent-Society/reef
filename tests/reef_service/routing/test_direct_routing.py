@@ -54,7 +54,12 @@ PROVIDER_MODELS = {"student": "student-v1", "teacher": "teacher-v2", "math-stude
 
 
 def write_manifest(
-    path: Path, provider_url: str, *, keyword: str = "reef_teacher_required", domain: bool = False
+    path: Path,
+    provider_url: str,
+    *,
+    keyword: str = "reef_teacher_required",
+    domain: bool = False,
+    default: str = "student",
 ) -> Path:
     """Two Scenarios sharing a teacher; the coding Scenario also lists a disabled target.
 
@@ -86,7 +91,7 @@ def write_manifest(
         "targets": targets,
         "scenarios": {
             "coding": {
-                "default_target": "student",
+                "default_target": default,
                 "targets": ["student", "teacher", "retired"],
                 "rules": [{"name": "teacher_requested", "keywords": [keyword], "target": "teacher"}, *domain_rules],
             },
@@ -178,16 +183,18 @@ async def routed_service(
     timeout_seconds: int = 5,
     reply_changes: Mapping[str, object] | None = None,
     domain: bool = False,
+    default: str = "student",
+    provider_chat: web.Handler | None = None,
 ) -> AsyncIterator[RoutedService]:
     """Start a provider, a fake router and a routed Reef; ``managed`` adds the private lifecycle control."""
     provider = Provider()
     # Pinned requests may exceed the router's 10 MiB preview limit; the provider accepts them like Reef does.
     provider_app = web.Application(client_max_size=MAX_REQUEST_BYTES)
     provider_app.router.add_get("/v1/models", provider.models)
-    provider_app.router.add_post("/v1/chat/completions", provider.chat)
+    provider_app.router.add_post("/v1/chat/completions", provider.chat if provider_chat is None else provider_chat)
     async with TestServer(provider_app) as provider_server:
         url = str(provider_server.make_url("")).rstrip("/")
-        path = write_manifest(tmp_path / "routing.json", url, keyword=keyword, domain=domain)
+        path = write_manifest(tmp_path / "routing.json", url, keyword=keyword, domain=domain, default=default)
         adapter = RoutingAdapter.from_manifest(path, router_config_hash=ROUTER_HASH, environ={})
         dispatcher = routing_dispatcher(tmp_path)
         lifecycle = None
@@ -553,17 +560,49 @@ def test_a_preview_timeout_never_dispatches_late(tmp_path: Path, monkeypatch: py
 
 def test_a_cancelled_request_closes_its_preview_and_never_dispatches(tmp_path: Path) -> None:
     async def run() -> None:
-        async with routed_service(tmp_path) as service:
+        async with routed_service(tmp_path, managed=True) as service:
             service.router.hold = asyncio.Event()
             request = asyncio.create_task(service.chat({"model": "auto", "messages": user_message("x")}))
             await asyncio.wait_for(service.router.arrived.wait(), 5)
+            closed = await service.lifecycle(command("close_policy", 1))
+            assert (await closed.json())["pending_selections"] == 1
             # Dropping the client connection cancels Reef's handler (TestServer cancels on disconnect).
             request.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await request
             await asyncio.wait_for(service.router.disconnected.wait(), 5)
             service.router.hold.set()
-            await asyncio.sleep(0.05)
+            assert service.client.app[REQUEST_ACCEPTANCE].status()["pending_selections"] == 0
+            assert service.provider.received == [] and service.records() == []
+
+    asyncio.run(run())
+
+
+def test_a_failed_selection_releases_the_policy_before_its_error_response_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        sending, finish = asyncio.Event(), asyncio.Event()
+        write_eof = web.Response.write_eof
+
+        async def hold_error_response(response: web.Response, data: bytes = b"") -> None:
+            if response.status == 400 and response.text and response.text.startswith("unknown_target:"):
+                sending.set()
+                await finish.wait()
+            await write_eof(response, data)
+
+        monkeypatch.setattr(web.Response, "write_eof", hold_error_response)
+        async with routed_service(tmp_path, managed=True) as service, asyncio.timeout(5):
+            invalid = asyncio.create_task(service.chat({"model": "unknown", "messages": user_message("hello")}))
+            try:
+                await sending.wait()
+                closed = await service.lifecycle(command("close_policy", 1))
+                state = await closed.json()
+                assert state["active_requests"] == 1 and state["pending_selections"] == 0
+            finally:
+                finish.set()
+                status, text, _ = await invalid
+            assert status == 400 and text.startswith("unknown_target:")
             assert service.provider.received == [] and service.records() == []
 
     asyncio.run(run())
@@ -598,23 +637,32 @@ async def start_slow_chat(service: RoutedService, body: bytes) -> tuple[asyncio.
     return request, finish
 
 
-def test_an_admitted_upload_keeps_its_policy_and_holds_activation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("action", ["close", "close_policy"])
+def test_an_admitted_upload_keeps_its_policy_and_holds_activation(tmp_path: Path, action: str) -> None:
     async def run() -> None:
         async with routed_service(tmp_path, managed=True) as service:
             new_path = write_manifest(tmp_path / "new.json", service.provider_url, keyword="escalate")
             body = json.dumps({"model": "auto", "messages": user_message("escalate")}).encode()
             request, finish = await start_slow_chat(service, body)
-            closed = await service.lifecycle(command("close", 1))
-            assert (await closed.json())["active_requests"] == 1
+            closed = await service.lifecycle(command(action, 1))
+            state = await closed.json()
+            assert state["active_requests"] == state["pending_selections"] == 1
+            scope = {"policy_close_revision": 1} if action == "close_policy" else {}
             activation = {
                 "manifest_path": str(new_path),
                 "snapshot_version": RoutingSnapshot.load(new_path).version,
                 "router_config_hash": NEW_ROUTER_HASH,
                 "expected_snapshot_version": service.adapter.snapshot.version,
             }
-            refused = await service.lifecycle(command("activate", 2, **activation))
+            refused = await service.lifecycle(command("activate", 2, **activation, **scope))
             assert refused.status == 409
+            assert not service.router.selections
+            service.router.hold = asyncio.Event()
             finish.set()
+            await asyncio.wait_for(service.router.arrived.wait(), 5)
+            refused = await service.lifecycle(command("activate", 2, **activation, **scope))
+            assert refused.status == 409
+            service.router.hold.set()
             response = await request
             assert response.status == 200, await response.text()
             [(router_headers, sent)] = service.router.selections
@@ -624,18 +672,160 @@ def test_an_admitted_upload_keeps_its_policy_and_holds_activation(tmp_path: Path
             [record] = service.records()
             routing = record["metadata"]["routing"]
             assert (routing["target_id"], routing["snapshot_version"]) == ("student", service.adapter.snapshot.version)
-            activated = await service.lifecycle(command("activate", 3, **activation))
+            activated = await service.lifecycle(command("activate", 3, **activation, **scope))
             assert activated.status == 200, await activated.text()
             state = await activated.json()
             assert state["snapshot_version"] == activation["snapshot_version"]
             assert state["router_config_hash"] == NEW_ROUTER_HASH and state["active_requests"] == 0
             # Reopening previews every Scenario under the new runtime; the router still runs the old one.
-            assert (await service.lifecycle(command("open", 4))).status == 503
+            assert (await service.lifecycle(command("open", 4, **scope))).status == 503
             service.router.snapshot = RoutingSnapshot.load(new_path)
             service.router.runtime_hash = NEW_ROUTER_HASH
-            reopened = await service.lifecycle(command("open", 5))
+            reopened = await service.lifecycle(command("open", 5, **scope))
             assert reopened.status == 200, await reopened.text()
             assert (await reopened.json())["accepting"] is True
+
+    asyncio.run(run())
+
+
+async def switch_policy_during_generation(service: RoutedService, manifest: Path) -> str:
+    """Close, publish and reopen while exactly one request has bound its V1 handler."""
+    closed = await service.lifecycle(command("close_policy", 1))
+    assert closed.status == 200, await closed.text()
+    state = await closed.json()
+    assert not state["accepting"] and state["active_requests"] == 1 and state["pending_selections"] == 0
+    status, text, _ = await service.chat({"model": "auto", "messages": user_message("not admitted")})
+    assert status == 503 and "not accepting requests" in text
+    service.router.snapshot = RoutingSnapshot.load(manifest)
+    service.router.runtime_hash = NEW_ROUTER_HASH
+    activated = await service.lifecycle(
+        command(
+            "activate",
+            2,
+            policy_close_revision=1,
+            manifest_path=str(manifest),
+            snapshot_version=service.router.snapshot.version,
+            router_config_hash=NEW_ROUTER_HASH,
+            expected_snapshot_version=service.adapter.snapshot.version,
+        )
+    )
+    assert activated.status == 200, await activated.text()
+    opened = await service.lifecycle(command("open", 3, policy_close_revision=1))
+    assert opened.status == 200, await opened.text()
+    state = await opened.json()
+    assert state["accepting"] and state["active_requests"] == 1
+    return service.router.snapshot.version
+
+
+def test_a_new_student_receipt_precedes_the_old_teacher_streams_last_token(tmp_path: Path) -> None:
+    async def run() -> None:
+        finish = asyncio.Event()
+        first = b'data: {"choices":[{"index":0,"delta":{"content":"first"}}]}\n\n'
+        last = b'data: {"choices":[{"index":0,"delta":{"content":"last"}}]}\n\n'
+
+        async def chat(request: web.Request) -> web.StreamResponse:
+            payload = await request.json()
+            if not payload.get("stream"):
+                assert payload["model"] == PROVIDER_MODELS["student"]
+                return web.json_response(
+                    {"choices": [{"message": {"content": "student answer"}, "finish_reason": "stop"}]}
+                )
+            assert payload["model"] == PROVIDER_MODELS["teacher"]
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(first)
+            await finish.wait()
+            await response.write(last + b"data: [DONE]\n\n")
+            return response
+
+        async with routed_service(tmp_path, managed=True, default="teacher", provider_chat=chat) as service:
+            payload = {"model": "auto", "messages": user_message("hello")}
+            async with asyncio.timeout(5):
+                old = await service.client.post(
+                    "/v1/chat/completions", headers=routing_headers(), json={**payload, "stream": True}
+                )
+                try:
+                    assert old.status == 200 and await old.content.readuntil(b"\n\n") == first
+                    path = write_manifest(tmp_path / "new.json", service.provider_url, default="student")
+                    version = await switch_policy_during_generation(service, path)
+                    status, text, headers = await service.chat(payload)
+                    assert status == 200 and "student answer" in text
+                    student_receipt = headers["x-reef-agent-record-id"]
+                finally:
+                    finish.set()
+                assert await old.content.readuntil(b"\n\n") == last
+                frame = await old.content.readuntil(b"\n\n")
+                teacher_receipt = json.loads(frame.removeprefix(b"data: "))["reef"]["agent_record_id"]
+                assert await old.read() == b"data: [DONE]\n\n"
+            records = service.dispatcher.get_or_create_scenario("coding").records.replay("coding")
+            expected = [
+                (student_receipt, "student", version, NEW_ROUTER_HASH),
+                (teacher_receipt, "teacher", service.adapter.snapshot.version, ROUTER_HASH),
+            ]
+            for record, (receipt, target, snapshot, runtime_hash) in zip(records, expected, strict=True):
+                detail = record.payload["metadata"]["routing"]
+                assert record.agent_record_id == receipt
+                assert (detail["target_id"], detail["provider_model"]) == (target, PROVIDER_MODELS[target])
+                assert (detail["snapshot_version"], detail["router_config_hash"]) == (snapshot, runtime_hash)
+
+    asyncio.run(run())
+
+
+def test_an_old_json_request_retries_the_old_endpoint_after_policy_activation(tmp_path: Path) -> None:
+    async def run() -> None:
+        started, abort = asyncio.Event(), asyncio.Event()
+        old_bodies = []
+
+        async def old_provider(request: web.Request) -> web.Response:
+            old_bodies.append(await request.json())
+            if len(old_bodies) == 1:
+                started.set()
+                await abort.wait()
+                return web.json_response({"choices": [{"finish_reason": "abort"}]})
+            return web.json_response({"choices": [{"message": {"content": "old endpoint"}, "finish_reason": "stop"}]})
+
+        endpoint_b = Provider()
+        new_app = web.Application()
+        new_app.router.add_get("/v1/models", endpoint_b.models)
+        new_app.router.add_post("/v1/chat/completions", endpoint_b.chat)
+        async with (
+            TestServer(new_app) as new_server,
+            routed_service(tmp_path, managed=True, default="teacher", provider_chat=old_provider) as service,
+            asyncio.timeout(5),
+        ):
+            old_body = {"model": "auto", "messages": user_message("old request")}
+            new_body = {"model": "auto", "messages": user_message("new request")}
+            old_request = asyncio.create_task(service.chat(old_body))
+            try:
+                await started.wait()
+                path = write_manifest(
+                    tmp_path / "new.json", str(new_server.make_url("")).rstrip("/"), default="teacher"
+                )
+                version = await switch_policy_during_generation(service, path)
+                status, text, new_headers = await service.chat(new_body)
+                assert status == 200 and "answer" in text
+            finally:
+                abort.set()
+                old_status, old_text, old_headers = await old_request
+            assert old_status == 200 and "old endpoint" in old_text
+            assert old_bodies == [{**old_body, "model": PROVIDER_MODELS["teacher"]}] * 2
+            assert endpoint_b.received == [{**new_body, "model": PROVIDER_MODELS["teacher"]}]
+            assert len(service.router.selections) == 2
+            fresh, aborted, retried = service.dispatcher.get_or_create_scenario("coding").records.replay("coding")
+            assert fresh.agent_record_id == new_headers["x-reef-agent-record-id"]
+            assert retried.agent_record_id == old_headers["x-reef-agent-record-id"]
+            for record, snapshot, runtime_hash in (
+                (fresh, version, NEW_ROUTER_HASH),
+                (aborted, service.adapter.snapshot.version, ROUTER_HASH),
+                (retried, service.adapter.snapshot.version, ROUTER_HASH),
+            ):
+                detail = record.payload["metadata"]["routing"]
+                assert (detail["target_id"], detail["snapshot_version"], detail["router_config_hash"]) == (
+                    "teacher",
+                    snapshot,
+                    runtime_hash,
+                )
+            assert retried.payload["metadata"]["routing"]["prior_attempt_ids"] == [aborted.agent_record_id]
 
     asyncio.run(run())
 

@@ -23,6 +23,7 @@ import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import yaml
@@ -327,10 +328,18 @@ class RoutingDeploymentController:
             raise RoutingDeploymentError("routing policy state has no committed pair")
         return committed
 
-    def wait_ready(self, *, initial: bool = True) -> None:
-        """Verify the router, publish its runtime to the closed child when it changed, then open admission."""
+    def wait_ready(
+        self, *, initial: bool = True, policy_close_revision: int | None = None, abort_policy: bool = False
+    ) -> None:
+        """Verify the committed pair before opening. A pre-PUT abort may only reopen the unchanged pair."""
         ownership, control = self.require_clients()
         deadline = self.ready_deadline
+        command = (
+            control.request
+            if policy_close_revision is None
+            else partial(control.request, policy_close_revision=policy_close_revision)
+        )
+        attempted_policy_opens: set[int] = set()
         while not self.stop_requested and time.monotonic() < deadline:
             if not initial:
                 # The existing REEF child must survive every routing replacement.
@@ -345,12 +354,21 @@ class RoutingDeploymentController:
                 self.inspect_ready(self.runtime.inspect(ownership))
                 status = control.request(deadline=deadline)
                 self.check_status(status)
-                if status.drain_pending_writes != 0:
+                # A lost OPEN reply may have already reopened this policy cycle. Verify the pair again,
+                # but never issue another command for a cycle that the child has finished.
+                opened = status.accepting and status.control_revision in attempted_policy_opens
+                if policy_close_revision is not None and not opened and not status.policy_closed:
+                    raise RoutingDeploymentError("the policy close ended before the router was verified")
+                if policy_close_revision is None and status.drain_pending_writes != 0:
                     raise RoutingControlError("request records are still finalizing")
                 # Every open, including startup, rollback and container recovery, checks the router runtime.
                 runtime_hash = self.check_router_policy(deadline)
                 if status.router_config_hash != runtime_hash:
-                    control.request(
+                    if opened or abort_policy:
+                        raise RoutingDeploymentError("the child does not have the verified routing runtime")
+                    if self.stop_requested:
+                        break
+                    command(
                         "activate",
                         publication={
                             "manifest_path": self.committed_policy().manifest,
@@ -371,11 +389,16 @@ class RoutingDeploymentController:
             event_failure = self.observe_events()
             if event_failure is not None:
                 raise RoutingDeploymentError("routing observation failed before opening acceptance")
+            if self.stop_requested:
+                break
             try:
                 # The child checks every provider and previews one message per Scenario under the published
                 # runtime before it opens. It never opens after this call's first attempt has ended.
-                control.request("open", deadline=deadline)
+                if not opened:
+                    command("abort_policy" if abort_policy else "open", deadline=deadline)
             except RoutingControlError as exc:
+                if policy_close_revision is not None:
+                    attempted_policy_opens.add(control.revision)
                 if not exc.retryable:
                     raise RoutingDeploymentError(str(exc)) from exc
                 # A final write submitted after our status snapshot (409), or a readiness preview that failed
@@ -560,6 +583,38 @@ class RoutingDeploymentController:
             time.sleep(0.05)
         raise RoutingDeploymentError("request or record finalization exceeded its deadline; recovery prohibited")
 
+    def close_for_policy(self) -> int | None:
+        """Return the policy close revision once all admitted routes are bound. Never cancel provider work.
+
+        On a selection timeout no SR mutation has begun. Verify the unchanged pair and reopen it, then
+        return None. A stop also returns None and leaves admission closed for shutdown.
+        """
+        _, control = self.require_clients()
+        status = control.request("close_policy")
+        revision = status.control_revision
+        self.event("draining", recovery=False)
+        deadline = time.monotonic() + self.policy.drain_timeout_seconds
+        while not self.stop_requested:
+            self.check_status(status)
+            if not status.policy_closed or status.control_revision != revision:
+                raise RoutingDeploymentError("policy close was superseded before all routes were bound")
+            if status.pending_selections == 0:
+                return revision
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            updated = self.status_before(control, deadline)
+            if updated is None:
+                break
+            status = updated
+            if status.pending_selections:
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        if not self.stop_requested:
+            self.event("policy_rejected", reason="timed out waiting for routing selection")
+            self.ready_deadline = time.monotonic() + self.policy.ready_timeout_seconds
+            self.wait_ready(initial=False, policy_close_revision=revision, abort_policy=True)
+        return None
+
     def startup_source(self) -> Path:
         """The manifest a new generation renders.
 
@@ -698,8 +753,8 @@ class RoutingDeploymentController:
             # Stop came during the check: nothing has closed or changed, and shutdown drains as usual.
             return
         self.event("policy_updating", snapshot_version=candidate.version)
-        self.drain(recovery=False)
-        if self.stop_requested:
+        policy_close_revision = self.close_for_policy()
+        if policy_close_revision is None or self.stop_requested:
             return
         pending = PendingPolicy(
             phase="replacing",
@@ -731,6 +786,8 @@ class RoutingDeploymentController:
                 )
                 # The router runs the candidate: it is the committed pair before the child publishes it.
                 self.policy_store.write(PolicyState(activated, replace(pending, phase="publishing")))
+                if self.stop_requested:
+                    raise InterruptedError("routing stop arrived before policy publication")
                 control.request(
                     "activate",
                     publication={
@@ -739,6 +796,7 @@ class RoutingDeploymentController:
                         "router_config_hash": runtime_hash,
                         "expected_snapshot_version": self.snapshot_version,
                     },
+                    policy_close_revision=policy_close_revision,
                 )
                 self.policy_store.write(PolicyState(activated))
                 self.snapshot_version = candidate.version
@@ -757,7 +815,7 @@ class RoutingDeploymentController:
         if self.stop_requested:
             return
         self.ready_deadline = time.monotonic() + self.policy.ready_timeout_seconds
-        self.wait_ready(initial=False)
+        self.wait_ready(initial=False, policy_close_revision=policy_close_revision)
 
     def replace_router_document(
         self, management: RouterManagementClient, document: str, current_etag: str, candidate_etag: str

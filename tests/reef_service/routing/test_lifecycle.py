@@ -127,7 +127,7 @@ def command(action: str, revision: int = 0, **overrides: object) -> dict[str, ob
         "generation": "generation",
         "control_revision": revision,
         "action": action,
-        **({"open_deadline_monotonic": OPEN_DEADLINE} if action == "open" else {}),
+        **({"open_deadline_monotonic": OPEN_DEADLINE} if action in ("open", "abort_policy") else {}),
         **overrides,
     }
 
@@ -1066,6 +1066,104 @@ def routed_acceptance(readiness: ScriptedReadiness) -> RequestAcceptance:
         PendingWrites(),
         publisher=readiness,
     )
+
+
+def test_only_an_unchanged_policy_abort_can_open_with_a_pending_selection() -> None:
+    async def run() -> None:
+        readiness = ScriptedReadiness(0)
+        acceptance = routed_acceptance(readiness)
+        acceptance.control(command("open", 0))
+        task = acceptance.register(selects_route=True)
+        async with client_for(acceptance) as client:
+            closed = acceptance.control(command("close_policy", 1))
+            assert closed["policy_closed"] and closed["pending_selections"] == 1
+            with pytest.raises(web.HTTPConflict):
+                acceptance.control(command("open", 2, policy_close_revision=1))
+            with pytest.raises(web.HTTPConflict):
+                acceptance.control(command("abort_policy", 2, policy_close_revision=0))
+            body = command("abort_policy", 2, policy_close_revision=1)
+            for _ in range(2):
+                reply = await client.post("/reef/lifecycle", json=body, headers=CONTROL_HEADERS)
+                assert reply.status == 200
+                result = await reply.json()
+                assert result["accepting"] and not result["policy_closed"] and result["pending_selections"] == 1
+            assert readiness.checks == 1
+        acceptance.finish(task)
+        assert acceptance.status()["pending_selections"] == 0
+
+    asyncio.run(run())
+
+
+def test_policy_activation_waits_for_selection_but_reopens_with_an_old_record_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        readiness = ScriptedReadiness(0)
+        monkeypatch.setattr(readiness, "publish", lambda path, snapshot, router_hash: None)
+        acceptance = routed_acceptance(readiness)
+        acceptance.control(command("open", 0))
+        task = acceptance.register(selects_route=True)
+        finish_write = asyncio.Event()
+        write = asyncio.create_task(acceptance.writes.run(finish_write.wait()))
+        await asyncio.sleep(0)
+        acceptance.control(command("close_policy", 1))
+        publish = command(
+            "activate",
+            2,
+            policy_close_revision=1,
+            manifest_path="v2.yaml",
+            snapshot_version="v2",
+            router_config_hash="b" * 64,
+            expected_snapshot_version="snapshot",
+        )
+        with pytest.raises(web.HTTPConflict) as error:
+            acceptance.control(publish)
+        assert "completed selections" in error.value.text
+        acceptance.release_selection(task)
+        acceptance.release_selection(task)
+        assert acceptance.control(publish)["snapshot_version"] == "v2"
+        with pytest.raises(web.HTTPConflict) as error:
+            acceptance.control(command("abort_policy", 3, policy_close_revision=1))
+        assert "cannot be abandoned" in error.value.text
+        status = acceptance.control(command("open", 3, policy_close_revision=1))
+        assert status["accepting"] and not status["policy_closed"]
+        assert (status["active_requests"], status["pending_selections"], status["pending_writes"]) == (1, 0, 1)
+        finish_write.set()
+        await write
+        acceptance.finish(task)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("escalation", ["close", "stop"])
+def test_a_full_close_supersedes_the_policy_close_and_starts_its_own_write_cutoff(escalation: str) -> None:
+    async def run() -> None:
+        acceptance = routed_acceptance(ScriptedReadiness(0))
+        acceptance.control(command("open", 0))
+        acceptance.control(command("close_policy", 1))
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def report() -> None:
+            started.set()
+            await finish.wait()
+
+        write = asyncio.create_task(acceptance.writes.run(report()))
+        await started.wait()
+        assert acceptance.status()["drain_pending_writes"] == 0
+        status = acceptance.control(command(escalation, 2))
+        assert not status["policy_closed"] and status["drain_pending_writes"] == 1
+        for action in ("open", "abort_policy"):
+            with pytest.raises(web.HTTPConflict):
+                acceptance.control(command(action, 3, policy_close_revision=1))
+        with pytest.raises(web.HTTPConflict):
+            acceptance.control(command("close_policy", 3))
+        with pytest.raises(web.HTTPConflict):
+            acceptance.control(command("open", 3))
+        finish.set()
+        await write
+        assert not acceptance.accepting
+
+    asyncio.run(run())
 
 
 def test_readiness_that_holds_the_event_loop_past_the_deadline_cannot_open() -> None:

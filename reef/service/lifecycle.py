@@ -288,20 +288,24 @@ class RequestAcceptance:
     and implies not ``accepting``.
     ``control_revision`` is -1 exactly when ``last_action`` is None. Otherwise it is the revision of the last
     applied command, and ``last_action`` is that command's ``(action, cancel_active, snapshot_version,
-    router_config_hash, open_deadline)``. Missing ``cancel_active`` defaults to False, and missing snapshot
-    and hash fields default to empty strings. ``open_deadline`` is 0.0 outside ``open``.
+    router_config_hash, open_deadline, policy_close_revision)``. Missing ``cancel_active`` defaults to False,
+    and missing snapshot and hash fields default to empty strings. The deadline is 0.0 unless the command opens.
     ``drain_sequence`` is the drain's write cutoff. Construction captures ``writes.sequence``, ``open`` clears
-    it to None, the next ``close`` or ``stop`` captures the current ``writes.sequence``, and later ones keep
-    it, so ``accepting`` implies it is None. The drain waits for every inference write and for other writes
+    it to None. Closing captures the current ``writes.sequence``. A full close after a policy close takes a
+    new cutoff. Later full closes keep it. The full drain waits for every inference write and for other writes
     up to the cutoff, so a report that starts while admission is closed does not extend it. Once
     ``stopping``, the status counts every write. ``active`` holds the root task of each
     admitted request: ``register`` adds it, and ``finish`` removes it when response handling ends. A finished
-    task may remain until removal. ``forced_requests`` (≥ 0) counts cancellation requests from commands with
+    task may remain until removal. ``selecting`` is the subset that has not yet bound a provider or failed
+    selection. A policy close waits only for this subset. Its ``policy_close_revision`` is the revision of
+    ``close_policy`` until admission opens, a full close takes over, or the owner is lost; otherwise it is None.
+    ``forced_requests`` (≥ 0) counts cancellation requests from commands with
     ``cancel_active=True`` or from owner loss. ``publisher`` is given at construction and never replaced; it is
     None without routing.
     Operations: ``control`` applies one validated command. ``open`` opens admission. ``close`` and ``stop``
     close it, and ``stop`` also sets ``stopping``. ``activate`` replaces ``settings`` through ``publisher``
-    while closed and drained. Repeating the last revision with the same command returns the status and
+    after the applicable drain. ``abort_policy`` reopens after a policy close that did not publish anything.
+    Repeating the last revision with the same command returns the status and
     changes nothing. An older or conflicting revision is refused. ``status`` returns the wire form of a
     ``LifecycleStatus``. ``validated_candidate_check`` and ``require_candidate_check`` read a candidate
     check, which is not a command: they change nothing, including the revision. ``writes`` is shared with the
@@ -316,9 +320,11 @@ class RequestAcceptance:
         self.accepting = False
         self.stopping = False
         self.control_revision = -1
-        self.last_action: tuple[str, bool, str, str, float] | None = None
+        self.last_action: tuple[str, bool, str, str, float, int | None] | None = None
         self.publisher = publisher
         self.active: set[asyncio.Task[object]] = set()
+        self.selecting: set[asyncio.Task[object]] = set()
+        self.policy_close_revision: int | None = None
         self.forced_requests = 0
         # A new child is closed: its drain boundary is set now, not at its first close command.
         self.drain_sequence: int | None = writes.sequence
@@ -327,7 +333,7 @@ class RequestAcceptance:
         if not self.accepting or self.stopping:
             raise web.HTTPServiceUnavailable(text="routing deployment is not accepting requests")
 
-    def register(self) -> asyncio.Task[object]:
+    def register(self, *, selects_route: bool = False) -> asyncio.Task[object]:
         # There is no await between the final check and insertion, or in control().
         # Both operations run on the same aiohttp event loop.
         self.check()
@@ -335,16 +341,23 @@ class RequestAcceptance:
         if task is None:
             raise RuntimeError("request admission requires an asyncio task")
         self.active.add(task)
+        if selects_route:
+            self.selecting.add(task)
         return task
+
+    def release_selection(self, task: asyncio.Task[object]) -> None:
+        """Release a request's selection after it binds its provider handler or its selection fails."""
+        self.selecting.discard(task)
 
     def finish(self, task: asyncio.Task[object]) -> None:
         """Release the root task of an admitted request whose response handling has ended."""
+        self.release_selection(task)
         self.active.discard(task)
 
     def activate(
         self, manifest_path: str, snapshot_version: str, router_config_hash: str, expected_snapshot_version: str
     ) -> None:
-        """Publish a new routing policy and its router runtime while closed and drained; admission stays closed.
+        """Publish while closed. A policy close waits for selections; a full close waits for requests and writes.
 
         The check and the publication run without an await, so no request can
         be admitted between them on this event loop.
@@ -353,7 +366,10 @@ class RequestAcceptance:
             raise web.HTTPConflict(text="this service has no routing publication")
         if self.accepting:
             raise web.HTTPConflict(text="routing policy activation requires closed admission")
-        if self.active or self.writes.count_before(self.drain_sequence):
+        if self.policy_close_revision is not None:
+            if self.selecting:
+                raise web.HTTPConflict(text="routing policy activation requires completed selections")
+        elif self.active or self.writes.count_before(self.drain_sequence):
             raise web.HTTPConflict(text="routing policy activation requires drained requests and writes")
         if self.settings.snapshot_version != expected_snapshot_version:
             raise web.HTTPConflict(text="routing policy activation expected another current snapshot")
@@ -375,6 +391,7 @@ class RequestAcceptance:
         """Close permanently when the parent lease disappears."""
         self.accepting = False
         self.stopping = True
+        self.policy_close_revision = None
         self.cancel_active()
 
     def status(self) -> dict[str, object]:
@@ -391,6 +408,8 @@ class RequestAcceptance:
             drain_pending_writes=self.writes.count_before(None if self.stopping else self.drain_sequence),
             failed_writes=self.writes.failed_count,
             forced_requests=self.forced_requests,
+            pending_selections=len(self.selecting),
+            policy_closed=self.policy_close_revision is not None,
         ).to_json()
 
     def readiness_deadline(self, body: Mapping[str, object]) -> float | None:
@@ -401,11 +420,11 @@ class RequestAcceptance:
             web.HTTPException: The command is invalid, stale, or for another generation.
         """
         action, revision, command = self.validated(body)
-        if action == "open" and revision > self.control_revision and self.publisher is not None:
+        if action in ("open", "abort_policy") and revision > self.control_revision and self.publisher is not None:
             return command[4]
         return None
 
-    def validated(self, body: Mapping[str, object]) -> tuple[str, int, tuple[str, bool, str, str, float]]:
+    def validated(self, body: Mapping[str, object]) -> tuple[str, int, tuple[str, bool, str, str, float, int | None]]:
         """The action, revision and comparable command of a control body, after every check that changes nothing.
 
         Raises:
@@ -415,9 +434,9 @@ class RequestAcceptance:
         publication = {"manifest_path", "snapshot_version", "router_config_hash", "expected_snapshot_version"}
         allowed = required | {"cancel_active"}
         if body.get("action") == "activate":
-            allowed |= publication
-        elif body.get("action") == "open":
-            allowed.add("open_deadline_monotonic")
+            allowed |= publication | {"policy_close_revision"}
+        elif body.get("action") in ("open", "abort_policy"):
+            allowed |= {"open_deadline_monotonic", "policy_close_revision"}
         if not required <= body.keys() or body.keys() - allowed:
             raise web.HTTPBadRequest(text="invalid lifecycle control fields")
         if body["deployment_id"] != self.settings.deployment_id or body["generation"] != self.settings.generation:
@@ -428,9 +447,9 @@ class RequestAcceptance:
         if type(revision) is not int or revision < 0:
             raise web.HTTPBadRequest(text="control_revision must be a nonnegative integer")
         if (
-            action not in ("open", "close", "stop", "activate")
+            action not in ("open", "close", "stop", "activate", "close_policy", "abort_policy")
             or type(cancel) is not bool
-            or (action in ("open", "activate") and cancel)
+            or (action not in ("close", "stop") and cancel)
         ):
             raise web.HTTPBadRequest(text="invalid lifecycle action")
         if action == "activate" and not (
@@ -441,7 +460,12 @@ class RequestAcceptance:
             raise web.HTTPBadRequest(
                 text="activation requires a manifest path, both snapshot versions and a router runtime hash"
             )
-        if action == "open":
+        close_revision = body.get("policy_close_revision")
+        if "policy_close_revision" in body and (type(close_revision) is not int or close_revision < 0):
+            raise web.HTTPBadRequest(text="policy_close_revision must be a nonnegative integer")
+        if action == "abort_policy" and close_revision is None:
+            raise web.HTTPBadRequest(text="a policy abort requires its close revision")
+        if action in ("open", "abort_policy"):
             # The owner's time.monotonic() value after which it no longer waits; the owner shares this host's clock.
             requested_deadline = body.get("open_deadline_monotonic")
             if (
@@ -460,9 +484,17 @@ class RequestAcceptance:
             str(body.get("snapshot_version", "")),
             str(body.get("router_config_hash", "")),
             open_deadline,
+            cast(int | None, close_revision),
         )
         if revision < self.control_revision or (revision == self.control_revision and command != self.last_action):
             raise web.HTTPConflict(text="stale or conflicting lifecycle control revision")
+        if revision > self.control_revision:
+            if action == "close_policy" and (not self.accepting or self.publisher is None):
+                raise web.HTTPConflict(text="a policy update can only close an open routed deployment")
+            if action in ("activate", "open", "abort_policy") and close_revision != self.policy_close_revision:
+                raise web.HTTPConflict(text="routing policy close revision does not match")
+            if action == "abort_policy" and self.control_revision != close_revision:
+                raise web.HTTPConflict(text="a published policy cannot be abandoned")
         return str(action), revision, command
 
     def validated_candidate_check(self, body: Mapping[str, object]) -> tuple[str, str, str, float]:
@@ -502,14 +534,19 @@ class RequestAcceptance:
         cancel = command[1]
         if revision == self.control_revision:
             return self.status()
-        if action in ("open", "activate") and self.stopping:
+        opens_admission = action in ("open", "abort_policy")
+        if (opens_admission or action == "activate") and self.stopping:
             raise web.HTTPConflict(text="stopping is terminal for this generation")
-        if action == "open" and time.monotonic() >= command[4]:
+        if opens_admission and time.monotonic() >= command[4]:
             # No await separates this check from the change below, so a late readiness result cannot open.
             raise web.HTTPServiceUnavailable(text=OPEN_DEADLINE_PASSED)
-        if action == "open" and self.drain_sequence is not None and self.writes.count_before(self.drain_sequence):
-            raise web.HTTPConflict(text="previously admitted writes have not finalized")
-        if action == "open" and self.publisher is not None and not self.settings.router_config_hash:
+        if action == "open":
+            if self.policy_close_revision is not None:
+                if self.selecting:
+                    raise web.HTTPConflict(text="routing selections have not completed")
+            elif self.drain_sequence is not None and self.writes.count_before(self.drain_sequence):
+                raise web.HTTPConflict(text="previously admitted writes have not finalized")
+        if opens_admission and self.publisher is not None and not self.settings.router_config_hash:
             raise web.HTTPConflict(text="routing has no verified router runtime; publish one before opening")
         if action == "activate":
             self.activate(
@@ -522,13 +559,14 @@ class RequestAcceptance:
         self.last_action = command
         if action == "activate":
             return self.status()
-        self.accepting = action == "open"
+        self.accepting = opens_admission
         if self.accepting:
             self.drain_sequence = None
-        elif self.drain_sequence is None:
+        elif self.drain_sequence is None or self.policy_close_revision is not None:
             # Retain this boundary through later forced-close commands. New
             # reports may proceed while closed without extending the old drain.
             self.drain_sequence = self.writes.sequence
+        self.policy_close_revision = revision if action == "close_policy" else None
         if action == "stop":
             self.stopping = True
         if cancel:
@@ -558,8 +596,10 @@ def create_acceptance_middleware(acceptance: RequestAcceptance) -> Middleware:
         # Admission and the routing policy are fixed together, before any body byte is awaited: the upload
         # counts toward the drain, and a policy published meanwhile cannot change what this request uses.
         # The body itself is read once, with its deadline, by the route (routes/payload.py).
-        task = acceptance.register()
         routing = None if acceptance.publisher is None else acceptance.publisher.current()
+        task = acceptance.register(
+            selects_route=routing is not None and resource is not None and resource.canonical == "/v1/chat/completions"
+        )
         if routing is not None:
             request[ADMITTED_ROUTING] = routing
         scope = INFERENCE_FINALIZATION.set(True)
