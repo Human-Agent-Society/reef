@@ -85,9 +85,10 @@ The public layout groups fields by their owner:
 * ``recipe.config``: fields declared by that recipe.
 * ``recipe.runtime``: the runtime type and its declared settings.
 * ``training``: backend selection, startup and worker-call timeouts, Ray connection and native training ``options``.
+* ``evaluation``: the address at which a task's container reaches this host.
 * ``storage``: artifact backend and repository, work/cache directories and record retention.
 * ``execution`` / ``executors``: role placement and named executor profiles.
-* ``evaluation`` / ``observability``: their existing component-owned settings.
+* ``observability``: its existing component-owned settings.
 * ``pipeline``: the stage classes that replace a weight-training recipe's own, with their config.
 * ``generator``: the generator service that writes and checks Harbor tasks and runs their rollouts.
 * ``harness``: how harness clients reach the deployment's services.
@@ -793,7 +794,7 @@ Service and storage settings
 ----------------------------
 
 The HTTP service reads these fields from the ``recipe``, ``reef``,
-``inference``, ``harness`` and ``storage`` sections.
+``inference``, ``harness``, ``storage`` and ``evaluation`` sections.
 
 .. container:: config
 
@@ -947,6 +948,12 @@ columns, indexes and receipt table are removed; PostgreSQL advances its schema
 version to 3. Training commits store only consumption progress. Already deleted
 bodies cannot be recovered. Do not share stores between old and new writers, or
 downgrade without restoring a compatible backup.
+
+.. container:: config
+
+   ``evaluation.agent_host`` : host.docker.internal
+       the address at which a task's container reaches this host, for an evaluation whose harness is an artifact
+       item. See `HTTP API <http-api.rst>`__.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
