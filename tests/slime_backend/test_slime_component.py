@@ -917,10 +917,14 @@ def test_sft_trains_a_demonstration_that_records_no_reward(tmp_path, stacks) -> 
     stack.component.template = CharTemplate()
     steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": "ab"}]
     demonstration = TrajectorySample({"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps})
-    stack.run("sft", step=0, batch=JobData("uploaded", (*batch_for(0).samples[:1], demonstration)))
+    # A trajectory from records holds a null reward when no one reported one.
+    recorded = TrajectorySample(
+        {"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps, "extra": {"reef": {"reward": None}}}
+    )
+    stack.run("sft", step=0, batch=JobData("uploaded", (*batch_for(0).samples[:1], demonstration, recorded)))
     (data,) = stack.processor.calls
-    # sft_loss reads no reward, so the row carries 0.
-    assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["rewards"][1] == 0.0
+    # sft_loss reads no reward, so each row carries 0.
+    assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["rewards"][1:3] == [0.0, 0.0]
 
 
 # -- Checkpoint storage
