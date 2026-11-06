@@ -2076,8 +2076,7 @@ Neither inherits from the other, and no trainer holds a serving engine.
   each call from the artifact that the call names overrides it, as the Tinker
   runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
   of a model artifact needs it. Such a runtime also returns True from
-  ``serves_artifacts_on_request``, which the scenario contract's
-  ``capabilities`` read.
+  ``serves_artifacts_on_request``.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
@@ -2250,10 +2249,6 @@ loop:
      - Start running jobs in this process: the training service's job worker
        calls it once. Other processes use the component without running jobs.
        The default does nothing.
-   * - ``starts_from_artifacts``
-     - False when ``import_start`` refuses every snapshot, as Slime's does;
-       True, the default, otherwise. The scenario contract's
-       ``capabilities`` read it.
    * - ``check_artifact(directory)``
      - Raise ``ValueError`` unless ``directory`` holds a snapshot in the
        layout of this component's snapshots. An artifact import calls it.
