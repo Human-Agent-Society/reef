@@ -9,11 +9,12 @@ import json
 import tarfile
 import time
 import urllib.request
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import pytest
@@ -32,13 +33,18 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.harness.adapters import get_adapter
+from reef.harness.harbor.agent import TreeAgent
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
+from reef.harness.tree import HarnessTree
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
+from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
+from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
+from reef.storage.data import NewItem
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import ComponentTrainer
@@ -250,6 +256,183 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             # The evaluation keeps no record and changes nothing the scenario serves.
             records = await (await client.get("/reef/scenarios/s/records", headers=AUTH)).json()
             assert records["records"] == []
+
+    asyncio.run(run())
+
+
+class TreeCallingLab(TaskLab):
+    """Builds the agent as Harbor does, keeps what it rendered, and calls the model with the rendered binding."""
+
+    def __init__(self, logs: Path) -> None:
+        self.logs = logs
+        self.rendered: dict[str, str] = {}
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        import_path = str(agent["import_path"])
+        assert import_path == "reef.harness.harbor.agent:TreeAgent"
+        kwargs = cast(dict[str, Any], agent["kwargs"])
+        TreeAgent(self.logs, **kwargs)
+        files = Path(kwargs["files_dir"])
+        self.rendered = {str(path.relative_to(files)): path.read_text() for path in files.rglob("*") if path.is_file()}
+        body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "solve"}]}).encode()
+        request = urllib.request.Request(
+            f"{kwargs['base_url']}/v1/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        await asyncio.to_thread(lambda: urllib.request.urlopen(request, timeout=10).read())
+        return RolloutRow(rewards={"reward": 1.0})
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+def harness_tree(root: Path) -> str:
+    """The URI of a directory that holds a harness tree for pi, whose skill holds the text of a placeholder."""
+    HarnessTree({"skills/check/SKILL.md": "---\nname: check\ndescription: Check.\n---\nCall {model} once.\n"}).write(
+        root
+    )
+    return f"file://{root}/"
+
+
+def tree_item(
+    dispatcher: Dispatcher, uri: str | None, *, kind: str = "harness_plugin", adapter: str | None = "pi"
+) -> str:
+    """Store an artifact item of a harness in another scenario of the owner of ``s``, and return its ID."""
+    item_id = f"other/artifact:{uuid.uuid4().hex}"
+    metadata = {
+        "kind": "artifact",
+        "origin": {"scenario": "other", "artifact_id": item_id.removeprefix("other/")},
+        **({"adapter": adapter} if adapter else {}),
+    }
+    content = {"source_uri": uri, "kind": kind, "component": "harness"}
+    owner = cast(str, dispatcher.scenario_owner("s"))
+    DataAccess.of(dispatcher).require_store().create(owner, [NewItem(item_id, content, metadata)])
+    return item_id
+
+
+@pytest.mark.integration
+def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item(tmp_path: Path) -> None:
+    runtime = ArtifactRuntime()
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
+    lab = TreeCallingLab(tmp_path / "logs")
+    dispatcher.workers.add(
+        EvaluationRolloutWorker(
+            dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id="trees", lab=lab, agent_host="127.0.0.1"
+        )
+    )
+
+    async def run() -> None:
+        evaluations = ArtifactEvaluations(dispatcher)
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            rule = {
+                "activation": {"module": "evaluated", "config": {"min_mean_score": 0.5}},
+                "artifact_evaluation": {"harness": {"name": "terminus-2"}},
+            }
+            response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=rule)
+            assert response.status == 200, await response.text()
+            activated: list[str] = []
+            evaluations.results.activate = lambda scenario, request: activated.append(request.artifact_id)
+            item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
+            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+            assert activated == [], "a score with a harness from an item activates nothing"
+
+        assert answer["state"] == "finished", answer
+        assert answer["request"]["harness"] == {"item": item_id}
+        evaluation = answer["policy_evaluation"]
+        assert evaluation["harness"]["base"] == "pi"
+        assert evaluation["scores"] == [{"task": "add", "scores": [1.0]}]
+        assert runtime.handler.releases == [artifact_id]
+        rendered = "".join(lab.rendered.values())
+        assert "Call {model} once." in rendered, "the runner fills no placeholder in the tree's own text"
+        assert "http://127.0.0.1:" in rendered, "the rendered binding names the address of the capture proxy"
+        assert "127.0.0.1" not in json.dumps(evaluation["harness"]["plugin"]), "the result keeps no endpoint"
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        ({"kind": "model"}, "not an artifact of the kind harness_plugin"),
+        ({"uri": None}, "only a published artifact"),
+        ({"adapter": None}, "names no adapter"),
+        ({"adapter": "missing"}, "unknown harness adapter"),
+        ({"adapter": "hermes"}, "cannot run in a task's container"),
+        ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
+    ],
+)
+def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
+    tmp_path: Path, options: dict[str, Any], reason: str
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, TreeCallingLab(tmp_path / "logs"))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            uri = options.pop("uri", harness_tree(tmp_path / "tree"))
+            body = {"artifact_id": artifact_id, "harness": {"item": tree_item(dispatcher, uri, **options)}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and reason in await response.text()
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, TreeCallingLab(tmp_path / "logs"))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
+
+            body = {"artifact_id": artifact_id, "harness": {"item": "another/artifact:1"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and "stores no item" in await response.text()
+
+            settings = {"artifact_evaluation": {"harness": {"item": item_id}}}
+            response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=settings)
+            assert response.status == 400 and "not an artifact item" in await response.text()
+
+            monkeypatch.setattr("reef.service.artifact_evaluations.task_agent_tools", lambda task: ("mcp_servers",))
+            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and "mcp_servers" in await response.text()
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_an_artifact_that_is_not_published_is_refused_before_any_rollout(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, ModelCallingLab({"add": 1.0}))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            monkeypatch.setattr(
+                ScenarioSnapshots, "find_snapshot", lambda self, revision: (SnapshotRef(revision, None), False)
+            )
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and "no durable bytes" in await response.text()
+            monkeypatch.undo()
+            listing = await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json()
+            assert listing["evaluations"] == []
 
     asyncio.run(run())
 
