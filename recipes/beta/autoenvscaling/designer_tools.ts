@@ -1,4 +1,4 @@
-// The AutoEnvScaling agent's own tool: its task through the oracle and nop check. The gateway at REEF_AUTHOR_URL runs
+// The AutoEnvScaling agent's own tool: its task through the oracle and nop check. The gateway at REEF_DESIGNER_URL runs
 // the check through Reef's generator service and holds every credential; this file holds none. A check outlasts one
 // HTTP exchange (a build alone may take 20 minutes), so the tool starts it and polls it until it is done.
 import { Type } from "typebox";
@@ -6,7 +6,7 @@ import { Type } from "typebox";
 const POLL_MS = 20_000;
 
 async function gateway(route, body, signal) {
-  const response = await fetch(`${process.env.REEF_AUTHOR_URL}${route}`, {
+  const response = await fetch(`${process.env.REEF_DESIGNER_URL}${route}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -28,8 +28,8 @@ function sleep(ms, signal) {
 }
 
 export default function (pi) {
-  const deadline = Number(process.env.REEF_AUTHOR_DEADLINE_MS);
-  const finishSeconds = Number(process.env.REEF_AUTHOR_FINISH_SECONDS);
+  const deadline = Number(process.env.REEF_DESIGNER_DEADLINE_MS);
+  const finishSeconds = Number(process.env.REEF_DESIGNER_FINISH_SECONDS);
   let latest = "No check yet.";
 
   pi.on("context", async (event) => {
@@ -42,8 +42,8 @@ export default function (pi) {
     return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: status }], timestamp: Date.now() }] };
   });
 
-  // The author sets REEF_AUTHOR_REVIEWS=1 when a passing oracle check is followed by a review of the tests.
-  const reviews = process.env.REEF_AUTHOR_REVIEWS === "1";
+  // The Designer sets REEF_DESIGNER_REVIEWS=1 when a passing oracle check is followed by a review of the tests.
+  const reviews = process.env.REEF_DESIGNER_REVIEWS === "1";
   pi.registerTool({
     name: "task_check",
     label: "Check the task",

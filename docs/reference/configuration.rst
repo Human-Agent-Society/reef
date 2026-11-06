@@ -1708,7 +1708,7 @@ which are not records.
 .. container:: config
 
    ``pipeline.record2sample.config.jobs_per_round`` : 1
-       trained jobs after which the next round starts
+       trained jobs after which the next round starts; 0 starts it when the previous round ends, so generation runs ahead of training until ``refill_tasks`` tasks wait
 
    ``pipeline.record2sample.config.source_records_per_round`` : 0
        recorded sessions that each round gives the generator, at most; 0 generates from the description only
@@ -1742,6 +1742,9 @@ which are not records.
 
    ``pipeline.record2sample.config.generation_deadline_seconds`` : 1800
        seconds that all attempts of one generation may take
+
+   ``pipeline.record2sample.config.validation_concurrency`` : 1
+       candidates that one generation checks at once. After a check that fails to run, no further check starts, and the attempt fails when the running checks end.
 
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
