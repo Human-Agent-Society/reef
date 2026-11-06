@@ -952,8 +952,8 @@ downgrade without restoring a compatible backup.
 .. container:: config
 
    ``evaluation.agent_host`` : host.docker.internal
-      The address at which a task's container reaches this host, for an
-      evaluation whose harness is an artifact item. See `HTTP API <http-api.rst>`__.
+       the address at which a task's container reaches this host, for an evaluation whose harness is an artifact
+       item. See `HTTP API <http-api.rst>`__.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
