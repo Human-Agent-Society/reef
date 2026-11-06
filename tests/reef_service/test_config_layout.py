@@ -317,3 +317,9 @@ def test_provider_without_local_model_rejects_gpu_request(tmp_path):
     }
     with pytest.raises(DeployConfigError, match=r"require --inference\.model-path"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")
+
+
+def test_the_evaluation_section_sets_the_agent_host_of_a_task_container() -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"agent_host": "10.0.0.5"}})
+
+    assert service_config_from_mapping(resolved).evaluation_agent_host == "10.0.0.5"

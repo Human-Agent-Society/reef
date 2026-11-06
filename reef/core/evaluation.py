@@ -289,14 +289,21 @@ class RolloutRequest:
             raise TypeError("a rollout request's record_dir is None or a Path")
 
 
+def harness_item(harness: Mapping[str, Any] | None) -> str | None:
+    """The artifact item that ``harness``, an ``ArtifactEvaluationRequest``'s value, names; None for a Harbor agent or
+    no harness."""
+    return None if harness is None else harness.get("item")
+
+
 @dataclass(frozen=True)
 class ArtifactEvaluationRequest:
     """A client's request to evaluate one artifact: a component of a snapshot, with the other side of its policy.
 
     Values: ``artifact_id`` is the non-empty ID of one of the scenario's artifacts, and ``component`` a
     non-empty name of one of its components: the evaluated artifact. Exactly one of ``harness`` and ``model`` is set: ``harness``, the
-    Harbor agent that runs a model artifact (an object with a non-empty ``name`` or ``import_path``, as
-    ``TaskRolloutRunner``'s ``agent``), or ``model``, the non-empty name of the deployment's model binding that a
+    harness that runs a model artifact: a Harbor agent (an object with a non-empty ``name`` or ``import_path``, as
+    ``TaskRolloutRunner``'s ``agent``), or an artifact item of a harness tree of the scenario's owner (an object
+    with a non-empty ``item`` and no other key); or ``model``, the non-empty name of the deployment's model binding that a
     harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
     ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
     Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
@@ -321,7 +328,16 @@ class ArtifactEvaluationRequest:
         if (self.harness is None) == (self.model is None):
             raise ValueError("an artifact evaluation configures exactly one of harness and model")
         if self.harness is not None:
-            if not isinstance(self.harness, Mapping) or not any(
+            if not isinstance(self.harness, Mapping):
+                raise ValueError("an artifact evaluation's harness is a JSON object")
+            if "item" in self.harness:
+                if (
+                    set(self.harness) != {"item"}
+                    or not isinstance(self.harness["item"], str)
+                    or not self.harness["item"]
+                ):
+                    raise ValueError("an artifact evaluation's harness item is one non-empty string and no other key")
+            elif not any(
                 isinstance(self.harness.get(key), str) and self.harness[key] for key in ("name", "import_path")
             ):
                 raise ValueError("an artifact evaluation's harness is a Harbor agent with a name or an import_path")

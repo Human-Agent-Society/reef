@@ -41,3 +41,9 @@ def test_an_artifact_items_content_is_checked() -> None:
     ):
         with pytest.raises(ValueError, match=reason):
             check_artifact_content(content, made_by_scenario=made_by_scenario)
+
+
+def test_only_the_item_of_a_harness_tree_names_its_adapter() -> None:
+    assert artifact_item("coding", ROW, "harness_plugin", None, "pi").metadata["adapter"] == "pi"
+    assert "adapter" not in artifact_item("coding", ROW, "model", None, "pi").metadata
+    assert "adapter" not in artifact_item("coding", ROW, "harness_plugin", None).metadata
