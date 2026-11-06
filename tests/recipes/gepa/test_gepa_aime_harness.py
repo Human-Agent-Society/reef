@@ -33,7 +33,7 @@ from reef.train.backend import ComponentArtifacts
 def run_requests(evaluator, *pairings):
     """One run request for each ``(files, task)``, on the evaluator's adapter and served model."""
     return [
-        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.served_model, task)
+        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.policy_model, task)
         for files, task in pairings
     ]
 
