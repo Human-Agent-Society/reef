@@ -220,6 +220,12 @@ class ServiceConfig:
         public_path=("storage", "artifact_sources"),
         help="Artifact source reader plugin references, as a JSON/YAML list, beside the hf, file and s3 readers.",
     )
+    #: The address at which a task's container reaches this host, for an evaluation with a harness tree.
+    evaluation_agent_host: str = config_option(
+        "host.docker.internal",
+        public_path=("evaluation", "agent_host"),
+        help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
