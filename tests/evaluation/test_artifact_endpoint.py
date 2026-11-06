@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
@@ -12,7 +14,7 @@ from reef.core.evaluation import PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint
-from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime
 
 
 class RefusingHandler(InferenceHandler):
@@ -55,6 +57,49 @@ def call(url: str, path: str, body: object) -> tuple[int, dict]:
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read())
+
+
+class EngineHandler(InferenceHandler):
+    """An engine's handler, which sets its own sampling values and keeps each body."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, Any]] = []
+
+    def request_payload(self, payload: Mapping[str, Any], *, serving_config: Mapping[str, Any]) -> dict[str, Any]:
+        return {**payload, "temperature": 0.2}
+
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.bodies.append(payload)
+        return {"artifact_id": artifact.artifact_id}
+
+
+class StartedElsewhereRuntime(Runtime):
+    """A runtime that another process started an engine of: it has no handler of its own, as a Modal runtime has none
+    before an activation."""
+
+    def __init__(self) -> None:
+        super().__init__(any_artifact=True)
+        self.engine = EngineHandler()
+
+    @property
+    def inference_handler(self) -> InferenceHandler:
+        raise RuntimeError("no engine serves yet")
+
+    def handler_for(self, url: str) -> InferenceHandler | None:
+        return self.engine
+
+
+@pytest.mark.unit
+def test_a_call_reaches_an_engine_that_another_process_started_with_the_engines_values() -> None:
+    release = Artifact(
+        SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
+    )
+    runtime = StartedElsewhereRuntime()
+    served = ServedArtifact("artifact:r7", "https://engine.invalid", "engine-model")
+    with ArtifactEndpoint(runtime, release, served) as endpoint:
+        chat = {"model": "from-the-agent", "messages": [{"role": "user", "content": "ok"}]}
+        assert call(endpoint.url, "/v1/chat/completions", chat) == (200, {"artifact_id": "artifact:r7"})
+    assert runtime.engine.bodies == [{**chat, "model": "engine-model", "temperature": 0.2}]
 
 
 @pytest.mark.unit

@@ -54,12 +54,16 @@ class ArtifactEndpoint:
         except InferenceUnavailable as exc:
             return 503, {"error": {"message": str(exc)}}
         try:
-            handler = self.runtime.inference_handler
-            if self.served is not None:
+            if self.served is None:
+                handler = self.runtime.inference_handler
+            else:
+                # A runtime that started the engine in another process has no handler of its own here.
                 reached = self.runtime.handler_for(self.served.url)
                 if reached is None:
                     raise ValueError(f"the runtime has no handler for {self.served.url}")
-                handler, payload = reached, reached.address_model(payload, self.served.model_name)
+                # The candidate samples with the deployment's values, as a client's call to a served artifact does.
+                body = reached.request_payload(payload, serving_config={})
+                handler, payload = reached, reached.address_model(body, self.served.model_name)
             return 200, await handler.inference(InferenceArtifact.from_artifact(self.artifact), path, payload)
         except UpstreamStatusError as exc:
             return exc.status, {"error": {"message": str(exc)}}
