@@ -12,7 +12,7 @@ import pytest
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
 from reef.harness.adapters import get_adapter
-from reef.harness.harbor.agent import CONTAINER_ROOT, can_run_in_task_container, run_harbor_task
+from reef.harness.harbor.agent import CONTAINER_ROOT, can_run_in_task_container, run_harbor_task, task_agent_tools
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError
@@ -103,3 +103,13 @@ def test_a_container_reaches_a_loopback_model_route_at_the_agent_host() -> None:
     )
     public = ModelBinding(base_url="https://api.example.com", model="m")
     assert container_binding(public, "host.docker.internal") == public
+
+
+def test_the_tools_that_a_task_gives_its_agent_are_found_in_its_config(tmp_path: Path) -> None:
+    task = harbor_task(tmp_path)
+    assert task_agent_tools(task) == ()
+
+    config = (task / "task.toml").read_text()
+    server = '[[environment.mcp_servers]]\nname = "search"\ntransport = "sse"\nurl = "http://search:8000/sse"\n'
+    (task / "task.toml").write_text(f'{config}\n[environment]\nskills_dir = "/skills"\n\n{server}')
+    assert task_agent_tools(task) == ("mcp_servers", "skills_dir")
