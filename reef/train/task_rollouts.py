@@ -348,7 +348,7 @@ def run_train_tasks(
         )
         rollouts = runner.run_rollouts(
             [
-                RolloutRequest(runner.harness, runner.served_model, str(task.task_path))
+                RolloutRequest(runner.harness, runner.policy_model, str(task.task_path))
                 for task in tasks
                 for _ in range(settings.rollouts_per_task)
             ]
