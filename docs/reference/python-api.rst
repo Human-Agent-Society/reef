@@ -2076,7 +2076,7 @@ Neither inherits from the other, and no trainer holds a serving engine.
   each call from the artifact that the call names overrides it, as the Tinker
   runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
   of a model artifact needs it. Such a runtime also returns True from
-  ``serves_artifacts_on_request``.
+  ``serves_any_artifact``.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
