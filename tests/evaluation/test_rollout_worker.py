@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 import pytest
 
 from reef.core.evaluation import PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
@@ -34,12 +36,20 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
         PolicyModel("m", "a"),
         {"name": "x"},
         "docker",
+        {"weights": "artifact-1"},
     )
+
+
+class ServedWorker(EvaluationRolloutWorker):
+    """A worker whose candidate needs no start."""
+
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        return None
 
 
 class UnreachableEndpoints(CandidateEndpoints):
     @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         raise ConnectionError("the candidate cannot be served")
         yield CandidateEndpoint("http://unused", None)
 
@@ -58,7 +68,7 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 2})
     value = rollout()
     queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
+    worker = ServedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
 
     assert worker.run_once() is True
     assert queue.get(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
