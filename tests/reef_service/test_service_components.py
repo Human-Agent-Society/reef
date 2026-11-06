@@ -18,7 +18,7 @@ from tests.support.harness_steps import IdleMethod, harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.sources import ArtifactSources
+from reef.artifact.sources import ArtifactSources, DirectorySource
 from reef.core.job_data import JobData
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
@@ -38,6 +38,7 @@ from reef.service.data_service import DataJob, DataWorker
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
+from reef.service.scenario_files import artifact_directory
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
@@ -420,6 +421,54 @@ def test_control_and_data_load_a_scenario_without_activating_its_engine(tmp_path
     finally:
         data.close()
     assert component.inference.activated == []
+
+
+@pytest.mark.unit
+def test_the_data_service_reads_the_artifact_that_control_commits_after_the_data_service_loaded(
+    tmp_path: Path,
+) -> None:
+    component = ImportingComponent(tmp_path / "checkpoints")
+    repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+
+    def dispatcher(components: frozenset[str]) -> Dispatcher:
+        return Dispatcher(
+            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            repository,
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
+            components=components,
+        )
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "config.json").write_text("{}")
+    (weights / "model.safetensors").write_bytes(b"w9")
+    directory = tmp_path / "store"
+    directory.mkdir()
+    control = dispatcher(frozenset({"control"}))
+    data = dispatcher(frozenset({"data"}))
+    try:
+        control.get_or_create_scenario("math")
+        before = {row["artifact_id"] for row in _listed(data)}
+        imported = control.import_artifact(
+            "math",
+            DirectorySource(weights, source_version="", link=False),
+            None,
+            source={"uri": weights.as_uri(), "version": ""},
+            directory=directory,
+        )
+        assert imported.artifact_id not in before
+        assert imported.artifact_id in {row["artifact_id"] for row in _listed(data)}
+        assert artifact_directory(data, "math", imported.artifact_id, None).is_dir()
+    finally:
+        data.close()
+        control.close()
+
+
+def _listed(dispatcher: Dispatcher) -> tuple[dict[str, object], ...]:
+    """The data service's artifact list. It loads the scenario on its first read."""
+    dispatcher.get_or_create_scenario("math")
+    return dispatcher.list_artifacts("math")
 
 
 @pytest.mark.unit
