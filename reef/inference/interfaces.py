@@ -463,11 +463,11 @@ class InferenceRuntime(ABC):
         return None
 
     @property
-    def serves_artifacts_on_request(self) -> bool:
+    def serves_any_artifact(self) -> bool:
         """Whether this runtime answers each call from the artifact that the call names, without loading it.
 
         It is the one statement of that capability. False, the default, for a runtime that serves only the artifact
-        it has loaded. A runtime that returns True overrides ``artifact_model`` and ``served_artifact_on_request``;
+        it has loaded. A runtime that returns True overrides ``artifact_model`` and ``serve_artifact``;
         the defaults of both refuse.
         """
         return False
@@ -475,14 +475,17 @@ class InferenceRuntime(ABC):
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         """The model that an evaluation rollout names to sample ``artifact`` on request, without a load.
 
-        Raise ``ReefError`` when ``serves_artifacts_on_request`` is False, and ``ValueError`` when ``artifact`` is
+        Raise ``ReefError`` when ``serves_any_artifact`` is False, and ``ValueError`` when ``artifact`` is
         not one that this runtime can serve.
         """
         raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
-    def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact | None:
-        """The ``served_models`` value that reaches ``artifact`` on request: the engine's ``base_url`` and the model
+    def serve_artifact(self, artifact: Artifact) -> ServedArtifact | None:
+        """Make an engine answer for ``artifact``, and return the value that reaches it: the engine's URL and the model
         name that samples that artifact. None when the engine has no address that another process can call.
+
+        Return only when the engine is ready. A second call for a served artifact starts nothing. Only the inference
+        owner calls it, one call at a time.
 
         Raise as ``artifact_model`` does.
         """
