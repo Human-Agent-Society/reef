@@ -11,8 +11,9 @@ rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No 
 ``reef.service.routes.evaluations`` adapts it to HTTP.
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
-artifact on request (``InferenceRuntime.serves_artifacts_on_request``), with a Harbor agent, on the Harbor tasks of the eval
-split of the scenario's imported tasks (its samples). It refuses a harness artifact, and a model artifact on any
+artifact on request (``InferenceRuntime.serves_artifacts_on_request``), on the Harbor tasks of the eval split of the
+scenario's imported tasks (its samples). Its harness is a Harbor agent, or a harness tree that an artifact item of
+the scenario's owner names, also from another scenario. It refuses a harness artifact, and a model artifact on any
 other runtime.
 """
 
@@ -23,11 +24,13 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.sources import ArtifactSources
 from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
@@ -36,6 +39,7 @@ from reef.core.evaluation import (
     PolicyModel,
     RolloutScore,
     RolloutScores,
+    harness_item,
 )
 from reef.core.job_data import TaskSample
 from reef.dispatcher import Dispatcher
@@ -43,11 +47,16 @@ from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
     EvaluationRollout,
-    agent_harness,
+    TreeHarness,
     harbor_agent,
     rollout_item_id,
 )
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tools
+from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
+from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import StoredEvaluation
 from reef.storage.observer import RecordObserver
@@ -226,7 +235,7 @@ class EvaluationResults:
             for item in items
         ]
         result = PolicyEvaluation(
-            agent_harness(harbor_agent(request.harness)), rollouts[0].model, RolloutScores.by_task(names, scores)
+            rollouts[0].policy_harness(), rollouts[0].model, RolloutScores.by_task(names, scores)
         )
         self.end(scenario, evaluation_id, request, result=result, error=None)
 
@@ -250,7 +259,10 @@ class EvaluationResults:
                     evaluations.begin(evaluation_id)
                 if result is not None:
                     evaluations.finish(evaluation_id, result=result, finished_at=time.time())
-                    activates = current.activation_rule.activates_evaluated(request.artifact_id, result)
+                    # A score with a harness from an item says nothing of the harness that the deployment serves.
+                    activates = harness_item(request.harness) is None and current.activation_rule.activates_evaluated(
+                        request.artifact_id, result
+                    )
                 else:
                     evaluations.fail(evaluation_id, error=error or "the evaluation failed", finished_at=time.time())
         except (ReefError, ValueError) as exc:
@@ -299,7 +311,7 @@ class ArtifactEvaluations:
     """Accepts, queues and reads the artifact evaluations of a service's scenarios.
 
     Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts
-    to the evaluation service's workers. ``new_artifacts`` reports the new artifacts that Reef evaluates with each
+    to the evaluation service's workers. ``sources`` reads the harness tree of an artifact item. ``new_artifacts`` reports the new artifacts that Reef evaluates with each
     scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
     end.
 
@@ -313,8 +325,10 @@ class ArtifactEvaluations:
         dispatcher: Dispatcher,
         *,
         new_artifacts: NewArtifacts | None = None,
+        sources: ArtifactSources | None = None,
     ) -> None:
         self.dispatcher = dispatcher
+        self.sources = ArtifactSources.from_setting(()) if sources is None else sources
         self.new_artifacts = new_artifacts
         self.queue = dispatcher.queue
         self.results = EvaluationResults(dispatcher)
@@ -399,6 +413,8 @@ class ArtifactEvaluations:
             value = changes.get("artifact_evaluation")
             if value is not None:
                 settings = ArtifactEvaluationSettings.from_json(value)
+                if harness_item(settings.harness) is not None:
+                    raise ValueError("an automatic evaluation's harness is a Harbor agent, not an artifact item")
                 self.checked(current, None, settings)
                 artifact_evaluation = settings.to_json()
             elif "artifact_evaluation" in changes:
@@ -413,10 +429,10 @@ class ArtifactEvaluations:
 
     def checked(
         self, current: Scenario, artifact_id: str | None, settings: ArtifactEvaluationSettings
-    ) -> tuple[ArtifactEvaluationRequest, Artifact, PolicyModel]:
+    ) -> tuple[ArtifactEvaluationRequest, Artifact, PolicyModel, str]:
         """The request of ``settings`` for ``artifact_id`` (None: the component's active artifact), the materialized
-        artifact, and the model that the runtime serves for it; ``ValueError`` or ``ReefError`` when ``current``
-        cannot run it."""
+        artifact, the model that the runtime serves for it, and the runtime's API dialect; ``ValueError`` or
+        ``ReefError`` when ``current`` cannot run it."""
         kinds = {name: component.kind for name, component in current.components.components.items()}
         component = settings.component
         if component is None:
@@ -442,7 +458,54 @@ class ArtifactEvaluations:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
         _, snapshot = current.resolve_artifact(artifact_id, component)
         artifact = snapshot.materialize()
-        return request, artifact, runtime.artifact_model(artifact)
+        return request, artifact, runtime.artifact_model(artifact), runtime.api
+
+    def tree_harness(self, scenario: str, item_id: str, api: str, tasks: Sequence[str]) -> TreeHarness:
+        """The harness tree of the artifact item ``item_id`` of the owner of ``scenario``, for model calls of the
+        dialect ``api`` on the Harbor task directories ``tasks``.
+
+        Raise ``ValueError`` when the item is not a tree that a task's container can run, or when a task needs what
+        the tree's agent does not give it.
+        """
+        owner = self.dispatcher.scenario_owner(scenario)
+        if owner is None:
+            raise ValueError(f"scenario {scenario!r} has no owner, so it can use no artifact item")
+        try:
+            item = DataAccess.of(self.dispatcher).require_store().read(owner, item_id)
+        except NoDataStore as exc:
+            raise ValueError(str(exc)) from exc
+        if item is None:
+            raise ValueError(f"{owner!r} stores no item {item_id!r}")
+        if item.kind != "artifact" or item.content is None or item.content["kind"] != "harness_plugin":
+            raise ValueError(f"item {item_id!r} is not an artifact of the kind harness_plugin")
+        uri, adapter = item.content["source_uri"], item.metadata.get("adapter")
+        if uri is None:
+            raise ValueError(
+                f"artifact item {item_id!r} has no source_uri: only a published artifact can be evaluated"
+            )
+        if not isinstance(adapter, str):
+            raise ValueError(f"artifact item {item_id!r} names no adapter in its metadata")
+        try:
+            descriptor = get_adapter(adapter)
+        except DescriptorError as exc:
+            raise ValueError(str(exc)) from exc
+        if not can_run_in_task_container(descriptor):
+            raise ValueError(f"adapter {adapter!r} cannot run in a task's container")
+        if api not in descriptor.model_binding:
+            raise ValueError(f"adapter {adapter!r} cannot call this runtime's API dialect {api!r}")
+        for task in tasks:
+            tools = task_agent_tools(Path(task))
+            if tools:
+                raise ValueError(f"task {task!r} needs {', '.join(tools)}, which a harness tree's agent does not get")
+        files = self.sources.open(uri)
+        tree = HarnessTree({path: files.read_bytes(path).decode("utf-8") for path in files.paths()})
+        validation = validate_tree(tree, descriptor)
+        if not validation.passed:
+            raise ValueError(f"the harness tree of item {item_id!r} fails validation: {validation.message()}")
+        harness = TreeHarness(adapter, api, tree.files)
+        # Rendering now refuses a bad tree here, and not at the end of the evaluation.
+        harness.policy_harness()
+        return harness
 
     def accept(
         self,
@@ -458,7 +521,7 @@ class ArtifactEvaluations:
         rollouts.
         """
         with self.dispatcher.locked_scenario(scenario) as current:
-            request, _artifact, model = self.checked(current, artifact_id, settings)
+            request, _artifact, model, api = self.checked(current, artifact_id, settings)
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
             held = {
                 stored.sample_id: stored.sample.task_path
@@ -472,7 +535,9 @@ class ArtifactEvaluations:
         if not names:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
         evaluation_id = uuid.uuid4().hex
-        agent = harbor_agent(request.harness)
+        item = harness_item(request.harness)
+        tree = None if item is None else self.tree_harness(scenario, item, api, [str(held[name]) for name in names])
+        agent = None if tree is not None else harbor_agent(request.harness)
         # The rollouts go to the queue before the evaluation exists, so that no reader sees an evaluation whose
         # rollouts are missing. An evaluation runs on all of its tasks or on none: when a step fails, the added
         # rollouts are cancelled and no evaluation is stored.
@@ -492,6 +557,7 @@ class ArtifactEvaluations:
                         model,
                         agent,
                         request.environment,
+                        tree,
                     )
                     self.queue.add(
                         NewWork(
