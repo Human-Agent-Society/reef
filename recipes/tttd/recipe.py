@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
-from recipes.tttd.processor import TTTDJobData, TTTDRecord2Record, TTTDSamples
+from recipes.tttd.processor import TTTDJobData, TTTDSamples
 from recipes.tttd.report import TTTDGroupedRolloutReport
 from reef.core.reports import ReportBase
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -16,10 +19,9 @@ class TTTDRecipe(WeightTrainingRecipe):
     """TTT-Discover: one complete step grid, one optimizer step, on the adaptive-entropic objective.
 
     The recipe binds the objective, the step schedule, and the report
-    contract. Its stages are ``TTTDRecord2Record``, ``TTTDSamples``, and
-    ``TTTDJobData``. The deployment writes the step grid in
-    ``pipeline.record2record.config``; the later stages read it from the
-    record stage.
+    contract. Its stages are ``TTTDSamples`` and ``TTTDJobData``. The
+    deployment writes the step grid in ``pipeline.record2sample.config``;
+    ``TTTDJobData`` reads it from ``TTTDSamples``.
     """
 
     name: str = "tttd"
@@ -31,9 +33,9 @@ class TTTDRecipe(WeightTrainingRecipe):
         return TTTDGroupedRolloutReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="tttd")
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "tttd"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=TTTDRecord2Record, record2sample=TTTDSamples, sample2job=TTTDJobData)
+        return PipelineSpec(record2sample=TTTDSamples, sample2job=TTTDJobData)

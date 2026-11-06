@@ -1,7 +1,7 @@
-"""One scenario served and evolved by several recipes, one per release component.
+"""One scenario served and evolved by several recipes, one per snapshot component.
 
-A composite recipe binds a recipe to each component name. Its surface
-serves every component's capabilities, its base artifact keeps each
+A composite recipe binds a recipe to each component name. It declares
+each recipe's component under that component's name, its default start keeps each
 component's seed under that component's directory, and its trainers are
 the components' trainers, run as independent workers that meet at the
 scenario's commit boundary (see ``docs/advanced_topics/state-model.rst``).
@@ -23,7 +23,7 @@ uses the deployment's model:
            config:
              pipeline: {sample2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
-           implementation: reef.recipe.cordis:CordisRecipe
+           implementation: reef.recipe.harness:HarnessEvolutionRecipe
            config:
              evolution: {adapter: pi, ...}
 """
@@ -36,23 +36,26 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
 
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.components import ComponentSpec, ScenarioComponents
+from reef.artifact.repository import DefaultStart
 from reef.core.components import validate_component_name
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
+from reef.core.snapshot import RootSource
 from reef.evaluation.activation import activation_reference
-from reef.inference.model_config import ModelConfig
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
+from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
+from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore, TrainerSamples
+from reef.storage.samples import SampleStore
 from reef.storage.tasks import TaskStorage, TaskStore
-from reef.surface.base import ComponentSurface, HarnessInfo, Surface
+from reef.train.backend import CommittedArtifacts, ComponentArtifacts
+from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.trainer import ComponentTrainer
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
@@ -123,9 +126,25 @@ class ComponentTaskStorage(TaskStorage):
         return self.storage.open(f"{self.component}/{name}")
 
 
+def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
+    """``component``'s view of the composite's root ``root``: the component's directory of the root snapshot, and,
+    for a default start, the inputs of that component's own default start (``CompositeRecipe.default_start`` names
+    them ``<component>.<input>``)."""
+    source = root.source
+    if source.kind == "default":
+        prefix = f"{component}."
+        source = RootSource(
+            "default",
+            inputs={
+                name.removeprefix(prefix): value for name, value in source.inputs.items() if name.startswith(prefix)
+            },
+        )
+    return ScenarioRoot(root.artifact.component(component), source)
+
+
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
-    """Bind one recipe per release component; the scenario runs their trainers side by side."""
+    """Bind one recipe per snapshot component; the scenario runs their trainers side by side."""
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
     name: str = "composite"
@@ -154,7 +173,9 @@ class CompositeRecipe(Recipe):
             name for name, recipe in self.components.items() if isinstance(recipe, WeightTrainingRecipe)
         ]
         if len(weight_components) > 1:
-            raise RecipeConfigError(f"components {weight_components} all train weights; a release loads one component")
+            raise RecipeConfigError(
+                f"components {weight_components} all train weights; a snapshot loads one component"
+            )
         object.__setattr__(self, "components", dict(self.components))
 
     @classmethod
@@ -217,7 +238,7 @@ class CompositeRecipe(Recipe):
     ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
         """The one component that trains weights, so the deployment connects its training component.
 
-        A release loads one component into a runtime, so two weight training
+        A snapshot loads one component into a runtime, so two weight training
         components are refused here, before any runtime is connected. The
         selected component's config is returned flat, as its recipe reads it.
         """
@@ -233,7 +254,7 @@ class CompositeRecipe(Recipe):
                 selected.append((str(name), weight_training))
         if len(selected) > 1:
             raise RecipeConfigError(
-                f"components {[name for name, _ in selected]} all train weights; a release loads one component"
+                f"components {[name for name, _ in selected]} all train weights; a snapshot loads one component"
             )
         return selected[0][1] if selected else None
 
@@ -247,10 +268,44 @@ class CompositeRecipe(Recipe):
             },
         )
 
-    def with_model_config(self, config: ModelConfig) -> CompositeRecipe:
-        super().with_model_config(config)
+    @property
+    def harness_adapter(self) -> str | None:
+        """The adapter of the component recipe that serves a harness tree; a composite serves at most one."""
+        return next((recipe.harness_adapter for recipe in self.components.values() if recipe.harness_adapter), None)
+
+    def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
+        recipe = self.components.get(component)
+        return None if recipe is None else recipe.harness_served_model(scenario, component)
+
+    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
+        recipe = self.components.get(component)
+        return None if recipe is None else recipe.harness_state_dir(scenario, component)
+
+    def job_components(self) -> tuple[TrainingComponent, ...]:
+        """The job components of every component recipe, each once: the components share the composite's
+        training component. Raise ``ValueError`` when two different components share a name."""
+        found: dict[str, TrainingComponent] = {}
+        for recipe in self.components.values():
+            for component in recipe.job_components():
+                known = found.setdefault(component.name, component)
+                if known is not component:
+                    raise ValueError(f"two job components of this composite are named {component.name!r}")
+        return tuple(found.values())
+
+    def with_job_components(
+        self, components: Mapping[str, TrainingComponent], data_store: DataStore
+    ) -> CompositeRecipe:
+        check_job_components(self, components)
         return replace(
-            self, components={name: recipe.with_model_config(config) for name, recipe in self.components.items()}
+            self,
+            training_component=(None if self.training_component is None else components[self.training_component.name]),
+            data_store=data_store,
+            components={
+                name: recipe.with_job_components(
+                    {component.name: components[component.name] for component in recipe.job_components()}, data_store
+                )
+                for name, recipe in self.components.items()
+            },
         )
 
     @property
@@ -278,35 +333,32 @@ class CompositeRecipe(Recipe):
             return declared[0]
         return any_component_report(tuple(declared))
 
-    def build_surface(self, scenario: str) -> Surface:
-        """Every component's serving capabilities under its own name; one component may carry harness info."""
-        components: dict[str, ComponentSurface] = {}
-        harness: HarnessInfo | None = None
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        """Each recipe's one component under the name the composite binds it to."""
+        specs: dict[str, ComponentSpec] = {}
         for component, recipe in self.components.items():
-            surface = recipe.serving_surface(scenario)
-            if len(surface.components) > 1:
+            declared = recipe.scenario_components(scenario)
+            if len(declared.components) > 1:
                 raise RecipeConfigError(f"component {component!r} serves several components of its own")
-            served = next(iter(surface.components.values()), ComponentSurface())
-            # A recipe's own release check (a recipe serving no component admits its whole release with one) admits
-            # this component here: inside the composite, the component is that recipe's release.
-            checks = every_check(surface.validator, served.validator)
-            components[component] = served if checks is served.validator else replace(served, validator=checks)
-            if surface.harness is not None:
-                if harness is not None:
-                    raise RecipeConfigError("only one component may serve harness information")
-                harness = surface.harness
-        return Surface(components=components, harness=harness)
+            served = next(iter(declared.components.values()), ComponentSpec())
+            # A recipe's own snapshot check (a recipe serving no component admits its whole snapshot with one) admits
+            # this component here: inside the composite, the component is that recipe's snapshot.
+            checks = every_check(declared.validator, served.validator)
+            specs[component] = served if checks is served.validator else replace(served, validator=checks)
+        return ScenarioComponents(specs)
 
     def build_trainers(
         self,
         scenario: str,
         records: RecordStore,
         *,
-        surface: Surface,
+        components: ScenarioComponents,
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        artifacts: CommittedArtifacts | None = None,
         samples: SampleStore | None = None,
+        root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
         for component, recipe in self.components.items():
@@ -319,30 +371,37 @@ class CompositeRecipe(Recipe):
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
-                samples=None if samples is None else TrainerSamples(samples, component),
+                artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
+                samples=None if samples is None else samples.for_trainer(component),
+                root=None if root is None else component_root(root, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
             trainer.admit_reports_of(self.report_type)
             trainers.append(ComponentTrainer(component, trainer))
         return tuple(trainers)
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """Each component's base under that component's directory.
+    def check_root_start(self, root: ScenarioRoot) -> None:
+        """Check every component's view of ``root`` with its recipe; propagate any ``ValueError`` refusal."""
+        for component, recipe in self.components.items():
+            recipe.check_root_start(component_root(root, component))
 
-        The files and the model directory of a component go under its name; each input is named ``<component>.<input>``. Raise
-        ``RecipeConfigError`` when two components hold a model directory.
+    def default_start(self) -> DefaultStart:
+        """Each component's default start under that component's directory.
+
+        The files and the model files of a component go under its name; each input is named ``<component>.<input>``.
+        Raise ``RecipeConfigError`` when two components hold model files.
         """
-        sources = {component: recipe.base_artifact_source() for component, recipe in self.components.items()}
-        models = [component for component, source in sources.items() if source.model_directory is not None]
+        sources = {component: recipe.default_start() for component, recipe in self.components.items()}
+        models = [component for component, source in sources.items() if source.model_files is not None]
         if len(models) > 1:
             raise RecipeConfigError(f"components {models} each hold a base model; a composite trains one model")
-        return BaseArtifactSource(
+        return DefaultStart(
             files={
                 f"{component}/{path}": text
                 for component, source in sources.items()
                 for path, text in source.files.items()
             },
-            model_directory=sources[models[0]].model_directory if models else None,
+            model_files=sources[models[0]].model_files if models else None,
             model_component=models[0] if models else None,
             inputs={
                 f"{component}.{name}": value

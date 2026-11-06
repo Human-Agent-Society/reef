@@ -182,11 +182,11 @@ def test_worker_role_does_not_observe_versions_and_the_observer_installs_once(mo
 
 @pytest.mark.unit
 def test_chat_client_refuses_a_response_whose_stamps_include_unknown() -> None:
-    from reef.artifact import Artifact, ArtifactRef
+    from reef.artifact import Artifact, SnapshotRef
     from reef.inference.vllm.chat import VLLMGenerateClient
 
     artifact = Artifact(
-        ArtifactRef(content_id="live", release_id="live:engine:1", parent_release_id="checkpoint"),
+        SnapshotRef(revision="live:engine:1", parent_revision="checkpoint"),
         None,
     )
     response = {
@@ -203,4 +203,4 @@ def test_chat_client_refuses_a_response_whose_stamps_include_unknown() -> None:
         "kv_transfer_params": {TOKEN_RUNTIME_LOAD_IDS_KEY: [UNKNOWN_RUNTIME_LOAD_ID, "engine:1"]},
     }
     with pytest.raises(ValueError, match="incomplete token runtime load IDs"):
-        VLLMGenerateClient().parse(artifact, response, capture_topk=0)
+        VLLMGenerateClient().parse(artifact, response)

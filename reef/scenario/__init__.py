@@ -4,15 +4,13 @@ A scenario owns one runtime binding, trainer, artifact chain, and store session.
 The modules follow these responsibilities:
 
 - ``scenario`` exposes operations on one instance; ``binding`` freezes its
-  deployment-selected admission, surface, runtime, and inference backend.
-- ``registry`` owns loaded instances, per-scenario locks, model updates, and
-  scenario archival coordination. It caches concrete ``runtime.model_config.ModelConfig``
-  instances and keeps each scenario's settings through the injected storage.
-  Recipes and the factory receive only the current scenario's configuration.
-  It asks its ``admission.ScenarioAdmission`` before it creates or loads a
-  scenario; the dispatcher unloads an idle scenario to free a load slot.
-- ``factory`` registers the base artifact, validates release selectors,
-  opens storage, reconciles committed state, synchronizes and
+  deployment-selected components with their admission checks, and the runtime.
+- ``registry`` owns loaded instances, per-scenario locks, and scenario
+  archival coordination. It keeps each scenario's settings through the
+  injected storage. It asks its ``admission.ScenarioAdmission`` before it
+  creates or loads a scenario; the dispatcher unloads an idle scenario to free a load slot.
+- ``factory`` writes a new scenario's root snapshot (the recipe's default
+  start, or an artifact item), opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.
   It returns a complete ``Scenario`` and closes owned resources on failure.
 - ``committer`` orders commits, activations, new training starts, retries, and artifact publication
@@ -36,12 +34,12 @@ remain in this package.
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import ReleaseNotRestorable, Scenario
+from reef.scenario.scenario import Scenario, SnapshotNotRestorable
 
 __all__ = [
-    "ReleaseNotRestorable",
     "Scenario",
     "ScenarioBinding",
     "ScenarioCommitter",
     "ScenarioRegistry",
+    "SnapshotNotRestorable",
 ]

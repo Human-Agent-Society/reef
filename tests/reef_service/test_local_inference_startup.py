@@ -214,6 +214,25 @@ def test_managed_lifecycle_with_cpu_engine_standin(tmp_path, mode):
                             time.sleep(0.1)
                     payload = {"model": str(model), "messages": [{"role": "user", "content": "hello"}]}
                     headers = {"Content-Type": "application/json", "x-reef-scenario": "local"}
+                    # An inference call never creates a scenario: create it first.
+                    with urlopen(
+                        Request(
+                            f"http://127.0.0.1:{port}/reef/scenarios", json.dumps({"name": "local"}).encode(), headers
+                        ),
+                        timeout=10,
+                    ) as response:
+                        assert response.status == 201
+                    deadline = time.monotonic() + 20
+                    while True:
+                        with urlopen(
+                            f"http://127.0.0.1:{port}/reef/scenarios/local/inference/status", timeout=1
+                        ) as response:
+                            startup = json.load(response)
+                        if startup["state"] == "ready":
+                            break
+                        assert startup["state"] != "failed", startup
+                        assert time.monotonic() < deadline, log_path.read_text()
+                        time.sleep(0.1)
                     with urlopen(
                         Request(f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(payload).encode(), headers),
                         timeout=10,

@@ -1,43 +1,51 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Self
 from urllib.parse import urlsplit
 
 from reef.artifact.artifact import (
+    ARTIFACT_ID_METADATA_KEY,
     Artifact,
     ArtifactConflict,
     ArtifactMaterializationError,
     ArtifactNotFound,
     ArtifactPublicationError,
-    ArtifactRef,
     ArtifactSourceError,
+    SnapshotRef,
+    artifact_components,
+    content_metadata,
 )
 from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
 from reef.artifact.repository import (
-    BaseArtifactSource,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
     RepositoryBackendContext,
-    StagedReleaseRepositoryBackend,
+    StagedSnapshotRepositoryBackend,
 )
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 
 _MANIFEST = "reef-artifact.json"
+#: How many commits one ``git fetch`` names: 40 hexadecimal digits each stay far below the limit of a command line.
+FETCH_BATCH_COMMITS = 1000
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
 _LFS_ATTRIBUTES = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
+# Backend instances in one process can share a working directory.
+WORKSPACE_LOCKS: dict[Path, RLock] = {}
+WORKSPACE_LOCKS_LOCK = Lock()
 
 
 def _check_tools() -> None:
@@ -63,7 +71,7 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
-#: The remote tracking ref naming the release a workspace fetched last, a commit the remote already holds.
+#: The remote tracking ref naming the snapshot a workspace fetched last, a commit the remote already holds.
 FETCHED_RELEASE_REF = "refs/remotes/origin/reef-fetched"
 
 
@@ -71,11 +79,11 @@ FETCHED_RELEASE_REF = "refs/remotes/origin/reef-fetched"
 class RefLayout:
     """Where the backend keeps its refs in the repository (RFC #1002).
 
-    Values: ``moving`` is the prefix of the refs that move (each scenario's registration and head, the base and the
-    repository head), and ``fixed`` the prefix of the refs that never move once written (each release, and each
+    Values: ``moving`` is the prefix of the refs that move (each scenario's registration and head), and ``fixed``
+    the prefix of the refs that never move once written (each snapshot, and each
     archived scenario head); both are full ref prefixes that end in ``/``. ``REEF_REFS`` keeps both under
     ``refs/reef/``. ``HUB_REFS`` puts the moving refs on branches and the fixed refs on tags, the only refs that the
-    Hugging Face Hub accepts. A release's ID is its commit under both, so on the Hub it is a revision.
+    Hugging Face Hub accepts. A snapshot's ID is its commit under both, so on the Hub it is a revision.
     Purpose: ``GitLFSSettings.refs`` selects one; the backend and its factory name every ref through it.
     """
 
@@ -90,15 +98,7 @@ class RefLayout:
         """The ref of the scenario whose base64url name is ``encoded``: its registration and its head."""
         return f"{self.moving}scenarios/{encoded}"
 
-    @property
-    def base(self) -> str:
-        return f"{self.moving}base"
-
-    @property
-    def head(self) -> str:
-        return f"{self.moving}head"
-
-    def release(self, commit: str) -> str:
+    def snapshot(self, commit: str) -> str:
         return f"{self.fixed}releases/{commit}"
 
     def archived(self, encoded: str, stamp: str) -> str:
@@ -130,11 +130,11 @@ def token_config(repository: str, token: str) -> dict[str, str]:
 
 
 class _GitWorkspace:
-    """Manage one git working tree used by a single scenario backend.
+    """Manage one git working tree shared by scenario backend instances.
 
     Encapsulates git clone/checkout/commit/push so the backend does not
     call git directly. Holds the work_dir, clone_dir, and a per-process
-    lock serializing mutations.
+    lock shared by backends that use this working directory.
     """
 
     def __init__(
@@ -151,7 +151,8 @@ class _GitWorkspace:
         self.work_dir = Path(work_dir).resolve()
         self.clone_dir = self.work_dir / "repository"
         self._git_client = git_client
-        self.lock = Lock()
+        with WORKSPACE_LOCKS_LOCK:
+            self.lock = WORKSPACE_LOCKS.setdefault(self.work_dir, RLock())
 
     def open_repository(self) -> None:
         if not (self.clone_dir / ".git").exists():
@@ -200,7 +201,7 @@ class _GitWorkspace:
                 child.unlink()
         target = self.clone_dir if subdirectory is None else self.clone_dir / subdirectory
         target.mkdir(parents=True, exist_ok=True)
-        # Released files are immutable, so the work tree links them rather than copying a checkpoint per step.
+        # Stored files are immutable, so the work tree links them rather than copying a checkpoint per step.
         for child in source.iterdir():
             destination = target / child.name
             if child.is_dir():
@@ -324,21 +325,23 @@ class _GitWorkspace:
     def fetch_version(self, version: str) -> str:
         """Fetch ``version`` from the remote and return its commit id.
 
-        Every publish path fetches the release it builds on or pushes through
+        Every publish path fetches the snapshot it builds on or pushes through
         here. The remote holds that commit and its history, and a remote
         tracking ref records it, so the LFS pre push check scans only the
-        commits a later push adds, not the older releases whose objects this
-        clone never fetched. A push to a new ref, such as a release saved for
+        commits a later push adds, not the older snapshots whose objects this
+        clone never fetched. A push to a new ref, such as a snapshot saved for
         review without moving the head, has no remote commit of its own to stop
         the scan.
         """
-        self.git("fetch", "origin", version)
-        self.git("update-ref", FETCHED_RELEASE_REF, "FETCH_HEAD")
-        return self.git("rev-parse", "FETCH_HEAD")
+        with self.lock:
+            self.git("fetch", "origin", version)
+            self.git("update-ref", FETCHED_RELEASE_REF, "FETCH_HEAD")
+            return self.git("rev-parse", "FETCH_HEAD")
 
     def show_file(self, version: str, path: str) -> str:
-        self.fetch_version(version)
-        return self.git("show", f"FETCH_HEAD:{path}")
+        with self.lock:
+            self.fetch_version(version)
+            return self.git("show", f"FETCH_HEAD:{path}")
 
     def ls_remote(self, ref_name: str) -> str | None:
         output = self.git("ls-remote", "origin", ref_name)
@@ -346,9 +349,16 @@ class _GitWorkspace:
             return None
         return output.split()[0]
 
-    def has_refs(self) -> bool:
-        """Whether the remote holds a ref of the workspace's layout; other refs, such as a Hub repo's ``main``, do not count."""
-        return bool(self.git("ls-remote", "origin", *self.refs.patterns))
+    def ls_remote_prefix(self, prefix: str) -> dict[str, str]:
+        """The commit of each remote ref whose name starts with ``prefix``, by ref name."""
+        output = self.git("ls-remote", "origin", f"{prefix}*")
+        return {name: commit for commit, name in (line.split() for line in output.splitlines())}
+
+    def fetch_commits(self, commits: Collection[str]) -> None:
+        """Fetch ``commits``, in groups that fit on a command line."""
+        ordered = sorted(commits)
+        for start in range(0, len(ordered), FETCH_BATCH_COMMITS):
+            self.git("fetch", "origin", *ordered[start : start + FETCH_BATCH_COMMITS])
 
     def clone_for_materialize(self, destination: Path, version: str) -> None:
         self._run(("git", "clone", "--no-checkout", self.repository, str(destination)))
@@ -383,13 +393,13 @@ def same_file(first: Path, second: Path) -> bool:
 
 
 def write_fresh(path: Path, text: str) -> None:
-    """Write ``text`` to a new inode: a work tree file may be a link to a released or cached file."""
+    """Write ``text`` to a new inode: a work tree file may be a link to a stored or cached file."""
     path.unlink(missing_ok=True)
     path.write_text(text, encoding="utf-8")
 
 
 def materialized_metadata(checkout: Path) -> Mapping[str, object]:
-    """The release metadata recorded in a materialized checkout's manifest; a bootstrap tree has none."""
+    """The snapshot metadata recorded in a materialized checkout's manifest; a bootstrap tree has none."""
     manifest_path = checkout / _MANIFEST
     if not manifest_path.is_file():
         return {}
@@ -412,14 +422,12 @@ class _ArtifactManifest:
     @staticmethod
     def text(
         *,
-        content_id: str,
-        parent_release_id: str | None,
+        parent_revision: str | None,
         source: Mapping[str, object],
         metadata: Mapping[str, object],
     ) -> str:
         manifest = {
-            "content_id": content_id,
-            "parent_release_id": parent_release_id,
+            "parent_revision": parent_revision,
             "source": dict(source),
             "metadata": dict(metadata),
         }
@@ -428,18 +436,21 @@ class _ArtifactManifest:
     def write(
         self,
         *,
-        content_id: str,
-        parent_release_id: str | None,
+        parent_revision: str | None,
         source: Mapping[str, object],
         metadata: Mapping[str, object],
     ) -> None:
         write_fresh(
             self._workspace.clone_dir / _MANIFEST,
-            self.text(content_id=content_id, parent_release_id=parent_release_id, source=source, metadata=metadata),
+            self.text(parent_revision=parent_revision, source=source, metadata=metadata),
         )
 
-    def read(self, version: str) -> Mapping[str, object]:
-        raw = self._workspace.show_file(version, _MANIFEST)
+    def read(self, version: str, *, local: bool = False) -> Mapping[str, object]:
+        raw = (
+            self._workspace.git("show", f"{version}:{_MANIFEST}")
+            if local
+            else self._workspace.show_file(version, _MANIFEST)
+        )
         try:
             manifest = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -448,34 +459,27 @@ class _ArtifactManifest:
             raise ArtifactSourceError(f"invalid artifact manifest at {version}")
         return manifest
 
-    def artifact_ref(self, version: str) -> ArtifactRef:
-        manifest = self.read(version)
+    def snapshot(self, version: str, *, local: bool = False) -> SnapshotRef:
+        manifest = self.read(version, local=local)
         try:
-            content_id = manifest["content_id"]
-            if not isinstance(content_id, str):
-                raise TypeError("content_id must be a string")
-            parent_release_id = manifest.get("parent_release_id")
-            if parent_release_id is not None and not isinstance(parent_release_id, str):
-                raise TypeError("parent_release_id must be a string or null")
-            return ArtifactRef(
-                content_id=content_id,
-                release_id=self._workspace.fetch_version(version),
-                parent_release_id=parent_release_id,
+            parent_revision = manifest.get("parent_revision")
+            if parent_revision is not None and not isinstance(parent_revision, str):
+                raise TypeError("parent_revision must be a string or null")
+            return SnapshotRef(
+                revision=(
+                    self._workspace.git("rev-parse", version) if local else self._workspace.fetch_version(version)
+                ),
+                parent_revision=parent_revision,
             )
         except (KeyError, TypeError) as exc:
             raise ArtifactSourceError(f"invalid artifact manifest at {version}") from exc
 
 
-class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
-    """The releases of one scenario in a Git LFS repository.
+class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
+    """The snapshots of one scenario in a Git LFS repository.
 
-    Every scenario of the repository forks from the repository's base
-    artifact (``refs.base``). When the repository has no base, the
-    constructor imports ``base`` as the base. ``None`` is an empty base. The
-    constructor raises ``ArtifactSourceError`` when the base was not imported,
-    as the base of an older Reef was not. It also raises
-    ``ArtifactSourceError`` when the base came from inputs other than
-    ``base.inputs``.
+    The scenario's ref names its head. ``register`` pushes the scenario's root snapshot, a commit with no parent, to
+    that ref; each later snapshot is a descendant of the root. Scenarios of one repository share no snapshot.
     """
 
     def __init__(
@@ -485,7 +489,6 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         *,
         work_dir: Path,
         cache_dir: Path,
-        base: BaseArtifactSource | None = None,
         refs: RefLayout = REEF_REFS,
         git_config: Mapping[str, str] | None = None,
     ) -> None:
@@ -494,6 +497,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         _check_tools()
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         self.refs = refs
+        self.artifact_ref_prefix = f"{refs.fixed}artifacts/{encoded}/"
         self.ref_name = refs.scenario(encoded)
         self.work_dir = Path(work_dir)
         self.cache_dir = Path(cache_dir)
@@ -518,7 +522,6 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 f"artifact repository {self.repository} keeps its refs under {other.moving} and {other.fixed}; "
                 "configure the storage.artifact_backend refs that match it"
             )
-        self._import_base(BaseArtifactSource() if base is None else base)
 
     @classmethod
     def factory(
@@ -527,81 +530,144 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         *,
         work_dir: Path,
         cache_dir: Path,
-        base: BaseArtifactSource | None = None,
         refs: RefLayout = REEF_REFS,
         git_config: Mapping[str, str] | None = None,
     ) -> GitLFSRepositoryBackendFactory:
-        """A factory of scenario backends over one repository, whose base artifact is ``base`` (None: empty)."""
+        """A factory of scenario backends over one repository."""
         _check_tools()
         return GitLFSRepositoryBackendFactory(
             cls,
             repository,
             work_dir=work_dir,
             cache_dir=cache_dir,
-            base=BaseArtifactSource() if base is None else base,
             refs=refs,
             git_config=git_config,
         )
 
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
-        if release_id == "base":
-            base = self._workspace.ls_remote(self.refs.base)
-            if base is None:
-                raise ArtifactNotFound("artifact repository has no base artifact")
-            return self._manifest.artifact_ref(base)
-        if release_id is None or release_id == "head":
-            resolved_release = self._workspace.ls_remote(self.refs.head) or self._workspace.ls_remote(self.refs.base)
-            if resolved_release is None:
-                raise ArtifactNotFound("artifact repository has no head release")
-            return self._manifest.artifact_ref(resolved_release)
-        selector = release_id.removeprefix("git+lfs://")
-        resolved_release = self._workspace.ls_remote(self.refs.release(selector))
-        if resolved_release is None:
+    def resolve_snapshot(self, revision: str) -> SnapshotRef:
+        selector = revision.removeprefix("git+lfs://")
+        resolved_snapshot = self._workspace.ls_remote(self.refs.snapshot(selector))
+        if resolved_snapshot is None:
             try:
-                resolved_release = self._workspace.fetch_version(selector)
+                resolved_snapshot = self._workspace.fetch_version(selector)
             except ArtifactPublicationError as exc:
-                raise ArtifactNotFound(f"release does not exist: {release_id}") from exc
-        return self._manifest.artifact_ref(resolved_release)
+                raise ArtifactNotFound(f"release does not exist: {revision}") from exc
+        return self._manifest.snapshot(resolved_snapshot)
 
-    def fork(
-        self,
-        release_id: str | None = None,
-        *,
-        metadata: Mapping[str, object] | None = None,
-    ) -> ArtifactRef:
+    def artifact_ref_name(self, artifact_id: str) -> str:
+        """The Git ref that binds ``artifact_id`` to its snapshot commit in this scenario."""
+        return self.artifact_ref_prefix + hashlib.sha256(artifact_id.encode()).hexdigest()
+
+    def stored_snapshot(self, commit: str) -> Artifact:
+        """The snapshot ``commit``, fetched already, with its metadata and without its files."""
+        manifest = self._manifest.read(commit, local=True)
+        metadata = manifest.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise ArtifactSourceError(f"invalid artifact metadata at {commit}")
+        return Artifact(self._manifest.snapshot(commit, local=True), None, metadata=metadata)
+
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        """The Git file objects and the metadata of the artifact, read without fetching weight bytes."""
+        commit = ref.revision
+        snapshot = self.stored_snapshot(commit)
+        components = artifact_components(snapshot)
+        if artifact_id not in components:
+            raise ArtifactNotFound(f"storage snapshot does not contain artifact {artifact_id!r}")
+        component = components[artifact_id]
+        manifest = snapshot.components
+        prefix = "" if component is None or manifest is None or manifest.single else f"{component}/"
+        files: dict[str, str] = {}
+        for entry in self._workspace.git("ls-tree", "-r", "-z", commit).split("\0"):
+            if not entry:
+                continue
+            descriptor, path = entry.split("\t", 1)
+            if path in (_MANIFEST, ".gitattributes") or not path.startswith(prefix):
+                continue
+            files[path.removeprefix(prefix)] = descriptor
+        return files, content_metadata(snapshot, component)
+
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        """Push the immutable binding ref of ``artifact_id`` unless it exists; fetch an existing one for comparison."""
+        ref_name = self.artifact_ref_name(artifact_id)
+        existing = self._workspace.ls_remote(ref_name)
+        if existing is None:
+            try:
+                self._workspace.force_push_with_lease(f"--force-with-lease={ref_name}:", f"{ref.revision}:{ref_name}")
+                return None
+            except ArtifactPublicationError:
+                existing = self._workspace.ls_remote(ref_name)
+                if existing is None:
+                    raise
+        if existing != ref.revision:
+            self._workspace.fetch_version(existing)
+        return self._manifest.snapshot(existing, local=True)
+
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
+        with self._workspace.lock:
+            commit = self._workspace.ls_remote(self.artifact_ref_name(artifact_id))
+            if commit is None:
+                raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
+            self._workspace.fetch_version(commit)
+            return self._manifest.snapshot(commit, local=True)
+
+    def artifact_snapshots(self, artifact_ids: Collection[str]) -> dict[str, SnapshotRef]:
+        """Read every binding of this scenario with one ``ls-remote``, and fetch their commits with one ``fetch``."""
+        with self._workspace.lock:
+            bound = self._workspace.ls_remote_prefix(self.artifact_ref_prefix)
+            commits = {
+                artifact_id: bound[self.artifact_ref_name(artifact_id)]
+                for artifact_id in artifact_ids
+                if self.artifact_ref_name(artifact_id) in bound
+            }
+            self._workspace.fetch_commits(set(commits.values()))
+            snapshots = {commit: self._manifest.snapshot(commit, local=True) for commit in set(commits.values())}
+            return {artifact_id: snapshots[commit] for artifact_id, commit in commits.items()}
+
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
+        """Commit the files of ``root`` with no parent and push the commit to the scenario's ref.
+
+        A ref that exists already refuses the unrelated commit, so the first registration wins and a later one
+        returns the winner's head. The registration also fills the root's cache entry, so the first
+        ``materialize`` links the files and pulls nothing.
+        """
+        if root.local_path is None or not root.local_path.is_dir():
+            raise ArtifactPublicationError("a root snapshot needs an existing local artifact directory")
         with self._workspace.lock:
             existing = self._workspace.ls_remote(self.ref_name)
             if existing is not None:
-                return self._manifest.artifact_ref(existing)
-            selected = self.resolve_release(release_id)
-            # The fork commit reuses the selected tree's LFS pointers, which the remote holds: the push needs no
-            # LFS object, so none is fetched.
-            self._workspace.checkout(selected.release_id)
+                self._workspace.fetch_version(existing)
+                self.bind_artifact_ids(self.stored_snapshot(existing))
+                return self._manifest.snapshot(existing)
+            self._workspace.orphan_checkout()
+            self._workspace.replace_tree(root.local_path)
+            self._workspace.write_lfs_attributes()
             self._manifest.write(
-                content_id=selected.content_id,
-                parent_release_id=selected.release_id,
-                source={"kind": "fork", "release_id": selected.release_id},
-                metadata=metadata or {},
+                parent_revision=None,
+                source={"kind": "root"},
+                metadata={**root.storage_metadata, **dict(metadata)},
             )
-            commit = self._workspace.commit("fork scenario repository")
+            # Identical roots registered in the same second still need distinct release IDs.
+            commit = self._workspace.commit(f"register scenario {uuid.uuid4().hex}")
+            self.bind_artifact_ids(self.stored_snapshot(commit))
             try:
                 self._workspace.push(f"{commit}:{self.ref_name}")
             except ArtifactPublicationError:
                 existing = self._workspace.ls_remote(self.ref_name)
                 if existing is None:
                     raise
-                return self._manifest.artifact_ref(existing)
-            selected_tree = self.cache_dir / selected.release_id
-            if selected_tree.is_dir():
-                # The fork holds the selected files, so its cache entry links them instead of pulling them again.
-                paths = tuple(
-                    str(path.relative_to(selected_tree))
-                    for path in selected_tree.rglob("*")
-                    if path.is_file() and path.relative_to(selected_tree) != Path(_MANIFEST)
-                )
-                manifest = (self._workspace.clone_dir / _MANIFEST).read_text()
-                self._cache_release(commit, selected_tree, paths, {_MANIFEST: manifest})
-            return self._manifest.artifact_ref(commit)
+                return self._manifest.snapshot(existing)
+            paths = tuple(
+                path
+                for path in self._workspace.git("ls-files", "-z").split("\0")
+                if path and path != _MANIFEST and path != ".gitattributes"
+            )
+            self._cache_snapshot(
+                commit,
+                self._workspace.clone_dir,
+                paths,
+                {".gitattributes": _LFS_ATTRIBUTES, _MANIFEST: (self._workspace.clone_dir / _MANIFEST).read_text()},
+            )
+            return self._manifest.snapshot(commit)
 
     def metadata(self) -> Mapping[str, object] | None:
         version = self._workspace.ls_remote(self.ref_name)
@@ -611,22 +677,22 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         metadata = manifest.get("metadata", {})
         if not isinstance(metadata, Mapping):
             raise ArtifactSourceError(f"invalid artifact metadata at {version}")
-        return dict(metadata)
+        return {key: value for key, value in metadata.items() if key != ARTIFACT_ID_METADATA_KEY}
 
-    def current(self) -> ArtifactRef:
+    def current(self) -> SnapshotRef:
         version = self._workspace.ls_remote(self.ref_name)
         if version is None:
             raise ArtifactNotFound("repository has no current artifact")
-        return self._manifest.artifact_ref(version)
+        return self._manifest.snapshot(version)
 
-    def materialize(self, ref: ArtifactRef) -> Artifact:
-        destination = self.cache_dir / ref.release_id
+    def materialize(self, ref: SnapshotRef) -> Artifact:
+        destination = self.cache_dir / ref.revision
         if destination.is_dir():
             return Artifact(ref, None, local_path=destination, metadata=materialized_metadata(destination))
-        temporary = Path(tempfile.mkdtemp(prefix=f".{ref.release_id}-", dir=self.cache_dir))
+        temporary = Path(tempfile.mkdtemp(prefix=f".{ref.revision}-", dir=self.cache_dir))
         checkout = temporary / "artifact"
         try:
-            self._workspace.clone_for_materialize(checkout, ref.release_id)
+            self._workspace.clone_for_materialize(checkout, ref.revision)
             git_metadata = checkout / ".git"
             if git_metadata.is_dir():
                 shutil.rmtree(git_metadata)
@@ -638,40 +704,39 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 if not destination.is_dir():
                     raise
         except ArtifactPublicationError as exc:
-            raise ArtifactMaterializationError(f"failed to materialize artifact {ref.release_id}: {exc}") from exc
+            raise ArtifactMaterializationError(f"failed to materialize artifact {ref.revision}: {exc}") from exc
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
         if not destination.is_dir():
-            raise ArtifactMaterializationError(f"artifact cache was not created: {ref.release_id}")
+            raise ArtifactMaterializationError(f"artifact cache was not created: {ref.revision}")
         return Artifact(ref, None, local_path=destination, metadata=materialized_metadata(destination))
 
     def publish(
         self,
         artifact: Artifact,
         *,
-        expected_parent: ArtifactRef,
+        expected_parent: SnapshotRef,
         advance_head: bool = True,
-    ) -> ArtifactRef:
+    ) -> SnapshotRef:
         if artifact.local_path is None or not artifact.local_path.is_dir():
             raise ArtifactPublicationError("artifact ref must contain an existing local artifact directory")
         with self._workspace.lock:
             current = self._workspace.ls_remote(self.ref_name)
-            if current != expected_parent.release_id:
-                raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.release_id}")
+            if current != expected_parent.revision:
+                raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.revision}")
             files = {
                 ".gitattributes": _LFS_ATTRIBUTES,
                 _MANIFEST: _ArtifactManifest.text(
-                    content_id=artifact.ref.content_id,
-                    parent_release_id=expected_parent.release_id,
+                    parent_revision=expected_parent.revision,
                     source={"kind": "training"},
-                    metadata=artifact.metadata,
+                    metadata=artifact.storage_metadata,
                 ),
             }
             paths = tuple(path for path in self._workspace.source_files(artifact.local_path) if path not in files)
             linked = any((artifact.local_path / path).is_symlink() for path in paths)
             if linked:
                 # A symlinked tree is published by its targets' bytes, which only a copy into the work tree resolves.
-                self._workspace.checkout(expected_parent.release_id)
+                self._workspace.checkout(expected_parent.revision)
                 self._workspace.replace_tree(artifact.local_path)
                 for path, text in files.items():
                     write_fresh(self._workspace.clone_dir / path, text)
@@ -680,43 +745,43 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 commit = self._workspace.commit_files(
                     artifact.local_path,
                     paths,
-                    parent=expected_parent.release_id,
-                    carried_from=self.cache_dir / expected_parent.release_id,
+                    parent=expected_parent.revision,
+                    carried_from=self.cache_dir / expected_parent.revision,
                     files=files,
                     message="publish artifact",
                 )
+            self.bind_artifact_ids(self.stored_snapshot(commit))
             if not advance_head:
-                # A pending release lives under the releases namespace; the scenario's ref and the head stay put.
-                self._workspace.push(f"+{commit}:{self.refs.release(commit)}")
+                # A pending snapshot lives under the snapshots namespace; the scenario's ref and the head stay put.
+                self._workspace.push(f"+{commit}:{self.refs.snapshot(commit)}")
                 if not linked:
-                    self._cache_release(commit, artifact.local_path, paths, files)
-                return self._manifest.artifact_ref(commit)
+                    self._cache_snapshot(commit, artifact.local_path, paths, files)
+                return self._manifest.snapshot(commit)
             try:
                 self._workspace.force_push_with_lease(
-                    f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
+                    f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
                     f"{commit}:{self.ref_name}",
-                    f"+{commit}:{self.refs.head}",
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
-                if current != expected_parent.release_id:
-                    raise ArtifactConflict(f"repository advanced from {expected_parent.release_id}") from exc
+                if current != expected_parent.revision:
+                    raise ArtifactConflict(f"repository advanced from {expected_parent.revision}") from exc
                 raise
             if not linked:
-                self._cache_release(commit, artifact.local_path, paths, files)
-            return self._manifest.artifact_ref(commit)
+                self._cache_snapshot(commit, artifact.local_path, paths, files)
+            return self._manifest.snapshot(commit)
 
-    def _cache_release(self, release_id: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
+    def _cache_snapshot(self, revision: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
         """Fill a just-published release's cache entry from the staged tree it was committed from.
 
         The staged files hold the committed bytes, so the entry links them
-        instead of cloning the release and pulling its LFS objects back. An
+        instead of cloning the snapshot and pulling its LFS objects back. An
         entry that cannot be filled is cloned by the first ``materialize``.
         """
-        destination = self.cache_dir / release_id
+        destination = self.cache_dir / revision
         if destination.is_dir():
             return
-        temporary = Path(tempfile.mkdtemp(prefix=f".{release_id}-", dir=self.cache_dir))
+        temporary = Path(tempfile.mkdtemp(prefix=f".{revision}-", dir=self.cache_dir))
         tree = temporary / "artifact"
         try:
             tree.mkdir()
@@ -731,120 +796,32 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
 
-    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+    def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._workspace.lock:
-            staged = self.resolve_release(ref.release_id)
-            if staged != ref or ref.parent_release_id != expected_parent.release_id:
-                raise ArtifactPublicationError("committed release differs from its staged identity or parent")
+            staged = self.resolve_snapshot(ref.revision)
+            if staged != ref or ref.parent_revision != expected_parent.revision:
+                raise ArtifactPublicationError("committed snapshot differs from its staged identity or parent")
             current = self._workspace.ls_remote(self.ref_name)
-            if current == ref.release_id:
+            if current == ref.revision:
                 return
-            if current != expected_parent.release_id:
-                raise ArtifactConflict("repository head changed before the staged release was committed")
+            if current != expected_parent.revision:
+                raise ArtifactConflict("repository head changed before the staged snapshot was committed")
             try:
                 self._workspace.force_push_with_lease(
-                    f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
-                    f"{ref.release_id}:{self.ref_name}",
-                    f"+{ref.release_id}:{self.refs.head}",
+                    f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
+                    f"{ref.revision}:{self.ref_name}",
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
-                if current == ref.release_id:
+                if current == ref.revision:
                     return
-                if current != expected_parent.release_id:
-                    raise ArtifactConflict("repository head changed while committing a staged release") from exc
+                if current != expected_parent.revision:
+                    raise ArtifactConflict("repository head changed while committing a staged snapshot") from exc
                 raise
-
-    def _import_base(self, source: BaseArtifactSource) -> None:
-        """Import ``source`` as the repository's base artifact when the repository has none, then check its inputs.
-
-        When two processes import at the same time, both push to one ref.
-        The second process then reads the base of the first.
-        """
-        base = self._workspace.ls_remote(self.refs.base)
-        if base is None and self._workspace.has_refs():
-            # Another constructor can import the base after the first read.
-            # Refuse only when the base is still missing.
-            base = self._workspace.ls_remote(self.refs.base)
-            if base is None:
-                raise ArtifactSourceError(
-                    f"artifact repository {self.repository} has releases but no base artifact; "
-                    "an older Reef made it, so create the artifact repository again"
-                )
-        if base is None:
-            base = self._push_base(source)
-        recorded = self._manifest.read(base).get("source")
-        if not isinstance(recorded, Mapping) or recorded.get("kind") != "import":
-            raise ArtifactSourceError(
-                f"the base artifact of {self.repository} was not imported from a configuration; "
-                "an older Reef made it, so create the artifact repository again"
-            )
-        if recorded.get("inputs") != dict(source.inputs):
-            raise ArtifactSourceError(
-                f"the base artifact of {self.repository} was imported from {recorded.get('inputs')!r}, "
-                f"but the deployment configures {dict(source.inputs)!r}; restore that configuration, "
-                "or create the artifact repository again"
-            )
-        self._restore_head(base)
-
-    def _push_base(self, source: BaseArtifactSource) -> str:
-        """Commit the content of ``source`` with no parent, push it to the base ref, and return the base.
-
-        The import also fills the base's cache entry. Thus the first materialize links the files and pulls nothing.
-        """
-        with self._workspace.lock:
-            self._workspace.orphan_checkout()
-            if source.model_directory is not None:
-                self._workspace.replace_tree(source.model_directory, subdirectory=source.model_component)
-            for relative, text in source.files.items():
-                target = self._workspace.clone_dir / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                write_fresh(target, text)
-            self._workspace.write_lfs_attributes()
-            self._manifest.write(
-                content_id=source.content_id,
-                parent_release_id=None,
-                source={"kind": "import", "inputs": dict(source.inputs)},
-                metadata={},
-            )
-            commit = self._workspace.commit("import base artifact")
-            try:
-                # A ref that exists already refuses this unrelated commit, so the first importer wins.
-                self._workspace.push(f"{commit}:{self.refs.base}")
-            except ArtifactPublicationError:
-                winner = self._workspace.ls_remote(self.refs.base)
-                if winner is None:
-                    raise
-                return winner
-            paths = tuple(
-                path
-                for path in self._workspace.git("ls-files", "-z").split("\0")
-                if path and path != _MANIFEST and path != ".gitattributes"
-            )
-            self._cache_release(
-                commit,
-                self._workspace.clone_dir,
-                paths,
-                {".gitattributes": _LFS_ATTRIBUTES, _MANIFEST: (self._workspace.clone_dir / _MANIFEST).read_text()},
-            )
-            return commit
-
-    def _restore_head(self, base: str) -> str:
-        head = self._workspace.ls_remote(self.refs.head)
-        if head is not None:
-            return head
-        self._workspace.fetch_version(base)
-        try:
-            self._workspace.push(f"{base}:{self.refs.head}")
-            return base
-        except ArtifactPublicationError:
-            head = self._workspace.ls_remote(self.refs.head)
-            if head is None:
-                raise
-            return head
 
     def _open_repository(self) -> None:
-        self._workspace.open_repository()
+        with self._workspace.lock:
+            self._workspace.open_repository()
 
 
 @dataclass(frozen=True)
@@ -880,7 +857,6 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         *,
         work_dir: Path,
         cache_dir: Path,
-        base: BaseArtifactSource,
         refs: RefLayout = REEF_REFS,
         git_config: Mapping[str, str] | None = None,
     ) -> None:
@@ -889,7 +865,6 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         self._repository = repository
         self._work_dir = Path(work_dir)
         self._cache_dir = Path(cache_dir)
-        self._base = base
         self._refs = refs
         self._git_config = dict(git_config or {})
 
@@ -909,7 +884,6 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             repository if "://" in repository or repository.startswith("git@") else Path(repository),
             work_dir=context.work_dir,
             cache_dir=context.cache_dir,
-            base=context.base,
             refs=REF_LAYOUTS[settings.refs],
             git_config=git_config,
         )
@@ -921,7 +895,6 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             self._repository,
             work_dir=self._work_dir / encoded,
             cache_dir=self._cache_dir,
-            base=self._base,
             refs=self._refs,
             git_config=self._git_config,
         )
@@ -941,8 +914,8 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         """Rename the scenario's ref into the layout's ``archived/<scenario>/<time>`` and drop its work clone.
 
         The commits stay reachable under the archived ref, so nothing the
-        scenario published is lost; the base, the head and the pending
-        releases are shared with other scenarios and stay. Only a local bare
+        scenario published is lost; its pending snapshots stay under the
+        snapshots namespace. Only a local bare
         repository can be renamed in place.
         """
         if not isinstance(self._repository, Path):

@@ -259,7 +259,9 @@ class SlimeAlgorithm(ABC):
     loss_type: str
 
     # --- optional class attributes (defaults shown) ---
-    requires_rollout_logprobs: bool = False
+    #: Whether the family trains on rows whose rollout log-probabilities come from Slime's own engines, as dataset
+    #: jobs do; every other family trains rows without them, so it refuses ``--use-rollout-logprobs``.
+    accepts_rollout_logprobs: bool = False
     advantages: Literal["required", "forbidden", "optional"] = "optional"
     forbidden_advantages_message: str | None = None
     allows_slime_advantage_computation: bool = False
@@ -447,10 +449,12 @@ class SlimeAlgorithm(ABC):
         actual_loss = getattr(args, "loss_type", None)
         if actual_loss != self.loss_type:
             raise RuntimeError(f"{source} requires --loss-type {self.loss_type}, got {actual_loss!r}")
-        if self.requires_rollout_logprobs and not getattr(args, "use_rollout_logprobs", False):
+        if getattr(args, "use_rollout_logprobs", False) and not self.accepts_rollout_logprobs:
+            # Serving returns no log-probabilities: the actor computes the old-policy log-probabilities of each row
+            # with the weights of the job's start.
             raise RuntimeError(
-                f"{source} requires --use-rollout-logprobs so policy "
-                "responses are used as the old-policy probabilities"
+                f"{source} trains rows without rollout log-probabilities: remove --use-rollout-logprobs, so that "
+                "the actor computes the old-policy log-probabilities"
             )
         self.validate_specific_args(args, source)
 

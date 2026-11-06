@@ -51,7 +51,7 @@ def test_evaluation_never_submits_training_reports(tmp_path) -> None:
 
         def get(self, path):
             assert path.endswith("/records/receipt")
-            return {"agent_record_id": "receipt", "artifact_ref": {"release_id": "sft-baseline"}}
+            return {"agent_record_id": "receipt", "artifact_id": "sft-baseline"}
 
         def report(self, *args, **kwargs):
             raise AssertionError("Held-out evaluation must not train")
@@ -67,7 +67,7 @@ def test_evaluation_never_submits_training_reports(tmp_path) -> None:
     assert len(records) == 2
     assert {row["seed"] for row in records} == {0, 1}
     assert all(row["evaluation"] and row["correct"] for row in records)
-    assert {row["release_id"] for row in records} == {"sft-baseline"}
+    assert {row["artifact_id"] for row in records} == {"sft-baseline"}
     assert [call[2]["max_tokens"] for call in campaign.client.calls] == [64000, 64000]
 
 
@@ -76,7 +76,7 @@ class CampaignService:
 
     def __init__(self, failure=None):
         self.failure = failure
-        self.initialized = False
+        self.created_scenarios = []
         self.records = {}
         self.reports = {}
         self.pending = []
@@ -89,13 +89,20 @@ class CampaignService:
             raise ConnectionError(f"Injected disconnect at {point}")
 
     def post(self, path, scenario, payload):
-        self.initialized = True
+        from reef_client import ReefClientError
+
+        if path == "/reef/scenarios":
+            # Reef creates the scenario at its initial snapshot.
+            self.created_scenarios.append(payload["name"])
+            return {"scenario": payload["name"]}, {}
+        if scenario not in self.created_scenarios:
+            raise ReefClientError(404, "No scenario")
         evaluation = payload["max_tokens"] == 4
         if evaluation and len(self.commits) == 1:
             self.fail_once("eval-1")
         self.inference_calls += 1
         receipt = f"receipt-{self.inference_calls}"
-        self.records[receipt] = {"agent_record_id": receipt, "artifact_ref": {"release_id": f"r{len(self.commits)}"}}
+        self.records[receipt] = {"agent_record_id": receipt, "artifact_id": f"r{len(self.commits)}"}
         return {
             "choices": [{"message": {"content": r"\boxed{42}"}, "finish_reason": "stop"}],
             "usage": {"completion_tokens": 3},
@@ -107,12 +114,11 @@ class CampaignService:
         from reef_client import ReefClientError
 
         if path.endswith("/artifacts"):
-            if not self.initialized:
+            if not self.created_scenarios:
                 raise ReefClientError(404, "No scenario")
             rows = [
                 {
                     "artifact_id": f"r{i}",
-                    "release_id": f"r{i}",
                     "operation": "training" if i else "creation",
                     "active": i == len(self.commits),
                 }
@@ -143,7 +149,7 @@ class CampaignService:
                         "step": step,
                         "operation": "training",
                         "activated": True,
-                        "artifact_ref": {"release_id": f"r{step}"},
+                        "components": {"weights": f"r{step}"},
                         "consumed_ids": self.pending,
                     }
                 )
@@ -209,7 +215,7 @@ def test_campaign_resumes_without_retraining_or_resampling_finished_batches(monk
     assert service.inference_calls == 10
     metrics = [json.loads(line) for line in (campaign_args.output / "metrics.jsonl").read_text().splitlines()]
     assert [row["step"] for row in metrics] == [0, 1, 2]
-    assert [row["release_id"] for row in metrics] == ["r0", "r1", "r2"]
+    assert [row["artifact_id"] for row in metrics] == ["r0", "r1", "r2"]
     assert all(row["accuracy"] == 1 for row in metrics)
     snapshots = {path: path.read_bytes() for path in campaign_args.output.glob("releases-*.json")}
     # Repeating a completed resume is read-only with respect to the service.
@@ -238,12 +244,14 @@ def test_partial_collection_recovers_only_missing_samples_and_torn_last_line(mon
 
     service = CampaignService()
     monkeypatch.setattr(run, "ReefClient", lambda *args, **kwargs: service)
+    # The inference routes answer only a scenario that exists; ``run`` creates it before the first sample.
+    service.post("/reef/scenarios", campaign_args.scenario, {"name": campaign_args.scenario})
     campaign = Campaign(campaign_args)
     questions = run.load_questions(campaign_args.eval_data)
     first = campaign.sample((questions[0], 0, True))
     path = campaign.output / "eval-0000.jsonl"
     path.write_bytes((json.dumps(first) + '\n{"question_id":').encode())
-    campaign.evaluate(questions, 0, release_id="r0")
+    campaign.evaluate(questions, 0, artifact_id="r0")
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     assert len(rows) == 2
     assert rows[0] == first
@@ -260,7 +268,7 @@ def test_resume_rejects_incomplete_historical_evaluation(monkeypatch, campaign_a
     path = campaign_args.output / "eval-0000.jsonl"
     path.write_text(path.read_text().splitlines()[0] + "\n")
     campaign_args.resume = True
-    with pytest.raises(RuntimeError, match="historical release"):
+    with pytest.raises(RuntimeError, match="historical snapshot"):
         Campaign(campaign_args).run()
     assert len(service.commits) == 1
     assert service.inference_calls == 4
@@ -313,7 +321,7 @@ def test_prompt_pool_is_seeded_and_disjoint_from_evaluation_and_openthoughts3():
         select_prompts(prompts, [], 42)
 
 
-def test_baseline_eval_reuses_an_earlier_evaluation_and_opens_the_scenario_with_the_first_batch(
+def test_baseline_eval_reuses_an_earlier_evaluation_and_samples_only_for_training_and_later_steps(
     monkeypatch, campaign_args, tmp_path
 ):
     from recipes.opd.examples.math import run
@@ -326,7 +334,7 @@ def test_baseline_eval_reuses_an_earlier_evaluation_and_opens_the_scenario_with_
             "question_id": "e0",
             "seed": seed,
             "receipt": f"old-receipt-{seed}",
-            "release_id": "old-r0",
+            "artifact_id": "old-r0",
             "correct": seed == 0,
             "finish_reason": "stop",
             "usage": {"completion_tokens": 5},
@@ -340,18 +348,22 @@ def test_baseline_eval_reuses_an_earlier_evaluation_and_opens_the_scenario_with_
     campaign_args.steps = 1
     Campaign(campaign_args).run()
     # Two training samples and the step-1 evaluation; nothing for step 0.
+    assert service.created_scenarios == ["test"]
     assert service.inference_calls == 4
     assert len(service.commits) == 1
     metrics = [json.loads(line) for line in (campaign_args.output / "metrics.jsonl").read_text().splitlines()]
-    assert [(row["step"], row["release_id"], row["accuracy"]) for row in metrics] == [
+    assert [(row["step"], row["artifact_id"], row["accuracy"]) for row in metrics] == [
         (0, "old-r0", 0.5),
         (1, "r1", 1.0),
     ]
     assert metrics[0]["elapsed_scope"] == "reused" and metrics[0]["reused_from"] == str(earlier)
-    assert (campaign_args.output / "eval-0000.jsonl").read_text() == earlier.read_text()
+    with (campaign_args.output / "eval-0000.jsonl").open() as handle:
+        copied = [json.loads(line) for line in handle]
+    assert copied == rows
     # Repeating the finished campaign is read-only with respect to the service.
     campaign_args.resume = True
     Campaign(campaign_args).run()
+    assert service.created_scenarios == ["test"]
     assert service.inference_calls == 4
     # A baseline for other seeds is refused before any request reaches a fresh scenario.
     fresh = CampaignService()

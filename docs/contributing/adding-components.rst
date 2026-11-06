@@ -7,9 +7,8 @@ owner, then use the matching playbook below.
 Core and external extensions
 ----------------------------
 
-Reefine is the built-in harness refinement recipe in ``reef/recipe/reefine/``.
-Other recipes and learning methods are external packages selected by dotted
-reference; Reef does not import those packages at boot. Changes to shared runtime or
+Recipes and learning methods outside ``reef/recipe/`` are external packages
+selected by dotted reference; Reef does not import those packages at boot. Changes to shared runtime or
 training machinery start with an `RFC issue
 <https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml>`__.
 A new top-level package, persisted format, wire contract, or incompatible
@@ -36,17 +35,19 @@ Implementation
   ``JudgedSamples`` (``reef/record2sample/``) and ``Sample2Job``
   (``reef/sample2job/``), and its record stage in the recipe module.
   Extend those contracts only when they do not already express it.
-- Put the method's backend-neutral training objective in
-  ``<method-package>/objective.py`` (``reef/train/algos/`` holds the
-  contract). Backend-specific payload
-  construction belongs to the concrete integration.
+- Put the method's training objective with the backend that it targets: a
+  ``SlimeObjective`` (``reef/train/slime_backend/objectives.py``) in
+  ``<method-package>/slime/__init__.py``, or a ``TinkerObjective``
+  (``reef/train/tinker_backend/objectives.py``) in its Tinker module. The
+  package's ``__init__.py`` refers to it with ``register_objective_ref``, so its
+  public half imports no backend. Name it in the recipe's ``default_parameters()``.
 - A method with its own tensor objective adds a loss family in
   ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
   ``objective.py``) and names it in the objective's ``loss_family``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
-- Override ``build_surface`` only when the produced artifact needs delivery
-  behavior beyond the existing surfaces.
+- Override ``build_components`` only when the method's releases bind
+  components beyond those of the recipe it extends.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
@@ -60,8 +61,43 @@ Surrounding changes
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
 - Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe
-  table when the cookbook carries the method. Update the relevant pipeline stage, objective, or surface
+  table when the cookbook carries the method. Update the relevant pipeline stage, objective, or component
   reference if its public contract changes.
+
+Add a harness method
+--------------------
+
+Use this playbook for a method that evolves a harness tree. Read `Write a
+harness method <../developer-guide/write-a-harness-method.rst>`__ first.
+
+Implementation
+~~~~~~~~~~~~~~
+
+- Put the ``Method`` in ``recipes/<name>/method.py`` and export it from the
+  package's ``__init__.py``. A deployment runs
+  ``reef.recipe.harness:HarnessEvolutionRecipe`` and names the class in
+  ``evolution.method``, so the method needs no recipe of its own.
+- Parse the method's settings into a ``PluginSettings`` dataclass in
+  ``from_config``.
+- Keep what the method learns across steps in files under
+  ``workspace.state``. Read earlier candidates, scores and decisions from the
+  history instead of keeping copies of them.
+- Put a prompt longer than a sentence or two in a ``.md`` file beside the
+  method.
+- Subclass ``HarnessEvolutionRecipe`` only when the method changes more than
+  the tree, such as the files a client pulls.
+
+Surrounding changes
+~~~~~~~~~~~~~~~~~~~
+
+- Add method tests under ``tests/recipes/<name>/``. Run a step as the trainer
+  does with ``backend_step`` in ``tests/support/harness_service.py``, or call ``step``
+  on a workspace from ``Workspace.create`` with a fake model binding.
+- Put runnable deployments under ``recipes/<name>/examples/``. The method's
+  ``README.md`` says what it does, how it uses the workspace, and where it
+  departs from its paper.
+- Add the method to the list in `Evolve your harness
+  <../user-guide/evolve-your-harness.rst#choose-or-write-a-method>`__.
 
 Add a training integration
 --------------------------
@@ -75,19 +111,19 @@ Implementation
 
 - Start an accepted integration in ``reef/train/<integration>/``. Keep its
   implementation, framework adapters, and plugins inside that subtree.
-- Implement ``TrainingComponent`` from ``reef/runtime/jobs.py``. A component
+- Implement ``TrainingComponent`` from ``reef/train/component.py``. A component
   runs whole training jobs with the framework's own training loop and saves
   checkpoints; Reef submits jobs and reads their status. Derive from
   ``reef.train.local_jobs.LocalJobComponent`` to get durable job directories,
   one job at a time, and resumption after a restart.
-- Read the job's ``method`` and optional ``scheduling`` parameters with
-  ``reef.train.algos.registry.job_training``, and prepare each job's data
-  with the objective that ``method`` names. Cut the data into optimizer steps
-  with ``reef.train.algos.schedule.schedule_job_data`` under the objective's
-  ``rollout_unit``. Write each
-  ``SavedCheckpoint.release_path`` in a form that serving loads: a Hugging Face
+- Own the job's parameters: parse them into your own typed value, refuse an
+  unknown key with ``ValueError``, and declare them in
+  ``TrainingComponent.parameters_schema(kind)``. Reef reads none of them. Own your
+  objectives and their registry too. Cut the data into optimizer steps
+  with ``reef.train.algos.schedule.schedule_job_data`` when it fits. Write each
+  ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
-- Implement ``import_start`` to load a published release as the start of the
+- Implement ``import_start`` to load a published snapshot as the start of the
   next job. Raise ``ValueError`` when the framework cannot do this; Reef then
   refuses a ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
@@ -95,7 +131,7 @@ Implementation
   integration. Contract changes need focused compatibility tests.
 - Implement ``TrainingDeployment`` in the integration to describe process
   preparation, and a ``RuntimeFactory`` that returns the
-  ``TrainingComponent``. Declare the component's ``release_format``; the
+  ``TrainingComponent``. Declare the component's ``artifact_format``; the
   ``inference`` section builds the serving from it, so the integration builds
   no serving runtime. A backend with its own serving returns its runtime
   config from ``trainer_serving_config``. In-process integrations can extend
@@ -130,7 +166,7 @@ Add a runtime kind
 
 Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
-``reef/runtime/interfaces.py`` before adding configuration.
+``reef/inference/interfaces.py`` before adding configuration.
 
 - For an external runtime, expose a factory as
   ``package.module:factory_name`` and use that dotted value as the runtime
@@ -138,26 +174,25 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - For a concrete inference backend, add its native implementation under
   ``reef/inference/<integration>/``. Keep native engine launch, request
   adaptation, weight loading, and framework imports inside that package.
-  ``reef/runtime/`` holds Reef's backend-neutral interfaces; it must not
-  import a concrete inference or training implementation. Implement
-  ``InferenceBackend`` from ``reef/runtime/interfaces.py``, including
+  The modules at the root of ``reef/inference/`` hold the inference contracts;
+  they must not import a concrete integration or ``reef.train``. Implement
+  ``InferenceBackend`` from ``reef/inference/interfaces.py``, including
   ``load_weight_files``, so that the serving runtimes in
-  ``runtime/serving.py`` can load published releases. Expose an inference
+  ``reef/inference/serving.py`` can load published snapshots. Expose an inference
   service factory through a dotted reference or the
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. Shared monitoring and engine recovery belong in
-  ``runtime/recovery.py``; adapter residency belongs in
-  ``runtime/residency.py``. Shared contracts and version values belong in
-  ``runtime/interfaces.py``.
+  ``reef/inference/recovery.py``; adapter residency belongs in
+  ``reef/inference/residency.py``. Shared contracts and version values belong in
+  ``reef/inference/interfaces.py``.
 - For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
   and load the selected integration from service assembly. ``RuntimeFactory`` and
-  factory resolution live in ``reef.runtime.deployment``. Runtime is a namespace
-  package: importing ``reef.runtime`` does not register integrations or re-export
-  classes. Keep its top level limited to ``interfaces.py``, ``jobs.py``,
-  ``durable_files.py``, ``deployment.py``, ``recovery.py``, ``residency.py``,
-  ``serving.py`` and ``executor/``. A training component is not a runtime: its
-  ``TrainingDeployment.component_type`` names a ``TrainingComponentFactory``.
+  factory resolution live in ``reef.inference.registry``. Importing
+  ``reef.inference`` does not register integrations or re-export classes. A
+  training component is not a runtime: its
+  ``TrainingDeployment.component_type`` names a ``TrainingComponentFactory``
+  from ``reef.train.component``.
 - A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the
@@ -166,7 +201,7 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   Opaque backend payloads must be declared as object fields and validated by
   the adapter; do not enumerate backend-native flags in the service layer.
 - Keep provider authentication and provider-native request handling in the
-  adapter. Do not import a concrete training backend from ``reef/runtime/``.
+  adapter. Do not import ``reef.train`` from ``reef/inference/``.
 - Test registered and dotted resolution in
   ``tests/reef_service/test_runtime_registry.py``. Add request, recovery, and
   malformed-result contracts for every capability the runtime implements.
@@ -178,17 +213,17 @@ Add a worker executor
 
 Use an ``Executor`` subclass when worker launch or control transport changes
 while the training lifecycle stays the same. Implement the common interface
-under ``reef/runtime/executor/`` for a general-purpose backend, or inside the
+under ``reef/execution/executor/`` for a general-purpose backend, or inside the
 owning training integration for a backend-specific launcher. See
 `Worker executors <../developer-guide/executors.rst>`__ for configuration,
 ownership, rank ordering and the Slime extension contract.
 
-Add a surface or artifact type
-------------------------------
+Add a component or artifact type
+--------------------------------
 
-Artifacts own immutable bytes and release heads; surfaces own validation and
-delivery. A change that needs both still keeps those responsibilities in
-separate packages. Read the `Python API <../reference/python-api.rst#surface>`__ and the
+Artifacts own immutable bytes and release heads. A recipe's components own
+admission, import layouts, kinds and client file trees. Runtimes own loading.
+Read `Scenario components <../developer-guide/components.rst>`__ and the
 release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
@@ -196,14 +231,16 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   and is exposed through a repository backend factory. To let a deployment
   select it in ``storage.artifact_backend``, the factory also inherits
   ``ConfigurableRepositoryBackendFactory``.
-- Put request preparation and response verification in ``InferenceHooks``,
-  activation and recovery behavior in ``ArtifactLoader``, and client-pull delivery in
-  ``FileTree`` under ``reef/surface/``.
-- Build the surface from the owning recipe; do not make the surface choose a
-  method or evaluate a candidate.
-- Test surface behavior in ``tests/surface/test_surfaces.py`` or the
-  closest artifact-specific surface test. Test storage backends against the
-  contracts in ``tests/artifact/test_reef_artifacts.py``.
+- Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
+  ``reef/inference/``, and client-pull delivery in a
+  ``FileTree`` (``reef/artifact/components.py``). Reef does not change a model
+  request on its way to the engine: a client pulls the artifacts that shape
+  its requests.
+- Declare the components in the owning recipe's ``build_components``; do not
+  make a component choose a method or evaluate a candidate.
+- Test component behavior in ``tests/artifact/test_scenario_components.py`` or
+  ``tests/artifact/test_snapshot_components.py``. Test storage backends against
+  the contracts in ``tests/artifact/test_reef_artifacts.py``.
 - Add scenario commit, activation, train-from, and recovery tests whenever
   persistence or activation ordering changes. Persisted-format changes require an RFC and a
   compatibility contract.
@@ -238,16 +275,19 @@ Use this playbook when Reef must render and run the same composition tree for
 another agent harness. Benchmark, grader, and environment orchestration stays
 under ``recipes/<name>/examples/`` or in the external harness.
 
-- For a bundled adapter, add ``reef/harness/adapters/<name>/descriptor.yaml``
-  and its package initializer. Use a ``quirks.py`` module only for behavior
-  the declarative descriptor cannot express.
-- Add an asset such as ``version_check.ts`` only when the adapter needs it,
-  then include the asset in the package-data rules in ``pyproject.toml``.
+- For a bundled adapter, add ``reef/harness/adapters/<name>/adapter.yaml``,
+  whose ``evolve`` section declares the parts of the agent's tree, and its
+  package initializer. Add a ``render.py`` with an
+  ``AdapterRenderer`` subclass, named by the descriptor's ``renderer``, only
+  for behavior the declarative files cannot express.
+- Add an asset, such as Codex's ``bundled_models.json``, only when the
+  adapter needs it, then include the asset in the package-data rules in
+  ``pyproject.toml``.
 - For an external adapter, publish an entry in the
   ``reef.harness_adapters`` entry-point group that resolves to an
   ``AdapterDescriptor`` or a zero-argument descriptor factory.
 - Add descriptor and golden-render coverage in
-  ``tests/harness/test_harness_render.py``. Add rollout, cleanup, install,
+  ``tests/harness/test_harness_render.py``. Add run, cleanup, install,
   and trajectory tests for the capabilities the descriptor declares.
 - Put golden trees under ``tests/harness/data/harness_goldens/`` and a
   real-binary smoke test under ``tests/smoke/`` when CI can install the pinned

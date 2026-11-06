@@ -14,8 +14,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.executor import Executor, ExecutorConfig
-from reef.runtime.executor.failure import ExecutorFailureListener
+from reef.execution.executor import Executor, ExecutorConfig
+from reef.execution.executor.failure import ExecutorFailureListener
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,
@@ -170,6 +170,14 @@ class SlimeTrainGroup:
             kwargs={"force_sync": force_sync},
             timeout=self.train_timeout_s,
         )
+
+    def set_rollout_manager(self, rollout_manager: Any) -> None:
+        """Hand every worker the Ray handle of the component's rollout manager, whose engines ``update_weights`` loads."""
+        self.executor.collective_rpc("set_rollout_manager", args=(rollout_manager,), timeout=self.train_timeout_s)
+
+    def update_weights(self) -> None:
+        """Load the actor's current weights into the rollout manager's engines, with Slime's own weight transfer."""
+        self.executor.collective_rpc("update_weights", timeout=self.train_timeout_s)
 
     def onload(self):
         return self.executor.collective_rpc("wake_up", timeout=self.train_timeout_s)

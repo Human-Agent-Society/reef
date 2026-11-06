@@ -7,8 +7,8 @@ import pytest
 import yaml
 from tests.support.config_helpers import deployment_layout
 
+from reef.execution.executor.config import role_executor_settings, select_executor
 from reef.recipe.config import recipe_config_from_file_layout
-from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.service.deploy.execution import service_executor_selection, validate_services
 from reef.service.deploy.inference import INFERENCE_COMPONENT_SERVICE
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -28,7 +28,6 @@ SERVICE_CONFIGS = (
     "tutorials/evolve-your-harness/configs/deployment.yaml",
 )
 EVOLUTION_CONFIGS = (
-    "recipes/skillclaw/skillclaw.yaml",
     "tutorials/evolve-your-harness/configs/serve.yaml",
     "tutorials/evolve-your-harness/configs/serve-native.yaml",
     "tutorials/evolve-your-harness/configs/deployment.yaml",
@@ -45,7 +44,7 @@ TRAINING_CONFIGS = (
 def slime_flags(config):
     """The ``--name=value`` arguments the HTTP service gives Slime for a resolved example."""
     settings = asdict(service_config_from_mapping(config))
-    runtime = SlimeDeployment().component_config(settings, loss_family="")
+    runtime = SlimeDeployment().component_config(settings, default_parameters={})
     arguments = slime_arguments(runtime["settings"], loss_family="", environ={})
     return dict(argument.removeprefix("--").split("=", 1) for argument in arguments if "=" in argument)
 
@@ -146,14 +145,14 @@ def test_openclawrl_isolates_external_models_from_reef_training():
         assert int(command[command.index("--tp") + 1]) == len(pools[name])
         assert "RAY_ADDRESS" not in compose[name].get("environment", {})
     prm = compose["prm"]["command"]
-    judging = config["pipeline"]["record2record"]["config"]
+    judging = config["pipeline"]["record2sample"]["config"]
     assert judging["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
     assert judging["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
     assert compose["reef"]["depends_on"] == {"prm": {"condition": "service_healthy"}}
     flags = slime_flags(config)
     training_gpus = int(flags.get("actor-num-nodes", "1")) * int(flags["actor-num-gpus-per-node"])
-    # Slime starts no engine; the inference section sizes the serving engines.
-    assert flags["rollout-num-gpus"] == "0"
+    # Slime's trajectory jobs start no engine; the inference section sizes the serving engines.
+    assert "rollout-num-gpus" not in flags
     rollout_gpus = int(config["reef"]["inference_num_gpus"])
     assert (training_gpus, rollout_gpus, int(flags["num-gpus-per-node"])) == (4, 1, 5)
     assert training_gpus + rollout_gpus == len(pools["reef"])

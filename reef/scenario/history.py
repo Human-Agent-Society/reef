@@ -5,7 +5,6 @@ from __future__ import annotations
 from itertools import islice
 from typing import Any
 
-from reef.core.artifact_ref import encode_artifact_ref
 from reef.core.records_types import RequestType
 from reef.scenario.scenario import Scenario
 from reef.storage.records import StoredRecord
@@ -19,7 +18,7 @@ def record_metadata(stored: StoredRecord) -> dict[str, Any]:
         "request_type": item.request_type.value,
         "created_at": item.created_at,
         "references": list(item.references),
-        "artifact_ref": encode_artifact_ref(item.artifact_ref) if item.artifact_ref else None,
+        "artifact_id": item.artifact_id,
         "score": item.payload.get("score"),
     }
 
@@ -53,6 +52,8 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
         raise ValueError("at most 100 non-empty record_id values of at most 256 characters are accepted")
     requested = frozenset(record_ids)
     commits = scenario.store.history() if scenario.store.durable else ()
+    components = tuple(scenario.artifact_status())
+    queries = scenario.snapshot_queries
     matches = tuple(
         islice(
             (
@@ -71,7 +72,9 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
                 "operation": commit.operation,
                 "operation_verified": commit.operation_verified,
                 "recorded_at": commit.recorded_at,
-                "artifact_ref": encode_artifact_ref(commit.artifact_ref),
+                "components": commit.artifact_ids
+                or queries.bound_artifact_ids(commit.snapshot.revision, components, scenario.scenario_step),
+                "component": commit.component,
                 "activated": commit.activated,
                 "consumed_ids": sorted(commit.consumed_ids),
                 "metrics": commit.metrics,

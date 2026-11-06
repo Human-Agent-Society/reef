@@ -38,6 +38,7 @@ from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import DEFAULT_RULE, ENTRYPOINT_PREFIX, RoutingAdapter, RoutingRule, RoutingSnapshot
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_HASH_HEADER, PreviewSettings
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 ROUTER_HASH = "1" * 64
@@ -157,7 +158,11 @@ async def provider_models(request: web.Request) -> web.Response:
 
 
 def routing_dispatcher(tmp_path: Path) -> Dispatcher:
-    return build_default_dispatcher(local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage())
+    return build_default_dispatcher(
+        local_artifact_dir=tmp_path / "local",
+        scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
+    )
 
 
 def preview_reply(

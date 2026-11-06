@@ -8,7 +8,7 @@ An ``activation`` section has this shape::
         review_kinds: [skill]
 
 - ``always`` (``AlwaysActivate``) activates every new artifact, except a harness tree that changes a reviewed
-  kind: a kind in ``review_kinds``, or one that Reef always reviews (``ALWAYS_REVIEWED_KINDS``). It is the
+  kind: a kind in ``review_kinds``. A harness recipe adds the parts its adapter always reviews. It is the
   default.
 - ``never`` (``NeverActivate``) activates none; a person activates each one
   (``POST /reef/scenarios/{scenario}/activate``).
@@ -31,14 +31,13 @@ from typing import Any, Self
 from reef.core.activation import ActivationRule, MadeArtifact
 from reef.core.evaluation import PolicyEvaluation
 from reef.core.plugins import PluginConfigError, PluginReference
-from reef.harness.tree.nodes import ALWAYS_REVIEWED_KINDS
 
 
 class AlwaysActivate(ActivationRule):
     """Activate every new artifact, except a harness tree that changes a reviewed kind.
 
     Values: ``review_kinds`` is a frozenset of non-empty node kind names. Operations: ``activates(made)`` is true
-    exactly when ``made.changed_kinds`` has no kind in ``review_kinds`` or in ``ALWAYS_REVIEWED_KINDS``;
+    exactly when ``made.changed_kinds`` has no kind in ``review_kinds``;
     ``activates_evaluated`` is false. Purpose: the ``always`` activation section, and the rule when there is no
     section.
     """
@@ -64,7 +63,7 @@ class AlwaysActivate(ActivationRule):
             raise PluginConfigError(f"activation.config.{exc}") from exc
 
     def activates(self, made: MadeArtifact) -> bool:
-        return not (made.changed_kinds & (self.review_kinds | ALWAYS_REVIEWED_KINDS))
+        return not (made.changed_kinds & self.review_kinds)
 
 
 class NeverActivate(ActivationRule):

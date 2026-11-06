@@ -8,9 +8,9 @@ from typing import Any
 
 from recipes.sao.processor import SAOJobData, SAOSamples
 from reef.core.reports import ReportBase, ScoredRolloutReport
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
-from reef.record2record import ExclusiveReportRecord2Record
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -30,8 +30,8 @@ class SAORecipe(WeightTrainingRecipe):
     (``reef.inference_handler_factory``); reef never re-tokenizes a rollout to
     reconstruct them.
 
-    The stages are ``ExclusiveReportRecord2Record`` (every rollout trains by
-    itself), ``SAOSamples``, and ``SAOJobData``. Each rollout sample is its own
+    The stages are ``SAOSamples`` (every rollout trains by itself) and
+    ``SAOJobData``. Each rollout sample is its own
     DP unit.
 
     Objective settings such as the clipping bounds, actor/critic cadence, and GAE
@@ -46,16 +46,12 @@ class SAORecipe(WeightTrainingRecipe):
         return ScoredRolloutReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective="sao",
-        )
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "sao"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(
-            record2record=ExclusiveReportRecord2Record, record2sample=SAOSamples, sample2job=SAOJobData
-        )
+        return PipelineSpec(record2sample=SAOSamples, sample2job=SAOJobData)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

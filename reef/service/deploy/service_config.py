@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -19,11 +20,13 @@ from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
-from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
+from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
+from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.segments import SegmentStore
 from reef.storage.tasks import TaskFileStore
 
 
@@ -46,7 +49,7 @@ class ServiceConfig:
 
     recipe: str = config_option(
         public_path=("recipe", "implementation"),
-        help="Recipe implementation or named deployment preset (the launcher owns --recipe).",
+        help="Recipe implementation or named deployment preset (the launcher reserves --recipe).",
     )
     host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
@@ -62,6 +65,14 @@ class ServiceConfig:
         None,
         public_path=("reef", "served_url"),
         help="URL the recipe's own evaluation calls reach this service at (default: loopback on the bind port).",
+    )
+    harness_inference_url: str | None = config_option(
+        None,
+        public_path=("harness", "inference_url"),
+        help=(
+            "URL clients reach the inference service at: a client's harness layer sends its model calls there "
+            "(default: the address the client gave)."
+        ),
     )
     console_origins: tuple[str, ...] = config_option(
         (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
@@ -112,7 +123,7 @@ class ServiceConfig:
         None,
         public_path=("inference", "serving"),
         help=(
-            "How a weight-training deployment serves its releases: engines (Reef's engines on an inference "
+            "How a weight-training deployment serves its snapshots: engines (Reef's engines on an inference "
             "component), trainer (the training backend's own serving, such as Tinker's sampler), none, or a "
             "module:Factory runtime factory. Default: engines when engine settings are given, else the "
             "training backend's default."
@@ -127,13 +138,13 @@ class ServiceConfig:
     inference_max_loaded_adapters: int = config_option(
         1,
         public_path=("inference", "max_loaded_adapters"),
-        help="Adapters the serving engines keep resident when the releases are PEFT adapters.",
+        help="Adapters the serving engines keep resident when the snapshots are PEFT adapters.",
     )
     inference_prefix_sharing: bool = config_option(
         False,
         public_path=("inference", "prefix_sharing"),
         help=(
-            "Share prefix-cache entries between requests. Each release load then retracts the requests in "
+            "Share prefix-cache entries between requests. Each snapshot load then retracts the requests in "
             "flight, which prefill again on the new weights."
         ),
     )
@@ -200,15 +211,17 @@ class ServiceConfig:
         ),
     )
     inference_retry_initial_s: float = config_option(
-        0.05, public_path=("inference", "retry_initial_s"), help="Initial inference retry delay in seconds."
+        0.05,
+        public_path=("inference", "retry_initial_s"),
+        help="Initial retry delay for a routed request, in seconds.",
     )
     inference_retry_max_s: float = config_option(
-        1.0, public_path=("inference", "retry_max_s"), help="Maximum inference retry delay in seconds."
+        1.0, public_path=("inference", "retry_max_s"), help="Maximum retry delay for a routed request, in seconds."
     )
     inference_retry_timeout_s: float = config_option(
         300.0,
         public_path=("inference", "retry_timeout_s"),
-        help="Retry deadline in seconds; defaults to the inference timeout.",
+        help="Retry deadline for a routed request, in seconds. Defaults to the inference timeout.",
     )
     #: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin: ``package.module:ClassName`` or module
     #: and config.
@@ -234,6 +247,12 @@ class ServiceConfig:
         public_path=("storage", "artifact_sources"),
         help="Artifact source reader plugin references, as a JSON/YAML list, beside the hf, file and s3 readers.",
     )
+    #: The address at which a task's container reaches this host, for an evaluation with a harness tree.
+    evaluation_agent_host: str = config_option(
+        "host.docker.internal",
+        public_path=("evaluation", "agent_host"),
+        help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -243,11 +262,56 @@ class ServiceConfig:
         public_path=("storage", "record_backend"),
         help="Scenario storage backend: sqlite, postgres, or a ScenarioStorage plugin reference.",
     )
+    #: ``sqlite``, ``postgres``, or a ``DataStore`` plugin: ``package.module:ClassName`` or module and config.
+    #: Unset follows ``record_backend``: ``postgres`` uses ``record_database_url`` and the schema ``reef_data``, and
+    #: a plugin record backend uses ``sqlite``.
+    data_store: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("storage", "data_store"),
+        help="Data store of the deployment's items (RFC #1028): sqlite, postgres, or a DataStore plugin reference.",
+    )
+    #: ``sqlite`` or ``postgres``: where the coordination tables (served models, work queues, the control lease) live.
+    #: Unset follows a built-in ``record_backend``; a plugin record backend must name it, because every process of
+    #: the deployment must share these tables. ``postgres`` uses ``record_database_url``.
+    coordination_backend: str | None = config_option(
+        None,
+        public_path=("storage", "coordination_backend"),
+        help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
+    )
+    #: How many times a worker takes one work item before the item fails, for every queue.
+    work_max_attempts: int = config_option(
+        3,
+        public_path=("storage", "work_max_attempts"),
+        help="Attempts of one work item (a job, a selection, a rollout, a data task) before it fails.",
+    )
+    #: How long control keeps an ended work item, so that its producer reads its result; then control deletes it.
+    work_retention_s: float = config_option(
+        7 * 24 * 3600.0,
+        public_path=("storage", "work_retention_s"),
+        help="Seconds that control keeps an ended work item before it deletes it. Default: 7 days.",
+    )
+    job_directory_ttl_s: float = config_option(
+        JOB_DIRECTORY_TTL_SECONDS,
+        public_path=("storage", "job_directory_ttl_s"),
+        help=(
+            "Seconds that the data store keeps a job data directory that no training job used; a job of the same "
+            "samples uses it again. Default: 7 days."
+        ),
+    )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
         "local",
         public_path=("storage", "task_file_backend"),
         help="Store of the files of generated tasks: local, or a TaskFileStore plugin reference.",
+    )
+    #: Unset, ``local``, or a ``SegmentStore`` plugin: ``package.module:ClassName`` or module and config.
+    segment_backend: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("storage", "segment_backend"),
+        help=(
+            "Store of the segment files that keep the content of trajectory items and record trajectories outside "
+            "the data store's database: unset (keep it in the database), local, or a SegmentStore plugin reference."
+        ),
     )
     task_file_dir: str = config_option(
         ".reef/task-files",
@@ -257,7 +321,7 @@ class ServiceConfig:
     task_import_manifest: str | None = config_option(
         None,
         public_path=("task_import", "manifest"),
-        help="Split manifest of the Harbor tasks that each scenario imports into its sample store.",
+        help="Split manifest of the Harbor tasks that each scenario imports into its samples.",
     )
     task_import_tasks_root: str | None = config_option(
         None,
@@ -324,12 +388,11 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Activation rule of new artifacts as a JSON/YAML object.", path=("activation",)),
     )
-    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
+    #: The stage classes that replace a weight-training recipe's own: ``record2sample`` and ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Pipeline stages as a JSON/YAML object: record2record, record2sample and sample2job, each with module and "
-            "config.",
+            "Pipeline stages as a JSON/YAML object: record2sample and sample2job, each with module and config.",
             path=("pipeline",),
         ),
     )
@@ -395,6 +458,33 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
+            raise ValueError("storage.work_max_attempts must be an integer")
+        if self.work_max_attempts < 1:
+            raise ValueError("storage.work_max_attempts must be at least 1")
+        if not math.isfinite(self.work_retention_s) or self.work_retention_s <= 0:
+            raise ValueError("storage.work_retention_s must be a positive number of seconds")
+        if not math.isfinite(self.job_directory_ttl_s) or self.job_directory_ttl_s <= 0:
+            raise ValueError("storage.job_directory_ttl_s must be a positive number of seconds")
+        if self.coordination_backend not in (None, "sqlite", "postgres"):
+            raise ValueError("storage.coordination_backend must be sqlite or postgres")
+        if self.coordination_backend is None and self.record_backend not in ("sqlite", "postgres"):
+            raise ValueError(
+                "storage.record_backend is a plugin, so name where the services share their coordination tables: "
+                "set storage.coordination_backend to sqlite (processes on one host) or postgres"
+            )
+        if self.data_store not in (None, "sqlite", "postgres"):
+            if isinstance(self.data_store, str) and ":" not in self.data_store:
+                raise ValueError("storage.data_store must be sqlite, postgres, or 'package.module:ClassName'")
+            DataStore.reference(self.data_store, setting="storage.data_store")
+        if self.data_store == "postgres" and self.record_backend != "postgres":
+            raise ValueError(
+                "storage.data_store: postgres uses storage.record_database_url, so it needs record_backend: postgres"
+            )
+        if self.segment_backend not in (None, "local"):
+            if isinstance(self.segment_backend, str) and ":" not in self.segment_backend:
+                raise ValueError("storage.segment_backend must be local or 'package.module:ClassName'")
+            SegmentStore.reference(self.segment_backend, setting="storage.segment_backend")
         if self.task_file_backend != "local":
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
@@ -403,20 +493,18 @@ class ServiceConfig:
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":
             raise ValueError("task-import.manifest and task-import.tasks-root must be non-empty paths")
-        if self.record_backend == "postgres":
+        if "postgres" in (self.record_backend, self.coordination_backend):
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
-                raise ValueError("reef.record_database_url is required for the postgres backend")
+                raise ValueError(
+                    "storage.record_database_url is required for a postgres record or coordination backend"
+                )
             postgres_url(self.record_database_url)
             validate_postgres_schema(self.record_database_schema)
         elif self.record_database_url is not None or self.record_database_schema != "reef_records":
-            raise ValueError("record_database_url and record_database_schema require reef.record_backend: postgres")
-
-
-def _config_service_value(config: Mapping[str, Any], *path: str, default: Any = None, expand: bool = True) -> Any:
-    value = config_value(config, *path, default=default, expand=expand)
-    if isinstance(value, str):
-        return interpolate_config(config, value)
-    return value
+            raise ValueError(
+                "record_database_url and record_database_schema require storage.record_backend or "
+                "storage.coordination_backend: postgres"
+            )
 
 
 def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -513,9 +601,12 @@ def parse_service_arguments(config: Mapping[str, Any]) -> dict[str, Any]:
         value = _argument_value(config, argument)
         if value is not None:
             supplied[argument.name] = value
-    return parse_config_values(
+    values = parse_config_values(
         tuple(dataclasses.replace(argument, required=False) for argument in arguments), supplied, environ=os.environ
     )
+    if "inference_retry_timeout_s" not in supplied:
+        values["inference_retry_timeout_s"] = values["inference_timeout_s"]
+    return values
 
 
 def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -551,9 +642,6 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     values["tokens"] = tuple(dict.fromkeys(token for token in tokens if token))
     values["console_origins"] = console_origins(values["console_origins"])
     values["routing_deployment"] = routing_deployment_settings(values["routing_deployment"])
-    # The legacy retry deadline follows the request timeout unless supplied.
-    if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
-        values["inference_retry_timeout_s"] = values["inference_timeout_s"]
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
     execution = {key: config[key] for key in ("execution", "executors") if key in config}

@@ -109,6 +109,15 @@ def main() -> int:
     os.environ["REEF_API_BASE"] = args.reef_url.rstrip("/") + "/v1"
 
     wait_healthy(f"{args.reef_url}/healthz")
+    # The inference routes serve only a scenario that exists: create it before any agent calls the gateway.
+    create = urllib.request.Request(
+        args.reef_url.rstrip("/") + "/reef/scenarios",
+        data=json.dumps({"name": SCENARIO}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {args.reef_token}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(create, timeout=60):
+        pass
 
     config = load_config(args, state)
     run_id = f"coral-ttt-{time.strftime('%Y%m%d-%H%M%S')}"

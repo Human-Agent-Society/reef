@@ -1,19 +1,22 @@
-"""``reef-native serve``: one resident process per installed tree, holding the tree as a live composition.
+"""``reef-native serve``: one resident process that runs a scenario's harness artifact and follows its head.
 
-The process boots a ``Loader`` over ``NATIVE_PLUGINS`` from ``native/tree.json``,
-starts the wrapper's capture proxy in process, and listens on a Unix socket
-for turns and control requests. A session holds one ``Run`` across turns. A
-new head Reef serves reaches the process through the release poll or the
-``x-reef-release-id`` header of an inference answer and is mounted between
-two steps of the open turn, or at once when no turn is open; a mount that
-leaves an entry FAILED is rolled back whole. Every mount, unmount and failed
-mount is an event in the open turn's session, else in ``sessions/serve.jsonl``.
-``reef-native -p`` stays the rollout form: one process, one turn.
+A mount renders a source tree for the native adapter into a fresh directory
+under ``native/mounts/`` and builds a ``NativeHost`` from the rendered files.
+The process boots on the source tree it mounted last (``source/`` beside the
+snapshot file), else on the head's, read through
+``GET /reef/harness?form=source``. It starts the capture proxy in process
+and listens on a Unix socket for turns and control requests. A session holds
+one ``Run`` across turns. A new head reaches the process through the artifact
+poll, and its host
+replaces the current one between two steps of the open turn, or at once when
+no turn is open. A tree that does not render or load leaves the current host
+in place. Every mount, unmount and failed mount is an event in the open
+turn's session, else in ``sessions/serve.jsonl``. ``reef-native -p`` stays
+the run form: one process, one turn.
 """
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
@@ -35,31 +38,31 @@ from pathlib import Path
 from typing import Any
 
 from reef.harness.adapters import get_adapter
-from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy, WrapperError
-from reef.harness.compose import Context, FiberState
-from reef.harness.compose.loader import Loader
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, Session, _Loop, binding_from
-from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
-from reef.harness.runners.native.graph import Run, run_graph, run_loop_module
-from reef.harness.runners.native.host import NativeHost
-from reef.harness.runners.native.plugins import NATIVE_PLUGINS
-from reef.harness.runners.native.release_client import (
+from reef.harness.capture import CaptureError, CaptureProxy
+from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, LoadError, Session, _Loop, binding_from
+from reef.harness.runners.native.artifact_client import (
+    ArtifactClient,
+    ArtifactClientError,
+    ArtifactUpdateListener,
     EventWriter,
     HeadWatch,
-    ReleaseClient,
-    ReleaseClientError,
-    ReleaseUpdateListener,
 )
-from reef.harness.runners.native.selftools import RESERVED_NAMES, ServeState, self_tools
-from reef.harness.tree.mutations import Mutation, admit_mutations
-from reef.harness.tree.nodes import flat_entry_refusal
+from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
+from reef.harness.runners.native.graph import GraphError, Run, run_graph, run_loop_module
+from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.mounts import HostMounts
+from reef.harness.runners.native.selftools import HostTool, ServeState, self_tools
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree, RenderError, TreePatch, validate_patch
 
 SERVE_LOG = "serve.jsonl"
 SOCKET_NAME = "serve.sock"
-#: The one mount directory of a serve process; unchanged entries keep their modules there across mounts.
-MOUNT_DIR = "live"
-TREE_FILE = "tree.json"
+#: The directory under ``native/`` that holds one rendered directory per mount; only the current one stays.
+MOUNTS_DIR = "mounts"
+#: The snapshot file the serve process writes at the tree root: the snapshot it mounted, so a restart resumes it.
+HARNESS_RELEASE_FILE = ".reef-harness-release"
+#: The directory beside the snapshot file that holds the mounted artifact's source tree.
+SOURCE_DIR = "source"
 FOLLOW_MODES = ("head", "pinned")
 DEFAULT_POLL_INTERVAL_S = 60.0
 DEFAULT_TURN_TIMEOUT_S = 600.0
@@ -83,7 +86,7 @@ class EventSink(ABC):
 
 
 def tree_layout(tree: Path) -> tuple[Path, Path]:
-    """(the pulled tree root, where the release file sits; its ``native/`` directory); the native directory itself is accepted."""
+    """(the pulled tree root, where the snapshot file sits; its ``native/`` directory); the native directory itself is accepted."""
     tree = tree.resolve()
     if (tree / "native" / "models.json").is_file():
         return tree, tree / "native"
@@ -105,38 +108,27 @@ def socket_path(tree: Path, override: Path | None = None) -> Path:
     return path
 
 
-def _parse_tree(text: str, where: str) -> list[dict[str, Any]]:
+def read_source(dest: Path) -> HarnessTree | None:
+    """The source tree of the snapshot the process mounted last; ``None`` before the first mount."""
+    directory = dest / SOURCE_DIR
+    if not directory.is_dir():
+        return None
     try:
-        entries = json.loads(text)
+        return HarnessTree.read(directory)
     except ValueError as exc:
-        raise ServeError(f"{where} is not JSON: {exc}") from exc
-    if not isinstance(entries, list) or not all(
-        isinstance(entry, Mapping) and entry.get("id") and entry.get("name") for entry in entries
-    ):
-        raise ServeError(f"{where} must be a JSON array of entries with id, name and config")
-    return [dict(entry) for entry in entries]
+        raise ServeError(f"{directory} is not a harness tree: {exc}") from exc
 
 
-def read_tree(native: Path) -> list[dict[str, Any]]:
-    """The installed ``native/tree.json``: the entries the serve form boots from."""
-    path = native / TREE_FILE
-    if not path.is_file():
-        raise ServeError(
-            f"{path} is missing: the serve form boots from the tree file; pull the tree from a reef that renders it"
-        )
-    return _parse_tree(path.read_text(encoding="utf-8"), str(path))
+def tree_of(manifest: Mapping[str, Any]) -> HarnessTree:
+    """The source tree a ``form=source`` manifest carries as ``files``."""
+    try:
+        return HarnessTree(dict(manifest.get("files") or {}))
+    except (TypeError, ValueError) as exc:
+        raise ServeError(f"artifact {manifest.get('artifact_id')!r} carries no source tree: {exc}") from exc
 
 
-def _entries_from_manifest(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
-    files = manifest.get("files") or {}
-    text = files.get(f"native/{TREE_FILE}") if isinstance(files, Mapping) else None
-    if not isinstance(text, str):
-        raise ServeError(f"release {manifest.get('release_id')!r} carries no native/{TREE_FILE}")
-    return _parse_tree(text, f"release {manifest.get('release_id')!r} native/{TREE_FILE}")
-
-
-def read_release_info(dest: Path) -> dict[str, Any]:
-    """The release file beside the tree, or an empty record when there is none or it is unreadable."""
+def read_artifact_info(dest: Path) -> dict[str, Any]:
+    """The snapshot file beside the tree, or an empty record when there is none or it is unreadable."""
     try:
         record = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -154,47 +146,6 @@ def _last_text(messages: Sequence[Mapping[str, Any]]) -> str:
         if message.get("role") == "assistant" and isinstance(message.get("content"), str):
             return str(message["content"])
     return ""
-
-
-# -- the live composition ----------------------------------------------------------------------------------
-
-
-def _entries_of(loader: Loader) -> list[dict[str, Any]]:
-    """The live entry options in tree order."""
-    result = []
-    for options in loader.root.data:
-        entry = loader.store.get(str(options.get("id")))
-        if entry is not None:
-            result.append(copy.deepcopy(dict(entry.options)))
-    return result
-
-
-def _not_flat(entries: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
-    """Every group entry or entry without an object config: (id, kind, error); the loader would mount a group's children unseen."""
-    failures = []
-    for entry in entries:
-        refusal = flat_entry_refusal(entry)
-        if refusal is not None:
-            failures.append((str(entry.get("id")), str(entry.get("name")), refusal))
-    return failures
-
-
-def _failures(loader: Loader) -> list[tuple[str, str, str]]:
-    """Every entry that is not ACTIVE: (id, kind, error); a kind with no plugin is one of them."""
-    failures = []
-    for options in loader.root.data:
-        id_, kind = str(options.get("id")), str(options.get("name"))
-        entry = loader.store.get(id_)
-        if entry is None or entry.disabled:
-            continue
-        fiber = entry.fiber
-        if fiber is None:
-            failures.append((id_, kind, f"no plugin for kind {kind!r}"))
-        elif fiber.error is not None:
-            failures.append((id_, kind, str(fiber.error)))
-        elif fiber.state is not FiberState.ACTIVE:
-            failures.append((id_, kind, f"node fiber is {fiber.state.name}"))
-    return failures
 
 
 # -- sessions and the log ----------------------------------------------------------------------------------
@@ -297,14 +248,28 @@ class _Conversation:
 
 
 class _Pending:
-    """One queued release mount and the answer whoever queued it waits for; the manifest is fetched when it lands."""
+    """One queued harness mount and the answer whoever queued it waits for; the manifest is fetched when it lands.
 
-    def __init__(self, release_id: str, source: str, manifest: Mapping[str, Any] | None = None) -> None:
+    Values: ``artifact_id`` is the artifact to mount. ``identity`` names the mount in status and logs.
+    """
+
+    def __init__(self, artifact_id: str, source: str, manifest: Mapping[str, Any] | None = None) -> None:
         self.manifest: dict[str, Any] | None = None if manifest is None else dict(manifest)
         self.source = source
-        self.release_id = release_id
+        self.artifact_id = artifact_id
         self.result: dict[str, Any] = {}
         self._done = threading.Event()
+
+    @property
+    def identity(self) -> dict[str, str]:
+        """``{"artifact_id": ...}``."""
+        return {"artifact_id": self.artifact_id}
+
+    def fetch(self, client: ArtifactClient) -> dict[str, Any]:
+        """The manifest to mount: the queued one, or the one Reef answers for ``artifact_id``."""
+        if self.manifest is not None:
+            return self.manifest
+        return client.fetch(self.artifact_id)
 
     def settle(self, result: Mapping[str, Any]) -> None:
         self.result = dict(result)
@@ -312,18 +277,18 @@ class _Pending:
 
     def wait(self, timeout_s: float) -> dict[str, Any]:
         if not self._done.wait(timeout_s):
-            return {"mounted": False, "release_id": self.release_id, "error": f"no mount within {timeout_s:.0f} s"}
+            return {"mounted": False, **self.identity, "error": f"no mount within {timeout_s:.0f} s"}
         return self.result
 
 
 # -- the process -------------------------------------------------------------------------------------------
 
 
-class Server(ServeState, ReleaseUpdateListener):
-    """The resident process: the live composition, the sessions, the proxy, the release watch and the socket."""
+class Server(ServeState, ArtifactUpdateListener):
+    """The resident process: the mounted host, the sessions, the proxy, the snapshot watch and the socket."""
 
     @property
-    def client(self) -> ReleaseClient:
+    def client(self) -> ArtifactClient:
         return self._client
 
     def __init__(
@@ -352,26 +317,27 @@ class Server(ServeState, ReleaseUpdateListener):
         self.turn_timeout_s = float(turn_timeout_s)
         self.socket_path = socket_path(tree, socket_override)
         self.sessions_dir = self.native / "sessions"
-        self.mount_dir = self.native / "mounts" / MOUNT_DIR
+        self.mounts_dir = self.native / MOUNTS_DIR
         self.descriptor = get_adapter("native")
+        self.mounts = HostMounts(self.mounts_dir, self.descriptor)
         try:
             self._installed_binding = binding_from(self.native / "models.json")
         except (OSError, ValueError, KeyError) as exc:
             raise ServeError(f"{self.native / 'models.json'} does not bind a model: {exc}") from exc
         self.reef_url = _without_v1(reef_url or self._installed_binding.base_url)
-        #: The token the wrapper convention names wins; the binding's key is what an installed tree carries.
+        #: An explicit token wins, then REEF_TOKEN, then the key the directory's own binding carries.
         self.token = (
             token if token is not None else (os.environ.get("REEF_TOKEN") or self._installed_binding.api_key or None)
         )
         self.binding: ModelBinding = self._installed_binding
-        self._client = ReleaseClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
-        self._served: list[dict[str, Any]] = []
-        self._release_id: str | None = None
-        self._parent_release_id: str | None = None
+        self._client = ArtifactClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
+        #: The served artifact's source tree, and the tree the current host runs: the served one, or a trial's.
+        self._tree = HarnessTree({})
+        self._artifact_id: str | None = None
+        self._parent_artifact_id: str | None = None
         self._pending: _Pending | None = None
         self._trial: str | None = None
-        #: Entries a rollback could not bring back; empty while the composition is what the release says.
-        self._degraded: list[str] = []
+        self._builtin_tools: list[HostTool] = []
         self._conversations: dict[str, _Conversation] = {}
         self._current: _Conversation | None = None
         self._deadline = 0.0
@@ -380,8 +346,6 @@ class Server(ServeState, ReleaseUpdateListener):
         self._stopped = threading.Event()
         self._started = False
         self._log: EventLog
-        self._host: NativeHost
-        self._loader: Loader
         self._proxy: CaptureProxy
         self._watch: HeadWatch
         self._enforcer: BuiltinToolEnforcer
@@ -390,34 +354,29 @@ class Server(ServeState, ReleaseUpdateListener):
     # -- what the self tools and the status read ---------------------------------------------------------------
 
     @property
-    def release_id(self) -> str | None:
-        return self._release_id
-
-    @property
-    def session_id(self) -> str | None:
-        return None if self._current is None else self._current.id
+    def artifact_id(self) -> str | None:
+        return self._artifact_id
 
     @property
     def host(self) -> NativeHost:
-        return self._host
+        return self.mounts.host
 
-    def live_entries(self) -> list[dict[str, Any]]:
-        """The entries the loader holds now: the served ones, or the trial's for the rest of a turn."""
-        return _entries_of(self._loader)
+    def live_tree(self) -> HarnessTree:
+        """The tree the current host runs: the served one, or the trial's for the rest of a turn."""
+        return self.mounts.live_tree
 
-    def served_entries(self) -> list[dict[str, Any]]:
+    def served_tree(self) -> HarnessTree:
         with self._state_lock:
-            return [copy.deepcopy(entry) for entry in self._served]
+            return self._tree
 
     def status(self) -> dict[str, Any]:
         with self._state_lock:
             return {
-                "release_id": self._release_id,
-                "parent_release_id": self._parent_release_id,
+                "artifact_id": self._artifact_id,
+                "parent_artifact_id": self._parent_artifact_id,
                 "follow": self.follow,
-                "entries": len(self._served),
-                "degraded": list(self._degraded),
-                "pending_mount": None if self._pending is None else self._pending.release_id,
+                "files": len(self._tree.files),
+                "pending_mount": None if self._pending is None else next(iter(self._pending.identity.values())),
                 "sessions": len(self._conversations),
                 "socket": str(self.socket_path),
                 "self_tools": self.self_tools,
@@ -426,7 +385,7 @@ class Server(ServeState, ReleaseUpdateListener):
     # -- lifecycle ---------------------------------------------------------------------------------------------
 
     def start(self) -> None:
-        """Boot: the proxy, the host, the tree as a mount with source ``boot``, the release watch, the socket."""
+        """Boot: the proxy, the boot tree as a mount with source ``boot``, the snapshot watch, the socket."""
         self._refuse_second_process()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._log = EventLog(self.sessions_dir / SERVE_LOG)
@@ -435,35 +394,42 @@ class Server(ServeState, ReleaseUpdateListener):
             self._enforcer = BuiltinToolEnforcer(select_enforcer(os.environ))
         except ValueError as exc:
             raise ServeError(str(exc)) from exc
-        release_info = read_release_info(self.dest)
-        release = str(release_info["release_id"]) if release_info.get("release_id") else None
-        parent = str(release_info["parent_release_id"]) if release_info.get("parent_release_id") else None
-        self._watch = HeadWatch(self.client, self, self._log, self.poll_interval_s, mounted=release)
+        artifact_info = read_artifact_info(self.dest)
+        artifact_id = str(artifact_info["artifact_id"]) if artifact_info.get("artifact_id") else None
+        parent = str(artifact_info["parent_artifact_id"]) if artifact_info.get("parent_artifact_id") else None
+        stored = read_source(self.dest) if artifact_id is not None else None
+        manifest: Mapping[str, Any] | None = None
+        if stored is None:
+            # Nothing mounted here yet: the head's source tree, which the boot mount stores for the next start.
+            try:
+                manifest = self.client.fetch(artifact_id)
+            except ArtifactClientError as exc:
+                raise ServeError(
+                    f"no source tree under {self.dest / SOURCE_DIR} and Reef answered none: {exc}"
+                ) from exc
+            stored = tree_of(manifest)
+            artifact_id = str(manifest["artifact_id"])
+            parent = None if manifest.get("parent_artifact_id") is None else str(manifest["parent_artifact_id"])
+        self._watch = HeadWatch(self.client, self, self._log, self.poll_interval_s, mounted=artifact_id)
         self._proxy = CaptureProxy(
             self.reef_url,
             self.scenario,
             self.token,
-            tags={"release": release} if release else {},
-            observer=self._watch,
+            tags={"artifact_id": artifact_id} if artifact_id else {},
         )
         try:
             self._proxy.start()
-        except WrapperError as exc:
+        except CaptureError as exc:
             raise ServeError(str(exc)) from exc
         self.binding = replace(self._installed_binding, base_url=f"http://127.0.0.1:{self._proxy.port}")
-        # A crashed process leaves modules behind; every one would be a twin of the entry that owns its name.
-        shutil.rmtree(self.mount_dir, ignore_errors=True)
-        ctx = Context()
-        self._host = NativeHost(mount_dir=self.mount_dir)
-        ctx.provide("native", self._host)
-        self._loader = Loader(ctx, NATIVE_PLUGINS.get)
+        # A crashed process leaves its mounts behind; none of them is current.
+        self.mounts.clear()
         if self.self_tools:
-            for tool in self_tools(self):
-                self._host.add_tool(tool)
-        failure = self._mount(read_tree(self.native), release, parent, source="boot")
+            self._builtin_tools = self_tools(self)
+        failure = self._mount(stored, artifact_id, parent, source="boot", manifest=manifest)
         if failure is not None:
             self.stop()
-            raise ServeError(f"the installed tree does not mount: {failure['entry']}: {failure['error']}")
+            raise ServeError(f"artifact {artifact_id} does not mount: {failure['error']}")
         self._watch.start()
         self._socket_server = _SocketServer(self.socket_path, self)
         threading.Thread(target=self._socket_server.serve_forever, name="reef-native-socket", daemon=True).start()
@@ -503,12 +469,8 @@ class Server(ServeState, ReleaseUpdateListener):
             self.socket_path.unlink(missing_ok=True)
         if hasattr(self, "_watch"):
             self._watch.stop()
-        if hasattr(self, "_loader"):
-            with self._turn_lock:
-                self._loader.root.update([])
-        shutil.rmtree(self.mount_dir, ignore_errors=True)
-        if self.mount_dir.parent.is_dir() and not any(self.mount_dir.parent.iterdir()):
-            self.mount_dir.parent.rmdir()
+        with self._turn_lock:
+            self.mounts.clear()
         if hasattr(self, "_proxy"):
             self._proxy.stop()
         if self._started:
@@ -541,38 +503,41 @@ class Server(ServeState, ReleaseUpdateListener):
             if control == "status":
                 return {"type": "control/result", "data": self.status()}
             if control == "mount":
-                release_id = request.get("release_id")
-                if not isinstance(release_id, str) or not release_id:
-                    return _error("mount needs a release_id")
-                return {"type": "control/result", "data": self.mount(release_id)}
+                artifact_id = request.get("artifact_id")
+                if not isinstance(artifact_id, str) or not artifact_id:
+                    return _error("mount needs an artifact_id")
+                return {"type": "control/result", "data": self.mount(artifact_id)}
             return _error(f"unknown control {control!r}; status or mount")
         return _error("request must carry turn or control")
 
-    def mount(self, release_id: str) -> dict[str, Any]:
-        """A manual mount: queue the release and answer once it landed or failed."""
-        pending = self._enqueue(release_id, "release")
+    def mount(self, artifact_id: str) -> dict[str, Any]:
+        """A manual mount: queue the snapshot and answer once it landed or failed."""
+        pending = self._enqueue(_Pending(artifact_id, "release"))
         self._drain_if_idle()
         return pending.wait(self.turn_timeout_s + 5.0)
 
     # -- the head ----------------------------------------------------------------------------------------------
 
-    def new_head(self, release_id: str, source: str) -> None:
+    def new_head(self, artifact_id: str, source: str) -> None:
         """A head the watch learned of: queued for a mount under ``head``, announced and left alone under ``pinned``."""
         if self.follow == "pinned":
-            self._log.write("release/available", {"release_id": release_id})
+            self._log.write("artifact/available", {"artifact_id": artifact_id})
             return
         # Only the id is queued here: the caller may be the proxy's relay thread, and the manifest fetch belongs
         # to the thread that mounts, so an inference answer is never held behind a round trip to reef.
-        self._enqueue(release_id, "release")
+        self._enqueue(_Pending(artifact_id, "release"))
         self._drain_if_idle()
 
-    def _enqueue(self, release_id: str, source: str) -> _Pending:
-        pending = _Pending(release_id, source)
+    def _enqueue(self, pending: _Pending) -> _Pending:
         with self._state_lock:
             previous, self._pending = self._pending, pending
         if previous is not None:
             previous.settle(
-                {"mounted": False, "release_id": previous.release_id, "error": f"superseded by {pending.release_id}"}
+                {
+                    "mounted": False,
+                    **previous.identity,
+                    "error": f"superseded by {next(iter(pending.identity.values()))}",
+                }
             )
         return pending
 
@@ -585,7 +550,7 @@ class Server(ServeState, ReleaseUpdateListener):
             self._turn_lock.release()
 
     def _drain_pending(self) -> None:
-        """Land the newest queued mount; the caller holds the turn lock. A trial keeps the served entries until the turn ends."""
+        """Land the newest queued mount; the caller holds the turn lock. A trial keeps its tree until the turn ends."""
         while self._trial is None:
             with self._state_lock:
                 pending, self._pending = self._pending, None
@@ -595,159 +560,113 @@ class Server(ServeState, ReleaseUpdateListener):
 
     def _mount_manifest(self, pending: _Pending) -> dict[str, Any]:
         try:
-            manifest = pending.manifest if pending.manifest is not None else self.client.fetch(pending.release_id)
-            entries = _entries_from_manifest(manifest)
-        except (ServeError, ReleaseClientError) as exc:
+            manifest = pending.fetch(self.client)
+            tree = tree_of(manifest)
+        except (ServeError, ArtifactClientError) as exc:
             self._log.write(
                 "harness/mount-failed",
-                {"release_id": pending.release_id, "source": pending.source, "entry": None, "error": str(exc)},
+                {**pending.identity, "source": pending.source, "error": str(exc)},
             )
-            if isinstance(exc, ReleaseClientError) and exc.timed_out:
+            if isinstance(exc, ArtifactClientError) and exc.timed_out and pending.artifact_id is not None:
                 # Reef is busy (an evolve step holds the manifest as it holds the catalog), not gone: the next poll
                 # that names this head announces it again, so the mount is retried at the interval, not forgotten.
-                self._watch.forget(pending.release_id)
-            return {"mounted": False, "release_id": pending.release_id, "error": str(exc)}
-        parent = manifest.get("parent_release_id")
+                self._watch.forget(pending.artifact_id)
+            return {"mounted": False, **pending.identity, "error": str(exc)}
+        parent = manifest.get("parent_artifact_id")
         failure = self._mount(
-            entries,
-            pending.release_id,
+            tree,
+            pending.artifact_id,
             None if parent is None else str(parent),
             source=pending.source,
             manifest=manifest,
         )
         if failure is not None:
-            return {
-                "mounted": False,
-                "release_id": pending.release_id,
-                "error": f"{failure['entry']}: {failure['error']}",
-            }
-        return {"mounted": True, "release_id": pending.release_id, "error": None}
+            return {"mounted": False, "artifact_id": pending.artifact_id, "error": failure["error"]}
+        return {"mounted": True, "artifact_id": pending.artifact_id, "error": None}
 
     # -- mounts ------------------------------------------------------------------------------------------------
 
     def _mount(
         self,
-        entries: Sequence[Mapping[str, Any]],
-        release_id: str | None,
-        parent_release_id: str | None,
+        tree: HarnessTree,
+        artifact_id: str | None,
+        parent_artifact_id: str | None,
         *,
         source: str,
         manifest: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """``root.update(entries)`` checked entry by entry; None on success, else the first failure after the rollback."""
-        previous = self.served_entries()
-        failures = [*_not_flat(entries), *self._reserved(entries)]
-        if not failures:
-            if self._degraded:
-                # A FAILED entry whose options did not change never retries on its own (only update() does), so a
-                # composition a rollback left degraded is reloaded clean under the next mount.
-                self._loader.root.update([])
-            self._loader.root.update([copy.deepcopy(dict(entry)) for entry in entries])
-            failures = _failures(self._loader)
-        if failures:
-            self._restore(previous)
-            entry, kind, error = failures[0]
-            self._log.write(
-                "harness/mount-failed",
-                {"release_id": release_id, "source": source, "entry": entry, "kind": kind, "error": error},
-            )
-            return {"entry": entry, "error": error}
-        with self._state_lock:
-            self._degraded = []
+        """Make ``tree`` the current host's tree; None on success, else the failure, with the current host kept.
+
+        ``source`` is ``boot`` or ``release`` for a served artifact, ``try`` for
+        a trial and ``rollback`` for the served tree back after one. A served
+        artifact with its ``manifest`` is stored for the next start.
+        """
+        try:
+            host, directory = self.build_host(tree)
+        except (RenderError, LoadError, GraphError) as exc:
+            self._log.write("harness/mount-failed", {"artifact_id": artifact_id, "source": source, "error": str(exc)})
+            return {"error": str(exc)}
+        self.mounts.replace(host, directory, tree)
         if source in ("boot", "release"):
             with self._state_lock:
-                self._served = [copy.deepcopy(dict(entry)) for entry in entries]
-                self._release_id = release_id
-                self._parent_release_id = parent_release_id
-            if release_id:
-                self._proxy.tags["release"] = release_id
+                self._tree = tree
+                self._artifact_id = artifact_id
+                self._parent_artifact_id = parent_artifact_id
+            if artifact_id:
+                self._proxy.tags["artifact_id"] = artifact_id
             else:
-                self._proxy.tags.pop("release", None)
-            self._watch.mounted(release_id)
-            if source == "release" and manifest is not None:
-                self._install(manifest)
+                self._proxy.tags.pop("artifact_id", None)
+            self._watch.mounted(artifact_id)
+            if manifest is not None:
+                self._install(tree, manifest)
         self._log.write(
             "harness/mount",
             {
-                "release_id": release_id,
-                "parent_release_id": parent_release_id,
+                "artifact_id": artifact_id,
+                "parent_artifact_id": parent_artifact_id,
                 "source": source,
-                "entries": len(entries),
+                "files": len(tree.files),
                 **(extra or {}),
             },
         )
         return None
 
-    @staticmethod
-    def _reserved(entries: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
-        """A tree entry that takes a name reserved for built-in tools."""
-        failures = []
-        for entry in entries:
-            config = entry.get("config")
-            name = str(config.get("name")) if isinstance(config, Mapping) else ""
-            if entry.get("name") == "native_tool" and name in RESERVED_NAMES:
-                failures.append(
-                    (
-                        str(entry.get("id")),
-                        "native_tool",
-                        f"reserved name {name!r}: built-in tools own it",
-                    )
-                )
-        return failures
+    def build_host(self, tree: HarnessTree) -> tuple[NativeHost, Path]:
+        """Build a candidate host without replacing the current mount."""
+        return self.mounts.build(tree, self._builtin_tools)
 
-    def _restore(self, previous: Sequence[Mapping[str, Any]]) -> None:
-        """Mount ``previous`` back; what still fails after a clean reload is logged and named by ``status``."""
-        self._loader.root.update([copy.deepcopy(dict(entry)) for entry in previous])
-        left = _failures(self._loader)
-        if left:
-            # An in place rollback can trip on a name two entries swapped; a clean reload restores the composition exactly.
-            self._loader.root.update([])
-            self._loader.root.update([copy.deepcopy(dict(entry)) for entry in previous])
-            left = _failures(self._loader)
-        with self._state_lock:
-            self._degraded = [entry for entry, _, _ in left]
-        for entry, kind, error in left:
-            # A module whose import is not idempotent cannot come back; the log and the status say so, loudly.
-            self._log.write(
-                "harness/rollback-failed",
-                {"release_id": self._release_id, "entry": entry, "kind": kind, "error": error},
-            )
-
-    def _install(self, manifest: Mapping[str, Any]) -> None:
-        """What a restart boots from: the mounted release's tree file and the release file naming it."""
-        files = manifest.get("files") or {}
-        text = files.get(f"native/{TREE_FILE}") if isinstance(files, Mapping) else None
-        if isinstance(text, str):
-            (self.native / TREE_FILE).write_text(text, encoding="utf-8")
-        # The same fields the install script writes (``files`` is what a rerun prunes by), plus the parent and the time.
+    def _install(self, tree: HarnessTree, manifest: Mapping[str, Any]) -> None:
+        """What a restart boots from: the snapshot's source tree under ``source/`` and the snapshot file naming it."""
+        staging = self.dest / f".{SOURCE_DIR}.part"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        tree.write(staging)
+        shutil.rmtree(self.dest / SOURCE_DIR, ignore_errors=True)
+        staging.rename(self.dest / SOURCE_DIR)
         record = {
-            "release_id": manifest.get("release_id"),
-            "content_id": manifest.get("content_id"),
-            "files": sorted(files) if isinstance(files, Mapping) else [],
-            "parent_release_id": manifest.get("parent_release_id"),
+            "artifact_id": manifest.get("artifact_id"),
+            "parent_artifact_id": manifest.get("parent_artifact_id"),
             "installed_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         (self.dest / HARNESS_RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
-    def try_mount(self, mutations: Sequence[Mutation], try_id: str) -> dict[str, Any]:
-        """Mount the served entries plus ``mutations`` for the rest of the open turn; the release file stays as it is."""
+    def try_patch(self, patch: TreePatch, try_id: str) -> dict[str, Any]:
+        """Mount the served tree with ``patch`` applied for the rest of the open turn; the snapshot file stays."""
         if self._current is None:
             return {"error": "no turn is open"}
         if self._trial is not None:
             self._unmount_trial()  # one trial at a time: a second try replaces the first
-        records = [
-            {"op": m.op, "id": m.id, "options": None if m.options is None else dict(m.options)} for m in mutations
-        ]
-        entries, reason = admit_mutations(self.served_entries(), mutations, self.descriptor)
-        if reason is not None:
-            return {"error": reason}
+        served = self.served_tree()
+        validation = validate_patch(served, patch, self.descriptor)
+        if not validation.passed:
+            return {"error": validation.message()}
         failure = self._mount(
-            entries,
-            self._release_id,
-            self._parent_release_id,
+            served.apply(patch),
+            self._artifact_id,
+            self._parent_artifact_id,
             source="try",
-            extra={"try_id": try_id, "mutations": records},
+            extra={"try_id": try_id, "paths": sorted(patch.changes)},
         )
         if failure is not None:
             return failure
@@ -759,20 +678,18 @@ class Server(ServeState, ReleaseUpdateListener):
         if self._trial is None:
             return
         try_id, self._trial = self._trial, None
-        self._restore(self._served)
+        self._mount(self.served_tree(), self._artifact_id, self._parent_artifact_id, source="rollback")
         self._proxy.tags.pop("trial", None)
-        self._log.write(
-            "harness/unmount",
-            {"try_id": try_id, "release_id": self._release_id, "source": "rollback", "entries": len(self._served)},
-        )
+        self._log.write("harness/unmount", {"try_id": try_id, "artifact_id": self._artifact_id})
 
     # -- turns -------------------------------------------------------------------------------------------------
 
     def between_steps(self, run: Run) -> None:
-        """At the top of every model stage: the wall clock ends the turn, then a queued mount lands."""
+        """At the top of every model stage: the wall clock ends the turn, then a queued mount lands on ``run``."""
         if time.monotonic() > self._deadline:
             run.end_turn({"kind": "turn-timeout", "seconds": self.turn_timeout_s}, "budget")
         self._drain_pending()
+        run.host = self.host
 
     def _conversation(self, session_id: str | None) -> _Conversation:
         with self._state_lock:
@@ -795,7 +712,13 @@ class Server(ServeState, ReleaseUpdateListener):
     def turn(
         self, prompt: str, session_id: str | None, workdir: Path, sink: EventSink | None = None
     ) -> dict[str, Any]:
-        """One turn on one session; the events go to ``sink`` as written and the result comes back."""
+        """One turn on one session; the events go to ``sink`` as written and the result comes back.
+
+        The result holds the exit status, the session, the turn number, the
+        final text, and ``receipts``: the receipts of the model calls the turn
+        made on the served tree, in order, which a report references; the
+        calls of a ``harness_try`` trial are left out.
+        """
         if session_id is not None and not _SESSION_NAME.fullmatch(session_id):
             raise ServeError(f"session id {session_id!r} must match {_SESSION_NAME.pattern}")
         with self._turn_lock:
@@ -809,10 +732,8 @@ class Server(ServeState, ReleaseUpdateListener):
                 run = self._begin_turn(conversation, prompt, workdir, session)
                 # Read at each turn start: a mount between turns lands on the next one, and a mount inside the turn
                 # (landed by before_step) changes the host under a loop that keeps this module object until the end.
-                module = self._host.loop
-                exit_code = (
-                    run_graph(run, self._host.graph("main")) if module is None else run_loop_module(run, module)
-                )
+                module = self.host.loop
+                exit_code = run_graph(run, self.host.graph("main")) if module is None else run_loop_module(run, module)
                 result = {
                     "exit": exit_code,
                     "session": conversation.id,
@@ -828,13 +749,19 @@ class Server(ServeState, ReleaseUpdateListener):
                 result = {"exit": 1, "session": conversation.id, "turn": turn_number, "text": ""}
             finally:
                 self._unmount_trial()
-                self._proxy.publish_turn()
                 if conversation.loop is not None:
                     conversation.loop.open.clear()
                 self._log.bind(None)
                 self._current = None
                 session.close()
                 self._drain_pending()
+            # The receipts of the model calls this turn made on the served tree, so its caller reports feedback
+            # against them; a trial's calls answered another tree and carry the trial tag.
+            result["receipts"] = [
+                capture["receipt"]
+                for capture in self._proxy.drain()
+                if capture.get("receipt") and "trial" not in capture["tags"]
+            ]
         self._drain_if_idle()
         return result
 
@@ -849,11 +776,11 @@ class Server(ServeState, ReleaseUpdateListener):
                 "enforcement": self._enforcer.mode,
                 "mode": "serve",
                 "session": conversation.id,
-                "release_id": self._release_id,
+                "artifact_id": self._artifact_id,
             }
             loop = _ServeLoop(self, session, self.native, conversation.dir, header, self._enforcer)
-            run = Run(loop, prompt, self.binding, self._host, workdir, session=session)
-            tools, hooks, module = run.tools, run.hooks, self._host.loop
+            run = Run(loop, prompt, self.binding, self.host, workdir, session=session)
+            tools, hooks, module = run.tools, run.hooks, self.host.loop
             session.write(
                 "session",
                 {
@@ -864,16 +791,17 @@ class Server(ServeState, ReleaseUpdateListener):
                     "tools": sorted(tools),
                     "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                     "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
-                    "graph": self._host.graph("main").source,
+                    "graph": self.host.graph("main").source,
                     "loop": None if module is None else module.name,
-                    "agents": sorted(self._host.agents),
-                    "tree": TREE_FILE,
+                    "agents": sorted(self.host.agents),
                 },
             )
             conversation.loop, conversation.run = loop, run
         else:
             loop.session = session
             run.session = session
+            # A mount between turns built a new host; the held run reads it from this turn on.
+            run.host = self.host
             run.turn += 1
             run.prompt = prompt
             run.workdir = workdir
@@ -983,7 +911,7 @@ def serve_command(args: Any) -> int:
     except ServeError as exc:
         print(f"reef-native serve: {exc}", file=sys.stderr)
         return 2
-    print(f"reef-native serve: release {server.release_id} on {server.socket_path}", file=sys.stderr, flush=True)
+    print(f"reef-native serve: artifact {server.artifact_id} on {server.socket_path}", file=sys.stderr, flush=True)
     try:
         server.wait()
     finally:
@@ -1011,7 +939,7 @@ def turn_command(args: Any) -> int:
 def control_command(args: Any) -> int:
     payload: dict[str, Any] = {"control": args.command}
     if args.command == "mount":
-        payload["release_id"] = args.release_id
+        payload["artifact_id"] = args.artifact_id
     try:
         reply = request(socket_path(args.tree, args.socket), payload)
     except ServeError as exc:
@@ -1036,20 +964,21 @@ __all__ = [
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_TURN_TIMEOUT_S",
     "FOLLOW_MODES",
-    "MOUNT_DIR",
+    "MOUNTS_DIR",
     "SERVE_LOG",
     "SOCKET_NAME",
+    "SOURCE_DIR",
     "BuiltinToolEnforcer",
     "EventLog",
     "EventSink",
     "ServeError",
     "ServeSession",
     "Server",
-    "admit_mutations",
-    "read_release_info",
-    "read_tree",
+    "read_artifact_info",
+    "read_source",
     "request",
     "run_command",
     "socket_path",
     "tree_layout",
+    "tree_of",
 ]

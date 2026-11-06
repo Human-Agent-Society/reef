@@ -26,7 +26,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from reef.record2sample.samples import flatten_content
+from reef.core.chat_rendering import flatten_content
 
 logger = logging.getLogger(__name__)
 
@@ -382,46 +382,3 @@ class ResponseRenderer:
         except Exception:
             logger.exception("response render failed; falling back to visible text")
             return None
-
-
-@dataclass
-class DirectiveTeacher:
-    """Candidate builder for the Megatron teacher pass.
-
-    Upstream's topk-select loss requires the Megatron PRM teacher — its
-    launcher forces ``OPENCLAW_COMBINE_OPD_TEACHER_SOURCE=megatron`` with the
-    comment that the inference-side teacher path "does not produce per-cand
-    top-K". So the judge ships candidate TOKEN SEQUENCES, never numbers:
-    upstream's ``sample.teacher_tokens_candidates``, here one
-    ``teacher_tokens`` list per accepted hint (the hint-enhanced prompt's
-    re-tokenization plus the native response ids, verbatim) and the
-    un-enhanced native ids for the RL-only anchor. The train actor runs the
-    K-loop against the frozen-base weights and gathers exact full-vocab
-    log-probs at S^q — no prefill window, no synthetic floor.
-    """
-
-    tokenizer_path: str
-
-    async def candidate_tokens(
-        self,
-        enhanced_messages: list[dict],
-        *,
-        tools: Any = None,
-        native_tokens: list[int],
-        response_token_count: int,
-    ) -> list[int] | None:
-        """One hint candidate's token sequence, or ``None`` on templating
-        failure (the candidate silently drops; the anchor never fails)."""
-        if not (0 < response_token_count < len(native_tokens)):
-            return None
-        try:
-            tokenizer = await asyncio.to_thread(load_tokenizer, self.tokenizer_path)
-            normalized = normalize_messages_for_template(enhanced_messages)
-            prompt_text = tokenizer.apply_chat_template(
-                normalized, tools=tools, tokenize=False, add_generation_prompt=True
-            )
-            prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
-        except Exception:
-            logger.exception("teacher templating failed; the candidate drops")
-            return None
-        return [int(v) for v in prompt_ids] + [int(v) for v in native_tokens[-response_token_count:]]

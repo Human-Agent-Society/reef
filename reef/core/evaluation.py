@@ -1,7 +1,7 @@
 """Artifact-agnostic contracts for evaluating and selecting candidate updates.
 
 An evaluation runs rollouts and gives their scores (``RolloutScores``). A publication policy reads the scores
-and decides whether a release is published; training on tasks assembles the same rollouts into samples.
+and decides whether a snapshot is published; training on tasks assembles the same rollouts into samples.
 """
 
 from __future__ import annotations
@@ -289,14 +289,21 @@ class RolloutRequest:
             raise TypeError("a rollout request's record_dir is None or a Path")
 
 
+def harness_item(harness: Mapping[str, Any] | None) -> str | None:
+    """The artifact item that ``harness``, an ``ArtifactEvaluationRequest``'s value, names; None for a Harbor agent or
+    no harness."""
+    return None if harness is None else harness.get("item")
+
+
 @dataclass(frozen=True)
 class ArtifactEvaluationRequest:
-    """A client's request to evaluate one artifact: a component of a release, with the other side of its policy.
+    """A client's request to evaluate one artifact: a component of a snapshot, with the other side of its policy.
 
     Values: ``artifact_id`` is the non-empty ID of one of the scenario's artifacts, and ``component`` a
     non-empty name of one of its components: the evaluated artifact. Exactly one of ``harness`` and ``model`` is set: ``harness``, the
-    Harbor agent that runs a model artifact (an object with a non-empty ``name`` or ``import_path``, as
-    ``TaskRolloutRunner``'s ``agent``), or ``model``, the non-empty name of the deployment's model binding that a
+    harness that runs a model artifact: a Harbor agent (an object with a non-empty ``name`` or ``import_path``, as
+    ``TaskRolloutRunner``'s ``agent``), or an artifact item of a harness tree of the scenario's owner (an object
+    with a non-empty ``item`` and no other key); or ``model``, the non-empty name of the deployment's model binding that a
     harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
     ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
     Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
@@ -321,7 +328,16 @@ class ArtifactEvaluationRequest:
         if (self.harness is None) == (self.model is None):
             raise ValueError("an artifact evaluation configures exactly one of harness and model")
         if self.harness is not None:
-            if not isinstance(self.harness, Mapping) or not any(
+            if not isinstance(self.harness, Mapping):
+                raise ValueError("an artifact evaluation's harness is a JSON object")
+            if "item" in self.harness:
+                if (
+                    set(self.harness) != {"item"}
+                    or not isinstance(self.harness["item"], str)
+                    or not self.harness["item"]
+                ):
+                    raise ValueError("an artifact evaluation's harness item is one non-empty string and no other key")
+            elif not any(
                 isinstance(self.harness.get(key), str) and self.harness[key] for key in ("name", "import_path")
             ):
                 raise ValueError("an artifact evaluation's harness is a Harbor agent with a name or an import_path")
@@ -371,7 +387,7 @@ class ArtifactEvaluationSettings:
     """How to evaluate an artifact that is not named yet: an ``ArtifactEvaluationRequest`` without its
     ``artifact_id``.
 
-    Values: ``component`` is None, for the one component of the releases that has a kind, or a non-empty
+    Values: ``component`` is None, for the one component of the snapshots that has a kind, or a non-empty
     component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task`` and ``environment`` meet the
     conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation request is these settings and an
     artifact ID, and a scenario keeps settings to evaluate each new artifact with; ``request`` makes the request
@@ -388,7 +404,7 @@ class ArtifactEvaluationSettings:
     def __post_init__(self) -> None:
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
             raise ValueError("an artifact evaluation's component is None or a non-empty string")
-        # The request of any release checks every other field.
+        # The request of any snapshot checks every other field.
         checked = self.request("any", self.component or "any")
         object.__setattr__(self, "harness", checked.harness)
 
@@ -445,7 +461,7 @@ class RolloutRunner[RolloutT](ABC):
 
     Values: an implementation holds what all its rollouts share, such as the environment and the model endpoint.
     ``RolloutT`` is the result of one rollout, with its trajectory. The Harbor agent runner
-    (``TaskRolloutRunner``) and the harness tree runner (``HarnessRolloutEvaluator``) implement it.
+    (``TaskRolloutRunner``) and the harness tree runner (``HarnessTaskEvaluator``) implement it.
     Purpose: a harness evaluation, a checkpoint evaluation and training on tasks run their rollouts through it.
     To run a task ``count`` times, a caller repeats its request ``count`` times.
     """

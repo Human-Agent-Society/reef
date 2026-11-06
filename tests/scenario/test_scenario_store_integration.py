@@ -17,12 +17,15 @@ from reef.recipe.base import Recipe
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskFileStore, TaskStorage
+from reef.train.backend import ComponentArtifacts
+from reef.train.component import ScenarioRoot
 from reef.train.trainer import Trainer
-from reef.train.types import TrainStepResult
+from reef.train.types import TrainingCommit
 
 
 class OpaqueStore(ScenarioStore):
@@ -48,8 +51,8 @@ class OpaqueStore(ScenarioStore):
         return self._inner.tasks
 
     @property
-    def samples(self) -> SampleStore:
-        return self._inner.samples
+    def training_state(self) -> TrainingState:
+        return self._inner.training_state
 
     @property
     def evaluations(self) -> EvaluationStore:
@@ -132,7 +135,9 @@ class FailingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        artifacts: ComponentArtifacts | None = None,
+        samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         raise RuntimeError("injected recipe failure")
 
@@ -166,9 +171,7 @@ def test_sqlite_implementations_inherit_storage_bases(tmp_path: Path) -> None:
 
 
 def backend_factory(tmp_path: Path):
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
 
 def trace(record_id: str, scenario: str = "math") -> AgentRecord:
@@ -184,14 +187,14 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
     repository_factory = backend_factory(tmp_path)
     directory = tmp_path / "private-store"
     factory = OpaqueStorage(directory)
-    dispatcher = Dispatcher(Recipe(), repository_factory, scenario_storage=factory)
+    dispatcher = Dispatcher(Recipe(), repository_factory, scenario_storage=factory, coordination=memory_coordination())
     try:
         scenario = dispatcher.get_or_create_scenario("math")
         assert scenario is not None
         assert scenario.store is factory.sessions[0]
         assert scenario.store.durable
         scenario.records.append(trace("first"))
-        scenario.commit(TrainStepResult(state={}))
+        scenario.commit(TrainingCommit(state={}))
         assert scenario.scenario_step == 1
         assert ("commit", "math") in factory.events
         assert [row["step"] for row in dispatcher.read_commits("math")["commits"]] == [1]
@@ -207,7 +210,9 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
     assert factory.close_count == 1
 
     reopened_factory = OpaqueStorage(directory)
-    reopened = Dispatcher(Recipe(), repository_factory, scenario_storage=reopened_factory)
+    reopened = Dispatcher(
+        Recipe(), repository_factory, scenario_storage=reopened_factory, coordination=memory_coordination()
+    )
     try:
         recovered = reopened.get_or_create_scenario("math")
         assert recovered is not None
@@ -221,7 +226,9 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
 
 def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_path: Path) -> None:
     factory = OpaqueStorage(tmp_path / "private-store")
-    dispatcher = Dispatcher(Recipe(), backend_factory(tmp_path), scenario_storage=factory)
+    dispatcher = Dispatcher(
+        Recipe(), backend_factory(tmp_path), scenario_storage=factory, coordination=memory_coordination()
+    )
     try:
         math = dispatcher.get_or_create_scenario("math")
         code = dispatcher.get_or_create_scenario("code")
@@ -260,7 +267,9 @@ def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_pa
 def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point: str) -> None:
     factory = OpaqueStorage(tmp_path / "private-store", fail_recovery=failure_point == "recovery")
     recipe = FailingRecipe() if failure_point == "recipe" else Recipe()
-    dispatcher = Dispatcher(recipe, backend_factory(tmp_path), scenario_storage=factory)
+    dispatcher = Dispatcher(
+        recipe, backend_factory(tmp_path), scenario_storage=factory, coordination=memory_coordination()
+    )
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
             dispatcher.get_or_create_scenario("math")
@@ -275,7 +284,9 @@ def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point
 @pytest.mark.parametrize("failure_point", ("binding", "replay"))
 def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatch, failure_point: str) -> None:
     storage = OpaqueStorage(tmp_path / "private-store")
-    dispatcher = Dispatcher(Recipe(), backend_factory(tmp_path), scenario_storage=storage)
+    dispatcher = Dispatcher(
+        Recipe(), backend_factory(tmp_path), scenario_storage=storage, coordination=memory_coordination()
+    )
     closed_trainers: list[Trainer] = []
     original_close = Trainer.close
 
@@ -289,11 +300,11 @@ def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatc
     try:
         current = dispatcher.get_or_create_scenario("math")
         assert current is not None
-        current.commit(TrainStepResult(state={}))
+        current.commit(TrainingCommit(state={}))
         with monkeypatch.context() as patch:
             patch.setattr(Trainer, "close", track_close)
             if failure_point == "binding":
-                patch.setattr(Recipe, "inference_handler", property(fail_restore))
+                patch.setattr(Recipe, "activation_rule", fail_restore)
             else:
                 patch.setattr(Trainer, "restore_record_progress", fail_restore)
             with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
@@ -310,7 +321,9 @@ def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatc
 
 def test_trainer_teardown_failure_still_closes_store_and_storage(tmp_path: Path, monkeypatch) -> None:
     factory = OpaqueStorage(tmp_path / "private-store")
-    dispatcher = Dispatcher(Recipe(), backend_factory(tmp_path), scenario_storage=factory)
+    dispatcher = Dispatcher(
+        Recipe(), backend_factory(tmp_path), scenario_storage=factory, coordination=memory_coordination()
+    )
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None
     original_close = scenario.trainer.close

@@ -1,0 +1,5 @@
+{
+  "name": "reef-harness",
+  "type": "module",
+  "main": "index.ts"
+}

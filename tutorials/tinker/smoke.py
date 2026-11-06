@@ -19,6 +19,19 @@ def main() -> None:
     args = parser.parse_args()
     client = ReefClient(args.url, token=os.environ["REEF_TOKEN"], timeout_s=args.timeout)
     scenario = f"tinker-smoke-{uuid.uuid4().hex[:8]}"
+    # The inference routes serve only a scenario that exists: create it first.
+    client.post("/reef/scenarios", scenario, {"name": scenario})
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        startup = client.get(f"/reef/scenarios/{scenario}/inference/status")
+        if startup["state"] == "ready":
+            break
+        if startup["state"] == "failed":
+            raise RuntimeError(f"Inference startup failed: {startup['error']}")
+        time.sleep(0.2)
+    else:
+        raise TimeoutError("Inference did not become ready; inspect the inference service logs")
+    base_artifact_id = startup["artifact_id"]
     for rollout in range(4):
         response, record = client.inference_with_record(
             scenario,
@@ -52,8 +65,8 @@ def main() -> None:
     while time.monotonic() < deadline:
         status = client.get("/reef/status")
         block = status.get("scenarios", {}).get(scenario) or {}
-        if block.get("scenario_step", 0) >= 1 and block.get("current_runtime_load_id"):
-            print(f"Committed one Tinker update for {scenario}")
+        if block.get("scenario_step", 0) >= 1 and block.get("served_artifact_id") not in (None, base_artifact_id):
+            print(f"Committed one Tinker update for {scenario}; it serves as {block['served_artifact_id']}")
             return
         time.sleep(2)
     raise TimeoutError("Reef did not commit the Tinker update; inspect service training status and logs")

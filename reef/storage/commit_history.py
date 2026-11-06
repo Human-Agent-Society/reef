@@ -16,10 +16,10 @@ from contextlib import AbstractContextManager, contextmanager
 from threading import RLock
 
 from reef.core.errors import ReefError
-from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord
+from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord, CommitSnapshots
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainingState
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.storage.tasks import TaskStorage
 
@@ -93,10 +93,10 @@ class CommitHistory(ABC):
 
 
 class CommitHistoryScenarioStore(ScenarioStore):
-    """One open session of a scenario: its records, task stores, training samples, evaluations and commits.
+    """One open session of a scenario: its records, task stores, training state, evaluations and commits.
 
     Values: ``scenario`` is a non-empty name. ``records``, ``tasks``,
-    ``samples``, ``evaluations`` and ``commit_history`` hold that
+    ``training_state``, ``evaluations`` and ``commit_history`` hold that
     scenario's state; the bundled storages keep all five in one database. Every record in the
     history names ``scenario``; a read that finds another name raises
     ``ReefError``. ``initial_step`` is a non-negative step for an existing
@@ -116,7 +116,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         commit_history: CommitHistory,
         *,
         tasks: TaskStorage,
-        samples: SampleStore,
+        training_state: TrainingState,
         evaluations: EvaluationStore,
         initial_step: int = 0,
     ) -> None:
@@ -127,11 +127,13 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self._scenario = scenario
         self._records = records
         self._tasks = tasks
-        self._samples = samples
+        self._training_state = training_state
         self._evaluations = evaluations
         self._commit_history = commit_history
         self._initial_step = initial_step
+        self._read_history: tuple[CommitRecord, ...] = ()
         self._cached_history: tuple[CommitRecord, ...] = ()
+        self._snapshots: CommitSnapshots | None = None
         self._commits_by_step: dict[int, CommitRecord] = {}
         self._lock = RLock()
         self._closed = False
@@ -153,10 +155,10 @@ class CommitHistoryScenarioStore(ScenarioStore):
             return self._tasks
 
     @property
-    def samples(self) -> SampleStore:
+    def training_state(self) -> TrainingState:
         with self._lock:
             self._ensure_open()
-            return self._samples
+            return self._training_state
 
     @property
     def evaluations(self) -> EvaluationStore:
@@ -170,6 +172,13 @@ class CommitHistoryScenarioStore(ScenarioStore):
         with self._lock:
             self._ensure_open()
             return self._commit_history
+
+    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
+        with self._lock:
+            self._snapshots = snapshots
+            self._read_history = ()
+            self._cached_history = ()
+            self._commits_by_step.clear()
 
     def history(self) -> tuple[CommitRecord, ...]:
         # Commits are append-only, so a read needs no lock against other writers.
@@ -258,9 +267,9 @@ class CommitHistoryScenarioStore(ScenarioStore):
 
     def _history(self) -> tuple[CommitRecord, ...]:
         records = self._commit_history.records()
-        if records is self._cached_history:
-            return records
-        previous = self._cached_history
+        if records is self._read_history and self._cached_history:
+            return self._cached_history
+        previous = self._read_history
         appended = len(previous) <= len(records) and (not previous or records[len(previous) - 1] is previous[-1])
         if not appended:
             self._commits_by_step.clear()
@@ -270,9 +279,11 @@ class CommitHistoryScenarioStore(ScenarioStore):
                     f"commit history {self._commit_history.label} holds records for {record.scenario!r}, "
                     f"not {self._scenario!r}"
                 )
-            self._commits_by_step[record.step] = record
-        self._cached_history = records
-        return records
+        located = records if self._snapshots is None else self._snapshots.locate(records)
+        self._commits_by_step.update({record.step: record for record in located})
+        self._read_history = records
+        self._cached_history = located
+        return located
 
 
 __all__ = [

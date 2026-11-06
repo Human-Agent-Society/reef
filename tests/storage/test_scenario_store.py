@@ -11,13 +11,13 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.snapshot import SnapshotRef
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
@@ -39,7 +39,7 @@ def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
     return CommitRecord(
         scenario=scenario,
         step=step,
-        artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,
@@ -183,7 +183,7 @@ def operation_commit(step: int, operation: str) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=commit().artifact_ref,
+        snapshot=commit().snapshot,
         checkpoint=False,
         algorithm_state=None,
         high_water_sequence=0,
@@ -235,7 +235,7 @@ def sqlite_session(*, database=None, initial_step=0):
         records,
         records.commit_history(),
         tasks=tasks,
-        samples=records.sample_store(files, "math"),
+        training_state=records.training_state(),
         evaluations=records.evaluation_store(),
         initial_step=initial_step,
     )
@@ -328,6 +328,34 @@ def test_conflicting_sessions_have_only_one_winner(open_storage):
     second_factory.close()
 
 
+@pytest.mark.parametrize("write", [False, True], ids=["reader", "writer"])
+def test_memory_sessions_wait_for_another_sessions_transaction(write: bool) -> None:
+    with (
+        closing(SQLiteScenarioStorage()) as storage,
+        closing(storage.open("math")) as first,
+        closing(storage.open("math")) as second,
+    ):
+        records = first.records
+        assert isinstance(records, SQLiteRecordStore)
+        started = Event()
+        item = record("concurrent")
+
+        def append() -> None:
+            started.set()
+            second.records.append(item)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with records._transaction(write=write) as connection:
+                # Shared-cache reads lock the table until their transaction ends.
+                connection.exec_driver_sql("SELECT agent_record_id FROM agent_record").fetchall()
+                pending = pool.submit(append)
+                assert started.wait(5)
+                with pytest.raises(TimeoutError):
+                    pending.result(timeout=0.1)
+            pending.result(timeout=5)
+        assert first.records.get("math", item.agent_record_id) == item
+
+
 def test_session_refreshes_cached_history_after_another_writer(open_storage):
     factory = open_storage()
     with closing(factory.open("math")) as first, closing(factory.open("math")) as second:
@@ -408,6 +436,37 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
     second_archive = factory.archive("math")
     assert set(first_archive).isdisjoint(second_archive)
     assert all(Path(location).exists() for location in first_archive)
+    factory.close()
+
+
+def test_an_archive_skips_a_wal_file_that_sqlite_removed_while_it_moved_the_files(tmp_path, monkeypatch):
+    """SQLite removes a WAL file only after it folded its frames into the database. When a reader of another
+    service makes it do so while the archive runs, the archive skips the file and the moved database keeps every
+    record."""
+    import sqlite3
+
+    import reef.storage.sqlite as sqlite_module
+
+    factory = SQLiteScenarioStorage(tmp_path)
+    reader = factory.open("math")
+    reader.records.append(record("record-1"))
+    database, wal, _ = factory.state_paths("math")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    move = sqlite_module.shutil.move
+
+    def move_after_sqlite_removed_the_wal(source: str, target: str) -> str:
+        if source == str(wal):
+            wal.unlink()
+        return move(source, target)
+
+    monkeypatch.setattr(sqlite_module.shutil, "move", move_after_sqlite_removed_the_wal)
+    archived = factory.archive("math")
+    monkeypatch.undo()
+    reader.close()
+    assert [Path(location).name for location in archived] == [database.name, f"{database.name}-shm"]
+    with closing(SQLiteRecordStore(Path(archived[0]))) as records:
+        assert records.count("math") == 1
     factory.close()
 
 

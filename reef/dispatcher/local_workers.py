@@ -1,8 +1,8 @@
 """Training workers: one thread per scenario component that trains.
 
 A cycle prepares the trainer's next commit outside the scenario's registry
-lock, because the preparation can take minutes (a harness step's evaluation,
-a training job's checkpoint evaluation). Then it commits under that lock. A
+lock, because the preparation can take a while (a job's submission, or the
+read of a job's checkpoints). Then it commits under that lock. A
 worker whose trainer has a training job or a pipeline background job (such
 as a judge call) running looks again every ``POLL_SECONDS``, since a job's
 checkpoints and a judgment arrive without a new record.
@@ -19,7 +19,7 @@ from threading import Event, Lock, Thread
 from typing import Literal
 
 from reef.dispatcher.errors import TrainingErrors, error_text, local_error_source
-from reef.runtime.interfaces import RuntimeContractError
+from reef.inference.interfaces import RuntimeContractError
 from reef.scenario.registry import InstanceState, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 
@@ -121,12 +121,6 @@ class LocalTrainingWorkers:
             worker = self.workers.get((scenario, component))
             return self.phase != "closed" and worker is not None and worker.ready is ready
 
-    def wake_all(self) -> None:
-        with self.lock:
-            workers = tuple(self.workers.values())
-        for worker in workers:
-            worker.ready.set()
-
     def open(self) -> None:
         with self.lock:
             if self.phase == "held":
@@ -179,14 +173,14 @@ class LocalTrainingWorkers:
         """Run one local cycle of ``scenario``'s ``component``; return whether the worker should look again."""
         current = self.registry.get_optional(scenario)
         if current is None:
-            # Deleted while a harness step was in flight: the step ends without
+            # Deleted while a cycle was in flight: the cycle ends without
             # a commit and without an error, as documented in http-api.rst.
             return False
         if not current.trainer_for(component).trains:
             raise RuntimeContractError(f"scenario {scenario!r} component {component!r} does not train")
         self.errors.clear(scenario, local_error_source(component))
         # A scenario runs one cycle at a time. A cycle holds the cycle lock
-        # from preparation to commit. Thus the head does not move under a step.
+        # from preparation to commit. Thus the head does not move under a job's submission.
         with self.cycle(scenario):
             if not self.cycles_run():
                 return False
@@ -198,9 +192,9 @@ class LocalTrainingWorkers:
                 # Reloaded while this worker waited: look again on the rebuilt instance, whose rows are unread.
                 return True
             try:
-                result = current.prepare_training_step(component)
+                result = current.next_commit(component)
             except Exception as exc:
-                self.fail_instruction(current, exc, component)
+                self.fail_request(current, exc, component)
                 self.reload_after_local_failure(current)
                 raise
             if result is None:
@@ -228,14 +222,15 @@ class LocalTrainingWorkers:
                     # in-memory step and append the same step number again.
                     self.reload_after_local_failure(current)
                     raise
+                self.registry.lifecycle.scenario_committed(current)
         return True
 
-    def fail_instruction(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
-        """A failed instruction step consumes the instruction with a skip row on the next step; wake for it."""
-        if not current.trainer_for(component).fail_pending_instruction(error_text(cause)):
+    def fail_request(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
+        """A failed request step consumes the request with a skip row on the next step; wake for it."""
+        if not current.fail_pending_request(error_text(cause), component):
             return
         with self.registry.lock_instance(current) as state:
-            # Wake the worker, so that the failed instruction settles without a new record.
+            # Wake the worker, so that the failed request settles without a new record.
             # Do not start a worker for an instance that a delete or a reload removed.
             if state is InstanceState.CURRENT:
                 self.wake(current)
@@ -300,20 +295,4 @@ class LocalTrainingWorkers:
             return
         with self.registry.lock_instance(current) as state:
             if state is InstanceState.CURRENT:
-                self.reload(current.name, current)
-
-    def reload(self, scenario: str, current: Scenario | None) -> Scenario:
-        """Rebuild durable state, retaining failed instructions that still need skip rows."""
-        failures = (
-            {
-                component_trainer.component: component_trainer.trainer.instruction_failures()
-                for component_trainer in current.trainers
-            }
-            if current is not None
-            else {}
-        )
-        recovered = self.registry.reload(scenario)
-        for component, failed in failures.items():
-            if failed:
-                recovered.trainer_for(component).set_instruction_failures(failed)
-        return recovered
+                self.registry.reload(current.name)

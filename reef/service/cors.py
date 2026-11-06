@@ -7,7 +7,7 @@ from aiohttp import web
 
 _METHODS = frozenset({"GET", "POST", "DELETE"})
 _HEADERS = frozenset({"authorization", "content-type", "x-reef-scenario"})
-_EXPOSE = "x-reef-agent-record-id, x-reef-release-id, x-reef-artifact-version"
+_EXPOSE = "x-reef-agent-record-id, x-reef-artifact-id, x-reef-artifact-version"
 
 
 def console_origins(values: Iterable[str]) -> tuple[str, ...]:

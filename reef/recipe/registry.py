@@ -17,12 +17,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.recipe.base import Recipe
+from reef.inference.interfaces import InferenceRuntime
+from reef.inference.registry import RuntimeRegistry
+from reef.recipe.base import Recipe, close_runtimes
 from reef.recipe.config import load_recipe_config
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.deployment import RuntimeRegistry, close_runtimes
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
+from reef.train.component import TrainingComponent
 
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RecipeType = type[Recipe]
@@ -81,8 +81,7 @@ def build_named_recipe(
     ``name`` is a YAML preset ``<name>.yaml`` under ``config_directory``
     (defaulting to ``REEF_RECIPE_CONFIG_DIR``), or the reserved core name
     ``recipe``. Presets are deployment data (see ``docs/reference/configuration.rst``);
-    the one kind reef bundles is a recipe's profile under ``reef.service.profiles``,
-    which ``reef serve --recipe`` points this directory at. A preset's ``runtime`` section builds the recipe's
+    Reef bundles none. A preset's ``runtime`` section builds the recipe's
     runtime; without one the recipe gets ``default_runtime`` and may omit
     ``model.path`` to use that runtime's model. Dotted references are
     not names: they are operator configuration for :func:`build_recipe`, so a
@@ -121,13 +120,10 @@ def build_named_recipe(
         if runtime_config
         else default_runtime
     )
-    if isinstance(runtime, TrainingComponent):
-        runtime.close()
-        raise TypeError("a recipe's runtime must be an inference runtime; training.backend selects training")
     try:
         return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
     except BaseException:
         if runtime_config:
             # The build error stays the one raised.
-            close_runtimes(None, runtime)
+            close_runtimes((), runtime)
         raise

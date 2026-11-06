@@ -38,13 +38,14 @@ from tests.reef_service.routing.routing_fakes import (
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher
 from reef.service import routing_preview
-from reef.service.app import CONTROL_APPLICATION, MAX_REQUEST_BYTES, create_app
+from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.assembly import build_app
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.errors import translate_error
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, PREVIEW_BODY_LIMIT_BYTES
+from reef.service.web import MAX_REQUEST_BYTES
 
 pytestmark = pytest.mark.unit
 NEW_ROUTER_HASH = "2" * 64
@@ -116,7 +117,15 @@ class Provider:
         payload = await request.json()
         self.received.append(payload)
         if payload.get("stream") is True:
-            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            response = web.StreamResponse(
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "x-reef-agent-record-id": "provider-record",
+                    "x-reef-artifact-id": "provider-artifact",
+                    "x-reef-release-id": "provider-release",
+                    "x-reef-artifact-version": "provider-version",
+                }
+            )
             await response.prepare(request)
             await response.write(b'data: {"id":"chat-1","choices":[{"index":0,"delta":{"content":"a"}}]}\n\n')
             await response.write(b"data: [DONE]\n\n")
@@ -147,7 +156,7 @@ class RoutedService:
     dispatcher: Dispatcher
 
     def records(self, scenario: str = "coding") -> list[Mapping[str, object]]:
-        loaded = self.dispatcher.loaded_scenario(scenario)
+        loaded = self.dispatcher.registry.get_loaded(scenario)
         return [] if loaded is None else [record.payload for record in loaded.records.replay(scenario)]
 
     async def chat(self, body: object, **headers: str) -> tuple[int, str, Mapping[str, str]]:
@@ -292,8 +301,15 @@ def test_a_stream_shares_the_selection_and_its_receipt_links_feedback(tmp_path: 
     async def run() -> None:
         async with routed_service(tmp_path) as service:
             body = {**REQUEST, "stream": True, "messages": user_message("reef_teacher_required")}
-            status, text, _ = await service.chat(body)
+            status, text, headers = await service.chat(body)
             assert status == 200
+            for header in (
+                "x-reef-agent-record-id",
+                "x-reef-artifact-id",
+                "x-reef-release-id",
+                "x-reef-artifact-version",
+            ):
+                assert header not in headers
             receipt = next(
                 json.loads(line.removeprefix("data: "))["reef"]["agent_record_id"]
                 for line in text.splitlines()
@@ -392,6 +408,7 @@ def test_routed_rollout_calls_are_refused_before_selection(tmp_path: Path, manag
         ([("x-reef-sr-decision", "teacher_requested")], None, 400, "reserved_header"),
         ([("x-reef-scenario", "math")], None, 400, "duplicate_header"),
         ([("x-reef-release-id", "release-1")], None, 400, "release_pin"),
+        ([("x-reef-artifact-id", "artifact-1")], None, 400, "release_pin"),
         ([("x-reef-scenario", None), ("x-reef-scenario", "unknown")], None, 403, "unknown_scenario"),
         ([("x-reef-scenario", None)], None, 400, "missing_scenario"),
         ([], b'{"model":"math-student","messages":[{"role":"user","content":"x"}]}', 403, "target_not_allowed"),

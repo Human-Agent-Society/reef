@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import threading
@@ -16,8 +17,9 @@ import pytest
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
-from reef.harness.client.tasks import (
+from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
+    ReefEvalLab,
     RolloutRow,
     TaskLab,
     TaskRollout,
@@ -106,6 +108,7 @@ class StandInLab(TaskLab):
         self.turns = turns
         self.trial_uri = trial_uri
         self.calls: list[dict[str, object]] = []
+        self.builds: list[dict[str, object]] = []
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         self.calls.append(
@@ -128,6 +131,58 @@ class StandInLab(TaskLab):
         return RolloutRow(
             rewards=self.rewards, error=self.error, trial_uri=self.trial_uri or f"trials/{task_path.name}"
         )
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        self.builds.append({"task_path": task_path, "overrides": dict(overrides)})
+        return ""
+
+
+class TemplateLab(StandInLab):
+    """A lab whose environment is one template per task, built at the first start of the task, the way E2B builds.
+
+    A start that finds the task's template building fails, as E2B cancels all but one build of a template.
+    ``build_errors`` names the tasks whose build fails, with the error. ``rollout_starts`` holds the task of each
+    rollout that started.
+    """
+
+    def __init__(self, build_errors: Mapping[str, str] | None = None, *, failing_builds: int = 1_000_000) -> None:
+        super().__init__({"reward": 1.0})
+        self.build_errors = dict(build_errors or {})
+        # The number of times each erroring task's build fails before it succeeds.
+        self.failing_builds = failing_builds
+        self.failed_builds: dict[str, int] = {}
+        self.template_builds: list[str] = []
+        self.built: set[str] = set()
+        self.building: set[str] = set()
+        self.most_building = 0
+        self.rollout_starts: list[Path] = []
+
+    async def start(self, task_path: Path) -> str:
+        name = task_path.name
+        if name in self.building:
+            return "build was cancelled"
+        if name not in self.built:
+            self.template_builds.append(name)
+            self.building.add(name)
+            self.most_building = max(self.most_building, len(self.building))
+            await asyncio.sleep(0.05)
+            self.building.discard(name)
+            if name in self.build_errors and self.failed_builds.get(name, 0) < self.failing_builds:
+                self.failed_builds[name] = self.failed_builds.get(name, 0) + 1
+                return self.build_errors[name]
+            self.built.add(name)
+        return ""
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        await super().build_environment(task_path, overrides=overrides)
+        return await self.start(task_path)
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.rollout_starts.append(task_path)
+        error = await self.start(task_path)
+        if error:
+            return RolloutRow(rewards={}, error=error)
+        return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
 
 
 @pytest.fixture
@@ -229,7 +284,7 @@ def test_a_scored_rollout_is_reported_against_its_receipts(reef: StandInReef, tm
     ran = runner(reef, tmp_path, lab, labels={"arm": "hint"}, extra_instruction_paths=[hint]).run(task_path)
 
     assert ran.reward == 1.0 and ran.receipts == ("rec-1", "rec-2") and ran.error == ""
-    assert ran.report_agent_record_ids == ("rep-1",) and ran.is_reported
+    assert ran.report_agent_record_ids == ("rep-1",)
     assert ran.trial_uri == "trials/t1" and len(ran.rollout_id) == 32
 
     call = lab.calls[0]
@@ -250,7 +305,8 @@ def test_a_scored_rollout_is_reported_against_its_receipts(reef: StandInReef, tm
     report = reef.reports[0]
     assert report["headers"]["x-reef-scenario"] == "guess" and report["headers"]["authorization"] == "Bearer tok"
     body = report["body"]
-    assert body["score"] == 1.0 and body["references"] == ["rec-1", "rec-2"]
+    # The last call ends the rollout's trajectory; Reef expands it to both calls.
+    assert body["score"] == 1.0 and body["references"] == ["rec-2"]
     assert body["feedback"] == "verifier reward 1.0 on t1"
     assert body["metadata"]["task"] == task_identity(task_path)
     assert body["metadata"]["rollout"] == {
@@ -266,7 +322,9 @@ def test_an_unrecorded_rollout_keeps_its_calls_and_reports_nothing(reef: StandIn
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False, is_unrecorded=True).run(task_path)
     assert ran.reward == 1.0 and ran.error == "" and ran.failed_calls == 0
-    assert ran.receipts == () and not ran.is_reported and reef.reports == [], "an unrecorded rollout keeps no record"
+    assert (
+        ran.receipts == () and ran.report_agent_record_ids == () and reef.reports == []
+    ), "an unrecorded rollout keeps no record"
     assert [turn.request["messages"][0]["content"] for turn in ran.turns] == ["turn 0", "turn 1"]
     assert all(turn.response["choices"][0]["message"]["content"] == "ls" for turn in ran.turns)
     headers = reef.inferences[0]["headers"]
@@ -279,14 +337,14 @@ def test_an_unscored_rollout_is_kept_but_not_reported(reef: StandInReef, tmp_pat
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({}, error="the container died")).run(task_path)
     assert ran.reward is None and ran.error == "the container died"
-    assert ran.receipts == ("rec-1", "rec-2") and not ran.is_reported and reef.reports == []
+    assert ran.receipts == ("rec-1", "rec-2") and ran.report_agent_record_ids == () and reef.reports == []
 
 
 def test_a_rollout_whose_verifier_names_no_primary_reward_says_so(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"correctness": 1.0, "style": 0.0})).run(task_path)
     assert ran.reward is None and ran.error == "the verifier wrote correctness, style and no reward entry"
-    assert not ran.is_reported and reef.reports == []
+    assert ran.report_agent_record_ids == () and reef.reports == []
 
 
 def test_a_verifier_timeout_scores_the_configured_reward_and_is_reported(reef: StandInReef, tmp_path: Path) -> None:
@@ -299,7 +357,7 @@ def test_a_verifier_timeout_scores_the_configured_reward_and_is_reported(reef: S
     lab = StandInLab({}, error="timed out after 900.0 seconds", trial_uri=trial.as_uri())
     assert runner(reef, tmp_path, lab).run(task_path).reward is None, "unscored unless the runner opts in"
     ran = runner(reef, tmp_path, lab, verifier_timeout_reward=0.0).run(task_path)
-    assert ran.reward == 0.0 and ran.is_reported and len(reef.reports) == 1
+    assert ran.reward == 0.0 and ran.report_agent_record_ids != () and len(reef.reports) == 1
     (trial / "result.json").write_text(json.dumps({"exception_info": {"exception_type": "AgentTimeoutError"}}))
     assert runner(reef, tmp_path, lab, verifier_timeout_reward=0.0).run(task_path).reward is None
     (trial / "result.json").unlink()
@@ -309,22 +367,14 @@ def test_a_verifier_timeout_scores_the_configured_reward_and_is_reported(reef: S
 def test_a_rollout_without_model_calls_is_not_reported(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}, turns=0)).run(task_path)
-    assert ran.reward == 1.0 and ran.receipts == () and not ran.is_reported and reef.reports == []
-
-
-def test_per_receipt_sends_one_report_per_model_call(reef: StandInReef, tmp_path: Path) -> None:
-    task_path = written_task(tmp_path / "tasks", "t1")
-    ran = runner(reef, tmp_path, StandInLab({"reward": 0.25}), per_receipt=True).run(task_path)
-    assert ran.report_agent_record_ids == ("rep-1", "rep-2")
-    assert [report["body"]["references"] for report in reef.reports] == [["rec-1"], ["rec-2"]]
-    assert {report["body"]["score"] for report in reef.reports} == {0.25}
+    assert ran.reward == 1.0 and ran.receipts == () and ran.report_agent_record_ids == () and reef.reports == []
 
 
 def test_a_refused_report_is_the_rollouts_error_and_the_rollout_comes_back_unreported(tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     with contextlib.closing(StandInReef(refuse_reports=True)) as reef:
         ran = runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(task_path)
-    assert ran.reward == 1.0 and not ran.is_reported
+    assert ran.reward == 1.0 and ran.report_agent_record_ids == ()
     assert "the report for t1 was refused (400)" in ran.error
 
 
@@ -332,7 +382,7 @@ def test_the_agents_own_authorization_passes_through_without_a_token(reef: Stand
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
     ran = runner(reef, tmp_path, lab, token=None).run(task_path)
-    assert ran.is_reported
+    assert ran.report_agent_record_ids != ()
     assert lab.calls[0]["agent"]["kwargs"]["llm_kwargs"] == {"api_key": "reef"}
     assert reef.inferences[0]["headers"]["authorization"] == "Bearer agent-side"
     assert "authorization" not in reef.reports[0]["headers"]
@@ -342,7 +392,7 @@ def test_a_measurement_run_keeps_its_rollouts_out_of_the_training_data(reef: Sta
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False).run(task_path)
     assert ran.reward == 1.0 and ran.receipts == ("rec-1", "rec-2")
-    assert not ran.is_reported and reef.reports == []
+    assert ran.report_agent_record_ids == () and reef.reports == []
 
 
 def test_concurrent_rollouts_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
@@ -350,15 +400,123 @@ def test_concurrent_rollouts_each_get_their_own_proxy_and_report(reef: StandInRe
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, concurrency=3)
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths]
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in paths]
     )
     assert [rollout.name for rollout in rollouts] == ["t1", "t2", "t3"] and all(
-        rollout.is_reported for rollout in rollouts
+        rollout.report_agent_record_ids != () for rollout in rollouts
     )
     assert len({rollout.rollout_id for rollout in rollouts}) == 3 and len(reef.reports) == 3
     ports = {call["agent"]["kwargs"]["api_base"] for call in lab.calls}
     assert len(ports) == 3, "every rollout talks to its own proxy, so its receipts are its own"
     assert sorted(receipt for rollout in rollouts for receipt in rollout.receipts) == [f"rec-{n}" for n in range(1, 7)]
+
+
+def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: StandInReef, tmp_path: Path) -> None:
+    paths = {name: written_task(tmp_path / "tasks", name) for name in ("t1", "t2", "t3")}
+    lab = TemplateLab()
+    running = runner(reef, tmp_path, lab, concurrency=7, environment="e2b")
+    names = ["t1", "t2", "t1", "t3", "t2", "t1", "t2"]
+    rollouts = running.run_rollouts(
+        [RolloutRequest(running.harness, running.policy_model, str(paths[name])) for name in names]
+    )
+    assert [(rollout.name, rollout.reward, rollout.error) for rollout in rollouts] == [
+        (name, 1.0, "") for name in names
+    ]
+    assert sorted(lab.template_builds) == ["t1", "t2", "t3"], "each task's template is built once"
+    assert [build["task_path"] for build in lab.builds] == [paths["t1"], paths["t2"]], "t3 has one rollout"
+    assert lab.builds[0]["overrides"] == {"environment": {"type": "e2b"}}
+    assert lab.most_building == 3, "no task waits for the build of another task"
+
+
+def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None:
+    paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2")]
+    lab = TemplateLab()
+    running = runner(reef, tmp_path, lab, concurrency=1, environment="e2b")
+    rollouts = running.run_rollouts(
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in paths * 2]
+    )
+    assert [rollout.reward for rollout in rollouts] == [1.0] * 4
+    assert lab.most_building == 1, "with one slot, the two builds run one after the other"
+
+
+def test_a_task_whose_environment_does_not_build_runs_no_rollout(reef: StandInReef, tmp_path: Path) -> None:
+    bad, good = written_task(tmp_path / "tasks", "bad"), written_task(tmp_path / "tasks", "good")
+    lab = TemplateLab({"bad": "COPY app.py: no such file"})
+    running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
+    rollouts = running.run_rollouts(
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in (bad, good, bad, good)]
+    )
+    assert [rollout.reward for rollout in rollouts] == [None, 1.0, None, 1.0]
+    assert rollouts[0].error == rollouts[2].error == "the environment of bad did not start: COPY app.py: no such file"
+    assert rollouts[0].rollout_id != rollouts[2].rollout_id
+    assert [running.rollout_score(rollout) for rollout in rollouts[::2]] == [RolloutScore.failed()] * 2
+    assert lab.rollout_starts == [good, good], "no rollout of bad starts"
+    assert lab.failed_builds == {"bad": 2}, "the build is tried twice"
+
+
+def test_a_build_that_fails_once_is_tried_again_and_the_rollouts_run(reef: StandInReef, tmp_path: Path) -> None:
+    task = written_task(tmp_path / "tasks", "t1")
+    lab = TemplateLab({"t1": "429: rate limit"}, failing_builds=1)
+    running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 3)
+    assert [(rollout.reward, rollout.error) for rollout in rollouts] == [(1.0, "")] * 3
+    assert len(lab.builds) == 2 and lab.template_builds == ["t1", "t1"]
+
+
+def test_docker_rollouts_start_with_no_build_first(reef: StandInReef, tmp_path: Path) -> None:
+    task = written_task(tmp_path / "tasks", "t1")
+    lab = StandInLab({"reward": 1.0})
+    running = runner(reef, tmp_path, lab, concurrency=4, environment="docker")
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 3)
+    assert [rollout.reward for rollout in rollouts] == [1.0] * 3
+    assert lab.builds == [], "Harbor builds one Docker image at a time"
+
+
+def test_run_rollouts_refuses_a_directory_without_task_toml_before_any_build(
+    reef: StandInReef, tmp_path: Path
+) -> None:
+    task, empty = written_task(tmp_path / "tasks", "t1"), tmp_path / "empty"
+    empty.mkdir()
+    lab = StandInLab({"reward": 1.0})
+    running = runner(reef, tmp_path, lab)
+    with pytest.raises(TaskRolloutError, match="not a Harbor task directory"):
+        running.run_rollouts(
+            [RolloutRequest(running.harness, running.policy_model, str(path)) for path in (task, task, empty, empty)]
+        )
+    assert lab.calls == [] and lab.builds == []
+
+
+def test_the_reef_eval_lab_builds_with_an_install_only_trial_of_the_nop_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The source suite installs no reef-eval; the installed-wheel suite has it.
+    pytest.importorskip("reef_eval")
+    import reef_eval.lab
+    from harbor.models.trial.config import TaskConfig, TrialConfig
+    from reef_eval.types import EpisodeResult, EpisodeSpec
+
+    trials: list[TrialConfig] = []
+
+    class TrialConfigExecutor:
+        """Validates the trial config the way reef-eval's Harbor executor does, and fails the trial."""
+
+        def __init__(self, trials_dir: Path) -> None:
+            self.trials_dir = trials_dir
+
+        async def execute(self, spec: EpisodeSpec) -> EpisodeResult:
+            task = TaskConfig.model_validate({"path": Path(spec.task)}).model_dump()
+            config = {"task": task, "trials_dir": self.trials_dir, "agent": spec.agent, **spec.overrides}
+            trials.append(TrialConfig.model_validate(config))
+            return EpisodeResult(rewards={}, error="build was cancelled")
+
+    monkeypatch.setattr(reef_eval.lab, "HarborExecutor", TrialConfigExecutor)
+    task_path = written_task(tmp_path / "tasks", "t1")
+    lab = ReefEvalLab(tmp_path / "lab")
+    error = asyncio.run(lab.build_environment(task_path, overrides={"environment": {"type": "docker"}}))
+    assert error == "build was cancelled"
+    (trial,) = trials
+    assert trial.install_only and trial.verifier.disable, "Harbor starts the environment and runs no agent or verifier"
+    assert trial.agent.name == "nop" and trial.environment.type == "docker"
 
 
 def test_two_runs_are_two_rollouts(reef: StandInReef, tmp_path: Path) -> None:
@@ -367,7 +525,7 @@ def test_two_runs_are_two_rollouts(reef: StandInReef, tmp_path: Path) -> None:
     rollout_runner = runner(reef, tmp_path, lab)
     first, second = rollout_runner.run(task_path), rollout_runner.run(task_path)
     assert first.rollout_id != second.rollout_id and lab.calls[0]["key"] != lab.calls[1]["key"]
-    assert [report["body"]["references"] for report in reef.reports] == [["rec-1", "rec-2"], ["rec-3", "rec-4"]]
+    assert [report["body"]["references"] for report in reef.reports] == [["rec-2"], ["rec-4"]]
 
 
 @pytest.mark.parametrize(
@@ -411,7 +569,10 @@ def test_labels_are_stored_the_way_the_service_stores_tags(reef: StandInReef, tm
     task_path = written_task(tmp_path / "tasks", "t1")
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels={"Arm": " Hint "}).run(task_path)
     assert reef.inferences[0]["headers"]["x-reef-tag-arm"] == "Hint"
-    assert reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == {"arm": "Hint"} and ran.is_reported
+    assert (
+        reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == {"arm": "Hint"}
+        and ran.report_agent_record_ids != ()
+    )
 
 
 def test_refused_model_calls_are_named_in_the_error_whether_or_not_the_rollout_is_recorded(tmp_path: Path) -> None:
@@ -420,7 +581,7 @@ def test_refused_model_calls_are_named_in_the_error_whether_or_not_the_rollout_i
         ran = runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(task_path)
         unrecorded = runner(reef, tmp_path, StandInLab({"reward": 0.0}), is_reporting=False, is_unrecorded=True)
         unrecorded_ran = unrecorded.run(task_path)
-    assert ran.reward == 1.0 and ran.receipts == () and not ran.is_reported
+    assert ran.reward == 1.0 and ran.receipts == () and ran.report_agent_record_ids == ()
     assert ran.failed_calls == 2
     assert ran.error == "2 model calls failed; the first answered 401: invalid service token"
     assert ran.as_line()["failed_calls"] == 2
@@ -432,7 +593,7 @@ def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: Stan
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
     ran = runner(reef, tmp_path, lab, agent_host="localhost").run(task_path)
-    assert ran.is_reported and ran.receipts == ("rec-1", "rec-2")
+    assert ran.report_agent_record_ids != () and ran.receipts == ("rec-1", "rec-2")
     assert lab.calls[0]["agent"]["kwargs"]["api_base"].startswith("http://localhost:")
 
 
@@ -447,7 +608,7 @@ def test_a_report_that_does_not_reach_reef_is_the_rollouts_error(
 
     monkeypatch.setattr(running.client, "report", refused)
     ran = running.run(task_path)
-    assert not ran.is_reported and "the report for t1 did not reach" in ran.error
+    assert ran.report_agent_record_ids == () and "the report for t1 did not reach" in ran.error
 
 
 # ------------------------------------------------------------------------------------------------ the command
@@ -525,7 +686,7 @@ def test_batch_and_task_use_labels_reach_the_inference_tags_and_the_report(reef:
     ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels).run(task_path)
     headers = reef.inferences[0]["headers"]
     assert headers["x-reef-tag-batch"] == "tasks:generated-tasks:1" and headers["x-reef-tag-task_use"] == "use-t1-0"
-    assert reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == labels and ran.is_reported
+    assert reef.reports[0]["body"]["metadata"]["rollout"]["labels"] == labels and ran.report_agent_record_ids != ()
 
 
 def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_a_rollout_that_never_ran() -> None:
@@ -553,16 +714,16 @@ def test_run_rollouts_refuses_a_harness_a_model_or_a_record_dir_it_cannot_use(
     task = str(written_task(tmp_path / "tasks", "t1"))
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, model_adapter="tinker://start/sampler")
-    assert running.served_model.kind == "model_adapter" and running.harness.kind == "harness"
+    assert running.policy_model.kind == "model_adapter" and running.harness.kind == "harness"
     refused = (
         (
-            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.served_model, task),
+            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.policy_model, task),
             "agent",
         ),
         (RolloutRequest(running.harness, PolicyModel(running.model), task), "serves"),
-        (RolloutRequest(running.harness, running.served_model, task, tmp_path / "keep"), "work_dir"),
+        (RolloutRequest(running.harness, running.policy_model, task, tmp_path / "keep"), "work_dir"),
     )
     for request, message in refused:
         with pytest.raises(ValueError, match=message):
-            running.run_rollouts([RolloutRequest(running.harness, running.served_model, task), request])
+            running.run_rollouts([RolloutRequest(running.harness, running.policy_model, task), request])
     assert lab.calls == [], "a refused request runs no rollout"

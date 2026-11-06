@@ -15,8 +15,8 @@ them:
 - ``remote_executor(kind, section, environ)`` returns the cloud sandbox of
   provider ``kind`` (a key of ``REMOTE_EXECUTORS``: ``e2b`` or ``modal``) from
   that provider's options in ``section``. A caller with its own settings, such
-  as ``evolution.proposer_agent``, passes its section; the factory reads only
-  the provider's options, ``forward_ports`` and ``env_from``.
+  as ``evolution.agent``, passes its section; the factory reads only the
+  provider's options, ``forward_ports`` and ``env_from``.
 - ``reef.execution.sandbox.remote.REMOTE_TASK_ENVIRONMENTS`` lists the Harbor environment
   types that run a task's containers on a provider, each with the variables
   its credentials come from.
@@ -39,7 +39,7 @@ Modal sandbox, and ``ExecutorEnvironment`` adapts one to Harbor's
 is where Harbor builds a task's ``environment/Dockerfile``, starts it, runs
 the task's agent and verifier in it and stops it.
 
-The generator service's checks (``harbor run -e`` children) and rollouts
+The generator service's checks (``harbor run -e`` children) and runs
 (in-process Harbor trials) use Harbor's task environment lifecycle. They select
 an environment by name and read its needs from ``reef.execution.sandbox.task_environment``.
 Checks share local process management with the executors through
@@ -159,8 +159,8 @@ environment. This local example returns ``hello`` and exit code zero::
 ``exec`` accepts a shell command, a working directory inside the root,
 environment variables and a timeout in seconds. It returns Harbor's
 ``ExecResult`` with ``stdout``, ``stderr`` and ``return_code``. A nonzero command
-exit is a result. Launch failures raise ``RolloutLaunchError``; timeouts raise
-``RolloutTimeout``. Commands run as the executor's configured user; selecting
+exit is a result. Launch failures raise ``ProgramLaunchError``; timeouts raise
+``ProgramTimeout``. Commands run as the executor's configured user; selecting
 another ``user`` is unsupported.
 
 
@@ -178,7 +178,7 @@ Reef host resolves ``program.host_binary()``, which can install the binary.
 Bubblewrap also binds ``program.host_install_dir()`` read-only. A cloud sandbox
 resolves ``program.binary`` in its image (an E2B template, a Modal image) and
 never installs on the Reef host; it refuses a ``self_isolating`` program. The harness layer provides
-``reef.harness.rollouts.vendor_install.AdapterProgram`` for an adapter.
+``reef.harness.tasks.vendor_install.AdapterProgram`` for an adapter.
 
 A run of several processes that must reach ports on the Reef host opens a
 session::
@@ -212,7 +212,7 @@ processes but does not delete caller-owned files. ``start`` opens the
 executor's session. When that opens a new session, such as a cloud sandbox, the
 environment owns it and ``stop(delete=True)`` closes it. Passing an open
 session borrows it for a trial. Stopping the trial's environment leaves the
-shared session running; its owner must close it after the proposer finishes.
+shared session running; its owner must close it after the agent finishes.
 
 Cancelling a command terminates its environment's processes before returning.
 Cancellation also closes the session, including a borrowed one. Ordinary
@@ -222,8 +222,9 @@ rebuilds are unsupported.
 
 Local execution provides no sandbox isolation. Bubblewrap and the cloud sandboxes retain their
 existing read-only inputs, writable state and network behavior. Configuration
-remains independent for evaluation and proposer execution; see
-`Running rollouts <../user-guide/evolve-your-harness.rst#running-rollouts>`__.
+remains independent for the evaluation runs and for an agent that a method
+runs; see
+`Running runs <../user-guide/evolve-your-harness.rst#running-runs>`__.
 
 ``execute`` and ``run_sync`` bridge existing synchronous callers to this async
 interface. Use the async methods directly inside a running event loop.

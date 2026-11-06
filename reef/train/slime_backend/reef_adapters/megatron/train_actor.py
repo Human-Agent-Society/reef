@@ -21,7 +21,7 @@ monkey_patch_torch_dist()
 
 # isort: split
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
-from slime.utils.timer import Timer
+from slime.observability.timer import Timer
 from torch_memory_saver import torch_memory_saver
 
 from reef.train.slime_backend.distill.teacher import TEACHER_TAG

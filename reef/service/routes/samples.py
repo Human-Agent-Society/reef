@@ -5,11 +5,12 @@ import asyncio
 from aiohttp import web
 
 from reef.service.request_service import RequestService
-from reef.service.routes.payload import read_object
-from reef.service.samples import MAX_SAMPLES_PER_PAGE, change_buffer, list_samples, read_buffer
+from reef.service.sample_processing import get_processing, list_processing
+from reef.service.samples import MAX_SAMPLES_PER_PAGE, list_samples, read_next_job
 
 
-def register_sample_routes(app: web.Application, *, request_service: RequestService) -> None:
+def register_sample_reads(app: web.Application, *, request_service: RequestService) -> None:
+    """The list of a scenario's samples."""
     dispatcher = request_service.dispatcher
 
     async def samples(request: web.Request) -> web.Response:
@@ -23,25 +24,46 @@ def register_sample_routes(app: web.Application, *, request_service: RequestServ
         )
         return web.json_response(listing)
 
-    async def buffer(request: web.Request) -> web.Response:
+    async def processing(request: web.Request) -> web.Response:
+        try:
+            before = int(request.query["before"]) if "before" in request.query else None
+            limit = int(request.query.get("limit", "50"))
+        except ValueError:
+            raise web.HTTPBadRequest(text="before and limit must be integers") from None
         listing = await asyncio.to_thread(
-            read_buffer, dispatcher, request.match_info["scenario"], request.query.get("component") or None
+            list_processing,
+            dispatcher,
+            request.match_info["scenario"],
+            state=request.query.get("state"),
+            before=before,
+            limit=limit,
         )
         return web.json_response(listing)
 
-    async def insert(request: web.Request) -> web.Response:
-        body = await read_object(request)
-        listing = await asyncio.to_thread(change_buffer, dispatcher, request.match_info["scenario"], body, insert=True)
-        return web.json_response(listing)
-
-    async def remove(request: web.Request) -> web.Response:
-        body = await read_object(request)
-        listing = await asyncio.to_thread(
-            change_buffer, dispatcher, request.match_info["scenario"], body, insert=False
+    async def processing_detail(request: web.Request) -> web.Response:
+        task = await asyncio.to_thread(
+            get_processing, dispatcher, request.match_info["scenario"], request.match_info["task_id"]
         )
-        return web.json_response(listing)
+        if task is None:
+            raise web.HTTPNotFound(text="sample processing task not found")
+        return web.json_response(task)
 
     app.router.add_get("/reef/scenarios/{scenario}/samples", samples)
-    app.router.add_get("/reef/scenarios/{scenario}/buffer", buffer)
-    app.router.add_post("/reef/scenarios/{scenario}/buffer/insert", insert)
-    app.router.add_post("/reef/scenarios/{scenario}/buffer/remove", remove)
+    app.router.add_get("/reef/scenarios/{scenario}/sample-processing", processing)
+    app.router.add_get("/reef/scenarios/{scenario}/sample-processing/{task_id}", processing_detail)
+
+
+def register_next_job_route(app: web.Application, *, request_service: RequestService) -> None:
+    """The read of a trainer's next automatic job, which is the trainer's state that control holds."""
+    dispatcher = request_service.dispatcher
+
+    async def next_job(request: web.Request) -> web.Response:
+        listing = await asyncio.to_thread(
+            read_next_job, dispatcher, request.match_info["scenario"], request.query.get("component") or None
+        )
+        return web.json_response(listing)
+
+    app.router.add_get("/reef/scenarios/{scenario}/next-job", next_job)
+
+
+__all__ = ["register_next_job_route", "register_sample_reads"]

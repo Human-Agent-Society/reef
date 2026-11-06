@@ -38,7 +38,7 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
 pipeline:
-  record2record:
+  record2sample:
     config:
       max_staleness: 18
   sample2job:
@@ -69,7 +69,7 @@ training:
   # critic only. The value head starts from zero, so without the warmup the
   # first actor steps train on advantages built from an unfitted critic —
   # the cold-start problem the paper's value-training designs exist to avoid.
-  # Warmup steps still commit one training release per rollout; the actor's
+  # Warmup steps still commit one training snapshot per rollout; the actor's
   # weights first move on step 11.
   options:
     megatron-to-hf-mode: "bridge"
@@ -98,7 +98,6 @@ training:
     lr: "1e-6"
     lr-decay-style: "constant"
     loss-type: "policy_loss"
-    use-rollout-logprobs: true
     use-critic: true
     eps-clip: "0.3"
     eps-clip-high: "5.0"

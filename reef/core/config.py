@@ -15,13 +15,14 @@ import os
 import re
 import sys
 import types
+from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn, Self, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
-from reef.core.errors import DeployConfigError
+from reef.core.errors import DeployConfigError, RuntimeConfigError
 
 _CFG_VAR_RE = re.compile(r"\$\{([\w.-]+)\}")
 
@@ -94,7 +95,7 @@ class ConfigArgument:
     def flags(self) -> tuple[str, ...]:
         dotted = ".".join(self.path)
         names = [dotted.replace("_", "-"), dotted]
-        # The launcher owns --recipe; the setting remains --reef.recipe.
+        # The launcher reserves --recipe; the setting remains --reef.recipe.
         if len(self.path) == 2 and self.path[0] == "reef" and self.name != "recipe":
             names = [self.name.replace("_", "-"), self.name, *names]
         if self.public_path:
@@ -313,7 +314,7 @@ class Settings:
         """Read one config into this settings dataclass, in the hyphen or the field spelling.
 
         ``setting`` names the config in errors, for example
-        ``pipeline.record2record.config``. An unknown field is refused.
+        ``pipeline.record2sample.config``. An unknown field is refused.
         """
         if not isinstance(config, Mapping):
             raise ValueError(f"{setting} must be an object")
@@ -366,3 +367,41 @@ def interpolate_config(config: Mapping[str, Any], value: str) -> str:
         seen.add(value)
         value = expanded
     raise DeployConfigError("config interpolation exceeded 64 levels")
+
+
+class ConfiguredFactory(ABC):
+    """A factory that builds one component from a config section of its own settings type.
+
+    ``kind`` is the non-empty name that the section's ``type`` key holds.
+    ``config_type`` is the settings dataclass whose fields the section sets,
+    or None for a factory that reads the section as it is. ``parse_config``
+    reads the section into those fields. ``RuntimeFactory`` and
+    ``TrainingComponentFactory`` add what they build.
+    """
+
+    kind: str
+
+    def config_type(self) -> type | None:
+        """Return this adapter's settings dataclass, or None for legacy factories.
+
+        Declarations use ``reef.core.config.config_option``. Discovery reads
+        metadata only; it must not connect services or allocate resources.
+        """
+        return None
+
+    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        """Parse only this selected adapter's configuration."""
+        settings_type = self.config_type()
+        if settings_type is None:
+            return dict(config)
+        try:
+            values = parse_config_values(
+                config_arguments(settings_type, prefix=("runtime",)),
+                {key: value for key, value in config.items() if key != "type"},
+                environ=environ,
+            )
+            # Component constructors retain range and cross-field validation.
+            settings_type(**values)
+        except ValueError as exc:
+            raise RuntimeConfigError(str(exc)) from exc
+        return {"type": config.get("type", self.kind), **values}

@@ -1,4 +1,4 @@
-"""Storage for the release chain: every publication as an immutable release.
+"""Storage for the snapshot chain: every publication as an immutable release.
 
 The package owns bytes and heads — persisted, staged, materialized on
 demand. *When* a head moves is the scenario committer's decision, one
@@ -7,13 +7,13 @@ level up. Boundaries this package holds:
 - Repository backends are scenario-agnostic. A backend stores one
   repository; the factory owns the scenario-name-to-backend mapping. Nothing
   here knows what a scenario, trainer, or commit history is;
-  ``ArtifactReleaseChain``'s caller decides transaction ordering.
+  ``ArtifactSnapshotChain``'s caller decides transaction ordering.
 - Releases are immutable and heads move only by compare-and-swap
   (``activate`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
-  (``ArtifactConflict``) instead of losing a release.
+  (``ArtifactConflict``) instead of losing a snapshot.
 - A ``local:`` release has identity but no durable bytes; activation and
-  a new training start refuse it as a source (``ReleaseNotRestorable``).
+  a new training start refuse it as a source (``SnapshotNotRestorable``).
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
@@ -22,16 +22,17 @@ inherits ``ConfigurableRepositoryBackendFactory`` in ``storage.artifact_backend`
 Git LFS is the built-in one. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
-Every repository starts from a base artifact. A configured backend imports
-``RepositoryBackendContext.base`` (a ``BaseArtifactSource``) into a
-repository that has none, with ``base.content_id`` as its content ID, and
-refuses to open a repository whose base was imported from other
-``base.inputs``.
+Every scenario owns its root snapshot, a snapshot with no parent.
+``RepositoryBackend.register`` stores it and makes it the scenario's head in
+one atomic step; a second caller gets the winner's head. Scenarios share no
+snapshot. A root that holds the recipe's ``DefaultStart`` reads its model
+files (a ``BaseModelFiles``, for example a ``ModelDirectory``) only when the
+scenario is created, so a process that only opens scenarios makes none.
 
 Backends used with a scenario commit history must subclass
-``StagedReleaseRepositoryBackend``. ``publish`` must accept
+``StagedSnapshotRepositoryBackend``. ``publish`` must accept
 ``advance_head=False`` and persist resolvable bytes without advancing its head.
-After the scenario commit history is durable, ``commit_release(ref, expected_parent=...)``
+After the scenario commit history is durable, ``commit_snapshot(ref, expected_parent=...)``
 advances that pointer. It must be idempotent when ``ref`` is already current and
 reject an unrelated head. A failed pointer update is repaired from the commit history
 on restart; the pointer never overrides committed scenario state. The memory
@@ -47,28 +48,30 @@ from reef.artifact.artifact import (
     ArtifactMaterializationError,
     ArtifactNotFound,
     ArtifactPublicationError,
-    ArtifactRef,
     ArtifactSourceError,
     ArtifactValidator,
+    SnapshotRef,
 )
-from reef.artifact.composite import compose_release
-from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_content_id
+from reef.artifact.composite import compose_snapshot
+from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_checksum
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
-from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
-    BaseArtifactSource,
+    BaseModelFiles,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
+    DefaultStart,
     EnumerableRepositoryBackendFactory,
+    ModelDirectory,
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
     RepositoryBackendContext,
     RepositoryBackendFactory,
-    StagedReleaseRepositoryBackend,
+    StagedSnapshotRepositoryBackend,
 )
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
 from reef.artifact.sources import (
     REFERENCE_FILE,
     ArtifactSourceReader,
@@ -98,15 +101,15 @@ __all__ = [
     "ArtifactMaterializationError",
     "ArtifactNotFound",
     "ArtifactPublicationError",
-    "ArtifactRef",
-    "ArtifactReleaseChain",
+    "ArtifactSnapshotChain",
     "ArtifactSourceError",
     "ArtifactSourceReader",
     "ArtifactSources",
     "ArtifactValidator",
-    "BaseArtifactSource",
+    "BaseModelFiles",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
+    "DefaultStart",
     "DirectoryFiles",
     "DirectorySource",
     "DownloadedSnapshot",
@@ -119,19 +122,21 @@ __all__ = [
     "HuggingFaceRevisionFiles",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
+    "ModelDirectory",
     "PEFTValidator",
     "RegistrationAwareRepositoryBackendFactory",
-    "ReleaseNotRestorable",
     "Repository",
     "RepositoryBackend",
     "RepositoryBackendContext",
     "RepositoryBackendFactory",
     "S3PrefixFiles",
     "S3Reader",
+    "SnapshotNotRestorable",
+    "SnapshotRef",
     "SourceFiles",
-    "StagedReleaseRepositoryBackend",
-    "compose_release",
-    "directory_content_id",
+    "StagedSnapshotRepositoryBackend",
+    "compose_snapshot",
+    "directory_checksum",
     "download_huggingface_snapshot",
     "parse_huggingface_source",
     "read_peft_config",

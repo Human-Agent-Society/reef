@@ -1,4 +1,4 @@
-"""The rollout executor abstraction: local behavior, sandbox construction,
+"""The run executor abstraction: local behavior, sandbox construction,
 and the fail-fast contract when a required sandbox cannot isolate."""
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from reef.core.errors import ReefError
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import (
     LocalExecutor,
-    RolloutLaunchError,
-    RolloutTimeout,
+    ProgramLaunchError,
+    ProgramTimeout,
     SandboxExecutor,
     SandboxLimits,
     SandboxUnavailable,
@@ -75,7 +75,7 @@ def test_local_executor_does_not_forward_parent_stdin(tmp_path: Path) -> None:
 
 
 def test_local_executor_finds_a_runner_beside_the_interpreter_after_path(tmp_path: Path, monkeypatch) -> None:
-    """reef serve started from a venv off PATH still launches reef-terminus; a name PATH finds keeps its binary."""
+    """reef serve started from a venv off PATH still launches a runner Reef ships; a name PATH finds keeps its binary."""
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)
     scripts = tmp_path / "venv" / "bin"
@@ -96,7 +96,7 @@ def test_local_executor_finds_a_runner_beside_the_interpreter_after_path(tmp_pat
 def test_local_executor_maps_a_missing_binary(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)
-    with pytest.raises(RolloutLaunchError):
+    with pytest.raises(ProgramLaunchError):
         LocalExecutor().launch(
             [str(tmp_path / "does-not-exist")], root=root, workspace=root / "workspace", env={}, timeout=10.0
         )
@@ -106,7 +106,7 @@ def test_local_executor_kills_the_tree_on_timeout(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)
     prog = _script(tmp_path, "import time; time.sleep(30)")
-    with pytest.raises(RolloutTimeout):
+    with pytest.raises(ProgramTimeout):
         LocalExecutor().launch(
             [sys.executable, str(prog)], root=root, workspace=root / "workspace", env={}, timeout=0.5
         )
@@ -118,7 +118,7 @@ def test_build_executor_defaults_to_local() -> None:
 
 
 def test_build_executor_rejects_an_unknown_kind() -> None:
-    with pytest.raises(ReefError, match="unknown rollout executor"):
+    with pytest.raises(ReefError, match="unknown run executor"):
         build_executor({"executor": "vm"})
 
 
@@ -147,16 +147,16 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
     with pytest.raises(SandboxUnavailable, match=r"cannot nest a bubblewrap jail.*No permissions"):
         SandboxExecutor().preflight()
-    # A rollout jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
+    # A run jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
     argv = seen[0]
-    rollout, tool = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
-    assert rollout[0] == tool[0] == "/usr/bin/bwrap" and tool[-2:] == ["--", "/bin/true"]
+    task_run, tool = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
+    assert task_run[0] == tool[0] == "/usr/bin/bwrap" and tool[-2:] == ["--", "/bin/true"]
     for flag in ("--unshare-user", "--unshare-pid", "--unshare-net", "--dev", "--clearenv"):
-        assert flag in rollout and flag in tool
-    # The rollout jail mounts a fresh /proc; the tool jail cannot nest that, so it binds the rollout's read only.
-    assert "--proc" in rollout and "--proc" not in tool
+        assert flag in task_run and flag in tool
+    # The run jail mounts a fresh /proc; the tool jail cannot nest that, so it binds the run's read only.
+    assert "--proc" in task_run and "--proc" not in tool
     assert tool[tool.index("/proc") - 1 : tool.index("/proc") + 2] == ["--ro-bind", "/proc", "/proc"]
-    for jail in (rollout, tool):
+    for jail in (task_run, tool):
         assert jail[jail.index("/usr") - 1 : jail.index("/usr") + 2] == ["--ro-bind", "/usr", "/usr"]
     _probe_result(monkeypatch, 0)
     SandboxExecutor().preflight()
@@ -195,13 +195,17 @@ def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_p
     assert "--setenv REEF_NATIVE_ENFORCE bwrap" in joined
 
 
-def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monkeypatch, tmp_path: Path) -> None:
+def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_only(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A read-only input stays read-only inside a writable directory, the workspace too, as a remote jail keeps it."""
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     root = tmp_path / "root"
     workspace = root / "workspace"
+    material = workspace / "material"
     state = root / "codex"
     config = state / "config.toml"
-    workspace.mkdir(parents=True)
+    material.mkdir(parents=True)
     state.mkdir()
     config.write_text("model = 'm'\n")
 
@@ -211,16 +215,17 @@ def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monke
         workspace=workspace,
         env={},
         writable_paths=(state,),
-        readonly_paths=(config,),
+        readonly_paths=(config, material),
     )
 
-    root_mount = argv.index("--ro-bind", argv.index(str(root)) - 1)
-    state_mount = argv.index("--bind", root_mount + 1)
-    config_mount = argv.index("--ro-bind", root_mount + 1)
-    workspace_mount = argv.index("--bind", state_mount + 1)
-    assert root_mount < state_mount < config_mount < workspace_mount
-    assert argv[state_mount + 1 : state_mount + 3] == [str(state), str(state)]
-    assert argv[config_mount + 1 : config_mount + 3] == [str(config), str(config)]
+    def mount(flag: str, path: Path) -> int:
+        return next(i for i in range(len(argv) - 2) if argv[i : i + 3] == [flag, str(path), str(path)])
+
+    root_mount = mount("--ro-bind", root)
+    assert root_mount < mount("--bind", workspace) < mount("--bind", state)
+    assert mount("--bind", state) < mount("--ro-bind", config) and mount("--bind", workspace) < mount(
+        "--ro-bind", material
+    )
 
 
 def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_path: Path) -> None:

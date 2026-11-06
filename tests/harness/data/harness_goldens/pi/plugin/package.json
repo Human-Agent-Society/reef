@@ -1,0 +1,9 @@
+{
+  "name": "reef-harness",
+  "private": true,
+  "pi": {
+    "extensions": ["extensions/reef/index.ts", "extensions"],
+    "skills": ["skills"],
+    "prompts": ["prompts"]
+  }
+}

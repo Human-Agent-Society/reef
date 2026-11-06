@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.train.tinker_backend.losses import TinkerLoss, TokenRow
+from recipes.tttd.objective import tttd_signal
+from reef.train.algos.signals import TrainingSignal
+from reef.train.tinker_backend.losses import MatrixInput, TinkerLoss, TokenRow
+from reef.train.tinker_backend.objectives import TinkerObjective, register_tinker_objective
+from reef.train.types import JobData
+
+
+@register_tinker_objective
+class TttdTinkerObjective(TinkerObjective):
+    name = "tttd"
+    loss_family = "tttd"
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        return tttd_signal(data, state)
 
 
 class TttdTinkerLoss(TinkerLoss):
@@ -13,7 +26,7 @@ class TttdTinkerLoss(TinkerLoss):
 
     def inputs(
         self, rows: Sequence[TokenRow], base_logprobs: Sequence[Sequence[float]], *, kl_coef: float
-    ) -> list[dict[str, list[Any]]]:
+    ) -> list[dict[str, list[Any] | MatrixInput]]:
         if not kl_coef:
             return [row.inputs([row.advantage] * len(row.mask)) for row in rows]
         if len(base_logprobs) != len(rows):

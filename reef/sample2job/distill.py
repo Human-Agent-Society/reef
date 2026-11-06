@@ -7,7 +7,6 @@ from typing import Any, Self
 
 from reef.core.job_data import JobData, Sample
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
 from reef.sample2job.base import Sample2Job, Sample2JobSettings
 
@@ -21,7 +20,6 @@ class DistillJobData(Sample2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:

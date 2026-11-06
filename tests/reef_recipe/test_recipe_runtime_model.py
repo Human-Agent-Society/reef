@@ -11,7 +11,7 @@ from reef.recipe.registry import build_named_recipe
 def test_recipe_loader_preserves_environment_references(tmp_path, monkeypatch) -> None:
     path = tmp_path / "demo.yaml"
     path.write_text(
-        "recipe:\n  implementation: reef.recipe.cordis:CordisRecipe\n"
+        "recipe:\n  implementation: reef.recipe.harness:HarnessEvolutionRecipe\n"
         "  config:\n    evolution:\n      tasks: ['Print ${MODEL_ID} and ${UNSET_VAR}']\n"
         "inference:\n  upstream-model: ${MODEL_ID}\n"
     )

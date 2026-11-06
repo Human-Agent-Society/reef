@@ -30,17 +30,12 @@
           - "recipes/sao/**"
           - "recipes/tttd/**"
           - "recipes/openclawrl/**"
-          - "reef/train/cordis_backend/**"
-          - "reef/surface/**"
-          - "third_party/cordis/**"
+          - "reef/train/harness_backend/**"
+          - "reef/artifact/components.py"
           - "tutorials/evolve-your-harness/**"
-          - "recipes/skillclaw/**"
           - "recipes/gepa/**"
-          - "tests/reef_service/test_compose*.py"
           - "tests/reef_service/test_harness*.py"
           - "tests/reef_service/test_*recipe*.py"
-          - "tests/reef_service/test_skill*.py"
-          - "tests/reef_service/test_*surface*.py"
           - "tests/smoke/**"
 
 "area: packaging":
@@ -62,7 +57,7 @@
       - any-glob-to-any-file:
           - "reef/artifact/**"
           - "reef/dispatcher/**"
-          - "reef/runtime/**"
+          - "reef/execution/executor/**"
           - "reef/train/**"
           - "recipes/*/examples/*/serve.yaml"
           - "tests/reef_service/test_async*.py"

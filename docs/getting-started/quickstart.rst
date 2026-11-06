@@ -2,7 +2,7 @@ Quickstart: serve inference and report feedback
 ===============================================
 
 Start Reef locally, send an inference request through a hosted provider,
-report feedback on the response, and inspect the release history. This
+report feedback on the response, and inspect the snapshot history. This
 quickstart needs no GPU; the final section links to recipes that learn
 from the records you collect.
 
@@ -25,14 +25,14 @@ This workflow touches a few key concepts:
 
 - **scenario** - A specific type of workload. For example, a code reviewer, or a
   math problem solver. Reef manages the training of each scenario separately,
-  i.e. records, training state and release chain.
+  i.e. records, training state and snapshot chain.
 - **receipt** - The id of a recorded inference exchange. It identifies the
-  request, the response, and the release that produced it.
+  request, the response, and the snapshot that produced it.
 - **report** - A feedback quoting one or more receipts.
 - **recipe** - How Reef use the report to evolve new versions of artifacts. A
   deployment serves one recipe, and every scenario on it evolves under that
   recipe.
-- **artifact** - The content a release selects: model weights, or a harness
+- **artifact** - The content a snapshot selects: model weights, or a harness
   tree of rules, prompts, skills, and config. Versioned.
 - **release** - One accepted publication in a scenario. The chain of them is
   the scenario's history.
@@ -46,7 +46,7 @@ Run the loop
 This runs the serving half of the loop against a hosted provider, on a laptop,
 with no GPU.
 
-.. steps::
+.. container:: steps
 
    #. **Install.** Follow the laptop path in `Installation
       <installation.rst>`__.
@@ -75,6 +75,16 @@ with no GPU.
       .. code:: bash
 
          curl -f http://127.0.0.1:8900/healthz     # {"ok": true}
+
+   #. **Create a scenario.** Reef answers inference only for a scenario that
+      exists, and a request for an unknown scenario gets HTTP 404.
+
+      .. code:: bash
+
+         curl -sS -X POST http://127.0.0.1:8900/reef/scenarios \
+           -H "Authorization: Bearer reef-local" \
+           -H "Content-Type: application/json" \
+           -d '{"name": "hello-reef"}'
 
    #. **Send a request and report on it.** The body is the provider's;
       ``x-reef-scenario`` is the only thing Reef adds. The response header
@@ -164,15 +174,10 @@ Slime training workers and the serving engine.
 Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 
-The one that runs on a laptop is ``reefine``, the built-in recipe:
-``reef serve --recipe reefine --model ollama/gemma4:26b`` needs no second file,
-because its proposer and evaluator ship with the package. Ask for a change from
-the shell or from a ``reef-pi`` session and one evolve step runs for it; read
-`Reefine <../user-guide/recipes/reefine.rst>`__ for what it does with a request.
-
-To write the loop yourself, use ``evolve-your-harness``, which takes a second
-file: a **preset** naming your ``propose`` and ``evaluate`` callables and the
-tasks to evaluate on. ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
+A harness recipe runs on a laptop with only a model endpoint. Bind
+``reef.recipe.harness:HarnessEvolutionRecipe`` and give it a **preset**
+naming your method (``evolution.method``), the seed tree, and the evaluation's
+tasks and scorer (``evolution.evaluation``). ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
 together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
 
@@ -181,9 +186,8 @@ Choose your next step
 
 - `Compare learning recipes <../user-guide/recipes.rst>`__ to choose between
   model training and harness evolution based on the feedback you have.
-- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ or
-  `SkillClaw skill evolution <../user-guide/recipes/skillclaw.rst>`__ for
-  worked harness examples, or `SAO rollout training
+- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ for a
+  worked harness example, or `SAO rollout training
   <../user-guide/recipes/sao.rst>`__ for a GPU training example with results.
 - Use the `HTTP API reference <../reference/http-api.rst>`__ when connecting
   your own agent: it covers inference headers, feedback reports, and release

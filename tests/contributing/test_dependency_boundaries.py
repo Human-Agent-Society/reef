@@ -100,13 +100,13 @@ def test_scenario_domain_does_not_depend_on_recipes() -> None:
 
 
 def test_core_package_does_not_depend_on_artifacts() -> None:
-    # The pure identity types (ArtifactRef and friends) live in reef.core;
+    # The pure identity types (SnapshotRef and friends) live in reef.core;
     # reef.artifact builds on them, never the other way around.
 
     for name in (
         "reef.core",
         "reef.core.records_types",
-        "reef.core.artifact_ref",
+        "reef.core.snapshot",
         "reef.core.errors",
     ):
         module = importlib.import_module(name)
@@ -123,7 +123,7 @@ def test_harbor_task_values_and_validation_do_not_depend_on_harness() -> None:
 
 
 def test_release_id_chain_does_not_depend_on_scenario_or_trainer() -> None:
-    module = importlib.import_module("reef.artifact.release_chain")
+    module = importlib.import_module("reef.artifact.snapshot_chain")
     tree = ast.parse(inspect.getsource(module))
 
     imported = _imported_modules(tree, package="reef.artifact")
@@ -195,10 +195,20 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
         any(
             target == contract or target.startswith(contract + ".")
             for contract in (
+                "reef.storage.artifact_items",
+                "reef.storage.control_lease",
+                "reef.storage.coordination",
+                "reef.storage.data",
+                "reef.storage.data_queue",
+                "reef.storage.data_sync",
+                "reef.storage.job_data",
+                "reef.storage.record_items",
                 "reef.storage.records",
                 "reef.storage.samples",
+                "reef.storage.served_models",
                 "reef.storage.scenario",
                 "reef.storage.tasks",
+                "reef.storage.work_queue",
             )
         )
         for target in _imports_of(imported, "reef.storage")
@@ -227,10 +237,21 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
-        "reef.storage.samples": ("reef.core", "reef.storage.tasks"),
+        "reef.storage.segments": ("reef.core",),
+        "reef.storage.samples": ("reef.core", "reef.storage.data", "reef.storage.tasks"),
+        "reef.storage.item_kinds": ("reef.core", "reef.storage.tasks"),
+        "reef.storage.job_data": ("reef.core", "reef.storage.segments"),
+        "reef.storage.data": (
+            "reef.core",
+            "reef.storage.item_kinds",
+            "reef.storage.job_data",
+            "reef.storage.segments",
+            "reef.storage.tasks",
+        ),
         "reef.storage.evaluations": ("reef.core",),
         "reef.storage.scenario": (
             "reef.core",
+            "reef.storage.data",
             "reef.storage.records",
             "reef.storage.commits",
             "reef.storage.tasks",
@@ -252,11 +273,12 @@ def test_scenario_state_enters_only_through_injected_storage() -> None:
     for path in sorted((REPO_ROOT / "reef/scenario").rglob("*.py")):
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        # Records, commits and settings all enter through the injected ScenarioStorage.
+        # Scenario state and served routes enter through injected storage readers.
         storage_imports = set(_imports_of(imported, "reef.storage")) - set(
             _imports_of(imported, "reef.storage.records")
             + _imports_of(imported, "reef.storage.scenario")
             + _imports_of(imported, "reef.storage.commits")
+            + ["reef.storage.served_models.ServedModels"]
         )
         assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
         for dependency in ("sqlite3", "sqlalchemy", "alembic"):
@@ -279,8 +301,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/storage",
         "reef/artifact",
         "reef/recipe",
-        "reef/runtime",
-        "reef/surface",
+        "reef/execution",
     )
     files = [path for package in core_packages for path in sorted((REPO_ROOT / package).rglob("*.py"))]
     # A method package's public half too; its ``slime`` subpackage is the
@@ -326,7 +347,7 @@ def test_checkpoint_storage_import_does_not_require_ray() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; "
         "from reef.train.slime_backend.reef_adapters import RetentionConfig; "
-        "from reef.runtime import recovery; "
+        "from reef.inference import recovery; "
         "from reef.train.slime_backend.reef_adapters.training_job import storage"
     )
 
@@ -342,8 +363,8 @@ def test_slime_job_preparation_resolves_tttd_torch_lazily() -> None:
 def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; sys.modules['torch'] = None; "
-        "from reef.train.cordis_backend import CordisBackend; "
-        "assert CordisBackend"
+        "from reef.train.harness_backend.backend import HarnessBackend; "
+        "assert HarnessBackend"
     )
 
 
@@ -353,18 +374,10 @@ def test_slime_training_component_import_does_not_load_megatron_stack() -> None:
         "ray = types.ModuleType('ray'); "
         "ray.remote = lambda **kwargs: lambda actor: actor; "
         "sys.modules['ray'] = ray; "
-        "from reef.train.slime_backend.component import SlimeTrainingComponent; "
-        "assert SlimeTrainingComponent; "
+        "from reef.train.slime_backend.component import SlimeJobRunner, SlimeTrainingComponent; "
+        "assert SlimeJobRunner and SlimeTrainingComponent; "
         "assert not [name for name in sys.modules if name.startswith(('megatron', 'torch', 'slime.ray'))]"
     )
-
-
-def test_model_config_does_not_depend_on_scenario() -> None:
-    module_name = "reef.inference.model_config"
-    module = importlib.import_module(module_name)
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
-    for dependency in ("reef.scenario", "reef.recipe", "reef.train", "reef.storage"):
-        assert _imports_of(imported, dependency) == [], module_name
 
 
 def test_reef_package_dependencies_are_acyclic() -> None:
@@ -434,8 +447,8 @@ def test_training_jobs_and_serving_import_require_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.jobs import TrainingComponent, TrainingJob; "
-        "from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime; "
+        "from reef.train.component import TrainingComponent, TrainingJob; "
+        "from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime; "
         "from reef.train.jobs import JobLoop; "
         "from reef.train.local_jobs import LocalJobComponent"
     )
@@ -445,71 +458,38 @@ def test_inference_recovery_requires_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.recovery import InferenceControl; "
-        "from reef.runtime.recovery import EngineHealthMonitor"
+        "from reef.inference.recovery import InferenceControl; "
+        "from reef.inference.recovery import EngineHealthMonitor"
     )
 
 
-def test_runtime_coordination_never_imports_concrete_model_backends() -> None:
-    for path in sorted((REPO_ROOT / "reef/runtime").rglob("*.py")):
+def test_inference_contracts_import_only_lower_contracts_and_no_backend() -> None:
+    # Include imports inside functions: delaying an import does not make a
+    # contract depend on an integration or on a module above it.
+    allowed = {
+        "interfaces.py": (),
+        "recovery.py": (),
+        "residency.py": ("reef.inference.interfaces",),
+        "deployment.py": ("reef.inference.interfaces",),
+        "registry.py": ("reef.inference.interfaces",),
+        "serving.py": ("reef.inference.interfaces", "reef.inference.residency"),
+    }
+    for name, prefixes in allowed.items():
+        path = REPO_ROOT / "reef/inference" / name
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.inference")
+        for dependency in ("reef.train", "slime", "sglang", "vllm", "megatron"):
+            assert _imports_of(imported, dependency) == [], name
+        for target in _imports_of(imported, "reef.inference"):
+            assert any(target == prefix or target.startswith(prefix + ".") for prefix in prefixes), f"{name}: {target}"
+
+
+def test_training_contracts_and_executors_never_import_model_backends() -> None:
+    paths = [REPO_ROOT / "reef/train/component.py", *sorted((REPO_ROOT / "reef/execution/executor").rglob("*.py"))]
+    for path in paths:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         for dependency in ("reef.inference", "reef.train", "slime", "sglang", "megatron"):
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
-
-
-def test_runtime_directory_has_only_its_owned_modules() -> None:
-    root = REPO_ROOT / "reef/runtime"
-    expected = {
-        "interfaces.py",
-        "jobs.py",
-        "durable_files.py",
-        "deployment.py",
-        "recovery.py",
-        "residency.py",
-        "serving.py",
-        "executor",
-    }
-
-    assert {path.name for path in root.iterdir() if path.name != "__pycache__"} == expected
-    assert (root / "executor").is_dir()
-    assert all((root / name).is_file() for name in expected - {"executor"})
-
-
-def test_runtime_modules_follow_their_dependency_order() -> None:
-    # Include imports inside functions: delaying an import does not make a
-    # serving/deployment dependency cycle a valid module boundary.
-    allowed = {
-        "interfaces.py": (),
-        "jobs.py": (),
-        "durable_files.py": (),
-        "recovery.py": ("reef.runtime.interfaces",),
-        "residency.py": ("reef.runtime.interfaces",),
-        "deployment.py": (
-            "reef.runtime.interfaces",
-            "reef.runtime.jobs",
-            "reef.runtime.recovery",
-            "reef.runtime.executor",
-        ),
-        "serving.py": (
-            "reef.runtime.interfaces",
-            "reef.runtime.jobs",
-            "reef.runtime.recovery",
-            "reef.runtime.residency",
-            "reef.runtime.deployment",
-        ),
-        "executor": ("reef.runtime.interfaces", "reef.runtime.executor"),
-    }
-    root = REPO_ROOT / "reef/runtime"
-    for path in sorted(root.rglob("*.py")):
-        owner = path.relative_to(root).parts[0]
-        assert owner in allowed, f"unowned runtime module: {path.relative_to(REPO_ROOT)}"
-        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
-        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        for target in _imports_of(imported, "reef.runtime"):
-            assert any(
-                target == prefix or target.startswith(prefix + ".") for prefix in allowed[owner]
-            ), f"{path.relative_to(REPO_ROOT)} imports {target} against the runtime dependency order"
 
 
 def test_inference_backends_never_import_training_implementations() -> None:
@@ -520,11 +500,11 @@ def test_inference_backends_never_import_training_implementations() -> None:
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
 
 
-def test_runtime_and_inference_packages_import_without_loading_backends() -> None:
+def test_inference_and_training_contracts_import_without_loading_backends() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron', 'reef.inference.sglang'))); "
-        "import reef.runtime; import reef.inference; "
+        "import reef.inference; from reef.inference import registry, serving; from reef.train import component; "
         "assert not [name for name in sys.modules "
         "if name.startswith(('reef.inference.sglang.', 'reef.train.slime_backend'))]"
     )
@@ -583,28 +563,14 @@ def test_processes_depend_only_on_the_standard_library_and_lifecycle() -> None:
     assert all(target.split(".")[0] in sys.stdlib_module_names for target in imports)
 
 
-def test_record_to_record_stage_depends_only_on_contracts_below_training() -> None:
-    # Record-to-sample and the trainer both use this stage, so it never imports either of them.
+def test_record_to_sample_stage_depends_only_on_contracts_below_training() -> None:
+    # The trainer and the recipes import the stage, so it never imports them or the generator service.
     allowed = (
         "reef.core",
-        "reef.runtime.interfaces",
-        "reef.observability",
         "reef.execution.jobs",
         "reef.pipeline_context",
-        "reef.record2record",
+        "reef.record2sample",
     )
-    for path in sorted((REPO_ROOT / "reef" / "record2record").rglob("*.py")):
-        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
-        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):
-            if target == "reef" or target.startswith("reef."):
-                assert any(
-                    target == prefix or target.startswith(prefix + ".") for prefix in allowed
-                ), f"{path.relative_to(REPO_ROOT)} imports {target}"
-
-
-def test_record_to_task_contract_depends_only_on_record2record() -> None:
-    # The trainer and the recipes import the contract, so it never imports them or the generator service.
-    allowed = ("reef.core", "reef.record2record", "reef.record2sample", "reef.pipeline_context")
     for path in sorted((REPO_ROOT / "reef" / "record2sample").glob("*.py")):
         for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.record2sample"):
             if target.startswith("reef.record2sample.generator"):
@@ -621,7 +587,6 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
         "reef.core",
         "reef.observability",
         "reef.pipeline_context",
-        "reef.record2record",
         "reef.record2sample",
         "reef.storage.samples",
         "reef.storage.tasks",

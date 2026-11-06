@@ -11,6 +11,7 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.runtime_stubs import runtime_bindings
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
     REFERENCE_FILE,
@@ -18,20 +19,21 @@ from reef.artifact import (
     ArtifactSources,
     DirectorySource,
     SourceFiles,
-    directory_content_id,
+    directory_checksum,
     read_reference,
 )
 from reef.core.errors import CommitPending, UnknownScenario
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 
 
 def weights(directory: Path, content: bytes = b"w9") -> Path:
-    """A full-weight release: the layout of ``StubTrainingComponent``'s releases."""
+    """A full-weight artifact: the layout of ``StubTrainingComponent``'s releases."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -61,8 +63,9 @@ def store(tmp_path: Path) -> Path:
 def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path) -> None:
     value, runtime, backend_factory = dispatcher(tmp_path)
     train(value, 1)
+    wait_for_serving(value)
     scenario = value.get_or_create_scenario("math")
-    served = scenario.current_artifact_ref()
+    served = scenario.current_snapshot()
     checkpoint = scenario.repository.checkpoint_artifact
     trainer_state = dict(scenario.trainer.state)
     status = value.build_training_status()["scenarios"]["math"]["artifacts"]
@@ -72,8 +75,8 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         "math", opened(weights(tmp_path / "w9")), None, source=source(tmp_path / "w9"), directory=store(tmp_path)
     )
 
-    # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
-    assert scenario.current_artifact_ref() == served
+    # Nothing serves, trains from or moves to the artifact: the active selection, the chain tip and the start stay.
+    assert scenario.current_snapshot() == served
     assert scenario.repository.checkpoint_artifact == checkpoint
     assert scenario.trainer.state == trainer_state
     assert value.build_training_status()["scenarios"]["math"]["artifacts"] == status
@@ -85,28 +88,27 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         None,
         {"source": source(tmp_path / "w9")},
     )
-    assert record.artifact_ref.release_id == imported.release_id
-    assert record.artifact_ref.parent_release_id == checkpoint.release_id
+    assert record.selection.artifact_ids == {"weights": imported.artifact_id}
+    assert record.snapshot.parent_revision == checkpoint.revision
     row = value.list_artifacts("math")[0]
-    assert (row["operation"], row["artifact_id"], row["release_id"], row["content_id"]) == (
-        "import",
-        imported.artifact_id,
-        imported.release_id,
-        imported.content_id,
-    )
-    assert imported.artifact_id == imported.release_id
-    assert imported.content_id == directory_content_id(tmp_path / "w9")
+    assert (row["operation"], row["artifact_id"]) == ("import", imported.artifact_id)
+    assert "release_id" not in row and "content_id" not in row
+    assert imported.artifact_id != record.snapshot.revision
+    _, stored_artifact = scenario.resolve_artifact(imported.artifact_id)
+    assert directory_checksum(stored_artifact.local_path) == directory_checksum(tmp_path / "w9")
     assert (row["source"], row["active"], row["activated"]) == (source(tmp_path / "w9"), False, False)
 
-    # The same bytes again are another artifact with the same content id.
+    # Importing the same bytes again creates another artifact identity.
     again = value.import_artifact(
         "math", opened(weights(tmp_path / "again")), None, source=source(tmp_path / "again"), directory=store(tmp_path)
     )
-    assert again.artifact_id != imported.artifact_id and again.content_id == imported.content_id
+    assert again.artifact_id != imported.artifact_id
+    _, another_artifact = scenario.resolve_artifact(again.artifact_id)
+    assert directory_checksum(another_artifact.local_path) == directory_checksum(stored_artifact.local_path)
 
     # The artifact is then an ordinary row: it serves and trains as any other.
     activated = value.activate("math", imported.artifact_id)
-    assert scenario.current_artifact_ref().release_id == imported.release_id == activated.release_id
+    assert scenario.serving_artifact_id() == imported.artifact_id == activated.artifact_id
     value.train_from("math", imported.artifact_id)
     assert JobLoopState.from_dict(scenario.trainer.state).start == str(runtime.imported[-1])
     value.close()
@@ -118,19 +120,23 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = restarted.get_or_create_scenario("math")
         assert scenario.repository.checkpoint_artifact == checkpoint
-        assert scenario.current_artifact_ref().release_id == imported.release_id
+        assert scenario.serving_artifact_id() == imported.artifact_id
         assert [row["operation"] for row in restarted.list_artifacts("math")] == [
             "import",
             "import",
             "training",
             "creation",
         ]
-        # It serves the activated import and resumes training from the imported start.
-        assert sorted(component.restore_order) == ["inference", "training"]
+        # Control resumes training before inference loads the selected import.
+        wait_for_serving(restarted)
+        assert component.restore_order == ["training", "inference"]
+        request = restarted.coordination.served_models.current_request("math")
+        assert request.payload["artifact_id"] == imported.artifact_id
     finally:
         restarted.close()
 
@@ -169,7 +175,7 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
 
 
 class CountingReader(ArtifactSourceReader):
-    """Opens ``mem://`` URIs as the full-weight release in ``directory`` and keeps each URI it opened."""
+    """Opens ``mem://`` URIs as the full-weight artifact in ``directory`` and keeps each URI it opened."""
 
     def __init__(self, directory: Path) -> None:
         self.directory = weights(directory)
@@ -218,9 +224,7 @@ def test_the_import_http_api_takes_a_uri(tmp_path) -> None:
             assert receipt == {
                 "scenario": "math",
                 "component": receipt["component"],
-                "artifact_id": receipt["release_id"],
-                "release_id": receipt["release_id"],
-                "content_id": directory_content_id(tmp_path / "source"),
+                "artifact_id": receipt["artifact_id"],
             }
             listed = (await (await client.get("/reef/scenarios/math/artifacts")).json())["artifacts"]
             assert (listed[0]["operation"], listed[0]["source"]) == ("import", {"uri": uri, "version": ""})
@@ -269,12 +273,13 @@ def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_pa
             imported = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
             assert imported.status == 201
             receipt = await imported.json()
-            # The content ID is the copy's; the layout check read no weights.
+            # The import has an independent identity; the layout check read no weights.
             copy = tmp_path / "copy"
             copy.mkdir()
             for path, data in hub.files.items():
                 (copy / path).write_bytes(data)
-            assert receipt["content_id"] == directory_content_id(copy)
+            selected, _ = value.get_or_create_scenario("math").resolve_artifact(receipt["artifact_id"])
+            assert selected.artifact_id == receipt["artifact_id"]
             assert "model.safetensors" not in hub.downloads
             listed = (await (await client.get("/reef/scenarios/math/artifacts")).json())["artifacts"]
             assert listed[0]["source"] == {"uri": uri, "version": COMMIT}
@@ -284,7 +289,7 @@ def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_pa
             assert read_reference(stored) is not None and (stored / REFERENCE_FILE).is_file()
             assert not (stored / "model.safetensors").exists()
 
-            # The revision must have the layout of the component's releases, and resolve.
+            # The revision must have the layout of the component's snapshots, and resolve.
             del hub.files["config.json"]
             refused = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
             assert refused.status == 400 and "config.json and weight files" in await refused.text()

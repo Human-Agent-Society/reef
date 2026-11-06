@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 
+from reef.core.errors import RuntimeConfigError
 from reef.inference.null import NullInferenceRuntime
-from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory
+from reef.inference.registry import RuntimeFactory
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.service_config import ServiceConfig
 
@@ -26,6 +27,9 @@ class ClosingComponent(StubTrainingComponent):
         super().close()
 
 
+SAO_PARAMETERS = {"trajectory": {"objective": "sao"}}
+
+
 @pytest.fixture
 def created(monkeypatch):
     """The settings each Slime component was created from, and the components, without Ray or GPUs."""
@@ -36,7 +40,7 @@ def created(monkeypatch):
         calls.append((settings, component))
         return component
 
-    monkeypatch.setattr(slime_component, "create_slime_component", create)
+    monkeypatch.setattr(slime_component, "SlimeTrainingComponent", create)
     return calls
 
 
@@ -56,13 +60,19 @@ def training_settings(**changes) -> ServiceConfig:
 
 
 def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
-    component, runtime = connect_training_component(training_settings(), model_path="model", loss_family="sao")
+    component, runtime = connect_training_component(
+        training_settings(), model_path="model", default_parameters=SAO_PARAMETERS
+    )
     try:
         [(settings, built)] = created
         assert component is built
         assert isinstance(runtime, NullInferenceRuntime)
-        assert settings.arguments == ("--global-batch-size=8", "--rollout-num-gpus=0")
-        assert (settings.loss_family, settings.recipe) == ("sao", "recipes.sao.recipe:SAORecipe")
+        assert settings.arguments == ("--global-batch-size=8",)
+        # The recipe registered sao by name; each job's driver, a new process, gets its reference.
+        assert (settings.loss_family, settings.recipe) == (
+            "recipes.sao.slime:SaoAlgorithm",
+            "recipes.sao.recipe:SAORecipe",
+        )
         assert (settings.ray_address, settings.namespace) == ("ray://head:10001", "training-cluster")
         assert settings.train_timeout_s == 14400.0
         # The deployment's execution section selects the workers' executors.
@@ -75,11 +85,13 @@ def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
 def test_slime_requires_a_ray_cluster_before_creating_the_component(created, monkeypatch):
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     with pytest.raises(RuntimeConfigError, match=r"training\.ray-address or RAY_ADDRESS"):
-        connect_training_component(training_settings(ray_address=None), model_path="model", loss_family="sao")
+        connect_training_component(
+            training_settings(ray_address=None), model_path="model", default_parameters=SAO_PARAMETERS
+        )
     assert created == []
 
 
-def test_a_serving_factory_that_builds_no_inference_runtime_releases_both_components(created, monkeypatch):
+def test_a_serving_factory_that_builds_no_inference_runtime_releases_the_training_component(created, monkeypatch):
     built: list[ClosingComponent] = []
 
     class WrongServingFactory(RuntimeFactory):
@@ -89,8 +101,8 @@ def test_a_serving_factory_that_builds_no_inference_runtime_releases_both_compon
             built.append(ClosingComponent())
             return built[-1]
 
-    monkeypatch.setattr("reef.runtime.deployment._runtime_kinds", {"none": WrongServingFactory()})
-    with pytest.raises(TypeError, match="built a training component: a runtime serves"):
-        connect_training_component(training_settings(), model_path="model", loss_family="sao")
+    monkeypatch.setattr("reef.inference.registry._runtime_kinds", {"none": WrongServingFactory()})
+    with pytest.raises(TypeError, match="must build an InferenceRuntime, not ClosingComponent: a runtime serves"):
+        connect_training_component(training_settings(), model_path="model", default_parameters=SAO_PARAMETERS)
     [(_, component)] = created
-    assert component.closed and built[0].closed
+    assert component.closed

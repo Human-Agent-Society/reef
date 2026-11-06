@@ -6,12 +6,14 @@ from dataclasses import replace
 from threading import Barrier, Event
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from tests.support.consumption_receipts import write_consumption_receipt
+from tests.support.conversations import conversation
 
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.snapshot import SnapshotRef
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.deployment_config import translate_layout
@@ -19,6 +21,7 @@ from reef.service.deploy.service_config import ServiceConfig, service_config_arg
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
 from reef.storage.records import RecordConflict, RecordRetention
+from reef.storage.sql_records import SQLRecordRetention
 from reef.storage.sqlite import SQLiteRecordStore
 
 
@@ -40,13 +43,11 @@ def test_namespaces_restart_and_receipt_isolation(postgres_config):
         write_consumption_receipt(first, "math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
     with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
         assert other.existing_receipt(original) is None
-        assert other.consumption_receipts("math") == ()
         assert other.append_result(original).inserted
         assert other.get("math", "first") == original
     with closing(PostgresRecordStore(url, schema=schema, name="one")) as reopened:
         assert reopened.append_result(original).inserted is False
         assert reopened.get_for_audit("math", "first").item == original
-        assert len(reopened.consumption_receipts("math")) == 1
     with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
         assert other.count("math") == 1
 
@@ -58,7 +59,6 @@ def test_large_consumption_receipt_reads_back(postgres_database):
         write_consumption_receipt(store, "math", ids, receipt_id="large", metadata={"step": 1})
         store.append(record("later"))
         assert store.get("math", "later") is not None
-        assert store.consumption_receipts("math")[0]["consumed_ids"] == tuple(sorted(ids))
 
 
 def test_concurrent_append_retry_and_conflict(postgres_database):
@@ -134,7 +134,7 @@ def test_sequence_allocation_waits_for_prior_commit(postgres_database):
         with ThreadPoolExecutor(1) as pool:
             with first._transaction(write=True) as connection:
                 first._insert(
-                    connection, first._tables.records, {**first._encode(record())._asdict(), "body_bytes": 30}
+                    connection, first._tables.records, {**first._encode(record())[0]._asdict(), "body_bytes": 30}
                 )
                 pending = pool.submit(append_second)
                 assert started.wait(5)
@@ -159,12 +159,11 @@ def test_reader_snapshot_and_transaction_rollback(postgres_database):
             assert connection.execute(query).all() == []
             write_consumption_receipt(second, "math", frozenset({"first"}), receipt_id="skip", metadata={})
             assert connection.execute(query).all() == []
-        assert len(first.consumption_receipts("math")) == 1
         assert first.get("math", "first") == original
         assert first.get_for_audit("math", "first").item == original
         with pytest.raises(RuntimeError, match="rollback"), first._transaction(write=True) as connection:
             first._insert(
-                connection, first._tables.records, {**first._encode(record("failed"))._asdict(), "body_bytes": 10}
+                connection, first._tables.records, {**first._encode(record("failed"))[0]._asdict(), "body_bytes": 10}
             )
             raise RuntimeError("rollback")
         assert second.get("math", "failed") is None
@@ -183,7 +182,6 @@ def test_archive_generation_retention_and_closed_sessions(postgres_database):
             old.append(record("stale"))
         with closing(PostgresRecordStore(postgres_database, name="math")) as new:
             assert new.storage_id != old.storage_id
-            assert new.consumption_receipts("math") == ()
             assert new.append_result(record()).inserted
             assert postgres_database.prune(RecordRetention(max_bytes=1)) == 3
             assert new.count("math") == 0
@@ -215,12 +213,82 @@ def test_capacity_counts_all_records_and_preserves_retry_hashes(postgres_databas
         assert store.append_result(record("expired")).inserted is False
 
 
+def test_eviction_keeps_the_nodes_of_each_generation_that_a_remaining_record_needs(postgres_database):
+    tables = postgres_database.tables
+    with (
+        closing(PostgresRecordStore(postgres_database, name="math")) as math,
+        closing(PostgresRecordStore(postgres_database, name="code")) as code,
+    ):
+        math.append(conversation("old", 2, created_at=10.0))
+        code.append(conversation("other", 2, scenario="code", created_at=15.0))
+        math.append(conversation("new", 3, created_at=20.0))
+        assert math.trajectory("math", "new") == ("old", "new")
+        with postgres_database.transaction() as connection:
+            old_row = connection.execute(
+                select(tables.records.c.body_bytes).where(tables.records.c.agent_record_id == "old")
+            ).scalar_one()
+            retained = SQLRecordRetention(tables).retained_bytes(connection)
+        # "new" continues "old" in the same generation, so the eviction frees only the row of "old".
+        assert postgres_database.prune(RecordRetention(max_bytes=retained - old_row)) == 1
+        assert math.replay("math") == (conversation("new", 3, created_at=20.0),)
+        assert code.replay("code") == (conversation("other", 2, scenario="code", created_at=15.0),)
+        assert math.loss("math").body_bytes == old_row
+        with postgres_database.transaction() as connection:
+            counts = dict(
+                connection.execute(
+                    select(tables.nodes.c.storage_id, func.sum(tables.nodes.c.record_count)).group_by(
+                        tables.nodes.c.storage_id
+                    )
+                ).all()
+            )
+        assert counts == {math.storage_id: 2, code.storage_id: 1}
+        assert postgres_database.prune(RecordRetention(max_bytes=1)) == 2
+        with postgres_database.transaction() as connection:
+            assert connection.execute(select(func.count()).select_from(tables.nodes)).scalar_one() == 0
+
+
+def test_an_upgrade_from_version_13_links_the_stored_calls(postgres_config):
+    url, schema = postgres_config
+    calls = [conversation(f"call-{turns}", turns) for turns in (1, 2, 3)]
+    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
+        with closing(PostgresRecordStore(database)) as records:
+            records.append_many(calls)
+        tables = database.tables
+        with database.transaction() as connection:
+            # Write the rows back as version 13 kept them: the whole payload, and no node table.
+            for call in calls:
+                connection.execute(
+                    tables.records.update()
+                    .where(tables.records.c.agent_record_id == call.agent_record_id)
+                    .values(payload_json=canonical_json(dict(call.payload)))
+                )
+            for column in ("message_field", "payload_sha256"):
+                connection.exec_driver_sql(f"ALTER TABLE {schema}.agent_record DROP COLUMN {column}")
+            tables.nodes.drop(connection)
+            version = tables.records.metadata.tables[f"{schema}.schema_version"]
+            connection.execute(version.update().values(version=13))
+    with (
+        closing(PostgresRecordDatabase(url, schema=schema)) as database,
+        closing(PostgresRecordStore(database)) as records,
+    ):
+        assert records.replay("math") == tuple(calls)
+        assert records.trajectory("math", "call-3") == ("call-1", "call-2", "call-3")
+        with database.transaction() as connection:
+            nodes = database.tables.nodes
+            assert connection.execute(
+                select(func.count(), func.sum(nodes.c.record_count)).select_from(nodes)
+            ).one() == (
+                3,
+                5,
+            )
+
+
 def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypatch):
     url, schema = postgres_config
     committed = CommitRecord(
         scenario="math",
         step=1,
-        artifact_ref=ArtifactRef("content:1", "release:1", "base"),
+        snapshot=SnapshotRef("release:1", "base"),
         checkpoint=True,
         algorithm_state={"step": 1},
         consumed_ids=frozenset({"first"}),
@@ -275,6 +343,7 @@ def test_deployment_file_names_a_storage_plugin_with_its_config(tmp_path):
         "recipe:\n  implementation: recipe\n"
         "storage:\n  record_backend:\n    module: reef.storage.postgres:PostgresScenarioStorage\n"
         "    config:\n      database_url: postgresql://user:secret@example.invalid/db\n"
+        "  coordination_backend: postgres\n  record_database_url: postgresql://user:secret@example.invalid/db\n"
     )
     settings = service_config_from_mapping(translate_layout(load_config(path)))
     assert settings.record_backend == {
@@ -311,14 +380,19 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         url, schema = request.getfixturevalue("postgres_config")
         values = {"record_backend": backend, "record_database_url": url, "record_database_schema": schema}
     elif backend == "sqlite-plugin":
-        values = {"record_backend": "reef.storage.sqlite:SQLiteScenarioStorage"}
+        values = {"record_backend": "reef.storage.sqlite:SQLiteScenarioStorage", "coordination_backend": "sqlite"}
     elif backend == "postgres-plugin":
         url, schema = request.getfixturevalue("postgres_config")
         plugin = {
             "module": "reef.storage.postgres:PostgresScenarioStorage",
             "config": {"database_url": url, "schema": schema},
         }
-        values = {"record_backend": plugin}
+        values = {
+            "record_backend": plugin,
+            "coordination_backend": "postgres",
+            "record_database_url": url,
+            "record_database_schema": schema,
+        }
     settings = ServiceConfig(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
@@ -398,13 +472,8 @@ def test_legacy_schema_moves_retirement_to_consumption_and_removes_old_tables(po
         with closing(PostgresRecordDatabase(url, schema=schema)) as database:
             with closing(PostgresRecordStore(database, name="one")) as records:
                 assert records.get("math", "first") == record()
-                assert {
-                    key for receipt in records.consumption_receipts("math") for key in receipt["consumed_ids"]
-                } == {"first", "earlier"}
-                assert len(records.consumption_receipts("math")) == 2
             with closing(PostgresRecordStore(database, name="two")) as records:
                 assert records.get("math", "other") == record("other")
-                assert records.consumption_receipts("math")[0]["consumed_ids"] == ("other",)
             with database.transaction() as connection:
                 inspector = inspect(connection)
                 assert "compaction_receipts" not in inspector.get_table_names(schema=schema)

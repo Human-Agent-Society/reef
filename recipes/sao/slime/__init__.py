@@ -13,8 +13,12 @@ from typing import Any
 
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult, register_loss_family
 from reef.train.slime_backend.data_builder import build_policy_rollout_data, validate_policy_columns
+from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.types import JobData, trajectories
 
 _logger = logging.getLogger(__name__)
 
@@ -26,8 +30,7 @@ DEFAULT_CRITIC_LAMBDA = 1.0
 # Paper default: K critic updates per actor update.
 DEFAULT_CRITIC_STEPS_PER_ACTOR = 2
 ROW_SHAPE = (
-    "[source_id, tokens, loss_mask, rollout_log_probs, reward, action_mask, "
-    "producing_runtime_load_id, rollout_created_at]"
+    "[source_id, tokens, loss_mask, rollout_log_probs, reward, action_mask, producing_artifact_id, rollout_created_at]"
 )
 
 
@@ -91,7 +94,7 @@ def sao_sample_row(sample: TrajectorySample) -> list[Any]:
     """Shape one Reef sample into SAO's 8-element wire row.
 
     The first five columns are the shared policy 5-tuple; SAO appends the
-    action mask (for skip-observation GAE), producing runtime load ID, and
+    action mask (for skip-observation GAE), producing artifact ID, and
     creation time, which the 5-tuple has no slots for. Outbound mirror of
     :func:`build_sao_rollout_data`.
     """
@@ -101,8 +104,9 @@ def sao_sample_row(sample: TrajectorySample) -> list[Any]:
         list(sample.training.get("loss_mask", [])),
         list(sample.training.get("rollout_log_probs", [])),
         trajectory_reward(sample),
-        list(sample.training.get("action_mask", [])),
-        sample.training.get("runtime_load_id", None),
+        # A rendered sample's actions are the tokens that it trains.
+        list(sample.training.get("action_mask") or sample.training.get("loss_mask", [])),
+        sample.artifact_id,
         sample.training.get("rollout_created_at", None),
     ]
 
@@ -115,8 +119,8 @@ def build_sao_rollout_data(
     """Validate and convert Reef SAO rows into Slime's external rollout payload.
 
     SAO's wire row keeps the policy 5-tuple as its prefix and appends the
-    action mask, producing version, and creation time: ``[source_id, tokens,
-    loss_mask, rollout_log_probs, reward, action_mask, producing_runtime_load_id,
+    action mask, producing artifact, and creation time: ``[source_id, tokens,
+    loss_mask, rollout_log_probs, reward, action_mask, producing_artifact_id,
     rollout_created_at]``. The shared policy builder assembles the 5-tuple
     columns; this builder validates the appended columns and attaches them.
     Each SAO sample is one independently scheduled rollout, so there is no
@@ -127,7 +131,7 @@ def build_sao_rollout_data(
     """
     base_rows: list[list[Any]] = []
     action_masks: list[list[int]] = []
-    producing_runtime_load_ids: list[str | None] = []
+    producing_artifact_ids: list[str | None] = []
     rollout_created_ats: list[float | None] = []
 
     for sample_index, row in enumerate(samples):
@@ -140,7 +144,7 @@ def build_sao_rollout_data(
             row_log_probs,
             reward,
             row_action_mask,
-            producing_runtime_load_id,
+            producing_artifact_id,
             rollout_created_at,
         ) = row
         row_tokens, row_loss_mask, row_log_probs, row_action_mask, reward = validate_policy_columns(
@@ -150,21 +154,18 @@ def build_sao_rollout_data(
             row_log_probs,
             reward,
             action_mask=row_action_mask,
-            require_log_probs=True,
         )
         if row_action_mask is None:
             raise RuntimeError("validated SAO sample has no action mask")
 
         base_rows.append([source_id, row_tokens, row_loss_mask, row_log_probs, reward])
         action_masks.append(row_action_mask)
-        producing_runtime_load_ids.append(
-            None if producing_runtime_load_id is None else str(producing_runtime_load_id)
-        )
+        producing_artifact_ids.append(None if producing_artifact_id is None else str(producing_artifact_id))
         rollout_created_ats.append(None if rollout_created_at is None else float(rollout_created_at))
 
     data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec)
     data["action_masks"] = action_masks
-    data["producing_runtime_load_ids"] = producing_runtime_load_ids
+    data["producing_artifact_ids"] = producing_artifact_ids
     data["rollout_created_ats"] = rollout_created_ats
     return data
 
@@ -173,7 +174,6 @@ def build_sao_rollout_data(
 class SaoAlgorithm(SlimeAlgorithm):
     loss_family = "sao"
     loss_type = "policy_loss"
-    requires_rollout_logprobs = True
     advantages = "forbidden"
     # SAO deliberately runs Slime's pre-train pass: the critic supplies
     # values, then the registered skip-observation GAE hook constructs the
@@ -375,34 +375,16 @@ class SaoAlgorithm(SlimeAlgorithm):
         )
 
     def rollout_metrics(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
-        """Telemetry of one rollout's data: its producing-version spread, its queue age and its trained token share.
+        """Telemetry of one rollout's data: how many artifacts produced it, its queue age and its trained token share.
 
-        A sample's producing-version spread is how many versions its producing
-        version (``incarnation:sequence``) is behind the newest producing
-        version of the same serving incarnation in the data. It measures how
-        far apart the data's samples were produced, not how far they are
-        behind the weights that train on them. A sample whose version has no
-        sequence does not count.
+        ``sao/producing_artifacts`` is the number of distinct artifacts that produced the data's samples. It
+        measures how many policies the data mixes, not how far it is behind the weights that train on it. A
+        sample without a producing artifact does not count.
         """
         metrics: dict[str, Any] = {}
-        versions = [
-            (head, int(tail))
-            for token in rollout_data.get("producing_runtime_load_ids") or []
-            if token is not None
-            for head, sep, tail in (str(token).rpartition(":"),)
-            if sep and head and tail.isdigit()
-        ]
-        if versions:
-            newest: dict[str, int] = {}
-            for incarnation, sequence in versions:
-                newest[incarnation] = max(sequence, newest.get(incarnation, sequence))
-            spreads = [newest[incarnation] - sequence for incarnation, sequence in versions]
-            metrics.update(
-                {
-                    "sao/producing_version_spread_max": max(spreads),
-                    "sao/producing_version_spread_mean": sum(spreads) / len(spreads),
-                }
-            )
+        producing = {token for token in rollout_data.get("producing_artifact_ids") or [] if token is not None}
+        if producing:
+            metrics["sao/producing_artifacts"] = len(producing)
         ages = [
             max(0.0, time.time() - float(value))
             for value in rollout_data.get("rollout_created_ats") or []
@@ -448,4 +430,29 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
     _logger.info("SAO: freezing critic attention via patterns %s", patterns)
 
 
-__all__ = ["SaoAlgorithm", "SaoSchedule", "SaoSettings", "SaoStepPlan", "build_sao_rollout_data", "sao_sample_row"]
+@register_slime_objective
+class SaoObjective(SlimeObjective):
+    name = "sao"
+    loss_family = "sao"
+    # The SAO ratio is clipped on both sides, so passes after the first stay bounded.
+    supports_multiple_epochs = True
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
+        steps = next_steps(state)
+        return TrainingSignal(
+            "train",
+            {"steps": steps},
+            {"steps": steps, "rollouts": len(samples)},
+        )
+
+
+__all__ = [
+    "SaoAlgorithm",
+    "SaoObjective",
+    "SaoSchedule",
+    "SaoSettings",
+    "SaoStepPlan",
+    "build_sao_rollout_data",
+    "sao_sample_row",
+]

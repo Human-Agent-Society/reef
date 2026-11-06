@@ -27,7 +27,7 @@ import yaml
 
 from reef.core.errors import ReefError
 from reef.inference.http import HttpInferenceHandler, provider_request_headers
-from reef.service.wire import RELEASE_ID_HEADER, SCENARIO_HEADER
+from reef.service.wire import SCENARIO_HEADER
 
 #: The catch-all rule that sends automatic requests to a scenario's default target.
 DEFAULT_RULE = "default"
@@ -834,8 +834,9 @@ class RoutingAdapter:
                 raise RoutingRequestError(f"request repeats the {name} header", code="duplicate_header")
             if name in RESERVED_HEADERS or name.startswith(RESERVED_HEADER_PREFIX):
                 raise RoutingRequestError(f"{name} is not accepted from clients", code="reserved_header")
-        if values.get(RELEASE_ID_HEADER, [""])[0].strip():
-            raise RoutingRequestError("routed external targets do not accept x-reef-release-id", code="release_pin")
+        for name in ("x-reef-release-id", "x-reef-artifact-id"):
+            if values.get(name, [""])[0].strip():
+                raise RoutingRequestError(f"routed external targets do not accept {name}", code="release_pin")
         name = values.get(SCENARIO_HEADER, [""])[0]
         if not name:
             raise RoutingRequestError("routing requires x-reef-scenario", code="missing_scenario")

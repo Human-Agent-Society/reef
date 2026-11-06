@@ -131,7 +131,6 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
     from reef.dispatcher import Dispatcher
     from reef.scenario.scenario import Scenario
     from reef.service.request_service import RequestService
-    from reef.surface.base import Surface
 
     # Removed dead code (no production callers).
     assert not hasattr(reef.core, "ReferenceStatus")
@@ -142,34 +141,22 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
     assert not hasattr(Dispatcher, "recipes")
     assert not hasattr(Scenario, "checkpoint_strategy")
     assert not hasattr(Scenario, "commit_log")
-    # Capabilities are explicit fields rather than inferred method overrides.
-    assert not hasattr(Surface, "kind")
-    assert not hasattr(Surface, "validator")
-    assert Surface().files is None
 
 
 @pytest.mark.unit
 def test_naming_unification_renames_are_complete() -> None:
     """One concept, one name: the renamed-away spellings must stay gone."""
-    import reef.storage.records
-    import reef.surface.base
     from reef.recipe.base import WeightTrainingRecipe
     from reef.scenario.scenario import Scenario
     from reef.train.trainer import Trainer
 
     # The objective id is no longer called "algorithm".
     assert not hasattr(WeightTrainingRecipe, "algorithm")
-    assert WeightTrainingRecipe.training_spec().objective == ""
+    assert WeightTrainingRecipe.default_parameters() == {}
     assert not hasattr(Trainer, "algorithm")
     assert not hasattr(Trainer, "objective")
     assert not hasattr(Scenario, "algorithm")
     assert not hasattr(Scenario, "objective")
-    # Surface-side protocols use serving vocabulary without duplicating the
-    # concrete runtime package's InferenceRuntime / TrainingRuntime names.
-    for name in ("SurfaceRuntime", "TrainingSurfaceRuntime", "ServingHost", "TrainingHost"):
-        assert not hasattr(reef.surface.base, name)
-    for name in ("ServingRuntime", "WeightRuntime"):
-        assert hasattr(reef.surface.base, name)
     # Route registration follows the records vocabulary.
     import reef.service.routes as routes
 
@@ -178,21 +165,9 @@ def test_naming_unification_renames_are_complete() -> None:
 
 
 @pytest.mark.unit
-def test_surface_hook_bag_and_dead_adapter_residency_are_removed() -> None:
-    import reef.surface as surfaces
-
-    for name in (
-        "EvolutionSurface",
-        "LayerModule",
-        "AdapterResidency",
-        "AdapterRuntime",
-        "AdapterSurface",
-        "HarnessSurface",
-        "ResidencyDecision",
-        "SkillSurface",
-        "WeightSurface",
-    ):
-        assert not hasattr(surfaces, name)
+def test_the_surface_package_is_removed() -> None:
+    """Scenario components live in ``reef.artifact.components``; the runtime loads weights directly."""
+    assert importlib.util.find_spec("reef.surface") is None
 
 
 @pytest.mark.unit
@@ -222,10 +197,10 @@ def test_online_grpo_objective_and_recipe_are_removed() -> None:
     data recipe, with nothing in it addressing drift on a continually updated
     policy."""
     from reef.recipe.registry import recipe_class_for
-    from reef.train.algos.registry import resolve_objective
+    from reef.train.slime_backend.objectives import resolve_slime_objective
 
-    with pytest.raises(ValueError, match="unknown objective"):
-        resolve_objective("online_grpo")
+    with pytest.raises(ValueError, match="unknown Slime objective"):
+        resolve_slime_objective("online_grpo")
     assert recipe_class_for("online_grpo") is None
     assert recipe_class_for("online_rft") is None
 

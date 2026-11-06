@@ -17,10 +17,10 @@ from typing import Any, Self
 
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.commits import CommitRecord
+from reef.storage.commits import CommitRecord, CommitSnapshots
 from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
-from reef.storage.samples import SampleStore
+from reef.storage.records import AppendResult, RecordLoss, RecordStore, StoredRecord
+from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
@@ -90,6 +90,9 @@ class ObservedRecordStore(RecordStore):
     def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
         return self._inner.count(scenario, request_type=request_type, after_sequence=after_sequence)
 
+    def last_sequence(self, scenario: str) -> int:
+        return self._inner.last_sequence(scenario)
+
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         return self._inner.get_for_audit(scenario, agent_record_id)
 
@@ -97,9 +100,6 @@ class ObservedRecordStore(RecordStore):
         self, scenario: str, *, after_sequence: int = 0, limit: int = 256, request_type: RequestType | None = None
     ) -> tuple[StoredRecord, ...]:
         return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
-
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        return self._inner.consumption_receipts(scenario)
 
     def loss(self, scenario: str) -> RecordLoss:
         return self._inner.loss(scenario)
@@ -129,12 +129,15 @@ class ObservedScenarioStore(ScenarioStore):
         return self._inner.tasks
 
     @property
-    def samples(self) -> SampleStore:
-        return self._inner.samples
+    def training_state(self) -> TrainingState:
+        return self._inner.training_state
 
     @property
     def evaluations(self) -> EvaluationStore:
         return self._inner.evaluations
+
+    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
+        self._inner.use_snapshots(snapshots)
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()
@@ -180,6 +183,9 @@ class ObservedScenarioStorage(ScenarioStorage):
 
     def open(self, scenario: str) -> ScenarioStore:
         return ObservedScenarioStore(self._inner.open(scenario), self._observer)
+
+    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
+        return self._inner.sample_store(scenario, session)
 
     def archive(self, scenario: str) -> tuple[str, ...]:
         return self._inner.archive(scenario)

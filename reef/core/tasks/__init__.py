@@ -7,6 +7,7 @@ from reef.core.tasks.harbor import (
     HarborTaskError,
     primary_reward,
     read_harbor_task,
+    task_instruction,
     write_harbor_task,
 )
 from reef.core.tasks.split import (
@@ -28,6 +29,7 @@ __all__ = [
     "primary_reward",
     "read_harbor_task",
     "read_split_manifest",
+    "task_instruction",
     "write_harbor_task",
     "write_split_manifest",
 ]

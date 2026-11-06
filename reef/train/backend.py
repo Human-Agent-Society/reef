@@ -1,16 +1,15 @@
-"""The candidate lifecycle of harness evolution backends."""
+"""The values of one harness step: a prepared step, and the committed snapshots that a step reads its head from."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
-from reef.artifact.artifact import Artifact
-from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import JobData, TrainStepResult
+from reef.core.evaluation import UpdateCandidate
+from reef.harness.tree.tree import normalized_path, require_text
 
 
 @dataclass(frozen=True)
@@ -53,104 +52,77 @@ class PreparedStep:
         return cls("skip", state, metrics or {})
 
 
-class CandidateBackend(CandidateEvaluator, ABC):
-    """Prepare and evaluate updates while Reef owns candidate selection.
+@dataclass(frozen=True)
+class ArtifactTextFiles:
+    """One committed component artifact's ID and text files.
 
-    The backend owns method-specific candidate construction and settlement,
-    and supplies the default evaluator. A recipe may inject a cohesive
-    :class:`reef.evaluation.CandidateEvaluationPlugin`; otherwise the trainer
-    wraps this evaluator in :class:`reef.evaluation.BackendAlwaysSelectPlugin`.
-    Every backend therefore follows the same evaluate-then-decide lifecycle
-    between preparation and settlement.
+    Values: ``artifact_id`` is the non-empty opaque ID of the component artifact; ``files`` maps
+    each tree path (``reef.harness.tree.normalized_path``) to its UTF-8 text. The mapping is
+    immutable and excludes repository metadata.
+    Purpose: ``CommittedArtifacts`` makes it; a harness step builds its
+    head from ``files``.
+    """
+
+    artifact_id: str
+    files: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact_id, str) or not self.artifact_id:
+            raise ValueError("ArtifactTextFiles.artifact_id must be a non-empty string")
+        if not isinstance(self.files, Mapping):
+            raise TypeError("artifact text files must be a mapping")
+        files = {normalized_path(path): require_text(path, text) for path, text in self.files.items()}
+        object.__setattr__(self, "files", MappingProxyType(files))
+
+
+class CommittedArtifacts(ABC):
+    """The artifacts a scenario's commits recorded, read for one component at a time.
+
+    Purpose: a harness trainer reads the committed head here, as the artifact of
+    its next job's start, and the scenario layer implements it over its commit
+    history and artifact repository. A component's head is its training
+    start: the snapshot of the later of its newest ``train_from`` record and
+    its newest training commit that made an artifact, active or not. An
+    ``activate`` record moves what serves, not the head. Before any such
+    record, the head is the scenario's root snapshot.
     """
 
     @abstractmethod
-    def initial_state(self) -> Mapping[str, Any]: ...
-
-    def close(self) -> None:
-        """Release resources owned by this backend; safe to call repeatedly."""
-        return
-
-    @property
-    def harness_node_paths(self) -> Mapping[str, str] | None:
-        """Root-relative render paths of the harness node kinds; ``None`` for a backend that evolves no harness."""
-        return None
-
-    @property
-    def harness_adapter(self) -> str | None:
-        """The name of the harness adapter the backend evolves; ``None`` for a backend that evolves no harness."""
-        return None
-
-    def commit_applied(self, state: Mapping[str, Any]) -> None:
-        """Observe algorithm state only after its scenario commit is durable.
-
-        Backends normally need no side effect here. A backend that maintains
-        a derived local mirror may update it from ``state`` without letting
-        speculative prepare/evaluate work escape Reef's commit boundary.
-        """
-        return
-
-    def shipped_content_update(self, state: Mapping[str, Any], published_tree: Path) -> TrainStepResult | None:
-        """A result that republishes the content this Reef ships, when the served tree no longer carries it.
-
-        Content a backend ships with Reef itself (the harness backend's reef-owned
-        entries) is fixed when a scenario is created and carried unchanged by every
-        later step, so a scenario opened by an upgraded Reef compares it against
-        ``published_tree``, the active release's files. The result carries the
-        refreshed ``state`` and a durable ``artifact``; it is committed without an
-        evaluation. The default ships nothing.
-        """
-        return None
-
-    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
-        """The state whose next step starts from ``artifact``, given the current ``state``.
-
-        Reef calls this when a person sets the training start (``train-from``).
-        ``artifact`` is the backend's component of a release, materialized.
-        Raise ``ValueError`` when the backend cannot start from ``artifact``.
-        The default refuses every artifact.
-        """
-        raise ValueError(f"the {type(self).__name__} backend cannot start from a published artifact")
-
-    def experiment_config(self) -> Mapping[str, Any]:
-        """Non-secret backend identity/config attached to experiment runs."""
-        return {}
-
-    def operational_metrics(self) -> Mapping[str, float | int]:
-        """Nonblocking process-local measurements, independent of successful commits."""
-        return {}
-
-    def failed_step_metrics(self) -> Mapping[str, Any]:
-        """Metadata to retain when the current instruction fails before producing a result."""
-        return {}
+    def head(self, component: str) -> ArtifactTextFiles:
+        """``component``'s files in its head artifact."""
 
     @abstractmethod
-    def prepare_step(
-        self,
-        data: JobData,
-        state: Mapping[str, Any],
-        scenario_step: int,
-    ) -> PreparedStep: ...
-
-    @abstractmethod
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        """Measure ``candidate``; the trainer's default plugin calls this with the candidate alone.
-
-        A backend may accept further keyword-only options with defaults (the
-        harness backend's ``sides``) for the plugins it ships; this contract
-        stays the one every plugin can rely on.
-        """
-
-    @abstractmethod
-    def settle_step(
-        self,
-        prepared: PreparedStep,
-        decision: SelectionDecision,
-    ) -> TrainStepResult: ...
-
-    @abstractmethod
-    def abort_step(self, prepared: PreparedStep) -> None:
-        """Restore backend-local state after evaluation or settlement fails."""
+    def artifact(self, artifact_id: str, component: str) -> ArtifactTextFiles:
+        """Return a committed component artifact; raise ``ArtifactNotFound`` when its ID is unknown."""
 
 
-__all__ = ["CandidateBackend", "PreparedStep"]
+@dataclass(frozen=True)
+class ComponentArtifacts:
+    """One component's view of a scenario's ``CommittedArtifacts``.
+
+    Values: ``artifacts`` is the scenario's reader, and ``component`` names a
+    component of the scenario, non-empty.
+    Purpose: ``Recipe.build_trainers`` makes one per component and hands it
+    to ``Recipe.build``; a harness trainer reads its head through it.
+    """
+
+    artifacts: CommittedArtifacts
+    component: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.component, str) or not self.component:
+            raise ValueError("ComponentArtifacts.component must be a non-empty string")
+
+    def head(self) -> ArtifactTextFiles:
+        return self.artifacts.head(self.component)
+
+    def artifact(self, artifact_id: str) -> ArtifactTextFiles:
+        return self.artifacts.artifact(artifact_id, self.component)
+
+
+__all__ = [
+    "ArtifactTextFiles",
+    "CommittedArtifacts",
+    "ComponentArtifacts",
+    "PreparedStep",
+]

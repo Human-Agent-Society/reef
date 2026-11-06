@@ -7,26 +7,16 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
-from recipes.tttd import (
-    TTTDGridSettings,
-    TTTDGroupedRolloutReport,
-    TTTDJobData,
-    TTTDRecipe,
-    TTTDRecord2Record,
-    TTTDSamples,
-)
-from recipes.tttd.objective import TttdObjective
-from reef.artifact import ArtifactRef
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
+from recipes.tttd.objective import adaptive_entropic_advantages
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
-from reef.record2record import NoRecordSets
-from reef.record2sample.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import TrainingMethod
+from reef.record2sample import NoSamples
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
@@ -48,13 +38,13 @@ def _inference(
     agent_record_id: str,
     token: int,
     *,
-    artifact_ref: ArtifactRef | None = None,
+    artifact_id: str | None = None,
 ) -> AgentRecord:
     return AgentRecord.create(
         scenario="discovery",
         request_type=RequestType.INFERENCE,
         agent_record_id=agent_record_id,
-        artifact_ref=artifact_ref,
+        artifact_id=artifact_id,
         payload={
             "input_ids": [10, 11],
             "response": {
@@ -98,12 +88,11 @@ def _processor(experiment_logger=None, job_samples=None) -> TrainingPipeline:
         report_type=TTTDGroupedRolloutReport,
         experiment_logger=experiment_logger or _ExperimentLogger(),
     )
-    record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=2, rollouts_per_group=3))
+    record2sample = TTTDSamples(context, TTTDSettings(groups_per_step=2, rollouts_per_group=3))
     return TrainingPipeline(
         context,
-        record2record=record2record,
-        record2sample=TTTDSamples(SampleAssemblySettings(), record2record),
-        sample2job=TTTDJobData(context, record2record, None, job_samples),
+        record2sample=record2sample,
+        sample2job=TTTDJobData(context, record2sample, None, job_samples),
     )
 
 
@@ -121,15 +110,15 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
         {
             "data": {},
             "pipeline": {
-                "record2record": {"config": {"groups_per_step": 2, "rollouts_per_group": 3}},
-                "record2sample": {"config": {"accept_multi_turn_policy_samples": True}},
+                "record2sample": {
+                    "config": {"groups_per_step": 2, "rollouts_per_group": 3, "accept_multi_turn_policy_samples": True}
+                },
             },
         }
     )
 
     pipeline = recipe.build_pipeline(PipelineContext("discovery", report_type=recipe.report_type))
 
-    assert isinstance(pipeline.record2record, TTTDRecord2Record)
     assert isinstance(pipeline.record2sample, TTTDSamples)
     assert isinstance(pipeline.sample2job, TTTDJobData)
     assert (pipeline.record2sample.groups_per_step, pipeline.record2sample.rollouts_per_group) == (2, 3)
@@ -157,9 +146,9 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
 @pytest.mark.parametrize(
     ("pipeline", "message"),
     [
-        ({"record2record": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
-        ({"record2record": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
-        ({"record2sample": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
+        ({"record2sample": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
+        ({"record2sample": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
+        ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         ({"sample2job": {"config": {"batch_size": 2}}}, "TTTDJobData: unknown config fields: batch_size"),
     ],
 )
@@ -173,7 +162,10 @@ def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict
 def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
     def build(job_samples: int) -> Trainer:
         return Trainer.build(
-            "discovery", SQLiteRecordStore(), pipeline_factory=lambda context: _processor(job_samples=job_samples)
+            "discovery",
+            SQLiteRecordStore(),
+            pipeline_factory=lambda context: _processor(job_samples=job_samples),
+            root=STUB_ROOT,
         )
 
     build(6).close()
@@ -184,14 +176,9 @@ def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("stage", [TTTDSamples, TTTDJobData])
-def test_tttd_later_stages_need_the_tttd_record_stage(stage: type) -> None:
-    context = PipelineContext("discovery")
-    stages = {"record2record": NoRecordSets()}
-    if stage is TTTDJobData:
-        stages["record2sample"] = TTTDSamples(SampleAssemblySettings(), TTTDRecord2Record(context, TTTDGridSettings()))
-    with pytest.raises(PluginConfigError, match=f"{stage.__name__} needs TTTDRecord2Record"):
-        stage.from_config({}, context=context, environ={}, **stages)
+def test_tttd_job_data_needs_the_tttd_sample_stage() -> None:
+    with pytest.raises(PluginConfigError, match="TTTDJobData needs TTTDSamples"):
+        TTTDJobData.from_config({}, context=PipelineContext("discovery"), record2sample=NoSamples(), environ={})
 
 
 @pytest.mark.unit
@@ -283,16 +270,16 @@ def test_tttd_does_not_mix_complete_groups_from_different_steps() -> None:
 
 
 @pytest.mark.unit
-def test_tttd_accepts_one_durable_release_id() -> None:
+def test_tttd_accepts_one_artifact_id() -> None:
     processor = _processor()
-    artifact_ref = ArtifactRef("artifact-1", "checkpoint-1", None)
+    artifact_id = "checkpoint-1"
     for group in range(2):
         for rollout in range(3):
             processor.push(
                 _inference(
                     f"i-0-{group}-{rollout}",
                     100 + group * 3 + rollout,
-                    artifact_ref=artifact_ref,
+                    artifact_id=artifact_id,
                 )
             )
             processor.push(_report(0, group, rollout, float(group + rollout)))
@@ -301,7 +288,7 @@ def test_tttd_accepts_one_durable_release_id() -> None:
 
 
 @pytest.mark.unit
-def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
+def test_tttd_rejects_and_releases_a_step_spanning_artifact_ids(caplog) -> None:
     processor = _processor()
     with caplog.at_level("WARNING", logger="recipes.tttd.processor"):
         for group in range(2):
@@ -311,21 +298,21 @@ def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
                     _inference(
                         f"i-0-{group}-{rollout}",
                         100 + group * 3 + rollout,
-                        artifact_ref=ArtifactRef(f"artifact-{version}", version, None),
+                        artifact_id=version,
                     )
                 )
                 processor.push(_report(0, group, rollout, float(group + rollout)))
 
     assert not processor.ready(6)
-    assert "span releases" in caplog.text
+    assert "span artifacts" in caplog.text
     assert processor.status()["failed_steps"] == [
         {
             "step": 0,
-            "reason": "mixed_release_ids",
-            "release_ids": ["checkpoint-1", "checkpoint-2"],
+            "reason": "mixed_artifact_ids",
+            "artifact_ids": ["checkpoint-1", "checkpoint-2"],
         }
     ]
-    retention = processor.releasable_record_ids()
+    retention = processor.record2sample.releasable_record_ids()
     expected_ids = {
         f"{prefix}-0-{group}-{rollout}" for prefix in ("i", "r") for group in range(2) for rollout in range(3)
     }
@@ -337,14 +324,14 @@ def test_tttd_caches_policy_samples_at_push(monkeypatch) -> None:
     from reef.record2sample import assembly as reported_module
 
     calls = 0
-    make_sample = reported_module.make_policy_trajectory
+    make_trajectory = reported_module.make_trajectory
 
-    def counted_make_sample(*args, **kwargs):
+    def counted_make_trajectory(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return make_sample(*args, **kwargs)
+        return make_trajectory(*args, **kwargs)
 
-    monkeypatch.setattr(reported_module, "make_policy_trajectory", counted_make_sample)
+    monkeypatch.setattr(reported_module, "make_trajectory", counted_make_trajectory)
     processor = _processor()
     for group in range(2):
         for rollout in range(3):
@@ -440,7 +427,7 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
             processor.push(_report(0, group, rollout, 1.0))
 
     batch = processor.build_job_data(6)
-    result = prepare_slime_job(batch, TrainingMethod("tttd"), {}, StepScheduling(), step_size=6)
+    result = prepare_slime_job(batch, "tttd", {}, StepScheduling(), step_size=6)
 
     assert len(trajectory_groups(batch)) == 1
     assert result.payload is not None
@@ -474,7 +461,7 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
     ],
 )
 def test_adaptive_entropic_advantages_match_pinned_reference(rewards, expected) -> None:
-    advantages, beta = TttdObjective.adaptive_entropic_advantages(rewards)
+    advantages, beta = adaptive_entropic_advantages(rewards)
 
     # Pinned from the original float32 torch implementation; the pure-math
     # port uses float64 so values match well within this tolerance.
@@ -515,7 +502,7 @@ def test_tttd_custom_loss_uses_rollout_log_probs_without_clipping(monkeypatch) -
 
     logits = torch.tensor([0.0, math.log(4.0)], requires_grad=True)
     batch = {
-        "rollout_log_probs": [torch.zeros(2)],
+        "log_probs": [torch.zeros(2)],
         "advantages": [torch.tensor([2.0, -3.0])],
         "unconcat_tokens": [torch.tensor([1, 2, 3])],
         "total_lengths": [3],
@@ -527,7 +514,7 @@ def test_tttd_custom_loss_uses_rollout_log_probs_without_clipping(monkeypatch) -
     }
 
     loss, metrics = tttd_loss(
-        SimpleNamespace(use_rollout_logprobs=True),
+        SimpleNamespace(use_rollout_logprobs=False),
         batch,
         logits,
         torch.mean,
@@ -557,7 +544,7 @@ def test_tttd_custom_loss_cancels_slime_dynamic_batch_normalization(monkeypatch)
 
     logits = torch.zeros(2, requires_grad=True)
     batch = {
-        "rollout_log_probs": [torch.zeros(2)],
+        "log_probs": [torch.zeros(2)],
         "advantages": [torch.tensor([1.0, 1.0])],
         "unconcat_tokens": [torch.tensor([1, 2, 3])],
         "total_lengths": [3],
@@ -566,7 +553,7 @@ def test_tttd_custom_loss_cancels_slime_dynamic_batch_normalization(monkeypatch)
     }
 
     scaled_loss, _ = tttd_loss(
-        SimpleNamespace(use_rollout_logprobs=True),
+        SimpleNamespace(use_rollout_logprobs=False),
         batch,
         logits,
         torch.mean,
@@ -596,7 +583,7 @@ def test_tttd_frozen_base_kl_executes_and_centers_masked_tokens(monkeypatch) -> 
 
     rollout_data = {
         "advantages": [torch.tensor([1.0, 2.0]), torch.tensor([3.0])],
-        "rollout_log_probs": [torch.tensor([-0.2, -0.5]), torch.tensor([-0.3])],
+        "log_probs": [torch.tensor([-0.2, -0.5]), torch.tensor([-0.3])],
         "ref_log_probs": [torch.tensor([-0.4, -0.1]), torch.tensor([-0.2])],
         "loss_masks": [torch.tensor([1.0, 0.0]), torch.tensor([1.0])],
     }
@@ -614,13 +601,13 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     # The processor keeps one constant-reward group when every group is
     # constant; the objective reports that batch, whose advantages carry no
     # signal, through constant_groups_retained.
-    from reef.train.algos.registry import resolve_objective
+    from reef.train.slime_backend.objectives import resolve_slime_objective
     from reef.train.types import JobData
 
     def sample(record_id: str, reward: float) -> TrajectorySample:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
-    objective = resolve_objective("tttd")
+    objective = resolve_slime_objective("tttd")
     constant = JobData(
         "b",
         tuple(

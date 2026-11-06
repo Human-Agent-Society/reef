@@ -5,8 +5,13 @@ import time
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
-from reef.observability.base import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
+from reef.core.artifact_selection import ArtifactSelection
+from reef.observability.base import (
+    ExperimentRun,
+    TrainFromExperimentEvent,
+    TrainingExperimentContext,
+    TrainingExperimentEvent,
+)
 from reef.observability.operations import OperationMetrics
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -21,6 +26,8 @@ class _StubRun:
         self.summary: dict[str, object] = {}
         self.artifacts: list[object] = []
         self.finished = False
+        # An offline run has no page yet; an online run gives its page.
+        self.url: str | None = None
 
     def define_metric(self, *args, **kwargs) -> None:
         self.defined.append((args, kwargs))
@@ -70,7 +77,7 @@ def _context(
         scenario=scenario,
         recipe="openclawrl",
         step=step,
-        source_artifact_ref=ArtifactRef(content_id="math", release_id="artifact:7", parent_release_id="artifact:6"),
+        source_artifacts=ArtifactSelection({"weights": "artifact:7"}),
         run_segment=run_segment,
         run_step=run_step,
         backend="ExampleTrainingBackend",
@@ -87,7 +94,7 @@ def _event(
 ) -> TrainingExperimentEvent:
     return TrainingExperimentEvent(
         context=_context(scenario=scenario, step=step, run_segment=run_segment, run_step=run_step),
-        produced_artifact_ref=ArtifactRef(content_id="math", release_id="artifact:8", parent_release_id="artifact:7"),
+        produced_artifacts=ArtifactSelection({"weights": "artifact:8"}),
         metrics={"train/loss": 0.25, "reward": 0.8, "selection": {"score": 1.0, "label": "ok"}},
         outcome="committed",
         training_job_id="job-7",
@@ -148,12 +155,7 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
             "backend": None,
             "model": "Qwen/test",
             "run_segment": 0,
-            "source_artifact": {
-                "kind": "artifact",
-                "content_id": "math",
-                "release_id": "artifact:7",
-                "parent_release_id": "artifact:6",
-            },
+            "source_artifact_ids": {"weights": "artifact:7"},
         },
         "backend": {},
         "training": {"global_batch_size": 2, "lr": 1e-6},
@@ -167,8 +169,8 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
     assert logged["train/loss"] == pytest.approx(0.25)
     assert logged["selection/score"] == pytest.approx(1.0)
     assert "selection/label" not in logged
-    assert logged["reef/source_release_id"] == "artifact:7"
-    assert logged["reef/produced_release_id"] == "artifact:8"
+    assert logged["reef/source_artifact_ids"] == {"weights": "artifact:7"}
+    assert logged["reef/produced_artifact_ids"] == {"weights": "artifact:8"}
     assert not {"reef/source_runtime_load_id", "reef/produced_runtime_load_id"} & logged.keys()
     assert logged["reef/training_job_id"] == "job-7"
     assert logged["reef/checkpoint_path"] == "/checkpoints/hf/7"
@@ -207,7 +209,7 @@ def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> N
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            start_artifact_ref=_context().source_artifact_ref,
+            start_artifacts=_context().source_artifacts,
         )
     )
 
@@ -230,7 +232,7 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
     logger = tracker.bind_scenario(
         scenario="math",
         recipe="openclawrl",
-        source_artifact_ref=_context().source_artifact_ref,
+        source_artifacts=_context().source_artifacts,
         run_segment=0,
     )
 
@@ -254,7 +256,7 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
             recipe="openclawrl",
             step=8,
             run_segment=0,
-            start_artifact_ref=_context().source_artifact_ref,
+            start_artifacts=_context().source_artifacts,
         )
     )
     logger.log({"accepted": 1}, namespace="processor")
@@ -291,7 +293,7 @@ def test_disabled_and_failed_tracking_never_fail_training() -> None:
     component_logger = logging_tracker.bind_scenario(
         scenario=context.scenario,
         recipe=context.recipe,
-        source_artifact_ref=context.source_artifact_ref,
+        source_artifacts=context.source_artifacts,
         run_segment=0,
     )
     component_logger.log({"training/error": 1}, namespace="operations")
@@ -409,7 +411,7 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
     scenario_logger = tracker.bind_scenario(
         scenario=context.scenario,
         recipe=context.recipe,
-        source_artifact_ref=context.source_artifact_ref,
+        source_artifacts=context.source_artifacts,
         run_segment=0,
     )
     before = time.time()
@@ -427,7 +429,7 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
             recipe=context.recipe,
             step=8,
             run_segment=0,
-            start_artifact_ref=context.source_artifact_ref,
+            start_artifacts=context.source_artifacts,
         )
     )
     scenario_logger.log({"records/unread_count": 0}, namespace="operations")
@@ -516,3 +518,27 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
     assert [row["weights/step/step"] for row in reward_rows] == [2, 3]
     assert run.summary["reef/weights/optimizer_steps"] == 4
     tracker.close()
+
+
+def test_the_run_of_a_context_is_named_with_its_page_while_the_run_is_open() -> None:
+    client = _StubClient()
+    tracker = _tracker(client)
+    assert tracker.experiment_run(_context()) is None
+    tracker.record(_event())
+    run_id = client.init_calls[0]["id"]
+    # An offline run gives no URL: the page is where the run is once it is synced, under the configured entity.
+    assert tracker.experiment_run(_context()) == ExperimentRun(
+        "wandb", "reef-tests", run_id, "has", f"https://wandb.ai/has/reef-tests/runs/{run_id}"
+    )
+    client.runs[0].url = f"https://wandb.ai/has-team/reef-tests/runs/{run_id}"
+    assert tracker.experiment_run(_context()).url == client.runs[0].url
+
+    no_entity = _tracker(_StubClient(), entity=None)
+    no_entity.record(_event())
+    assert no_entity.experiment_run(_context()).url is None
+    disabled = _tracker(_StubClient(), enabled=False)
+    disabled.record(_event())
+    assert disabled.experiment_run(_context()) is None
+    failed = _tracker(_StubClient(fail_init=True))
+    failed.record(_event())
+    assert failed.experiment_run(_context()) is None

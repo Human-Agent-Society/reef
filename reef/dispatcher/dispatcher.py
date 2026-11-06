@@ -4,39 +4,61 @@ from __future__ import annotations
 
 import logging
 import shutil
-import tempfile
 import time
-from collections.abc import Iterator, Mapping, Sequence
+import uuid
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.artifact.sources import SourceFiles
-from reef.core.errors import ScenarioCapacityFull, UnknownScenario
-from reef.core.job_data import TrajectorySample
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.served_models import CACHE_SECONDS
+from reef.core.serving_config import ServingConfig
 from reef.dispatcher import ingest
+from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
+from reef.dispatcher.samples import LocalSampleProducers
+from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
+from reef.dispatcher.serving import ServingWorker
 from reef.dispatcher.status import TrainingStatus
+from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
+from reef.dispatcher.work_retention import EndedWorkSweeper
+from reef.evaluation.artifact_endpoint import CandidateArtifacts
+from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorkers
+from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.recipe.base import Recipe
-from reef.runtime.deployment import close_runtimes
+from reef.recipe.base import Recipe, close_runtimes
+from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
+from reef.scenario.factory import ItemStart
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
-from reef.scenario.releases import ServedArtifact
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshots import ServedBesideArtifact
+from reef.storage.artifact_items import request_artifact_copy
+from reef.storage.control_lease import ControlLeaseState
+from reef.storage.coordination import Coordination, instance_id
+from reef.storage.data import DataStore, MemoryDataStore, check_owner
+from reef.storage.data_sync import ScenarioUses
+from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
-from reef.storage.samples import StoredSample
+from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.tasks import SplitName
+from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.work_queue import WorkItem
+from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
 from reef.train.trainer import Trainer
+from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +72,7 @@ class BackgroundThreads:
     idle_unload_thread: Thread | None = None
 
 
-class Dispatcher(ScenarioLifecycle):
+class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, CandidateArtifacts, ScenarioUses):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's
@@ -78,9 +100,16 @@ class Dispatcher(ScenarioLifecycle):
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
+        record_storage: ScenarioStorage | None = None,
+        data_store: DataStore | None = None,
         hold_local_cycles: bool = False,
         scenario_idle_unload_seconds: float | None = None,
         scenario_admission: ScenarioAdmission | None = None,
+        coordination: Coordination,
+        control_lease: ControlLeaseState | None = None,
+        workers: ServiceWorkers | None = None,
+        components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
+        work_retention_seconds: float = 7 * 24 * 3600.0,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -91,14 +120,90 @@ class Dispatcher(ScenarioLifecycle):
 
         ``scenario_admission``: decides whether a scenario is created or
         loaded. The default admits all scenarios.
+
+        ``record_storage``: the scenario storage that the work outside a loaded scenario uses, such as the inference
+        path that appends records and the data service that copies them. It is ``scenario_storage`` without what a
+        scenario's session does when it opens (the data sync); None means ``scenario_storage``.
+
+        ``control_lease``: the control lease of this instance, when it runs control. A standby waits for it before
+        it builds the dispatcher (``wait_for_control_lease``); None takes the lease now, and raises ``ReefError``
+        when another instance holds it. When another instance takes the lease, the local cycles stop and
+        ``lease_lost`` is set: the process that owns the dispatcher ends, so that its supervisor starts it again as a
+        standby.
+
+        ``coordination`` and ``workers``: the coordination store and the background workers of the services
+        that this process runs. A process that runs every service and keeps no state across restarts, such as an
+        embedded dispatcher, gives it ``reef.storage.sql_coordination.memory_coordination()``.
+
+        The data store keeps the data directory of each training job (``reef.storage.job_data``): control writes
+        it, and the training service opens it. Without a data store, a ``MemoryDataStore`` keeps them.
+        The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
+        the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
+
+        The recipe's training component gets its jobs through the jobs queue: the dispatcher gives the trainers a
+        ``JobQueueComponent`` over it and, with ``training``, runs a ``TrainingJobWorker`` on it.
+
+        ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
+        constructor first waits for the control lease, while another control instance holds it; then the
+        dispatcher queues serving requests, watches the shared store, and runs the trainers' local workers, which
+        add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
+        each scenario on demand and leaves the jobs to control.
+
+        ``data_store``: the deployment's data store (RFC #1028). Control asks the data service to copy each
+        scenario's new records into it (``request_record_copy``), and runs the ``data_sync`` items that the data
+        service adds after its writes (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
+        which owns the task file store that the data store shares.
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
-        #: The deployment's recipe, before any scenario's own model settings.
+        #: The deployment's coordination store: ``served_models``, the work queues and the control lease.
+        self.coordination = coordination
+        #: The background workers of the services that this process runs; the dispatcher stops them first.
+        self.workers = workers if workers is not None else ServiceWorkers()
+        #: The services that this process runs. Control runs the trainers' local workers, ``served_models`` and
+        #: the store watcher.
+        self.services = ServiceSet.of(components)
+        #: The work queue of the samples, jobs and evaluations queues.
+        self.queue = coordination.work_queue
+        self.work_retention_seconds = work_retention_seconds
+        # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
+        # training service runs one worker for each of them.
+        #: The store of the job data directories of the training jobs.
+        self.job_directory_store: DataStore = (
+            MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
+        )
+        job_components = recipe.job_components()
+        if job_components:
+            if self.services.runs_training:
+                for component in job_components:
+                    self.workers.add(
+                        TrainingJobWorker(
+                            component,
+                            self.queue,
+                            self.job_directory_store,
+                            worker_id=instance_id(f"training-{component.name}"),
+                        )
+                    )
+            recipe = recipe.with_job_components(
+                {
+                    component.name: JobQueueComponent(
+                        component, self.queue, owns_component=not self.services.runs_training
+                    )
+                    for component in job_components
+                },
+                self.job_directory_store,
+            )
+        #: The deployment's recipe; its trainers submit to the jobs queue.
         self.recipe = recipe
         self.storage = scenario_storage
+        self.record_storage = scenario_storage if record_storage is None else record_storage
+        self.data_store = data_store
         self.record_retention_lock = Lock()
-        self.experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
+        tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
+        if recipe.job_components() and not isinstance(tracker, NullExperimentTracker):
+            # Control's tracker also writes each training job's run into the job's item, for the job listing.
+            tracker = JobExperimentRecorder(tracker, self.queue)
+        self.experiment_tracker = tracker
         self.registry = ScenarioRegistry(
             recipe,
             backend_factory,
@@ -108,12 +213,60 @@ class Dispatcher(ScenarioLifecycle):
             experiment_tracker=self.experiment_tracker,
             admission=scenario_admission,
             lifecycle=self,
+            served_models=coordination.served_models,
+            training_requests=TrainingRequestQueue(self.queue),
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
+        #: The writer of serving requests, when this process runs control.
+        self.publisher: ServedModelsPublisher | None = None
+        #: Set when another control instance took the lease (``control_lease_lost``).
+        self.lease_lost = Event()
+        if self.services.runs_control:
+            lease = (
+                take_control_lease(coordination.control_lease, instance_id("control"))
+                if control_lease is None
+                else control_lease
+            )
+            runtime = recipe.runtime
+            request_timeout_seconds = 300.0 if runtime is None else runtime.inference_timeout_s
+            publisher = ServedModelsPublisher(
+                self.registry,
+                coordination,
+                self,
+                lease,
+                instance_id=lease.instance_id,
+                stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
+            )
+            self.workers.add(publisher)
+            self.publisher = publisher
+            # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
+            publisher.start()
+            self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
+            self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
+            if data_store is not None:
+                self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
+        if self.services.runs_inference and recipe.runtime is not None and recipe.runtime.serves_requests:
+            self.workers.add(
+                ServingWorker(
+                    recipe,
+                    backend_factory,
+                    coordination,
+                    worker_id=instance_id("inference-startup"),
+                    local_artifact_dir=local_artifact_dir,
+                )
+            )
+        if self.services.runs_samples:
+            self.workers.add(
+                SamplesWorker(
+                    self.queue,
+                    LocalSampleProducers(self.registry, self.local_workers if self.services.runs_control else None),
+                    worker_id=instance_id("samples"),
+                )
+            )
         self.training_status = TrainingStatus(recipe, self.registry, self.errors)
-        if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
+        if self.services.runs_control and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
                 target=self.preload_scenarios,
                 args=(backend_factory.list_registrations(),),
@@ -136,33 +289,31 @@ class Dispatcher(ScenarioLifecycle):
                 daemon=True,
             )
             self.background_threads.idle_unload_thread.start()
+        self.workers.start()
 
     # -- Scenario API (delegates to registry) ----------------------------
 
     def has_scenario(self, scenario: str) -> bool:
         return self.registry.has(scenario)
 
-    def get_or_create_scenario(
-        self,
-        scenario: str,
-        *,
-        release_id: str | None = None,
-        allow_implicit_creation: bool | None = None,
-    ) -> Scenario | None:
-        return self.registry.get_or_create(
-            scenario,
-            release_id,
-            allow_implicit_creation=allow_implicit_creation,
-        )
+    def get_or_create_scenario(self, scenario: str, *, allow_implicit_creation: bool | None = None) -> Scenario | None:
+        return self.registry.get_or_create(scenario, allow_implicit_creation=allow_implicit_creation)
 
-    def loaded_scenario(self, scenario: str, *, release_id: str | None = None) -> Scenario | None:
-        """The loaded instance of ``scenario``, or None; see :meth:`ScenarioRegistry.get_loaded`."""
-        return self.registry.get_loaded(scenario, release_id)
+    def create_scenario(self, scenario: str, start: ItemStart | None = None) -> tuple[Scenario, bool]:
+        """The scenario ``scenario``, and True exactly when this call created it.
 
-    def configure_scenario_model(
-        self, scenario: str, model: object, *, create: bool = False, release_id: str | None = None
-    ) -> Scenario:
-        return self.registry.configure_model(scenario, model, create=create, release_id=release_id)
+        A new scenario's root snapshot holds the artifact item ``start``, or the recipe's default start when
+        ``start`` is ``None`` (``ScenarioFactory.load_or_create``); an existing scenario ignores ``start``. The check
+        and the creation hold the scenario's lock, so of several calls for one new name only one gets True. Raise as
+        ``get_or_create_scenario`` does when the creation is refused, and ``ValueError`` when the item's layout or
+        admission check refuses it; no scenario is registered then.
+        """
+        with self.registry.lock_for(scenario):
+            created = not self.registry.has(scenario)
+            current = self.registry.get_or_create(scenario, start, allow_implicit_creation=True)
+        if current is None:
+            raise RuntimeError("scenario creation returned no scenario")
+        return current, created
 
     def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
         with self.registry.lock_for(scenario):
@@ -184,6 +335,7 @@ class Dispatcher(ScenarioLifecycle):
         The method holds the scenario's lock, so no accept or commit runs
         meanwhile. It does these steps:
 
+        - Its ``served_models`` rows go, so the inference service answers it 404.
         - The workers drop the scenario, and a training job it runs is cancelled.
         - The loaded instance closes.
         - The storage archives the records, the commits and the settings.
@@ -197,6 +349,9 @@ class Dispatcher(ScenarioLifecycle):
         with self.record_retention_lock, self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
+            # The inference service stops answering the scenario first, so no record reaches the archived store.
+            if self.publisher is not None:
+                self.publisher.withdraw(scenario)
             dropped = self.registry.remove(scenario)
             self.local_workers.remove(scenario)
             self.errors.forget(scenario)
@@ -211,8 +366,68 @@ class Dispatcher(ScenarioLifecycle):
         return {"scenario": scenario, "archived": archived}
 
     def scenario_loaded(self, instance: Scenario) -> None:
-        """The registry calls this when it loads a scenario: its weight trainers resume their jobs and records."""
+        """The registry calls this when it loads a scenario: its weight trainers resume their jobs and records.
+
+        The scenario's items can wait untrained when it opens, and no record wakes a worker for them, so the
+        workers wake when a trainer holds untrained samples.
+        """
+        if not self.services.runs_control:
+            # Another process runs control: this one loaded the scenario only to make its samples.
+            return
+        self.scenario_committed(instance)
         self.local_workers.resume(instance)
+        self.request_record_copy(instance.name)
+        if any(component_trainer.trainer.holds_untrained_records() for component_trainer in instance.trainers):
+            self.local_workers.wake(instance)
+
+    def scenario_committed(self, instance: Scenario) -> None:
+        """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it, ask
+        the data service to copy the scenario's artifacts to artifact items, ask the samples service to read the
+        commit, and finish the items of the requests that the commit consumed.
+
+        The commit is durable already, so a failed write does not undo it: the publisher's next round writes the rows
+        again, and the next commit asks again. The samples service reads job ends and train counts from the commits,
+        and a stage can act on them without a new record, such as the next round of generated tasks.
+        """
+        try:
+            if self.publisher is not None:
+                self.publisher.publish(instance)
+            self.request_artifact_copy(instance.name)
+        except Exception:
+            logger.exception(
+                "scenario %r: the commit is durable, but its served models were not written", instance.name
+            )
+        try:
+            self.request_samples(instance)
+            instance.refresh_requests()
+        except Exception:
+            logger.exception(
+                "scenario %r: the commit is durable, but the samples service was not asked, or the requests of the "
+                "commit were not finished",
+                instance.name,
+            )
+
+    def follow_commits(self, current: Scenario) -> Scenario:
+        """``current`` as the commit history holds it: ``current`` itself, or a new instance of the scenario when a
+        control process committed past the step that ``current`` loaded.
+
+        A process that runs no control, such as the harness service, calls it before it reads what a scenario
+        serves; control's own instance is never behind its history.
+        """
+        history = current.store.history()
+        if not history or history[-1].step <= current.scenario_step:
+            return current
+        return self.registry.reload(current.name)
+
+    def at_newest_commit(self, current: Scenario) -> Scenario:
+        """``current``, or its new instance in a process where another process runs control (``follow_commits``)."""
+        return current if self.services.runs_control else self.follow_commits(current)
+
+    def scenario_reloaded(self, instance: Scenario) -> None:
+        """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
+        workers keep the failure until the samples come and the next cycle runs."""
+        if self.services.runs_control:
+            self.request_samples(instance)
 
     def close_replaced(self, instance: Scenario) -> None:
         """Close a reloaded scenario's old instance once no local cycle runs on it."""
@@ -226,6 +441,7 @@ class Dispatcher(ScenarioLifecycle):
         - Its storage is durable.
         - No request runs on it.
         - No trainer has records that it would still train on.
+        - No trainer has a training job that runs.
         - No reload or close of an instance waits.
 
         A weight-training scenario is never idle, because only a delete
@@ -238,7 +454,10 @@ class Dispatcher(ScenarioLifecycle):
             return False
         if self.local_workers.instance_change_pending(current.name):
             return False
-        return not any(component_trainer.trainer.holds_untrained_records() for component_trainer in current.trainers)
+        return not any(
+            component_trainer.trainer.job_running or component_trainer.trainer.holds_untrained_records()
+            for component_trainer in current.trainers
+        )
 
     def unload_if_idle(self, scenario: str) -> bool:
         """Unload ``scenario`` if it is idle, and return whether it was unloaded.
@@ -287,15 +506,10 @@ class Dispatcher(ScenarioLifecycle):
                 moved.append(str(destination))
         return moved
 
-    def recipe_has_files(self) -> bool:
-        """Whether the served recipe creates a file-serving surface."""
-        # Capability probe only: file serving does not depend on the scenario.
-        return self.recipe.build_surface("").files is not None
-
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
         """Each component's artifacts of ``scenario``, newest first, with each component's active one marked."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).artifacts()
+            return self.at_newest_commit(self.registry.require(scenario)).artifacts()
 
     def read_records(
         self, scenario: str, *, after_sequence: int = 0, limit: int = 50, request_type: RequestType | None = None
@@ -329,9 +543,14 @@ class Dispatcher(ScenarioLifecycle):
             )
 
     def scenario_contract(self, scenario: str) -> dict[str, Any]:
+        """What ``scenario`` accepts. ``parameters_schema`` is the JSON Schema of a training job's parameters, by the
+        kind of its samples: only the kinds whose schema the training component declares
+        (``TrainingComponent.parameters_schema``)."""
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
             pipeline = current.trainer.pipeline
+            component = current.training_component
+            schemas = {kind: None if component is None else component.parameters_schema(kind) for kind in SAMPLE_KINDS}
             return {
                 "scenario": scenario,
                 # The key keeps its name for callers; the value names the recipe's sample-to-job stage.
@@ -339,22 +558,44 @@ class Dispatcher(ScenarioLifecycle):
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
+                "parameters_schema": {kind: schema for kind, schema in schemas.items() if schema is not None},
             }
 
     def activate(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Make ``artifact_id`` the active artifact of ``component`` in ``scenario``; no training start moves."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).activate(artifact_id, component)
+            current = self.registry.require(scenario)
+            changed = current.activate(artifact_id, component)
+            if self.publisher is not None:
+                self.publisher.publish(current, retry_failed=True)
+            self.scenario_committed(current)
+            return changed
 
     def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
-        """Serve ``artifact_id`` of ``component`` beside the active release of ``scenario``; that release stays."""
+        """Serve ``artifact_id`` of ``component`` beside the active selection of ``scenario``; that snapshot stays."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).serve(artifact_id, component)
+            current = self.registry.require(scenario)
+            changed = current.serve(artifact_id, component)
+            self.scenario_committed(current)
+            return changed
 
-    def stop_serving(self, scenario: str, artifact_id: str) -> ServedArtifact:
-        """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
+    def restore(self, scenario: str, step: int) -> Mapping[str, str]:
+        """Restore the complete selection at a recorded scenario step and queue its serving startup."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).stop_serving(artifact_id)
+            current = self.registry.require(scenario)
+            selection = current.restore(step)
+            if self.publisher is not None:
+                self.publisher.publish(current, retry_failed=True)
+            self.scenario_committed(current)
+            return selection
+
+    def stop_serving(self, scenario: str, artifact_id: str) -> ServedBesideArtifact:
+        """Stop serving ``artifact_id`` beside the active selection of ``scenario``; the active selection stays."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.require(scenario)
+            changed = current.stop_serving(artifact_id)
+            self.scenario_committed(current)
+            return changed
 
     def train_from(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer of ``scenario`` from ``artifact_id``; what serves stays."""
@@ -386,36 +627,42 @@ class Dispatcher(ScenarioLifecycle):
         Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
         """
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).import_artifact(
+            imported = self.registry.require(scenario).import_artifact(
                 files, component, source=source, directory=directory
             )
+        self.request_artifact_copy(scenario)
+        return imported
 
-    def current_artifact(
+    def sync_artifact(
         self,
         scenario: str,
+        artifact: Artifact,
         *,
-        release_id: str | None = None,
-    ) -> Artifact:
-        current = self.get_or_create_scenario(scenario, release_id=release_id)
+        component: str,
+        expected_selection: ArtifactSelection,
+        metrics: Mapping[str, Any],
+    ) -> ComponentArtifact:
+        """Make a person's merged ``component`` tree ``scenario``'s active selection and training start, under the
+        scenario's lock, and write what the scenario serves now; see :meth:`ScenarioCommitter.sync_artifact`."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.require(scenario)
+            published = current.sync_artifact(
+                artifact, component=component, expected_selection=expected_selection, metrics=metrics
+            )
+            self.scenario_committed(current)
+            return published
+
+    def current_artifact(self, scenario: str) -> Artifact:
+        current = self.get_or_create_scenario(scenario)
         if current is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         return Artifact(current.repository.require_current_artifact(), current.repository)
 
     # -- Record acceptance -----------------------------------------------
 
-    def accept_record(
-        self,
-        item: AgentRecord,
-        *,
-        release_id: str | None = None,
-    ) -> AgentRecord:
+    def accept_record(self, item: AgentRecord) -> AgentRecord:
         with self.registry.lock_for(item.scenario):
-            # An instruction names a scenario that exists; inference and reports keep implicit creation.
-            current = self.get_or_create_scenario(
-                item.scenario,
-                release_id=release_id,
-                allow_implicit_creation=False if item.request_type is RequestType.TRAIN else None,
-            )
+            current = self.get_or_create_scenario(item.scenario)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             stored, inserted = ingest.append_record(current, item)
@@ -423,17 +670,35 @@ class Dispatcher(ScenarioLifecycle):
                 self.process_accepted_records(current)
             return stored
 
-    def accept_records(
-        self, items: Sequence[AgentRecord], *, release_id: str | None = None
-    ) -> tuple[AgentRecord, ...]:
+    def accept_request(
+        self,
+        scenario: str,
+        payload: Mapping[str, Any],
+        *,
+        request_id: str | None = None,
+    ) -> WorkItem:
+        """Queue a training request of ``scenario`` (``ingest.file_request``) and wake its workers.
+
+        The scenario must exist. ``request_id`` makes the request retry-safe; without it the request gets a new
+        ID. Return the request's queue item.
+        """
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            item = ingest.file_request(current, request_id or uuid.uuid4().hex, payload)
+            self.local_workers.wake(current)
+            return item
+
+    def accept_records(self, items: Sequence[AgentRecord]) -> tuple[AgentRecord, ...]:
         """Validate an ordered import batch, commit it, then wake its consumer."""
         if not items:
             raise ValueError("a record batch must not be empty")
         scenario = items[0].scenario
-        if any(item.scenario != scenario or item.request_type is RequestType.TRAIN for item in items):
-            raise ValueError("a record batch must contain inferences or reports from one scenario")
+        if any(item.scenario != scenario for item in items):
+            raise ValueError("a record batch must contain records from one scenario")
         with self.registry.lock_for(scenario):
-            current = self.get_or_create_scenario(scenario, release_id=release_id)
+            current = self.get_or_create_scenario(scenario)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             stored, inserted = ingest.append_records(current, items)
@@ -441,54 +706,84 @@ class Dispatcher(ScenarioLifecycle):
                 self.process_accepted_records(current)
             return stored
 
-    def accept_trajectories(
-        self, scenario: str, trajectories: tuple[tuple[str, TrajectorySample], ...], *, release_id: str | None = None
-    ) -> None:
-        """Save uploaded ``(trajectory_id, trajectory)`` pairs in one transaction, then wake their consumer."""
-        if not trajectories:
-            raise ValueError("an upload must hold one or more trajectories")
-        with self.registry.lock_for(scenario):
-            current = self.get_or_create_scenario(scenario, release_id=release_id)
-            if current is None:
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
-            if ingest.append_trajectories(current, trajectories):
-                self.process_accepted_records(current)
+    def scenario_owner(self, scenario: str) -> str | None:
+        """The owner of ``scenario`` in the data store, or None when the scenario does not exist.
 
-    def accept_tasks(self, scenario: str, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
-        """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's imported tasks, then wake
-        their consumers. Return the published tasks (``ingest.append_tasks``)."""
-        if not directories:
-            raise ValueError("an upload must hold one or more tasks")
-        with self.registry.lock_for(scenario):
-            current = self.get_or_create_scenario(scenario)
-            if current is None:
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
-            published = ingest.append_tasks(current, directories, split)
-            self.local_workers.wake(current)
-            return published
-
-    def sample_buffer(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
-        """The buffer of the trainer of ``component`` (the only one when None): its mode and its samples."""
-        with self.locked_scenario(scenario) as current:
-            return self.trainer_of(current, component).buffer_listing()
-
-    def change_buffer(
-        self, scenario: str, sample_ids: tuple[str, ...], *, insert: bool, component: str | None = None
-    ) -> Mapping[str, Any]:
-        """Insert ``sample_ids`` into the manual buffer of the trainer of ``component``, or remove them.
-
-        Raise ``ManualBufferRefused`` in automatic mode and ``ValueError`` for an ID that the trainer cannot take.
+        A scenario that the data sync has not opened yet has the owner with its own name.
         """
+        if not self.has_scenario(scenario):
+            return None
+        return self.storage.read_settings(scenario).owner or scenario
+
+    def set_scenario_owner(self, scenario: str, owner: str) -> None:
+        """Give ``scenario`` the owner ``owner``, and load it again, so that it reads the items of that owner.
+
+        A scenario gets its owner when it is created, so only a scenario that still has the default owner (its
+        own name) and uses none of its trajectory or task items can take another. The data service then copies the
+        scenario's artifacts and records to items of ``owner``. Raise ``ValueError`` otherwise, and
+        ``UnknownScenario`` for a scenario that does not exist.
+        """
+        check_owner(owner)
         with self.locked_scenario(scenario) as current:
-            listing = self.trainer_of(current, component).change_buffer(sample_ids, insert=insert)
-            # A queued instruction may now have samples to train.
+            settings = self.storage.read_settings(scenario)
+            if settings.owner == owner:
+                return
+            samples = self.storage.sample_store(scenario, current.store)
+            if settings.owner != scenario or (samples is not None and samples.page(limit=1)):
+                raise ValueError(f"scenario {scenario!r} has the owner {settings.owner!r}; it is set at creation")
+            self.storage.write_settings(scenario, replace(settings, owner=owner))
+        self.registry.reload(scenario)
+        # A copy that ran before, such as the one that the creation commit asked for, filled the default owner's
+        # store; the new owner's store gets the scenario's artifacts and records too.
+        self.request_artifact_copy(scenario)
+        self.request_record_copy(scenario)
+
+    def check_use(
+        self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
+    ) -> None:
+        """Raise ``ValueError`` unless ``scenario`` can train on the items that it is to use (``ingest.check_use``)."""
+        with self.locked_scenario(scenario) as current:
+            ingest.check_use(current, trajectories, train_tasks)
+
+    def sync_items(self, owner: str, scenarios: Iterable[str]) -> None:
+        """Sync each loaded scenario of ``owner`` among ``scenarios`` with that owner's items (``apply_sync``).
+
+        A scenario that is not loaded syncs when it opens. A scenario of another owner does not use the items.
+        """
+        if self.data_store is None:
+            return
+        for scenario in sorted(set(scenarios)):
+            with self.registry.lock_for(scenario):
+                current = self.registry.get_loaded(scenario)
+                if current is not None and self.storage.read_settings(scenario).owner == owner:
+                    self.apply_sync(current, owner)
+
+    def apply_sync(self, current: Scenario, owner: str) -> None:
+        """Copy the record items of ``owner`` that the loaded scenario ``current`` now uses into its record store,
+        and wake its workers, which read the items that the write changed. The caller holds the scenario's lock."""
+        if self.data_store is None:
+            raise ReefError("this dispatcher has no data store")
+        if sync_scenario_records(current.store.records, self.data_store, owner, current.name):
+            self.process_accepted_records(current)
+        else:
             self.local_workers.wake(current)
-            return listing
+
+    def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
+        """The next automatic job of the trainer of ``component`` (the only one when None): its mode and samples."""
+        with self.locked_scenario(scenario) as current:
+            return self.trainer_of(current, component).next_job_listing()
 
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""
         with self.locked_scenario(scenario) as current:
-            return current.store.samples.page(after_sequence=after_sequence, limit=limit)
+            samples = self.storage.sample_store(scenario, current.store)
+            return () if samples is None else samples.page(after_sequence=after_sequence, limit=limit)
+
+    def listed_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[ListedSample, ...]:
+        """The listing of the scenario's stored samples after ``after_sequence``, at most ``limit``, without content."""
+        with self.locked_scenario(scenario) as current:
+            samples = self.storage.sample_store(scenario, current.store)
+            return () if samples is None else samples.listing(after_sequence=after_sequence, limit=limit)
 
     @staticmethod
     def trainer_of(current: Scenario, component: str | None) -> Trainer:
@@ -499,7 +794,7 @@ class Dispatcher(ScenarioLifecycle):
 
     @contextmanager
     def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
-        """The loaded scenario ``scenario``, loaded again when it was unloaded, held under its lock.
+        """The loaded scenario ``scenario`` at its newest commit, loaded again when it was unloaded, held under its lock.
 
         Raise ``UnknownScenario`` when the scenario does not exist. The caller must not keep the scenario, or its
         storage session, after the block: an unload closes the session.
@@ -508,7 +803,7 @@ class Dispatcher(ScenarioLifecycle):
             current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            yield current
+            yield self.at_newest_commit(current)
 
     def set_evaluation_and_activation(
         self, scenario: str, *, artifact_evaluation: Mapping[str, object] | None, activation: object
@@ -519,6 +814,19 @@ class Dispatcher(ScenarioLifecycle):
             scenario, artifact_evaluation=artifact_evaluation, activation=activation
         )
 
+    def set_serving_config(self, scenario: str, update: Mapping[str, object]) -> dict[str, Any]:
+        """Change the serving config of ``scenario`` by ``update`` (``ScenarioRegistry.set_serving_config``) and
+        queue a serving request that carries it, so inference applies it without an activation. Return the stored
+        ``serving_config`` and the ``effective_serving_config``."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.set_serving_config(scenario, update)
+            if self.publisher is not None:
+                self.publisher.publish(current)
+            return {
+                "serving_config": current.serving_config.to_json(),
+                "effective_serving_config": current.effective_serving_config(current.serving_config),
+            }
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self.registry.stored_settings(scenario)
@@ -526,34 +834,113 @@ class Dispatcher(ScenarioLifecycle):
     def scenario_settings(self, scenario: str) -> dict[str, Any]:
         """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
 
-        ``training_mode`` and ``model`` are what the loaded scenario runs. ``artifact_evaluation`` and
+        ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
-        scenario's ``activation``, else the deployment's. Raise ``UnknownScenario`` for an unknown scenario.
+        scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
+        ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
+        with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
+        after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
+        a load does. ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
+        (``PipelineContext.job_parameters``), which a request's ``parameters`` merge into; a kind that the
+        recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
+            try:
+                effective_serving = current.effective_serving_config(settings.serving_config)
+            except ValueError:
+                effective_serving = current.effective_serving_config(ServingConfig())
+            job_parameters = current.stepping_trainers()[0].trainer.pipeline.sample2job.context.job_parameters
             return {
                 "scenario": scenario,
                 "training_mode": current.training_mode,
-                "model": current.model_config.view(),
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
                 "effective_activation": self.registry.effective_activation(settings),
+                "serving_config": settings.serving_config.to_json(),
+                "effective_serving_config": effective_serving,
+                "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
         """The scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.locked_scenario(scenario) as current:
-            return current.store.samples.imported_tasks()
+            samples = self.storage.sample_store(scenario, current.store)
+            return () if samples is None else samples.imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
-        """Start consumption only after the accepted records are durable."""
-        # Every component's trainer sees the record. A trainer that trains wakes its
-        # worker. A trainer that trains nothing only advances its record cursor, here.
+        """Start consumption only after the accepted records are durable, and copy them to record items."""
+        self.request_record_copy(current.name)
+        # Every component's trainer sees the record. The samples service makes the samples of a trainer that
+        # trains, and its worker builds jobs from them. A trainer that trains nothing only advances its record
+        # cursor, here.
+        self.request_samples(current)
         self.local_workers.wake(current)
         for component_trainer in current.trainers:
             if not component_trainer.trainer.trains:
-                current.prepare_training_step(component_trainer.component)
+                component_trainer.trainer.read_new_records()
+
+    def control_lease_lost(self) -> None:
+        """Another control instance took the lease: no local cycle of this instance runs or commits any more, and
+        ``lease_lost`` is set for the process that owns the dispatcher."""
+        self.local_workers.stop()
+        self.lease_lost.set()
+
+    def candidate(self, scenario: str, artifact_id: str, component: str | None) -> tuple[InferenceRuntime, Artifact]:
+        """The runtime of ``scenario`` and the materialized artifact ``artifact_id`` (``CandidateArtifacts``)."""
+        with self.locked_scenario(scenario) as current:
+            runtime = current.runtime
+            if runtime is None:
+                raise ReefError(f"scenario {scenario!r} has no runtime")
+            _, snapshot = current.resolve_artifact(artifact_id, component)
+            return runtime, snapshot.materialize()
+
+    def candidate_task(self, scenario: str, task_name: str) -> Path:
+        """The directory of the Harbor task ``task_name`` of ``scenario`` here (``CandidateArtifacts``)."""
+        with self.locked_scenario(scenario) as current:
+            samples = self.storage.sample_store(scenario, current.store)
+            found = () if samples is None else samples.get((task_name,))
+        sample = found[0].sample if found else None
+        if not isinstance(sample, TaskSample):
+            raise ReefError(f"scenario {scenario!r} uses no task {task_name!r}")
+        return sample.task_path
+
+    def request_artifact_copy(self, scenario: str) -> None:
+        """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""
+        if self.data_store is not None:
+            request_artifact_copy(self.queue, scenario)
+
+    def request_record_copy(self, scenario: str) -> None:
+        """Ask the data service to copy the new records of ``scenario`` to record items, when there is a data store."""
+        if self.data_store is not None:
+            request_record_copy(self.queue, scenario)
+
+    def records_added(self, current: Scenario) -> None:
+        """Another process appended records to ``current``: ask for their samples and copy them to record items."""
+        self.request_record_copy(current.name)
+        self.request_samples(current)
+
+    def samples_added(self, scenario: str) -> None:
+        """The samples service stored samples of ``scenario``: its local workers build the next job from them."""
+        current = self.registry.get_loaded(scenario)
+        if current is not None:
+            self.local_workers.wake(current)
+
+    def job_changed(self, scenario: str) -> None:
+        """A training job of ``scenario`` saved a checkpoint or ended: its local workers commit it now."""
+        current = self.registry.get_loaded(scenario)
+        if current is not None:
+            self.local_workers.wake(current)
+
+    def requests_added(self, scenario: str) -> None:
+        """Another process queued a training request of ``scenario``: its local workers run it."""
+        self.samples_added(scenario)
+
+    def request_samples(self, current: Scenario) -> None:
+        """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains."""
+        for component_trainer in current.trainers:
+            if component_trainer.trainer.trains:
+                request_selection(self.queue, current.name, component_trainer.component)
 
     # -- Preload ---------------------------------------------------------
 
@@ -630,10 +1017,16 @@ class Dispatcher(ScenarioLifecycle):
             self.background_threads.idle_unload_thread.join()
         for worker in local_workers:
             worker.thread.join()
+        errors: list[BaseException] = []
+        # The service workers stop after the local cycles, so that the publisher releases the control lease only
+        # when no cycle of this instance can commit any more.
+        try:
+            self.workers.stop()
+        except BaseException as exc:
+            errors.append(exc)
         if self.background_threads.metrics_thread is not None:
             self.background_threads.metrics_thread.join()
             self.record_operational_metrics()
-        errors: list[BaseException] = []
         replaced = self.local_workers.take_replaced()
         for scenario in (*replaced, *self.registry.loaded_scenarios()):
             # Use scenario.close(), not records.close(). The processors must
@@ -643,17 +1036,26 @@ class Dispatcher(ScenarioLifecycle):
                 scenario.close()
             except BaseException as exc:
                 errors.append(exc)
+        if self.data_store is not None:
+            try:
+                self.data_store.close()
+            except BaseException as exc:
+                errors.append(exc)
         try:
             self.storage.close()
         except BaseException as exc:
             errors.append(exc)
-        errors.extend(close_runtimes(self.recipe.training_component, self.recipe.runtime))
+        errors.extend(close_runtimes(self.recipe.job_components(), self.recipe.runtime))
         # Send the experiment events that are still queued before the tracker closes.
         self.registry.experiment_reports.close()
         try:
             self.experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
+        try:
+            self.coordination.close()
+        except BaseException as exc:
+            errors.append(exc)
         if errors:
             raise errors[0]
 
@@ -663,6 +1065,7 @@ def build_default_dispatcher(
     backend_factory: RepositoryBackendFactory | None = None,
     local_artifact_dir: Path | None = None,
     scenario_storage: ScenarioStorage,
+    coordination: Coordination,
 ) -> Dispatcher:
     """Build a Dispatcher serving the core record-only ``recipe``.
 
@@ -671,16 +1074,14 @@ def build_default_dispatcher(
     from ``reef.recipe: recipe``.
     Uses an in-memory artifact backend when ``backend_factory`` is not
     provided. Record and commit storage must be supplied explicitly through
-    ``scenario_storage``; this helper does not select a record backend.
+    ``scenario_storage``, and the coordination store through ``coordination``; this helper selects neither.
     """
     if backend_factory is None:
-        root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
-        initial = root / "initial"
-        initial.mkdir()
-        backend_factory = InMemoryRepositoryBackend.factory(initial, root=root / "repository")
+        backend_factory = InMemoryRepositoryBackend.factory()
     return Dispatcher(
         Recipe(),
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         scenario_storage=scenario_storage,
+        coordination=coordination,
     )

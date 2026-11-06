@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._activation_rule_plugin import ComponentRule
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import inference, report
+from tests.support.harness_steps import IdleMethod, evolution_config
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
@@ -23,11 +24,13 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.service import deploy
 from reef.service.app import create_app
 from reef.service.deploy.service_config import ServiceConfig
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import JobStatus, TrainingJob
+from reef.train.job_queue import JobQueueComponent
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -97,9 +100,6 @@ def _settings(**overrides) -> ServiceConfig:
         "inference_timeout_s": 30.0,
         "inference_handler_factory": None,
         "inference_handler_config": {},
-        "inference_retry_initial_s": 0.05,
-        "inference_retry_max_s": 1.0,
-        "inference_retry_timeout_s": 30.0,
         "artifact_repository": "/state/artifacts.git",
         "artifact_work_dir": "/state/work",
         "artifact_cache_dir": "/state/cache",
@@ -137,11 +137,6 @@ def test_service_config_exposes_shared_batch_controls() -> None:
     assert "groups_per_step" not in args.recipe_settings
     assert args.inference_handler_factory is None
     assert args.inference_handler_config == {}
-    assert (args.inference_retry_initial_s, args.inference_retry_max_s, args.inference_retry_timeout_s) == (
-        0.05,
-        1.0,
-        300.0,
-    )
 
 
 @pytest.mark.unit
@@ -255,7 +250,7 @@ def test_training_configs_leave_max_staleness_unset_and_make_checkpoint_budget_m
     monkeypatch.setenv("REEF_TOKEN", "test-token")
     from tests.support.config_helpers import load_deployment
 
-    from reef.runtime.executor.arguments import native_arguments
+    from reef.execution.executor.arguments import native_arguments
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
     assert "max_staleness" not in config["reef"]
@@ -285,18 +280,18 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     )
 
     assert dispatcher.recipe.name == "openclawrl"
-    component = dispatcher.recipe.training_component
+    # The recipe's trainers add their jobs to the jobs queue; the training worker runs them on the component.
+    queued = dispatcher.recipe.training_component
+    assert isinstance(queued, JobQueueComponent)
+    component = queued.component
     assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
-    # The backend serves its own releases by default (``inference.serving: trainer``).
+    # The backend serves its own snapshots by default (``inference.serving: trainer``).
     assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
-        # The base artifact is the training component's untrained checkpoint.
-        "context": RepositoryBackendContext(
-            work_dir=Path("/state/work"), cache_dir=Path("/state/cache"), base=component.base_artifact_source()
-        ),
+        "context": RepositoryBackendContext(work_dir=Path("/state/work"), cache_dir=Path("/state/cache")),
     }
 
 
@@ -309,29 +304,16 @@ def test_build_dispatcher_loads_recipe_for_inference_service_under_the_recipe_na
 
 
 @pytest.mark.unit
-def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repository, monkeypatch, tmp_path) -> None:
-    module = tmp_path / "demo_evolution.py"
-    module.write_text(
-        "from reef.evaluation.harness import RolloutScorer\n"
-        "from reef.train.cordis_backend.strategies import Proposer\n\n"
-        "class Propose(Proposer):\n"
-        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(RolloutScorer):\n"
-        "    def score(self, task, result):\n        return 0.0\n"
+def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repository, tmp_path) -> None:
+    dispatcher = build(
+        tmp_path,
+        recipe="reef.recipe.harness:HarnessEvolutionRecipe",
+        recipe_settings=evolution_config(adapter="pi", state_dir=str(tmp_path / "state")),
     )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    evolution = {
-        "propose": "demo_evolution:Propose",
-        "evaluate": "demo_evolution:Evaluate",
-        "tasks": ["task one"],
-        "adapter": "pi",
-    }
-
-    dispatcher = build(tmp_path, recipe="reef.recipe.cordis:CordisRecipe", recipe_settings={"evolution": evolution})
 
     recipe = dispatcher.recipe
-    assert recipe.adapter == "pi"
-    assert recipe.tasks == ("task one",)
+    assert recipe.evolution.adapter == "pi" and isinstance(recipe.method, IdleMethod)
+    assert recipe.configured_tasks() == ("t",)
 
 
 @pytest.mark.unit
@@ -384,7 +366,6 @@ def test_build_dispatcher_refuses_an_activation_section_for_a_preset(stub_reposi
 def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_repository, tmp_path) -> None:
     generator = {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
     pipeline = {
-        "record2record": {"module": "reef.recipe.generated_tasks:GeneratedTaskRecord2Record", "config": {}},
         "record2sample": {
             "module": "reef.recipe.generated_tasks:GeneratedTaskSamples",
             "config": {"generator": generator},
@@ -401,9 +382,6 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_reposito
     # A stage the section leaves out is the recipe's own, with no config.
     assert stages is not None and stages.sample2job.plugin_class.__name__ == "GeneratedTaskJobData"
     assert stages.sample2job.config == {}
-    assert (
-        stages.record2record is not None and stages.record2record.plugin_class.__name__ == "GeneratedTaskRecord2Record"
-    )
     assert stages.record2sample is not None and stages.record2sample.plugin_class.__name__ == "GeneratedTaskSamples"
     assert stages.record2sample.config == {"generator": generator}
 
@@ -441,8 +419,8 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(stub_reposito
 
 @pytest.mark.unit
 def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured_inference_handler() -> None:
+    from reef.core.weight_layout import ArtifactFormat
     from reef.inference.sglang.chat import SGLangInferenceHandler
-    from reef.runtime.jobs import ReleaseFormat
     from reef.service.deploy.serving import serving_runtime_config
     from reef.service.deploy.training import training_deployment_for
 
@@ -457,10 +435,10 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
     )
     backend = training_deployment_for("slime")
 
-    config = backend.component_config(dataclasses.asdict(settings), loss_family="policy")
+    config = backend.component_config(dataclasses.asdict(settings), default_parameters={})
     assert (config["ray_address"], config["namespace"]) == ("ray-head:6379", "reef")
     assert config["settings"]["model_path"] == "/models/demo"
-    serving = serving_runtime_config(settings, backend, ReleaseFormat("full"))
+    serving = serving_runtime_config(settings, backend, ArtifactFormat("full"))
     assert serving["inference_handler_factory"] is SGLangInferenceHandler
     assert serving["inference_handler_config"] == {"tool_call_parser": "qwen25"}
 
@@ -474,18 +452,18 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
 
     assert dispatcher.recipe.name == "sao"
     # The training backend built the component (the inference branch builds none).
-    component = dispatcher.recipe.training_component
+    component = dispatcher.recipe.training_component.component
     assert component.received_model_path == "/models/demo"
 
 
 @pytest.mark.unit
-def test_build_dispatcher_gives_max_staleness_to_the_record_stage_only(stub_repository, tmp_path) -> None:
-    pipeline = {"record2record": {"config": {"max_staleness": 2}}}
+def test_build_dispatcher_gives_max_staleness_to_the_record_to_sample_stage_only(stub_repository, tmp_path) -> None:
+    pipeline = {"record2sample": {"config": {"max_staleness": 2}}}
     dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
-    # The window belongs to the record-to-record stage; the training component never receives it.
-    assert "max_staleness" not in dispatcher.recipe.training_component.config
-    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2record.max_staleness == 2
+    # The window belongs to the record-to-sample stage; the training component never receives it.
+    assert "max_staleness" not in dispatcher.recipe.training_component.component.config
+    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2sample.max_staleness == 2
 
 
 @pytest.mark.unit
@@ -509,7 +487,7 @@ class HeldJobComponent(StubTrainingComponent):
 
 
 class AdapterInference(StubInferenceRuntime):
-    """Serve each release under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
+    """Serve each snapshot under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
 
     def __init__(self, *, per_scenario_adapters: bool) -> None:
         super().__init__()
@@ -522,6 +500,9 @@ class AdapterInference(StubInferenceRuntime):
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         return f"adapter:{scenario}:{self.served}"
 
+    def served_model_name(self, scenario: str) -> str:
+        return f"adapter:{scenario}:{self.served}"
+
     def serve(self, artifact: Artifact) -> str:
         return super().serve(artifact.materialize())
 
@@ -531,17 +512,16 @@ class AdapterInference(StubInferenceRuntime):
 def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter(
     tmp_path, monkeypatch, per_scenario_adapters
 ) -> None:
+    synchronization_timeout_seconds = 30
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("w0")
     component = HeldJobComponent(tmp_path / "checkpoints")
     runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, runtime)),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
 
     async def math_status(client: TestClient) -> dict:
@@ -550,10 +530,15 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         return (await response.json())["scenarios"]["math"]
 
     async def wait_for(client: TestClient, finished_jobs: int, running: bool) -> dict:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + synchronization_timeout_seconds
         while time.monotonic() < deadline:
             block = await math_status(client)
-            if block["finished_jobs"] == finished_jobs and (block["training_job"] is not None) == running:
+            if (
+                block["finished_jobs"] == finished_jobs
+                and (block["training_job"] is not None) == running
+                and block["served_artifact_id"]
+                == dispatcher.get_or_create_scenario("math").artifact_status()["weights"]["active"]
+            ):
                 return block
             await asyncio.sleep(0.01)
         pytest.fail(f"status did not reach {finished_jobs} finished jobs: {block}")
@@ -561,20 +546,26 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher))) as client:
             dispatcher.get_or_create_scenario("math")
-            idle = await math_status(client)
+            idle = await wait_for(client, finished_jobs=0, running=False)
             assert (idle["training_job"], idle["finished_jobs"]) == (None, 0)
             assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
             assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters
 
-            # A per-scenario adapter answers requests under its own version.
-            dispatcher.accept_record(inference(1, "adapter:math:w0" if per_scenario_adapters else "w0"))
+            dispatcher.accept_record(inference(1, idle["served_artifact_id"]))
             dispatcher.accept_record(report(1))
             running = await wait_for(client, finished_jobs=0, running=True)
+            # The training service hands the queued job to the component on its own thread.
+            deadline = time.monotonic() + synchronization_timeout_seconds
+            while not component.submitted and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
             (job,) = component.submitted
             assert running["training_job"] == {"job_id": job.job_id, "backend": "stub", "checkpoints_handled": 0}
 
             component.finish_jobs()
             finished = await wait_for(client, finished_jobs=1, running=False)
+            # The status names the artifact that serves the scenario: the job's checkpoint, once it is active.
+            (active,) = [row["artifact_id"] for row in dispatcher.list_artifacts("math") if row["active"]]
+            assert finished["served_artifact_id"] == active != idle["served_artifact_id"]
             if per_scenario_adapters:
                 assert finished["adapter_runtime_load_id"] == "adapter:math:w1"
             else:
@@ -800,7 +791,7 @@ def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkey
 def test_the_watchdog_fails_on_an_unexpected_child_exit_only(
     tmp_path: Path, returncode: int, signal_during_poll: bool, exit_code: int
 ) -> None:
-    from reef.runtime.executor.uniproc import UniProcExecutor
+    from reef.execution.executor.uniproc import UniProcExecutor
     from reef.service.deploy.orchestrator import _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
@@ -888,7 +879,7 @@ def test_stack_signal_during_event_wait_does_not_deadlock(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -> None:
-    from reef.runtime.executor.uniproc import UniProcExecutor
+    from reef.execution.executor.uniproc import UniProcExecutor
     from reef.service.deploy import orchestrator
 
     stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
@@ -936,7 +927,7 @@ def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -
 def test_opd_example_trains_an_adapter_against_the_teacher_engine(monkeypatch, config_path) -> None:
     from tests.support.config_helpers import load_deployment
 
-    from reef.runtime.executor.arguments import native_arguments
+    from reef.execution.executor.arguments import native_arguments
 
     monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen3-8b-sft")
     monkeypatch.setenv("OPD_TEACHER_PATH", "/models/qwen3-32b")

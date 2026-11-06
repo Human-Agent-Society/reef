@@ -6,21 +6,23 @@ import json
 import time
 
 import pytest
-from tests.reef_service.test_skill_delivery import FakeStream
+from tests.reef_service.test_sse_streams import FakeStream
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, finished_jobs
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.snapshot import SnapshotRef
 from reef.dispatcher import Dispatcher
 from reef.observability import TracingConfig, build_record_observer
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.streaming import stream_record
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage, RecordObserver
-from reef.storage.samples import consumed_sample_id
+from reef.storage.samples import consumed_sample_id, stage_item_id
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -152,14 +154,13 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
     observer, exporter = _observer()
     from reef.observability.open_telemetry import record_span_context
 
-    served = ArtifactRef(content_id="c1", release_id="v3", parent_release_id="v2")
     item = AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
         payload={
             "model": "qwen",
             "messages": [{"role": "user", "content": "2+2?"}],
-            "runtime_load_id": "load-3",
+            "artifact_id": "artifact-3",
             "metadata": {"tags": ["eval", "smoke"]},
             "response": {
                 "id": "chatcmpl-1",
@@ -170,7 +171,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         },
         agent_record_id="i1",
         created_at=1_700_000_000.5,
-        artifact_ref=served,
+        artifact_id="artifact-3",
     )
     observer.record_accepted(item)
     span = _spans(observer, exporter)["chat qwen"]
@@ -187,9 +188,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         "reef.scenario": "math",
         "reef.agent_record_id": "i1",
         "reef.request_type": "inference",
-        "reef.release_id": "v3",
-        "reef.content_id": "c1",
-        "reef.runtime_load_id": "load-3",
+        "reef.artifact_id": "artifact-3",
         "reef.tags": ("eval", "smoke"),
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "qwen",
@@ -339,7 +338,8 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     commit = CommitRecord(
         scenario="math",
         step=3,
-        artifact_ref=ArtifactRef(content_id="c3", release_id="v3", parent_release_id="v2"),
+        snapshot=SnapshotRef(revision="v3", parent_revision="v2"),
+        selection=ArtifactSelection({"harness": "artifact:h3", "weights": "artifact:w2"}),
         checkpoint=True,
         algorithm_state=None,
         high_water_sequence=9,
@@ -360,7 +360,9 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     assert step.parent is None
     assert step.attributes["reef.step"] == 3
     assert step.attributes["reef.component"] == "harness"
-    assert step.attributes["reef.release_id"] == "v3"
+    assert step.attributes["reef.artifact_id"] == "artifact:h3"
+    assert step.attributes["reef.artifacts.weights"] == "artifact:w2"
+    assert "reef.release_id" not in step.attributes
     assert step.attributes["reef.consumed_record_count"] == 2
     assert "reef.compacted_record_count" not in step.attributes
     assert step.attributes["reef.training_job_id"] == "job-3"
@@ -377,7 +379,7 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
         assert span.context.trace_id == expected_parent.trace_id
         assert span.parent.span_id == expected_parent.span_id
         assert [link.context.span_id for link in span.links] == [step.context.span_id]
-        assert span.attributes["reef.release_id"] == "v3"
+        assert span.attributes["reef.artifact_id"] == "artifact:h3"
         assert span.attributes["reef.component"] == "harness"
 
 
@@ -427,7 +429,7 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
         commit = CommitRecord(
             scenario="math",
             step=1,
-            artifact_ref=ArtifactRef(content_id="c1", release_id="v1", parent_release_id=None),
+            snapshot=SnapshotRef(revision="v1", parent_revision=None),
             checkpoint=False,
             algorithm_state=None,
             high_water_sequence=2,
@@ -448,20 +450,19 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
 
 @pytest.mark.unit
 def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("w0")
     observer = _CapturingObserver()
     component = ImportingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, component.inference)),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
+        coordination=memory_coordination(),
     )
     try:
-        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
-        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
+        served = dispatcher.get_or_create_scenario("math").serving_artifact_id()
+        dispatcher.accept_record(_inference("i1", artifact_id=served))
+        dispatcher.accept_record(_inference("i1", artifact_id=served))
         dispatcher.accept_record(_report("r1", "i1"))
         for _ in range(5000):
             if finished_jobs(dispatcher):
@@ -474,7 +475,7 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     assert observer.accepted == ["i1", "r1"]
     # The job's submission consumes the records; its checkpoint and its end commit after it.
     assert [(commit.scenario, commit.step, commit.consumed_ids) for commit in observer.committed] == [
-        ("math", 1, frozenset({"i1", "r1", consumed_sample_id("r1:0")})),
+        ("math", 1, frozenset({"i1", "r1", consumed_sample_id(stage_item_id("math", "r1:0"))})),
         ("math", 2, frozenset()),
         ("math", 3, frozenset()),
     ]

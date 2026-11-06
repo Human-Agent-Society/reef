@@ -28,9 +28,10 @@ from tests.reef_service.routing.routing_fakes import (
 )
 
 from reef.dispatcher import Dispatcher
+from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.lifecycle import LifecycleSettings
-from reef.service.streaming import SSEFrameDecoder, is_terminal_sse_event, receipt_sse_events
+from reef.service.streaming import is_terminal_sse_event, receipt_sse_events
 
 pytestmark = pytest.mark.unit
 CHAT_PATH = "/v1/chat/completions"

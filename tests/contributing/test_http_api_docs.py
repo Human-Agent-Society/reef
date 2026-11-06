@@ -27,7 +27,7 @@ def grid_tables(lines: list[str]) -> list[tuple[int, list[str]]]:
 
 def test_every_grid_table_line_has_its_bars_in_the_same_columns() -> None:
     tables = grid_tables(HTTP_API.read_text(encoding="utf-8").splitlines())
-    assert any("/reef/harness/releases/{step}/page" in line for _, block in tables for line in block)
+    assert any("/reef/harness/artifacts/{step}/page" in line for _, block in tables for line in block)
     for start, block in tables:
         columns = [index for index, char in enumerate(block[0]) if char == "+"]
         assert len(columns) >= 2, f"docs/reference/http-api.rst:{start} does not open a grid table"

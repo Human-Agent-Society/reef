@@ -12,7 +12,7 @@ def test_local_interfaces_are_abstract_bases_with_explicit_implementations() -> 
     assert issubclass(RepositoryBackend, ABC)
     assert issubclass(InMemoryRepositoryBackend, RepositoryBackend)
     assert issubclass(GitLFSRepositoryBackend, RepositoryBackend)
-    for method_name in ("fork", "metadata", "current", "publish"):
+    for method_name in ("register", "metadata", "current", "publish"):
         assert "scenario" not in inspect.signature(getattr(RepositoryBackend, method_name)).parameters
 
     recipe_parameters = inspect.signature(Recipe).parameters

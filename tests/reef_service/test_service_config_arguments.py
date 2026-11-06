@@ -58,9 +58,9 @@ def test_parser_defaults_come_from_settings():
         assert defaults[argument.name] == getattr(ServiceConfig(recipe="recipe"), field.name)
 
 
-def test_recipe_setting_and_launcher_profile_are_independent_arguments():
-    args = build_serve_parser().parse_args(["--recipe", "reefine", "--reef.recipe", "custom-preset"])
-    assert args.recipe == "reefine"
+def test_recipe_setting_and_reserved_launcher_flag_are_independent_arguments():
+    args = build_serve_parser().parse_args(["--recipe", "removed", "--reef.recipe", "custom-preset"])
+    assert args.recipe == "removed"
     assert args.config_recipe == "custom-preset"
     assert parse_service_arguments({"reef": {"recipe": "custom-preset"}})["recipe"] == "custom-preset"
 
@@ -164,13 +164,6 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
     assert settings.recipe_settings["batch_size"] == 4
     assert "batch_size" not in parse_service_arguments(normalized)
     assert normalized["execution"] == {"services": {"backend": "uni"}}
-
-
-def test_retry_deadline_still_follows_inference_timeout():
-    config = {"reef": {"recipe": "recipe", "inference_timeout_s": 42}}
-    assert service_config_from_mapping(normalize_service_config(config)).inference_retry_timeout_s == 42
-    config["reef"]["inference_retry_timeout_s"] = 12
-    assert service_config_from_mapping(config).inference_retry_timeout_s == 12
 
 
 @pytest.mark.parametrize(

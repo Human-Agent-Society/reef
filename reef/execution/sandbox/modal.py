@@ -1,4 +1,4 @@
-"""Run rollout processes in a Modal Sandbox (:mod:`reef.execution.sandbox.remote`).
+"""Run task processes in a Modal Sandbox (:mod:`reef.execution.sandbox.remote`).
 
 A Modal Sandbox is a gVisor container that Modal runs; nested bubblewrap jails work in it. :class:`ModalExecutor` is
 the deployment's setting (the Modal app the sandboxes belong to, the image, the resources, how long a sandbox may
@@ -23,8 +23,8 @@ from typing import Any, ClassVar, Self
 
 from reef.execution.sandbox.process import (
     ProcessOutcome,
-    RolloutLaunchError,
-    RolloutTimeout,
+    ProgramLaunchError,
+    ProgramTimeout,
     SandboxProgram,
     SandboxUnavailable,
 )
@@ -123,7 +123,7 @@ class ModalExecutor(RemoteExecutor):
         if self.image:
             return modal.Image.from_registry(self.image)
         if not self.npm_package:
-            raise RolloutLaunchError("a Modal sandbox needs modal_image or a program with an npm package")
+            raise ProgramLaunchError("a Modal sandbox needs modal_image or a program with an npm package")
         return (
             modal.Image.from_registry(NODE_IMAGE)
             .apt_install("bubblewrap", "python3", "coreutils")
@@ -166,20 +166,20 @@ class ModalExecutor(RemoteExecutor):
         try:
             session = replace(self, owner="", forward_ports=(), timeout_s=60).open()
             session.run(probe_command(self.binary))
-        except (modal.exception.Error, RolloutLaunchError) as exc:
+        except (modal.exception.Error, ProgramLaunchError) as exc:
             raise SandboxUnavailable(f"Modal startup check failed: {exc}") from exc
         finally:
             if session is not None:
                 try:
                     session.close()
-                except RolloutLaunchError as exc:
+                except ProgramLaunchError as exc:
                     raise SandboxUnavailable("Modal startup probe could not be cleaned up") from exc
         object.__setattr__(self, "validated", True)
 
     def open(self) -> ModalSession:
         lifetime = math.ceil(self.timeout_s + SANDBOX_MARGIN_S)
         if lifetime > SANDBOX_MAX_TIMEOUT_S:
-            raise RolloutLaunchError(
+            raise ProgramLaunchError(
                 f"a Modal sandbox lives at most {SANDBOX_MAX_TIMEOUT_S} s; this run needs {lifetime} s"
             )
         import modal
@@ -197,7 +197,7 @@ class ModalExecutor(RemoteExecutor):
                 memory=self.memory_mb,
             )
         except Exception as exc:
-            raise RolloutLaunchError(f"the Modal sandbox did not start: {exc}") from exc
+            raise ProgramLaunchError(f"the Modal sandbox did not start: {exc}") from exc
         session = ModalSession(sandbox, env=self.env)
         try:
             for port, tunnel_port in zip(self.forward_ports, ports, strict=True):
@@ -229,7 +229,7 @@ class ModalSession(RemoteSession):
         process = self.sandbox.exec("/bin/sh", "-c", command)
         process.wait()
         if process.returncode != 0:
-            raise RolloutLaunchError(
+            raise ProgramLaunchError(
                 f"the Modal sandbox command exited with {process.returncode}: {process.stderr.read().strip()}"
             )
 
@@ -269,20 +269,20 @@ class ModalSession(RemoteSession):
             process.wait()
             status = process.returncode
             if status in TIMEOUT_STATUSES and time.monotonic() - started >= timeout:
-                raise RolloutTimeout(f"the process ran past its {timeout:g} s limit in the Modal sandbox")
+                raise ProgramTimeout(f"the process ran past its {timeout:g} s limit in the Modal sandbox")
             outcome = ProcessOutcome(status, process.stdout.read(), process.stderr.read())
             finished = True
             return outcome
-        except RolloutTimeout:
+        except ProgramTimeout:
             raise
         except Exception as exc:
-            raise RolloutLaunchError(f"the Modal sandbox could not run the process: {exc}") from exc
+            raise ProgramLaunchError(f"the Modal sandbox could not run the process: {exc}") from exc
         finally:
             try:
                 self.pull(root)
             except Exception as exc:
                 if finished:
-                    raise RolloutLaunchError(f"could not copy {root.name} back from the Modal sandbox") from exc
+                    raise ProgramLaunchError(f"could not copy {root.name} back from the Modal sandbox") from exc
                 logger.warning("could not copy %s back from the failed Modal process", root.name)
 
 

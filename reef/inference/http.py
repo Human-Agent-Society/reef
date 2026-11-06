@@ -11,12 +11,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
-from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
+from reef.core.errors import UpstreamStatusError
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime, InferenceStream
+from reef.inference.provider_protocol import provider_headers
+from reef.inference.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string
 
 #: Hop-by-hop headers that describe one connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(
@@ -33,15 +34,8 @@ HOP_BY_HOP_HEADERS = frozenset(
     }
 )
 
-#: Routes that speak the Anthropic Messages API and take its native auth headers.
-ANTHROPIC_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
-ANTHROPIC_VERSION = "2023-06-01"
-
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
-
-#: Keys a per-scenario model override may carry.
-MODEL_CONFIG_KEYS = frozenset({"url", "model", "api", "api_key"})
 
 # -- Request headers ----------------------------------------------------------
 
@@ -50,13 +44,17 @@ class RequestHeadersFactory(ABC):
     """Produce request headers for one artifact-bound upstream call."""
 
     @abstractmethod
-    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
+    def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
         """Return identity and authentication headers for the selected route."""
 
+    def external_headers(self, path: str) -> Mapping[str, str]:
+        """Headers for an external model call with no Reef artifact identity."""
+        return {}
 
-def content_identity_headers(artifact: Artifact) -> dict[str, str]:
+
+def artifact_identity_headers(artifact: InferenceArtifact) -> dict[str, str]:
     """Reef identity headers for one selected, optionally materialized artifact."""
-    headers = {"x-reef-release-id": artifact.ref.release_id}
+    headers = {"x-reef-artifact-id": artifact.artifact_id}
     if artifact.local_path is not None:
         headers["x-reef-artifact-path"] = str(artifact.local_path)
     return headers
@@ -65,15 +63,18 @@ def content_identity_headers(artifact: Artifact) -> dict[str, str]:
 class ArtifactRequestHeaders(RequestHeadersFactory):
     """Attach the selected Reef artifact identity."""
 
-    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
-        return content_identity_headers(artifact)
+    def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
+        return artifact_identity_headers(artifact)
 
 
 class ProviderRequestHeaders(RequestHeadersFactory):
-    """Attach artifact identity and provider-specific authentication.
+    """Attach artifact identity and provider authentication.
 
-    Anthropic routes take the key as ``x-api-key`` plus a version header;
-    OpenAI-compatible routes take it as a bearer token.
+    Values: the object holds ``api_key``, a non-empty provider credential.
+    Purpose: an :class:`HttpInferenceHandler` that calls a provider asks it
+    for the headers of each call. ``headers(artifact, path)`` returns the
+    identity headers of ``artifact`` followed by
+    :func:`~reef.inference.provider_protocol.provider_headers` for ``path``.
     """
 
     def __init__(self, api_key: str) -> None:
@@ -81,14 +82,11 @@ class ProviderRequestHeaders(RequestHeadersFactory):
             raise ValueError("api_key must be non-empty")
         self._api_key = api_key
 
-    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
-        headers = content_identity_headers(artifact)
-        if path in ANTHROPIC_PATHS:
-            headers["x-api-key"] = self._api_key
-            headers["anthropic-version"] = ANTHROPIC_VERSION
-        else:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
+    def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
+        return {**artifact_identity_headers(artifact), **self.external_headers(path)}
+
+    def external_headers(self, path: str) -> Mapping[str, str]:
+        return provider_headers(path, self._api_key)
 
 
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
@@ -139,18 +137,31 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def _post_arguments(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_arguments(
+        self, artifact: InferenceArtifact | None, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         """Keyword arguments of one ``session.post`` call."""
+        headers = (
+            self._request_headers.external_headers(path)
+            if artifact is None
+            else self._request_headers.headers(artifact, path)
+        )
         return {
             "url": f"{self._upstream_url}{path}",
             "json": payload,
-            "headers": dict(self._request_headers.headers(artifact, path)),
+            "headers": dict(headers),
         }
 
     def _status_error(self, status: int, body: str) -> UpstreamStatusError:
         return UpstreamStatusError(f"{self._error_label} returned {status}: {body[:400]}", status=status)
 
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.post_json(path, payload, artifact=artifact)
+
+    async def post_json(
+        self, path: str, payload: dict[str, Any], *, artifact: InferenceArtifact | None = None
+    ) -> dict[str, Any]:
+        """POST to the provider. External models omit the Reef artifact."""
         from aiohttp import ClientSession, ClientTimeout, ContentTypeError
 
         async with (
@@ -168,7 +179,15 @@ class HttpInferenceHandler(InferenceHandler):
             raise UpstreamStatusError(f"{self._error_label} response must be a JSON object", status=502)
         return value
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
+        return await self.post_stream(path, payload, artifact=artifact)
+
+    async def post_stream(
+        self, path: str, payload: dict[str, Any], *, artifact: InferenceArtifact | None = None
+    ) -> InferenceStream:
+        """Open the provider stream. Its owner closes it after consuming or cancelling it."""
         from aiohttp import ClientSession, ClientTimeout
 
         # The session outlives this call: the stream owns it until closed.
@@ -208,7 +227,7 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
     Holds an HttpInferenceHandler with provider-native auth
-    and exposes it via inference_handler. It loads no weights: a release
+    and exposes it via inference_handler. It loads no weights: a snapshot
     serves under its release ID, and no load names what serves.
     """
 
@@ -234,33 +253,12 @@ class InferenceProxyRuntime(InferenceRuntime):
             error_label="inference provider",
         )
 
-    @classmethod
-    def from_model_config(cls, value: object) -> InferenceProxyRuntime | None:
-        """Validate a per-scenario model override and build its proxy runtime."""
-        if value is None:
-            return None
-        if not isinstance(value, Mapping) or set(value) - MODEL_CONFIG_KEYS:
-            raise ValueError("model must be null or an object with url, model, api and api_key")
-        for name in ("url", "model"):
-            if not _clean_text(value.get(name)) or not value[name].strip():
-                raise ValueError(f"model.{name} must be a non-empty string without control characters")
-        url = value["url"].strip()
-        if not _plain_http_url(url):
-            raise ValueError("model.url must be an HTTP(S) URL without credentials, query or fragment")
-        api = value.get("api", "openai")
-        if api not in PROVIDER_APIS:
-            raise ValueError("model.api must be openai, responses or anthropic")
-        key = value.get("api_key")
-        if key is not None and not _clean_text(key):
-            raise ValueError("model.api_key must be a string without control characters")
-        return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=key)
-
     @property
     def model_path(self) -> str:
         return self._model_path
 
     @property
-    def api_key(self) -> str | None:
+    def provider_key(self) -> str | None:
         return self._api_key
 
     @property
@@ -275,28 +273,8 @@ class InferenceProxyRuntime(InferenceRuntime):
     def inference_handler(self) -> InferenceHandler:
         return self._inference_handler
 
-    def current_runtime_load_id(self) -> str | None:
-        return None
-
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        return artifact.ref.release_id
-
-
-def _clean_text(value: object) -> bool:
-    """A string with no control characters (which would corrupt headers or logs)."""
-    return isinstance(value, str) and not any(ord(character) < 32 for character in value)
-
-
-def _plain_http_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return (
-        parsed.scheme in ("http", "https")
-        and bool(parsed.netloc)
-        and not parsed.username
-        and not parsed.password
-        and not parsed.query
-        and not parsed.fragment
-    )
+        return artifact.artifact_id
 
 
 @dataclass(frozen=True)
@@ -381,7 +359,7 @@ __all__ = [
     "InferenceProxyRuntimeFactory",
     "ProviderRequestHeaders",
     "RequestHeadersFactory",
-    "content_identity_headers",
+    "artifact_identity_headers",
     "provider_request_headers",
     "resolve_proxy_runtime",
 ]

@@ -1,4 +1,4 @@
-"""Storage boundary for a scenario's records, commits, settings, tasks, training samples, evaluations, and recovery.
+"""Storage boundary for a scenario's records, commits, settings, tasks, training state, evaluations, and recovery.
 
 Artifact publication remains the responsibility of the committer. A
 store settles record consumption and the committed scenario state together;
@@ -9,16 +9,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
-from reef.storage.commits import CommitRecord
+from reef.core.serving_config import ServingConfig
+from reef.storage.commits import CommitRecord, CommitSnapshots
+from reef.storage.data import check_owner
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
 
@@ -28,32 +30,43 @@ class ScenarioStoreConflict(ReefError):
 
 @dataclass(frozen=True)
 class ScenarioSettings:
-    """The settings a person selects for one scenario, kept with its records and commits.
+    """The settings of one scenario, kept with its records and commits.
 
-    ``model_config`` is the validated model override as JSON (``None`` selects
-    the recipe's model). ``training_mode`` is the selected mode (``None``
-    selects the recipe's default). ``artifact_evaluation`` is the
+    ``training_mode`` is the selected mode (``None`` selects the recipe's
+    default). ``artifact_evaluation`` is the
     ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
     artifact with (``None`` evaluates none). ``activation`` is the scenario's
     own activation rule as JSON: ``{"module": <built-in rule>, "config": {...}}``.
     ``None`` follows the deployment's ``activation`` section. The scenario
-    registry checks the rule before it stores it.
+    registry checks the rule before it stores it. ``owner`` is the data store
+    owner whose items the scenario uses (RFC #1028), a name that passes
+    ``check_owner``. It is ``None`` only for a scenario that the data sync has
+    not opened yet; the first open sets it. ``serving_config`` is the serving fields that the scenario sets over
+    the deployment's values (RFC #1097); the scenario registry checks it with the runtime before it stores it.
+    Construction checks these types.
+
+    Purpose: the scenario registry and the dispatcher write the settings
+    through ``ScenarioStorage.write_settings`` and read them back when a
+    scenario loads.
     """
 
-    model_config: Mapping[str, object] | None = None
     training_mode: str | None = None
     artifact_evaluation: Mapping[str, object] | None = None
     activation: Mapping[str, object] | None = None
+    owner: str | None = None
+    serving_config: ServingConfig = field(default_factory=ServingConfig)
 
     def __post_init__(self) -> None:
-        if self.model_config is not None and not isinstance(self.model_config, Mapping):
-            raise ValueError("scenario settings model_config must be an object or null")
         if self.training_mode is not None and not isinstance(self.training_mode, str):
             raise ValueError("scenario settings training_mode must be a string or null")
         if self.artifact_evaluation is not None and not isinstance(self.artifact_evaluation, Mapping):
             raise ValueError("scenario settings artifact_evaluation must be an object or null")
         if self.activation is not None and not isinstance(self.activation, Mapping):
             raise ValueError("scenario settings activation must be an object or null")
+        if self.owner is not None:
+            check_owner(self.owner)
+        if not isinstance(self.serving_config, ServingConfig):
+            raise ValueError("scenario settings serving_config must be a ServingConfig")
 
 
 class ScenarioStore(ABC):
@@ -85,11 +98,9 @@ class ScenarioStore(ABC):
 
     @property
     @abstractmethod
-    def samples(self) -> SampleStore:
-        """The training samples of this scenario, such as the trajectories that clients uploaded.
-
-        The store closes with this session. Its samples survive a restart if ``durable`` is true.
-        """
+    def training_state(self) -> TrainingState:
+        """The training state of this scenario: the train counts of its samples and the records that its stages
+        consumed. It closes with this session, and survives a restart if ``durable`` is true."""
 
     @property
     @abstractmethod
@@ -98,6 +109,11 @@ class ScenarioStore(ABC):
 
         The store closes with this session. Its evaluations survive a restart if ``durable`` is true.
         """
+
+    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
+        """Locate the snapshot of each record that ``history`` reads. A store that keeps its records in memory holds
+        their snapshots, so it does nothing."""
+        return
 
     @abstractmethod
     def history(self) -> tuple[CommitRecord, ...]:
@@ -143,7 +159,7 @@ class ScenarioStorage(Plugin, ABC):
     shared resources only; sessions remain owned by their scenarios.
 
     Every piece of per-scenario state that Reef owns goes through this
-    interface: records, commits, generated tasks, training samples and evaluations through sessions, settings
+    interface: records, commits, generated tasks, training state and evaluations through sessions, settings
     through ``read_settings`` and ``write_settings``. Archiving a scenario
     retires all of it. A deployment names a subclass in ``storage.record_backend``.
     """
@@ -176,6 +192,11 @@ class ScenarioStorage(Plugin, ABC):
     @abstractmethod
     def open(self, scenario: str) -> ScenarioStore:
         """Open an independently owned session for this scenario."""
+
+    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
+        """The data items that ``scenario`` trains on, with the training state of its open ``session`` (RFC #1140).
+        A storage without a data store has none: its trainers keep their samples in memory."""
+        return None
 
     @abstractmethod
     def archive(self, scenario: str) -> tuple[str, ...]:

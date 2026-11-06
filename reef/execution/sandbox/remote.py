@@ -1,4 +1,4 @@
-"""Run rollout processes in a cloud sandbox that reaches the Reef host only through a tunnel.
+"""Run task processes in a cloud sandbox that reaches the Reef host only through a tunnel.
 
 A cloud sandbox (an E2B microVM, a Modal Sandbox) has the internet but no route to the machine Reef runs on. A
 :class:`RemoteExecutor` is the deployment's setting for one provider; :meth:`RemoteExecutor.open` starts one
@@ -6,7 +6,7 @@ sandbox and answers a :class:`RemoteSession`, which launches any number of proce
 Each process's root is copied in before it starts and copied back once it ends, so the caller reads what it wrote
 as a local run leaves it; :meth:`RemoteSession.pull` refreshes a directory while a process still runs. Every
 process runs in a bubblewrap jail (:func:`protected_command`) that keeps the sandbox's filesystem read-only except
-the directories the rollout declares.
+the directories the run declares.
 
 A port in ``forward_ports`` is reachable inside the sandbox at the same loopback address it has on the Reef host,
 so no URL handed to a process changes. The sandbox runs :mod:`reef.execution.sandbox.relay` on that port; a
@@ -49,7 +49,7 @@ from reef.execution.sandbox.process import (
     ISOLATION_ENV,
     ProcessOutcome,
     ProgramExecutor,
-    RolloutLaunchError,
+    ProgramLaunchError,
     SandboxProgram,
     SandboxUnavailable,
 )
@@ -108,7 +108,7 @@ def protected_command(
     writable_paths: Sequence[Path],
     readonly_paths: Sequence[Path],
 ) -> str:
-    """Keep the sandbox's filesystem read-only except the rollout's declared output directories.
+    """Keep the sandbox's filesystem read-only except the run's declared output directories.
 
     The PID namespace retires tool children when the command is stopped. Bubblewrap
     also prevents privilege escalation, so sudo cannot undo the read-only mounts.
@@ -421,7 +421,7 @@ class RemoteSession(ProgramExecutor):
             )
             url = self.public_url(tunnel_port)
         except Exception as exc:
-            raise RolloutLaunchError(f"the {self.provider} relay for port {port} did not start: {exc}") from exc
+            raise ProgramLaunchError(f"the {self.provider} relay for port {port} did not start: {exc}") from exc
         pump = TunnelPump(url, secret, port)
         pump.start()
         self.pumps.append(pump)
@@ -457,7 +457,7 @@ class RemoteSession(ProgramExecutor):
         try:
             self.stop()
         except Exception as exc:
-            raise RolloutLaunchError(
+            raise ProgramLaunchError(
                 f"could not stop the {self.provider} sandbox; its provider timeout still applies"
             ) from exc
         self.closed = True
@@ -482,7 +482,7 @@ class TunnelPump:
         self.thread.start()
         if not self.ready.wait(timeout) or self.failure is not None:
             self.stop()
-            raise RolloutLaunchError(f"the sandbox relay did not answer at {self.url}: {self.failure or 'timed out'}")
+            raise ProgramLaunchError(f"the sandbox relay did not answer at {self.url}: {self.failure or 'timed out'}")
 
     def stop(self) -> None:
         task = self.task

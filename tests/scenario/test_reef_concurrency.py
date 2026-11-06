@@ -15,12 +15,14 @@ import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
-from reef.artifact import Artifact, ArtifactConflict, ArtifactRef, InMemoryRepositoryBackend, Repository
+from reef.artifact import Artifact, ArtifactConflict, InMemoryRepositoryBackend, Repository, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.types import TrainStepResult
+from reef.train.component import SavedCheckpoint, TrainingJob
+from reef.train.job_queue import TrainingJobWorker
+from reef.train.types import TrainingCommit
 
 
 class CountingComponent(StubTrainingComponent):
@@ -37,12 +39,12 @@ class CountingComponent(StubTrainingComponent):
         return super().train(job)
 
 
-def sft_inference(agent_record_id: str, runtime_load_id: str | None) -> AgentRecord:
-    """An inference record from the version that served the scenario when it was created.
+def sft_inference(agent_record_id: str, artifact_id: str) -> AgentRecord:
+    """An inference record from the artifact that served the scenario when it was created.
 
-    Accepts race with commits, so no record can name the version that serves
+    Accepts race with commits, so no record can name the artifact that serves
     it. The tests set ``max_staleness`` to their job count instead: every
-    record stays within the window of every later version.
+    record stays within the window of every later artifact.
     """
     return AgentRecord.create(
         scenario="math",
@@ -51,7 +53,7 @@ def sft_inference(agent_record_id: str, runtime_load_id: str | None) -> AgentRec
             "tokens": [1, 2],
             "loss_mask": [0, 1],
             "rollout_log_probs": [-0.2],
-            "runtime_load_id": runtime_load_id,
+            "artifact_id": artifact_id,
         },
         agent_record_id=agent_record_id,
     )
@@ -100,17 +102,27 @@ def wait_for_jobs(dispatcher: Dispatcher, expected: int) -> None:
     raise AssertionError("async training did not commit")
 
 
+def poll_jobs_quickly(dispatcher: Dispatcher) -> None:
+    """Make the training worker look at the jobs queue often.
+
+    The training worker runs each job on its own thread and looks for the next job after its poll time. The
+    trainer's worker polls a running job every ``local_workers.POLL_SECONDS``, which the tests patch.
+    """
+    for worker in dispatcher.workers.workers:
+        if isinstance(worker, TrainingJobWorker):
+            worker.poll_seconds = 0.01
+
+
 @pytest.mark.unit
 def test_activate_requires_the_observed_head(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
-    backend = InMemoryRepositoryBackend("math", initial, root=tmp_path / "repository")
-    repository = Repository(backend, backend.resolve_release())
-    repository.fork()
-    head = repository.require_current_artifact()
+    backend = InMemoryRepositoryBackend("math", directory=tmp_path / "repository")
+    head = backend.register(Artifact.local(initial), metadata={})
+    repository = Repository(backend, head, current_artifact=head, checkpoint_artifact=head)
 
-    stale = ArtifactRef(content_id="artifact:stale", release_id="stale", parent_release_id=None)
-    advanced = ArtifactRef(content_id="live:1", release_id="live:proc:w1:1", parent_release_id=head.release_id)
+    stale = SnapshotRef(revision="stale", parent_revision=None)
+    advanced = SnapshotRef(revision="live:proc:w1:1", parent_revision=head.revision)
     with pytest.raises(ArtifactConflict, match="active artifact moved"):
         repository.activate(advanced, expected=stale)
 
@@ -121,9 +133,8 @@ def test_activate_requires_the_observed_head(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
+def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
     pairs_per_thread = 4
     thread_count = 4
@@ -132,16 +143,18 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
             **runtime_bindings(component),
             max_staleness=pairs_per_thread * thread_count,
         ),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
-    base_version = dispatcher.get_or_create_scenario("math").serving_runtime_load_id()
+    poll_jobs_quickly(dispatcher)
+    base_artifact_id = dispatcher.get_or_create_scenario("math").serving_artifact_id()
 
     def worker(seed: int) -> None:
         for offset in range(pairs_per_thread):
             index = seed * pairs_per_thread + offset
-            dispatcher.accept_record(sft_inference(f"i{index}", base_version))
+            dispatcher.accept_record(sft_inference(f"i{index}", base_artifact_id))
             dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"))
 
     errors = run_workers(thread_count, worker)
@@ -167,27 +180,28 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     P. The worker must finish that trainer and version-chain commit before preparing
     another batch; otherwise P could be recorded as two scenario steps.
     """
-    initial = tmp_path / "initial"
-    initial.mkdir()
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component), max_staleness=4),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
+    poll_jobs_quickly(dispatcher)
     scenario = dispatcher.get_or_create_scenario("math")
-    base_version = scenario.serving_runtime_load_id()
+    base_artifact_id = scenario.serving_artifact_id()
     original_prepare_commit = scenario.trainer.prepare_commit
 
-    def slow_prepare_commit(result):
+    def slow_prepare_commit(result, correlation_metrics=None):
         time.sleep(0.05)
-        return original_prepare_commit(result)
+        return original_prepare_commit(result, correlation_metrics)
 
     monkeypatch.setattr(scenario.trainer, "prepare_commit", slow_prepare_commit)
 
     def worker(seed: int) -> None:
-        dispatcher.accept_record(sft_inference(f"i{seed}", base_version))
+        dispatcher.accept_record(sft_inference(f"i{seed}", base_artifact_id))
         dispatcher.accept_record(sft_report(f"r{seed}", f"i{seed}"))
 
     errors = run_workers(4, worker)
@@ -200,12 +214,11 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
 
 @pytest.mark.unit
 def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = build_default_dispatcher(
-        backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        backend_factory=InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     dispatcher.get_or_create_scenario("chat")
     commits_per_thread = 3
@@ -217,7 +230,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
             candidate = tmp_path / f"candidate-{index}"
             candidate.mkdir()
             (candidate / "model.txt").write_text(f"v{index}")
-            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+            dispatcher.registry.get("chat").commit(TrainingCommit(state=None, artifact=Artifact.local(candidate)))
 
     errors = run_workers(thread_count, worker)
 
@@ -228,14 +241,14 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
 
     backend = scenario.repository.backend
     assert backend.current() == scenario.repository.current_artifact
-    # Walk the durable release chain: every publish linked exactly one parent, so
-    # the chain from the tip reaches the bootstrap ref in total + fork + base
-    # hops, with no forks or skipped links.
+    # Walk the durable snapshot chain: every publish linked exactly one parent, so
+    # the chain from the tip reaches the root snapshot in total + 1 hops, with no
+    # forks or skipped links.
     node = backend.current()
     nodes = 0
     while True:
         nodes += 1
-        if node.parent_release_id is None:
+        if node.parent_revision is None:
             break
-        node = backend.resolve_release(node.parent_release_id)
-    assert nodes == total + 2
+        node = backend.resolve_snapshot(node.parent_revision)
+    assert nodes == total + 1

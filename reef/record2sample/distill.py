@@ -1,184 +1,105 @@
-"""Distillation: the student's request with the teacher's context, rendered as the teacher reads it.
+"""Distillation: the student's call, with what the teacher reads before the student's reply.
 
-The distilling recipes make a teacher score the student's own sample. What
-the teacher reads beyond the student's request is the recipe's policy
-(:meth:`DistillSamples.teacher_request`: a demonstration, environment feedback,
-nothing); rendering it with the served model's chat template and shipping it
-as ``teacher_tokens`` beside the student's policy tensors is the mechanism
-they share, :func:`recorded_sample` and :meth:`TeacherRenderer.teacher_tokens`.
-A recipe whose teacher context comes from other samples of the same job data, as
-SDPO's does, composes the request in ``make_job_data`` and renders it with the
-same two.
+The distilling recipes make a teacher score the student's own reply. What the teacher reads beyond the student's
+request is the recipe's policy (:meth:`DistillSamples.teacher_request`: a demonstration, environment feedback,
+nothing). A sample is the student's call as an ATIF trajectory with the teacher's request in its metadata
+(``reef.core.chat_rendering.TeacherRequest``); the training component renders both with the model's chat template:
+the teacher sequence is the teacher's request followed by the student's reply tokens verbatim. A recipe whose
+teacher context comes from other samples of the same job data, as SDPO's does, writes the request in
+``make_job_data``.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Self, cast
+from typing import Any, Self
 
+from reef.core.chat_rendering import TeacherRequest, flatten_content, normalize_messages_for_template, trajectory_tools
 from reef.core.config import config_option
 from reef.core.job_data import TrajectorySample
 from reef.core.reports import TeacherContextReport
+from reef.core.trajectories import atif_messages, make_trajectory
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record, ReportContext
-from reef.record2sample import ReportSamples, SkippedReport
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.samples import flatten_content, recorded_request, recorded_response
-
-logger = logging.getLogger(__name__)
-
-
-def normalize_messages_for_template(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Messages as a chat template expects them: text content, chat roles, tool arguments as objects."""
-    normalized: list[dict[str, Any]] = []
-    for message in messages:
-        entry = dict(message)
-        if entry.get("role") == "developer":
-            entry["role"] = "system"
-        content = entry.get("content")
-        if content is not None and not isinstance(content, str):
-            entry["content"] = flatten_content(content)
-        if entry.get("tool_calls"):
-            entry["tool_calls"] = [normalize_tool_call(call) for call in entry["tool_calls"]]
-        normalized.append(entry)
-    return normalized
-
-
-def normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
-    """A tool call with its function arguments as an object, as chat templates render them."""
-    normalized = dict(call)
-    function = normalized.get("function")
-    if isinstance(function, Mapping):
-        function = dict(function)
-        arguments = function.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                function["arguments"] = json.loads(arguments)
-            except json.JSONDecodeError:
-                function["arguments"] = {}
-        normalized["function"] = function
-    return normalized
+from reef.record2sample.reports import ReportContext, ReportSamples
 
 
 @dataclass(frozen=True)
 class DistillSettings(SampleAssemblySettings):
-    """The config of ``DistillSamples``: the teacher's tokenizer and window, and the sample assembly."""
+    """The config of ``DistillSamples``: the teacher's window and the sample assembly.
 
-    tokenizer_path: str = config_option("", help="The served model's tokenizer, which renders the teacher prompt.")
+    Values: ``max_teacher_tokens`` is a non-negative int, 0 for no limit; the other keys are as in
+    ``SampleAssemblySettings``. The constructor refuses other values.
+    Purpose: ``DistillSamples.from_config`` parses it from ``pipeline.record2sample.config``.
+    """
+
     max_teacher_tokens: int = config_option(
-        0, help="The longest teacher sequence the trainer scores; a longer report is skipped. 0 is no limit."
+        0, help="The longest teacher sequence the trainer scores; a longer sample does not train. 0 is no limit."
     )
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not self.tokenizer_path.strip():
-            raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
         if self.max_teacher_tokens < 0:
             raise ValueError("max_teacher_tokens must be non-negative (0 disables the limit)")
 
 
-class TeacherRenderer:
-    """Render the teacher's request with the served model's chat template."""
+@dataclass(frozen=True)
+class StudentCall:
+    """The student's call of a distillation sample, as chat messages that a chat template takes.
 
-    def __init__(self, tokenizer_path: str) -> None:
-        # transformers belongs to the training environment; the service never renders a prompt.
-        from transformers import AutoTokenizer
-
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-    def teacher_tokens(
-        self,
-        messages: Sequence[Any],
-        tools: Sequence[Any] | None,
-        response_ids: Sequence[int],
-        *,
-        max_prompt_tokens: int = 0,
-        enable_thinking: bool | None = None,
-    ) -> list[int]:
-        """The teacher sequence: ``messages`` rendered with the chat template, then ``response_ids`` verbatim.
-
-        ``max_prompt_tokens`` keeps only the first that many rendered prompt
-        ids (0 keeps them all). ``enable_thinking`` is handed to the template
-        when set, for templates that render a thinking switch into the
-        generation prompt, so the teacher reads what the engine rendered.
-        """
-        template_options: dict[str, Any] = {}
-        if enable_thinking is not None:
-            template_options["enable_thinking"] = enable_thinking
-        # tokenize=True and return_dict=False return the flat token list.
-        prompt_ids = cast(
-            list[int],
-            self.tokenizer.apply_chat_template(
-                list(messages),
-                tools=list(tools) if tools else None,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_dict=False,
-                **template_options,
-            ),
-        )
-        if max_prompt_tokens > 0:
-            prompt_ids = prompt_ids[:max_prompt_tokens]
-        return [*prompt_ids, *(int(token) for token in response_ids)]
-
-
-def recorded_sample(assembly: SampleAssembly, context: ReportContext, score: float) -> TrajectorySample:
-    """The student's policy sample from the report's one recorded inference.
-
-    Checks what a teacher sequence needs: one inference, and its recorded
-    prompt and response tokens.
+    Values: ``messages`` is the request of the call, normalized for a chat template
+    (``normalize_messages_for_template``); ``tools`` its tools, or None; ``reply`` the text of its reply.
+    Purpose: ``student_call`` makes it from the sample's ATIF trajectory; a recipe composes the teacher's request
+    from it.
     """
-    if len(context.inferences) != 1:
+
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None
+    reply: str
+
+
+def student_call(sample: TrajectorySample) -> StudentCall:
+    """The student's call of ``sample``, a trajectory whose last step is the student's reply.
+
+    ``ValueError``: the trajectory does not end with an agent reply.
+    """
+    conversation = normalize_messages_for_template(atif_messages(sample.trajectory))
+    if not conversation or conversation[-1]["role"] != "assistant":
+        raise ValueError("a distillation sample ends with the student's reply")
+    return StudentCall(
+        conversation[:-1], trajectory_tools(sample.trajectory), flatten_content(conversation[-1].get("content"))
+    )
+
+
+def student_sample(assembly: SampleAssembly, context: ReportContext, score: float) -> TrajectorySample:
+    """The student's sample: the last call of the report's one trajectory, with ``score`` and the report's metadata.
+
+    ``ValueError``: the report references more than one trajectory.
+    """
+    if len(context.ends) != 1:
         raise ValueError(
             f"a teacher sequence covers one recorded request per report; report "
-            f"{context.report.agent_record_id} references {len(context.inferences)}"
+            f"{context.report.agent_record_id} references {len(context.ends)}"
         )
-    sample = assembly.build(context, score)
-    tokens = [int(token) for token in sample.training.get("tokens", [])]
-    response_length = len(sample.training.get("loss_mask", []))
-    if not 0 < response_length < len(tokens):
-        raise ValueError("a teacher sequence requires the recorded prompt and response tokens of the inference")
-    return sample
-
-
-def teacher_overflow(context: ReportContext, teacher_tokens: Sequence[int], max_teacher_tokens: int) -> bool:
-    """Return True when the teacher sequence is longer than ``max_teacher_tokens``, and log the report it skips.
-
-    0 is no limit.
-    """
-    if not max_teacher_tokens or len(teacher_tokens) <= max_teacher_tokens:
-        return False
-    logger.warning(
-        "report %s skipped: its teacher sequence is %d tokens, over max_teacher_tokens %d",
-        context.report.agent_record_id,
-        len(teacher_tokens),
-        max_teacher_tokens,
-    )
-    return True
+    return assembly.with_report(make_trajectory(context.ends, score), context)
 
 
 class DistillSamples(ReportSamples):
-    """One report, one distillation sample: the student's policy tensors plus its teacher sequence.
+    """One report, one distillation sample: the student's call, and the request that its teacher reads.
 
-    A report references one recorded request and carries the teacher's
-    ``teacher_context``. ``teacher_tokens`` is the teacher's request
-    (:meth:`teacher_request`) rendered with the served model's chat template,
-    followed by the student's response ids verbatim, so a teacher pass scores
-    the student's own tokens. A sequence longer than ``max_teacher_tokens``
-    cannot be scored by the trainer's window: the report is skipped and
-    counted in ``teacher_overflow_reports``. A recipe's subclass overrides
-    :meth:`teacher_request` with its composition.
+    A report references one recorded request and carries the teacher's ``teacher_context``. The sample is the
+    student's call as an ATIF trajectory, with the teacher's request (:meth:`teacher_request`) in its
+    ``extra.reef.teacher`` (``TeacherRequest``). The training component renders the teacher sequence: the request with
+    the chat template, then the student's reply tokens verbatim, so a teacher pass scores the student's own tokens. A
+    sequence longer than ``max_teacher_tokens`` does not train. A recipe's subclass overrides :meth:`teacher_request`
+    with its composition. Each report trains by itself and owns its inference records.
     """
 
-    def __init__(self, settings: DistillSettings) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext, settings: DistillSettings) -> None:
+        super().__init__(context, exclusive_sources=True, max_staleness=settings.max_staleness)
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
-        self.renderer = TeacherRenderer(settings.tokenizer_path)
-        self.overflow_count = 0
 
     @classmethod
     def from_config(
@@ -186,51 +107,30 @@ class DistillSamples(ReportSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(DistillSettings.parse(config, plugin_class=cls))
+        return cls(context, DistillSettings.parse(config, plugin_class=cls))
 
     def teacher_request(
-        self, messages: list[Any], tools: list[Any] | None, response: str, teacher_context: str
-    ) -> tuple[list[Any], list[Any] | None]:
-        """The request the teacher reads, from the student's recorded request, its response and the report's teacher context.
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, response: str, teacher_context: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+        """The request the teacher reads, from the student's request, its response and the report's teacher context.
 
-        The default is the request as recorded: the teacher reads no
-        privileged text (on-policy distillation from a separate teacher).
+        The default is the request as recorded: the teacher reads no privileged text (on-policy distillation from a
+        separate teacher).
         """
         return messages, tools
 
-    def operational_metrics(self) -> Mapping[str, float | int]:
-        return {"teacher_overflow_reports": self.overflow_count}
-
-    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         parsed = context.parsed_report
         if not isinstance(parsed, TeacherContextReport):
             raise ValueError(f"{type(self).__name__} requires the TeacherContextReport schema")
         # The teacher's distribution is the signal; a reported score is metadata only.
-        sample = recorded_sample(self.assembly, context, 0.0 if context.score is None else context.score)
-        payload = context.inferences[0].payload
-        messages, tools = recorded_request(payload)
-        teacher_messages, teacher_tools = self.teacher_request(
-            messages, tools, recorded_response(payload), parsed.teacher_context
-        )
-        response_length = len(sample.training["loss_mask"])
-        teacher_tokens = self.renderer.teacher_tokens(
-            teacher_messages, teacher_tools, sample.training["tokens"][-response_length:]
-        )
-        if teacher_overflow(context, teacher_tokens, self.max_teacher_tokens):
-            self.overflow_count += 1
-            return SkippedReport("teacher_overflow")
-        return sample.with_training(teacher_tokens=teacher_tokens)
+        sample = student_sample(self.assembly, context, 0.0 if context.score is None else context.score)
+        call = student_call(sample)
+        messages, tools = self.teacher_request(call.messages, call.tools, call.reply, parsed.teacher_context)
+        teacher = TeacherRequest(messages, tools, max_tokens=self.max_teacher_tokens)
+        return sample.with_metadata(teacher=teacher.as_json())
 
 
-__all__ = [
-    "DistillSamples",
-    "DistillSettings",
-    "TeacherRenderer",
-    "normalize_messages_for_template",
-    "normalize_tool_call",
-    "recorded_sample",
-    "teacher_overflow",
-]
+__all__ = ["DistillSamples", "DistillSettings", "StudentCall", "student_call", "student_sample"]

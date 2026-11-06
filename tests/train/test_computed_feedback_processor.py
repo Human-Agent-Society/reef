@@ -1,7 +1,7 @@
 """Focused unit tests for the computed-feedback pipeline's state machine.
 
 tests.recipes.openclawrl.test_openclawrl_contracts pins the real recipe's behavior; these tests pin the
-mechanics of a pipeline with a ``JudgingRecord2Record`` and ``JudgedSamples`` with a
+mechanics of a pipeline with a ``JudgedSamples`` stage of a
 toy recipe, where recipe policy cannot blur the state machine.
 """
 
@@ -24,10 +24,9 @@ from tests.support._trajectories import policy_trajectory
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, JobContext, SupportsReceipt
-from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError
+from reef.execution.sandbox.process import LocalExecutor, ProgramLaunchError
 from reef.pipeline_context import PipelineContext
-from reef.record2record import JudgingRecord2Record, RecordJudging
-from reef.record2sample import JudgedSamples
+from reef.record2sample import JudgedSamples, RecordJudging
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TrajectorySample
@@ -70,7 +69,7 @@ class _FakeWorker:
 class _ToyJudging(RecordJudging):
     """A record tracks itself; a record whose payload names ``completes`` finishes that receipt."""
 
-    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
+    def observe(self, item: AgentRecord, now: float, stage: JudgedSamples) -> None:
         completes = item.payload.get("completes")
         if completes:
             stage.dispatch(_Job(completes))
@@ -95,7 +94,7 @@ class _ToySamples(JudgedSamples):
             loss_mask=(1,),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            runtime_load_id=record.payload.get("version", "v1"),
+            artifact_id=record.payload.get("version", "v1"),
         )
 
 
@@ -112,8 +111,7 @@ class _ToyProcessor(TrainingPipeline):
     def __init__(self, context: PipelineContext, *, worker: Any, max_staleness: int = 0) -> None:
         super().__init__(
             context,
-            record2record=JudgingRecord2Record(_ToyJudging(), worker, max_staleness=max_staleness),
-            record2sample=_ToySamples(),
+            record2sample=_ToySamples(_ToyJudging(), worker, max_staleness=max_staleness),
             sample2job=ToyJobData(context, None, None),
         )
 
@@ -139,11 +137,12 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     assert processor.background_jobs_running()
 
     worker.push(_Judgment("r1"))
+    processor.produce()
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     assert source_record_id(batch.samples[0]) == "r1"
     processor.acknowledge(batch.data_id)
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert "r1" in decision
     assert "r2" not in decision  # still tracked
 
@@ -151,7 +150,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
 def test_untracked_records_are_terminal_on_sight() -> None:
     processor, worker = _engine()
     processor.push(_record("noise"))
-    assert "noise" in processor.releasable_record_ids()
+    assert "noise" in processor.record2sample.releasable_record_ids()
     assert not worker.jobs
 
 
@@ -163,8 +162,9 @@ def test_failed_and_declined_judgments_retire_the_record() -> None:
     processor.push(_record("done2", completes="b"))
     worker.push(Failed("a"))
     worker.push(_Judgment("b", good=False))
+    processor.produce()
     assert not processor.ready(1)
-    releasable = processor.releasable_record_ids()
+    releasable = processor.record2sample.releasable_record_ids()
     assert {"a", "b"} <= set(releasable)
 
 
@@ -176,21 +176,22 @@ def test_refused_submission_retires_immediately() -> None:
     processor, _ = _engine(worker=_Refusing())
     processor.push(_record("r1", track=True))
     processor.push(_record("r2", completes="r1"))
-    assert "r1" in processor.releasable_record_ids()
+    assert "r1" in processor.record2sample.releasable_record_ids()
 
 
 def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_batch() -> None:
     processor, worker = _engine()
-    processor.observe_serving_runtime_load_id("v1")
+    processor.observe_serving_artifact_id("v1")
     processor.push(_record("old", track=True, version="v1"))
     processor.push(_record("done1", completes="old"))
-    processor.observe_serving_runtime_load_id("v2")
+    processor.observe_serving_artifact_id("v2")
     processor.push(_record("new", track=True, version="v2"))
     processor.push(_record("done2", completes="new"))
     worker.push(_Judgment("new"))
     worker.push(_Judgment("old"))
+    processor.produce()
     assert not processor.ready(2)  # the stale sample is not in the buffer
-    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert {"old", "new"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
 
 
@@ -198,12 +199,13 @@ def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
     worker = _FakeWorker()
     processor = _ToyProcessor(PipelineContext("s"), worker=worker, max_staleness=1)
     for name, version in (("v3", "e:3"), ("v4", "e:4"), ("v5", "e:5")):
-        processor.observe_serving_runtime_load_id(version)
+        processor.observe_serving_artifact_id(version)
         processor.push(_record(name, track=True, version=version))
         processor.push(_record(f"done-{name}", completes=name))
         worker.push(_Judgment(name))
-    assert not processor.ready(3)  # e:3 is two versions behind e:5
-    assert {"v3", "v4", "v5"} <= processor.releasable_record_ids()
+    processor.produce()
+    assert not processor.ready(3)  # e:3 is two artifacts behind e:5
+    assert {"v3", "v4", "v5"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(2).samples] == ["v4", "v5"]
 
 
@@ -211,7 +213,7 @@ def test_correlate_only_mode_without_a_worker() -> None:
     processor = _ToyProcessor(PipelineContext("s"), worker=None)
     processor.push(_record("r1", track=True))
     processor.push(_record("r2", completes="r1"))
-    assert "r1" in processor.releasable_record_ids()
+    assert "r1" in processor.record2sample.releasable_record_ids()
     processor.close()
 
 
@@ -341,7 +343,7 @@ class ProcessJobRunner(BackgroundJobRunner):
         try:
             await asyncio.shield(pending)
         except asyncio.CancelledError:
-            with contextlib.suppress(RolloutLaunchError):
+            with contextlib.suppress(ProgramLaunchError):
                 await pending
             raise
         return SupportsReceipt(job.receipt)

@@ -38,7 +38,6 @@ from tests.reef_service.routing.routing_fakes import (
 from yarl import URL
 
 from reef.core import AgentRecord
-from reef.scenario.scenario import Scenario
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
@@ -65,8 +64,7 @@ from reef.service.lifecycle import (
 )
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
-from reef.service.routing import RoutingAdapter, RoutingSnapshot
-from reef.service.wire import RequestHeaders
+from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingSnapshot
 from reef.storage.records import AppendResult, RecordConflict
 from reef.storage.sqlite import SQLiteRecordStore
 
@@ -548,23 +546,23 @@ def test_cancelled_scenario_initialization_remains_in_finalization(
 ) -> None:
     started = threading.Event()
     finish = threading.Event()
-    original = RequestService.inference_scenario
+    dispatcher = routing_dispatcher(tmp_path)
+    original = dispatcher.get_or_create_scenario
+    snapshot = routing_adapter(tmp_path, "http://127.0.0.1:1").snapshot
+    decision = RoutingDecision(snapshot.targets["student"], snapshot.version, "coding", "student", "explicit_pin")
 
-    def initialize(
-        service: RequestService, parsed: RequestHeaders, *, record: bool, artifact_id: str | None = None
-    ) -> Scenario:
+    def initialize(scenario: str):
         started.set()
         if not finish.wait(5):
             raise TimeoutError("test initialization was not released")
-        return original(service, parsed, record=record, artifact_id=artifact_id)
+        return original(scenario)
 
-    monkeypatch.setattr(RequestService, "inference_scenario", initialize)
-    dispatcher = routing_dispatcher(tmp_path)
+    monkeypatch.setattr(dispatcher, "get_or_create_scenario", initialize)
 
     async def run() -> None:
         writes = PendingWrites()
         service = RequestService(dispatcher, writes=writes)
-        task = asyncio.create_task(service.inference_operations({"x-reef-scenario": "coding"}))
+        task = asyncio.create_task(service.routed.scenario({"x-reef-scenario": "coding"}, decision))
         await asyncio.to_thread(started.wait, 5)
         try:
             task.cancel()
@@ -575,7 +573,7 @@ def test_cancelled_scenario_initialization_remains_in_finalization(
         finally:
             finish.set()
         assert await writes.wait(5)
-        assert dispatcher.loaded_scenario("coding") is not None
+        assert dispatcher.registry.get_loaded("coding") is not None
 
     try:
         asyncio.run(run())
@@ -919,7 +917,7 @@ def test_managed_server_keeps_control_on_its_socket_and_never_dispatches_for_a_g
                 router.hold.set()
                 await asyncio.sleep(0.2)
                 assert provider_calls == []
-                loaded = dispatcher.loaded_scenario("coding")
+                loaded = dispatcher.registry.get_loaded("coding")
                 assert loaded is None or loaded.records.replay("coding") == ()
             finally:
                 if not server.done():

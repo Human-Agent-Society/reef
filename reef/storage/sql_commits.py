@@ -17,7 +17,7 @@ from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String
 from sqlalchemy.engine import Connection
 
 from reef.storage.commit_history import CommitHistory, same_commit
-from reef.storage.commits import CommitHistoryError, CommitRecord
+from reef.storage.commits import CommitHistoryError, CommitRecord, encode_commit
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 
@@ -52,8 +52,7 @@ class SQLCommitHistory(CommitHistory):
     Values: ``record_store`` is the open record store whose transactions the
     history uses. ``table`` is the commit table and the namespace of this
     generation. ``train_counts`` is the train count table
-    (``sample_train_count_table``) and ``buffer`` the manual buffer table
-    (``manual_buffer_table``) in the same namespace. ``label`` names the table for error messages, and ``durable``
+    (``sample_train_count_table``) in the same namespace. ``label`` names the table for error messages, and ``durable``
     is true when the database outlives the process. ``records()`` is the rows
     of the namespace in step order, decoded. The cached records are always a
     prefix of those rows, so a read fetches only the steps after them; a
@@ -62,9 +61,8 @@ class SQLCommitHistory(CommitHistory):
 
     ``append`` stores a new commit and adds one to the train count of the
     commit's trainer (``record.component``, or ``""`` when it names none) for
-    each sample whose ``consumed_sample_id`` the commit lists, and removes
-    those samples from that trainer's manual buffer (``manual_buffer_table``),
-    in one transaction. An
+    each sample whose ``consumed_sample_id`` the commit lists, in one
+    transaction. An
     append of a commit that is already stored changes nothing, so a retry
     counts no sample twice.
 
@@ -86,7 +84,6 @@ class SQLCommitHistory(CommitHistory):
         record_store: SQLRecordStore,
         table: ScopedTable,
         train_counts: ScopedTable,
-        buffer: ScopedTable,
         *,
         label: str,
         durable: bool,
@@ -94,7 +91,6 @@ class SQLCommitHistory(CommitHistory):
         self.record_store = record_store
         self.table = table
         self.train_counts = train_counts
-        self.buffer = buffer
         self._label = label
         self._durable = durable
         self._lock = RLock()
@@ -129,7 +125,7 @@ class SQLCommitHistory(CommitHistory):
             return self._read(connection)
 
     def append(self, record: CommitRecord) -> None:
-        encoded = json.dumps(record.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        encoded = encode_commit(record)
         with self._lock, self._transaction(write=True) as connection:
             records = self._read(connection)
             existing = next((item for item in records if item.step == record.step), None)
@@ -166,12 +162,6 @@ class SQLCommitHistory(CommitHistory):
                         counts.c.sample_id.in_(sample_ids),
                     )
                     .values(train_count=counts.c.train_count + 1)
-                )
-                buffer = self.buffer.table
-                connection.execute(
-                    buffer.delete().where(
-                        self.buffer.condition(), buffer.c.trainer == component, buffer.c.sample_id.in_(sample_ids)
-                    )
                 )
 
     @contextmanager

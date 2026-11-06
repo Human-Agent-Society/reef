@@ -1,7 +1,7 @@
-"""Smoke of the real hermes binary: render, rollout, and trajectory against the
+"""Smoke of the real hermes binary: render, run, and trajectory against the
 real thing. The hermetic suites drive scripted fakes, so every format and
 environment assumption about the real Hermes Agent lives here: a pinned
-hermes runs one rollout against a stdlib OpenAI-compatible stub and must read
+hermes runs one run against a stdlib OpenAI-compatible stub and must read
 our rendered config.yaml, reach the stub with the SOUL.md text and the bound
 key, write a session snapshot our reader parses, make no extra model call,
 and leave no unexplained residue. Skipped unless REEF_REAL_HERMES_BINARY
@@ -10,10 +10,8 @@ one)."""
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import shutil
 import subprocess
 import threading
 from collections.abc import Sequence
@@ -22,12 +20,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.harness_render import write_rendered
 
 from reef.harness.adapters import get_adapter
-from reef.harness.client.wrapper import _create_temp_composition, run_agent
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import run_rollout
-from reef.harness.tree.render import render_composition
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import run_task
+from reef.harness.tree import HarnessTree, render_tree
 
 REAL_HERMES = os.environ.get("REEF_REAL_HERMES_BINARY", "")
 
@@ -102,7 +100,7 @@ class StubHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
 
 
-def test_real_hermes_rollout_renders_runs_and_cleans_up() -> None:
+def test_real_hermes_run_renders_runs_and_cleans_up() -> None:
     server = StubOpenAI()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
@@ -110,12 +108,9 @@ def test_real_hermes_rollout_renders_runs_and_cleans_up() -> None:
         binding = ModelBinding(
             base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
         )
-        nodes = [("rules", {"text": RULES_SENTENCE}), *binding.compose_nodes(descriptor)]
-        files = render_composition(nodes, descriptor)
+        files = render_tree(HarnessTree({"rules.md": RULES_SENTENCE}), descriptor, binding.config_overlays(descriptor))
         # The task starts with a dash on purpose: it must pass through -q as the query.
-        result = run_rollout(
-            descriptor, files, "- Reply with exactly the word READY", binary=REAL_HERMES, timeout=300.0
-        )
+        result = run_task(descriptor, files, "- Reply with exactly the word READY", binary=REAL_HERMES, timeout=300.0)
     finally:
         server.shutdown()
         server.server_close()
@@ -135,55 +130,42 @@ def test_real_hermes_rollout_renders_runs_and_cleans_up() -> None:
     assert result.residue == ()
 
 
-def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_in_a_rollout_and_a_session(tmp_path) -> None:
+def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_beside_a_run_home(tmp_path) -> None:
     """hermes's own config readers, run in its venv on the rendered home: the tirith scanner is off (it would download
-    at boot and block "$REEF_HARNESS_WRAPPER" commands), and the commands root is found beside a rollout home and,
-    through REEF_HARNESS_DEST, beside the temp copy a reef-hermes session runs in. It is still found when the tree
-    sets skills.external_dirs itself, empty or to a directory of its own."""
+    at boot), and the commands root is found beside the run home. It is still found when the tree sets
+    skills.external_dirs itself, empty or to a directory of its own."""
     descriptor = get_adapter("hermes")
     binding = ModelBinding(base_url="http://127.0.0.1:9", model=MODEL, api_key="smoke-key-1234")
-    command = ("agent_command", {"name": "probe", "text": "Reply with PROBE."})
+    command = {"commands/probe.md": "Reply with PROBE."}
     probe = (
         "import json\n"
         "from agent.skill_utils import get_external_skills_dirs\n"
         "from tools.tirith_security import _load_security_config\n"
         "print(json.dumps([_load_security_config()['tirith_enabled'], [str(p) for p in get_external_skills_dirs()]]))\n"
     )
-    env = {name: value for name, value in os.environ.items() if name not in ("REEF_HARNESS_DEST", "TIRITH_ENABLED")}
+    env = {name: value for name, value in os.environ.items() if name != "TIRITH_ENABLED"}
     extra = tmp_path / "extra-skills"
     extra.mkdir()
     for tree, listed in (("default", None), ("empty", []), ("own", [str(extra.resolve())])):
-        config = [] if listed is None else [("config", {"data": {"skills": {"external_dirs": listed}}})]
+        config = {} if listed is None else {"config/primary.json": json.dumps({"skills": {"external_dirs": listed}})}
         root = tmp_path / tree / "reef-harness"
-        nodes = [*config, command, *binding.compose_nodes(descriptor)]
-        for relative, text in render_composition(nodes, descriptor).items():
-            (root / relative).parent.mkdir(parents=True, exist_ok=True)
-            (root / relative).write_text(text, encoding="utf-8")
+        write_rendered(root, HarnessTree({**config, **command}), descriptor, binding)
         found = [*(listed or []), str((root / "hermes-commands").resolve())]
-        session_home = _create_temp_composition("hermes", str(root / "hermes"), 9)
-        try:
-            layouts = {
-                "rollout": {**env, "HERMES_HOME": str(root / "hermes")},
-                "session": {**env, "HERMES_HOME": session_home, "REEF_HARNESS_DEST": str(root)},
-            }
-            for layout, layout_env in layouts.items():
-                result = subprocess.run(
-                    [str(Path(REAL_HERMES).parent / "python"), "-c", probe],
-                    env=layout_env,
-                    cwd=tmp_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                assert result.returncode == 0, (tree, layout, result.stderr)
-                assert json.loads(result.stdout.splitlines()[-1]) == [False, found], (tree, layout)
-        finally:
-            shutil.rmtree(session_home)
+        result = subprocess.run(
+            [str(Path(REAL_HERMES).parent / "python"), "-c", probe],
+            env={**env, "HERMES_HOME": str(root / "hermes")},
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, (tree, result.stderr)
+        assert json.loads(result.stdout.splitlines()[-1]) == [False, found], tree
 
 
-def test_real_hermes_rollout_makes_no_background_review_call_after_ten_tool_calls() -> None:
+def test_real_hermes_run_makes_no_background_review_call_after_ten_tool_calls() -> None:
     """hermes reviews the skill library in a background agent after ten tool calls in a turn; the defaults turn that
-    off, so a rollout makes only its own model calls and writes no skill into the tree. The tree has no rules, like
+    off, so a run makes only its own model calls and writes no skill into the tree. The tree has no rules, like
     a scenario's seed tree, so hermes writes its default SOUL.md, which is not residue."""
     server = StubOpenAI(tool_calls=[("terminal", {"command": f"echo step-{step}"}) for step in range(10)])
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -192,8 +174,8 @@ def test_real_hermes_rollout_makes_no_background_review_call_after_ten_tool_call
         binding = ModelBinding(
             base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
         )
-        files = render_composition(binding.compose_nodes(descriptor), descriptor)
-        result = run_rollout(
+        files = render_tree(HarnessTree({}), descriptor, binding.config_overlays(descriptor))
+        result = run_task(
             descriptor, files, "Run ten echo commands, then reply READY", binary=REAL_HERMES, timeout=300.0
         )
     finally:
@@ -207,9 +189,9 @@ def test_real_hermes_rollout_makes_no_background_review_call_after_ten_tool_call
     assert result.residue == ()
 
 
-def test_real_hermes_rollout_that_loads_a_skill_leaves_no_residue() -> None:
+def test_real_hermes_run_that_loads_a_skill_leaves_no_residue() -> None:
     """A skill_view of a tree skill makes hermes count the load in skills/.usage.json under a lock file, with no
-    config key to turn that off. Both are hermes's own state, so the rollout reports no residue."""
+    config key to turn that off. Both are hermes's own state, so the run reports no residue."""
     server = StubOpenAI(tool_calls=[("skill_view", {"name": "notes"})])
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
@@ -217,9 +199,9 @@ def test_real_hermes_rollout_that_loads_a_skill_leaves_no_residue() -> None:
         binding = ModelBinding(
             base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
         )
-        skill = ("skill", {"name": "notes", "text": "# Notes\n\nKeep notes short: NOTES-MARKER-7."})
-        files = render_composition([skill, *binding.compose_nodes(descriptor)], descriptor)
-        result = run_rollout(
+        skill = {"skills/notes/SKILL.md": "# Notes\n\nKeep notes short: NOTES-MARKER-7."}
+        files = render_tree(HarnessTree(skill), descriptor, binding.config_overlays(descriptor))
+        result = run_task(
             descriptor, files, "Load the notes skill, then reply READY", binary=REAL_HERMES, timeout=300.0
         )
     finally:
@@ -234,47 +216,12 @@ def test_real_hermes_rollout_that_loads_a_skill_leaves_no_residue() -> None:
     assert result.residue == ()
 
 
-def test_real_hermes_session_keeps_its_snapshot_and_log_in_the_installed_tree(tmp_path, monkeypatch) -> None:
-    """A reef-hermes session runs on a temp copy of the home that the wrapper removes; the session snapshot and the
-    log hermes writes stay in the installed tree, so a second session keeps the first one's files."""
-    server = StubOpenAI()
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    descriptor = get_adapter("hermes")
-    root = tmp_path / "reef-harness"
-    binding = ModelBinding(
-        base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
-    )
-    for relative, text in render_composition(binding.compose_nodes(descriptor), descriptor).items():
-        (root / relative).parent.mkdir(parents=True, exist_ok=True)
-        (root / relative).write_text(text, encoding="utf-8")
-    monkeypatch.setenv("REEF_HARNESS_CAPTURES_DIR", str(tmp_path / "captures"))
-    home = root / "hermes"
-    sessions: list[list[str]] = []
-    try:
-        for prompt in ("Reply with exactly the word READY", "Reply READY again"):
-            with contextlib.suppress(SystemExit):
-                run_agent(
-                    REAL_HERMES, str(home), "smoke", "hermes", "HERMES_HOME", ["chat", "-Q", "--oneshot", "-q", prompt]
-                )
-            sessions.append(sorted(path.name for path in (home / "sessions").glob("session_*.json")))
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert len(sessions[0]) == 1 and len(sessions[1]) == 2 and sessions[0][0] in sessions[1], sessions
-    for name in sessions[1]:
-        assert json.loads((home / "sessions" / name).read_text())["messages"][-1]["content"] == "READY"
-    assert (home / "logs" / "agent.log").is_file()
-
-
 def test_real_hermes_reads_the_curator_off(tmp_path) -> None:
     """hermes's own curator check, run in its venv on the rendered home: the curator is off, so a session start seeds
-    no curator state in the skills directory, which in a reef-hermes session is the installed release's."""
+    no curator state in the skills directory, which belongs to the rendered tree."""
     descriptor = get_adapter("hermes")
     home = tmp_path / "hermes"
-    for relative, text in render_composition([], descriptor).items():
-        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / relative).write_text(text, encoding="utf-8")
+    write_rendered(tmp_path, HarnessTree({}), descriptor)
     probe = (
         "import json\nfrom agent import curator\nprint(json.dumps([curator.is_enabled(), curator.should_run_now()]))\n"
     )
@@ -292,9 +239,9 @@ def test_real_hermes_reads_the_curator_off(tmp_path) -> None:
 
 
 def test_the_identity_the_rules_follow_is_the_one_the_real_hermes_seeds() -> None:
-    """The hermes quirks put hermes's own first run identity ahead of the rules; it must stay the text the pinned
+    """The hermes render steps put hermes's own first run identity ahead of the rules; it must stay the text the pinned
     hermes writes, read here with the interpreter the real binary runs on."""
-    from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
+    from reef.harness.adapters.hermes.render import DEFAULT_IDENTITY
 
     interpreter = Path(REAL_HERMES).read_text(encoding="utf-8").splitlines()[0].removeprefix("#!").strip()
     seeded = subprocess.run(

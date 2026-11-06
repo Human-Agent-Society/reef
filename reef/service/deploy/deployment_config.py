@@ -15,10 +15,10 @@ from typing import Any
 
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, parse_config_values
 from reef.core.errors import DeployConfigError
+from reef.execution.executor.config import ExecutorSettings, WorkerResources, executor_settings
+from reef.inference.registry import runtime_factory_for
 from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.deployment import runtime_factory_for
-from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
 from reef.service.deploy.service_config import service_config_arguments, service_owned_keys
 
@@ -98,6 +98,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "recipe",
         "training",
         "storage",
+        "evaluation",
         "execution",
         "executors",
         "activation",
@@ -105,6 +106,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "generator",
         "task_import",
         "observability",
+        "harness",
     }
     # A section name, like a field name, can use a hyphen for an underscore.
     extra = {section.replace("-", "_") for section in pending} - known_sections

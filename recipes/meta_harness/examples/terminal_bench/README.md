@@ -1,13 +1,15 @@
 # Meta-Harness on Terminal-Bench
 
-Run the [Meta-Harness recipe](../../README.md) on the full pinned
+Run the [Meta-Harness method](../../README.md) on the full pinned
 Terminal-Bench 2 suite. See [Results](#results) for the comparison and
 [RESULTS.md](../../RESULTS.md) for the evaluation configuration and scope.
 The seed is vanilla Terminus 2, represented by a no-op `Agent(Terminus2)`
-module. The proposer rewrites that module, retains every valid candidate, and
-selects only strict improvements over the best recorded mean score.
+module at `seed/extensions/agent.py`. The proposer rewrites that module,
+the search retains every valid candidate, and Reef selects only strict
+improvements over the best recorded mean score.
 
-The example uses Reef's shared Meta-Harness recipe and Terminus adapter.
+The example uses the Meta-Harness method, Reef's harness evolution recipe, and
+the campaign's own [terminus adapter](#the-terminus-adapter).
 [Deviations](#deviations) documents the differences between the runnable setup
 and the comparison.
 
@@ -90,70 +92,186 @@ export REEF_PROPOSER_API_KEY=...
 export REEF_PROPOSER_MODEL=gpt-5.6-sol
 export E2B_API_KEY=...
 
-# Small live wiring check: one task, one repeat, one candidate.
+# Small live wiring check: one task, one repeat, one step.
 ./run.sh --task extract-elf --iterations 1 --repeats 1
 
-# The full suite, two repeats, up to four new candidates.
+# The full suite, two repeats, four steps.
 ./run.sh
 ```
 
 Repeat `--task NAME` to select tasks from the [manifest](harness/tasks.json);
-omit it for the full suite. Use `--iterations` and `--repeats` for smaller runs.
+omit it for the full suite. `--iterations` sets the steps the search takes in
+all (default 4), and `--repeats` the repeats of each task.
 Replace model names as needed, retaining the target's `openai/` provider prefix.
 The proposer URL and key default to the target's; the target URL defaults to
 `https://api.openai.com`. Unauthenticated endpoints can omit keys.
 
 `REEF_META_HARNESS_WORKERS` defaults to 4; lower it for endpoint or E2B limits.
-Rollouts time out after 9,000 seconds, including setup and verification.
-Model keys stay in temporary rollout configs, not published harnesses.
+Runs time out after 9,000 seconds, including setup and verification.
+Model keys stay in temporary run configs, not published harnesses.
 Sandbox `egress_hosts` enables networking, not hostname filtering; see the
 [sandbox configuration](../../README.md#terminus-2-code-evolution).
 
 ## Implementation
 
-`run.sh` starts `run.py`, which embeds the configured recipe, Reef dispatcher,
+`run.sh` starts `run.py`, which embeds the configured recipe, a Reef dispatcher,
 SQLite storage, and Git LFS artifacts without an HTTP listener. Terminus calls
 the model endpoint directly.
 
-Each round records one served-harness rollout and its verifier report, rotating
-tasks by committed step. The recipe proposes a candidate, evaluates it and the
-incumbent on the selected suite, then commits the population and serving state
-together. Rollouts and gates use Reef's executor, timeout, residue policy, and
-finite-score checks. Failed gate rollouts score zero; rollout launch failures
-stop the run. Infrastructure failures are not automatically replaced.
+`terminal_bench.yaml` trains in `manual` mode, so a training request starts
+each step, as `POST /reef/train` does in a deployment. For each step,
+`run.py` queues one request with the dispatcher's `accept_request`, the
+call behind that route, and commits the step's job. The method proposes a
+candidate from the search history. Reef evaluates it on the selected suite
+against the incumbent's cached scores, adds it to the history, and commits
+the step with the serving state.
 
-Defaults allow four evaluated candidates and eight proposal attempts, including
-invalid or duplicate proposals: at most 1,424 gate rollouts
-(`4 x 2 sides x suite size x 2 repeats`) plus eight feedback rollouts. Smaller
-runs scale the gate budget. Retrying uncommitted work can cost extra; these are
-search limits, not billing caps.
+Runs and evaluations use Reef's executor, timeout, residue policy, and
+finite-score checks. Failed evaluation runs score zero; run launch
+failures stop the run. Infrastructure failures are not automatically replaced.
+
+Each step costs one proposer call and, for a valid new candidate, one
+evaluation: 178 runs on the full suite with 2 repeats (89 tasks). The first
+evaluation also runs the seed. A refused proposal, invalid or a repeat, still takes
+a step, as in upstream, and evaluates nothing. A failed commit keeps its runs
+in the history, and its retry reuses them; a candidate that a retry proposes
+in place of the failed one costs extra.
+
+## The terminus adapter
+
+`reef_terminus/` is this campaign's adapter for Harbor's Terminus 2. Reef does
+not bundle it. `pip install -e .` in this directory registers it as
+`terminus` on the `reef.harness_adapters` entry point group, and installs the
+`reef-terminus` runner that its runs launch. A deployment then names it
+with `evolution.adapter: terminus`, as `terminal_bench.yaml` does. The runner
+writes one trial file per run, and `reef_terminus.trajectory.read_trials`,
+the adapter's `sessions` reader, reads it back.
+
+Terminus 2 is a Harbor agent class, not a CLI. `reef-terminus` reads the
+tree from `REEF_TERMINUS_DIR`, configures Harbor's `terminus-2` agent
+through `reef-eval`, and runs the one Harbor task (a directory or a
+registry id) that `--task` names. It writes the verifier reward and the
+ATIF trajectory under `REEF_TERMINUS_SESSION_DIR`.
+
+- `config` supplies constructor arguments; unknown keys are refused.
+  `rules` supplies an `extra_instruction_paths` entry. `skill` and
+  `command` are two `AgentConfig.skills` roots, and Harbor does not mark
+  commands as commands.
+- One extension file, `extensions/<name>.py`, may define
+  `Agent(Terminus2)`. Rendering checks its syntax without running it.
+- The binding keeps the served name in `model_name` and sets
+  `llm_kwargs.custom_llm_provider` to `litellm_proxy`, so litellm sends
+  the name unchanged, whatever its vendor prefix, and passes
+  `reasoning_effort`, the thinking budget, and `llm_call_kwargs` in the
+  body. Harbor looks up the context limit under `model_name`; a name that
+  litellm does not list gets 1,000,000 tokens.
+- Routes refused: `llm_kwargs` fields that the binding does not write;
+  `llm_call_kwargs` arguments that select an endpoint, provider,
+  credential, model, fallback, or logging callback (such as `base_url`,
+  `model`, and `fallbacks`); and `model` or `models` in
+  `llm_call_kwargs.extra_body`.
+
+To run a published tree yourself, save the `files` of `GET /reef/harness`
+under a tree root. Evaluation runs call the upstream directly, but your
+own run through Reef needs the scenario header, or Reef answers HTTP 400.
+Write `terminus/config.json` with the service's `REEF_TOKEN` (any text
+when the service has no token), then run one task:
+
+``json
+{
+  "model_name": "<served model>",
+  "api_base": "http://127.0.0.1:8901/v1",
+  "llm_kwargs": {
+    "api_key": "<REEF_TOKEN>",
+    "custom_llm_provider": "litellm_proxy",
+    "extra_headers": {"x-reef-scenario": "<scenario>"}
+  }
+}
+``
+
+``bash
+TREE_ROOT="$HOME/reef-harness/terminus"
+REEF_TERMINUS_DIR="$TREE_ROOT" \
+  REEF_TERMINUS_SESSION_DIR="$TREE_ROOT/terminus/sessions" \
+  REEF_TERMINUS_TRIALS_DIR="$HOME/reef-trials" \
+  reef-terminus --task /path/to/harbor/task
+``
+
+The trial record under `$TREE_ROOT/terminus/sessions` holds the rewards
+and the trajectory. Docker must share the trials directory with the host;
+with colima on macOS, use a path under your home directory. A trial with
+neither reward nor verifier output is reported as a possible mount problem.
+
+### Docker or a remote environment
+
+Tasks run the Harbor task in local Docker by default. The run keeps
+the service's `DOCKER_HOST`, `DOCKER_CONTEXT`, and `DOCKER_CONFIG`
+(default `~/.docker`), because `HOME` points into the run. On macOS
+the run root is under `~/.reef/runs`. Elsewhere it is in the temp
+directory; if Docker's VM does not share it, set `TMPDIR` for the service.
+
+To run tasks in a remote Harbor environment, use the sandbox executor and
+pass the switch and the credentials into it. For E2B:
+
+``yaml
+evolution:
+  executor: sandbox
+  sandbox:
+    egress_hosts: [api.e2b.dev]
+    env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
+``
+
+Start the service with `REEF_TERMINUS_ENVIRONMENT=e2b` and
+`E2B_API_KEY`. For Modal, allow `api.modal.com`, pass
+`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, and set
+`REEF_TERMINUS_ENVIRONMENT=modal`. The runtime needs Linux, bubblewrap,
+Python 3.12+, and Harbor with the environment's extra (`harbor[e2b]`, or
+the `modal` package). The interpreter and local task directories must be
+visible inside the sandbox, for example under `/opt`. `egress_hosts`
+does not yet enforce a hostname firewall.
+
+Reef refuses before launch: local Docker under the sandbox executor, a
+remote environment without `egress_hosts` or its credentials in
+`env_from`, and an `extension` file under any executor other than
+`sandbox`. Such a tree still renders; the refusal depends on how the
+run runs, not on what the tree holds.
 
 ## Resume and output
 
 Repeat the same command to resume `work/<campaign-id>/` (or under `REEF_WORK`).
-Tasks, seed, models, and search settings determine the id. Run only one driver
-per directory.
+Tasks, seed, models, and search settings determine the id; the step count
+does not, so a larger `--iterations` continues the same search. Run only one
+driver per directory.
 
-Committed Reef state is authoritative. Restarts reuse recorded rollouts, replay
-pending reports, and rebuild stale JSON mirrors. Failed commits cannot advance
-search or its summary.
+Committed Reef state is authoritative. Each request has the ID of its step,
+so a restart finds the request of an unfinished step instead of queueing a
+second one, and finishes the job that a previous process started. Failed
+commits cannot advance search or its summary.
 
-- `reef-data/`: SQLite records and scenario history.
+- `harness/`: the search history (every candidate tree, its runs and their
+  records, and each step's decision) and one record per step, which holds the
+  proposer's prompt and reply in `calls.json`.
+- `reef-data/`: SQLite records and the scenario's commits. Each commit holds
+  the method state: the replies that proposed no candidate.
 - `artifacts.git`, `artifact-work/`, `artifact-cache/`: published harnesses and
-  their release chain.
-- `population/<scenario-hash>.json`: post-commit mirror of candidates, parents,
-  scores, and attempt audit hashes.
-- `summary.json`: committed scores, served id, proposer calls, and gate count.
+  their snapshot chain.
+- `summary.json`: rebuilt from the latest commit and the history of the steps
+  it covers: each candidate's parent, outcome, and scores, the served id, the
+  candidates generated, and the evaluation runs spent.
 
 ## Deviations
 
 - **Suite:** full pinned dataset by default; reported scores use a fixed subset
   at the same revision.
-- **Schedule:** paired gates remeasure the incumbent but select against its
-  previously admitted score. The first baseline score vector arrives after the
-  first proposal. The comparison measures the baseline and each candidate once.
-- **Proposals:** one feedback rollout and the complete population feed the
-  recipe's prompt, not an upstream tool-using coding agent inspecting trial files.
+- **Schedule:** each evaluation pairs the candidate with the incumbent's
+  cached scores, so the incumbent does not run again, except a run that
+  could not run, which runs again. The baseline's scores
+  arrive with the first candidate's evaluation. As in the comparison, the
+  baseline and each candidate run once.
+- **Proposals:** the complete population and bounded excerpts of its
+  evaluation run records feed the method's prompt, not an upstream tool-using
+  coding agent that reads the trial files. [`agent/`](../../agent/README.md)
+  runs that coding agent as the proposer.
 - **Requests:** Chat Completions/LiteLLM for the target; Responses with default
   reasoning for the proposer. The comparison uses Responses and `xhigh`, plus
   request and verifier adaptations not installed here.
@@ -173,6 +291,6 @@ pytest tests/recipes/meta_harness/test_meta_harness_terminal_bench.py \
 pre-commit run --all-files
 ```
 
-Tests mock model calls and rollout launches, checking the real recipe,
+Tests mock model calls and run launches, checking the real method, recipe,
 scoring, commits, publication, and recovery. They do not measure live benchmark
 performance or replace a Linux/E2B smoke run.

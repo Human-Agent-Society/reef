@@ -2,69 +2,51 @@
 
 ``RequestService`` normalizes typed Reef payloads, resolves the artifact
 version before every provider call so concurrent publication cannot change
-what gets recorded, stores each exchange as a record, and applies the
-scenario surface's request/response checks. No aiohttp types appear here;
+what gets recorded, and stores each exchange as a record. No aiohttp types appear here;
 ``reef.service.routes`` adapts these methods to HTTP.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import math
-import time
-import uuid
+import tempfile
 from collections.abc import Awaitable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any, TypeVar
 
-from aiohttp import ClientError
-
-from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
-from reef.core.errors import ReefError, UnknownScenario
+from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound
+from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.requirements import ancestor_requiring_nothing, required_by
-from reef.core.training_request import normalize_training_request_payload
+from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
-from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
-from reef.harness.tree.mutations import Mutation, MutationError
-from reef.harness.tree.render import RenderError, render_composition
-from reef.observability.operations import OperationMeasurement, OperationMetrics
-from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import (
-    InferenceAdmissionHandle,
-    InferenceHandler,
-    InferenceStream,
-    UpstreamStatusError,
-    inference_aborted,
-)
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
+from reef.harness.tree import HarnessTree, validate_tree
+from reef.harness.tree.checks import clip_record_value
 from reef.scenario.scenario import Scenario
-from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
+from reef.scenario.snapshot_files import component_files
+from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
 from reef.service.lifecycle import PendingWrites
-from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingScenario
+from reef.service.routed_inference import InferenceRetryPolicy, InferenceRetryTimeout, RoutedInference
+from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import RoutingPreviewClient
-from reef.service.streaming import sse_events
-from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
-from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
-from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
-from reef.train.backend import CandidateBackend
-from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
-from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.service.wire import (
+    SCENARIO_HEADER,
+    ReportPayload,
+    RequestHeaders,
+    parse_request_headers,
+    scenario_header,
+    with_request_tags,
+)
+from reef.train.harness_backend.backend import StepProgress
+from reef.train.harness_backend.component import PROGRESS_FILE, STEPS_DIR, read_step_progress
+from reef.train.harness_backend.records import read_step_records
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 WriteResult = TypeVar("WriteResult")
-
-
-def request_family(record: bool, *, rollout: bool = False) -> str:
-    """The operation metrics family of a call: served traffic keeps a record; an evaluation or rollout call does not."""
-    if rollout:
-        return "rollout"
-    return "serve" if record else "evaluate"
 
 
 def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
@@ -81,188 +63,78 @@ def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[s
     return merged
 
 
-def _random_harness_scenario_name() -> str:
-    return f"harness-{uuid.uuid4().hex[:12]}"
-
-
-def install_service_url(headers: Mapping[str, str]) -> str | None:
-    """The address an install request reached Reef at, from its Host; None without one.
-
-    A gateway in front of Reef names the address the client reached in the
-    forwarded headers; the binding goes there, so the installed harness
-    calls back through it."""
-    normalized = {key.lower(): value.strip() for key, value in headers.items()}
-    host = normalized.get("x-forwarded-host") or normalized.get("host")
-    if not host:
-        return None
-    return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
-
-
-def recorded_stream_aborted(response: Mapping[str, Any]) -> bool:
-    """Whether a recorded stream reports the ``abort`` finish reason that marks an unusable inference.
-
-    A relayed provider stream keeps its raw SSE ``body``, read event by event; a handler's own captured
-    response is one object.
-    """
-    body = response.get("body")
-    if not isinstance(body, str):
-        return inference_aborted(response)
-    for data in sse_events(body):
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, Mapping) and inference_aborted(event):
-            return True
-    return False
-
-
 def normalize_request_payload(
     request_type: RequestType,
     payload: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], tuple[str, ...]]:
     """Normalize a typed Reef payload; a native provider body passes through."""
-    if request_type is RequestType.TRAIN:
-        return normalize_training_request_payload(payload), ()
     if request_type is not RequestType.REPORT:
         return dict(payload), ()
     report = ReportPayload.from_dict(payload)
     return report.to_dict(), report.references
 
 
-@dataclass(frozen=True)
-class PendingInference:
-    """State retained to finalize one provider stream, including after its connection has closed.
+def request_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The training request ``request_id`` of ``scenario`` as the request page reads it: ``agent_record_id``,
+    ``payload`` and ``created_at``.
 
-    ``item`` is the record to finalize. ``record_stream`` releases the optional ``admission`` and ``lease``
-    handles in its finalization path, whether storage succeeds or fails. ``deferred_prepared`` is None if and
-    only if ``path`` is None; both are set when the handler validates its response only at the end.
-    ``routing_decision`` is None or a ``RoutingDecision`` and ``routing_request_id`` a string. For a routed
-    stream, ``routing_decision`` is its decision, ``record`` is true, ``routing_request_id`` is non-empty and
-    ``routing_decision.scenario == item.scenario``; otherwise ``routing_decision`` is None and
-    ``routing_request_id`` is empty. ``routing_started`` is a finite int or float, normally the
-    ``time.monotonic`` reading taken at the provider call, or zero by default. A routed record's elapsed
-    time is measured from it. The other fields retain their existing contracts.
+    A queued or recent request comes from its queue item. One whose item control deleted after the work retention
+    comes from the catalog row that settled it, which records the request (``metrics["training_request"]``), without
+    ``created_at``. Raise ``ArtifactNotFound`` when neither holds it.
     """
-
-    item: AgentRecord
-    release_id: str | None
-    admission: InferenceAdmissionHandle | None = None
-    lease: InferenceLease | None = None
-    deferred_prepared: PreparedInference | None = None
-    path: str | None = None
-    measurement: OperationMeasurement | None = None
-    #: False for an evaluation call: served like any other, kept by nobody.
-    record: bool = True
-    routing_decision: RoutingDecision | None = None
-    routing_request_id: str = ""
-    routing_started: float = 0.0
-
-    def __post_init__(self) -> None:
-        if (self.deferred_prepared is None) != (self.path is None):
-            raise ValueError("a stream's deferred response check needs both its prepared inference and its path")
-        if self.routing_decision is not None and not isinstance(self.routing_decision, RoutingDecision):
-            raise ValueError("a stream's routing decision must be None or a routing decision")
-        if not isinstance(self.routing_request_id, str):
-            raise ValueError("a stream's routing request ID must be a string")
-        if type(self.routing_started) not in (float, int) or not math.isfinite(self.routing_started):
-            raise ValueError("a stream's routing start must be a finite monotonic reading")
-        if self.routing_decision is None:
-            if self.routing_request_id:
-                raise ValueError("an unrouted stream has no routing request ID")
-        elif not self.record or not self.routing_request_id or self.routing_decision.scenario != self.item.scenario:
-            raise ValueError("a routed stream keeps a record of its own Scenario under a routing request ID")
-
-
-@dataclass(frozen=True)
-class PreparedInference:
-    """Everything one inference attempt froze before calling the provider."""
-
-    parsed: RequestHeaders
-    artifact: Artifact
-    #: What the handler serves: the runtime-loaded component's view of the
-    #: release, or the release itself when nothing is loaded or it is flat.
-    served: Artifact
-    #: The release the attempt's record names: the served one, or the one the client runs (see recorded_ref).
-    record_ref: ArtifactRef
-    handler: InferenceHandler
-    surface: Surface
-    #: True when the scenario trains weights on a training component: the
-    #: recorded payload must then carry the engine-confirmed runtime load ID.
-    durable: bool
-    admission: InferenceAdmissionHandle | None = None
-    #: Releases serving state the surface held for this attempt (an adapter
-    #: lease); called exactly once when the attempt ends.
-    lease: InferenceLease | None = None
-    #: The request hooks this attempt runs: the surface's, or on an evaluation
-    #: call every component's but the one the rollout evaluates.
-    hooks: InferenceHooks | None = None
-
-    def release(self) -> None:
-        try:
-            if self.lease is not None:
-                self.lease.release()
-        finally:
-            if self.admission is not None:
-                self.admission.release()
-
-
-@dataclass(frozen=True)
-class InferenceRetryPolicy:
-    initial_s: float = 0.05
-    max_s: float = 1.0
-    timeout_s: float = 300.0
-
-    def __post_init__(self) -> None:
-        if not 0 < self.initial_s <= self.max_s or self.timeout_s <= 0:
-            raise ValueError("inference retry policy requires 0 < initial_s <= max_s and timeout_s > 0")
-
-
-class InferenceRetryTimeout(ReefError):
-    """Inference attempts ending with a handler ``abort`` exhausted their retry deadline."""
+    item = None if scenario.training_requests is None else scenario.training_requests.get(request_id)
+    if item is not None:
+        return {"agent_record_id": item.id, "payload": dict(item.payload), "created_at": item.created_at}
+    step = settled_step(rows, request_id)
+    metrics = rows[step].get("metrics") if step is not None else None
+    request = metrics.get("training_request") if isinstance(metrics, Mapping) else None
+    if not isinstance(request, Mapping):
+        raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {request_id!r}")
+    return {
+        "agent_record_id": request_id,
+        "payload": {key: value for key, value in request.items() if key != "id"},
+        "created_at": None,
+    }
 
 
 class RequestService:
-    """The HTTP routes' inference, record and report operations over one dispatcher.
+    """The request handling of one service app over ``dispatcher``.
 
-    Routing state: ``routing`` is the routing adapter requests are admitted with, or None without routing; a
-    managed child's publication replaces it. ``preview`` is the router's preview client, needed only for
-    automatic selection: without it ``select_route`` raises for the automatic model, while explicit pins
-    still resolve. ``writes`` is the managed child's ``PendingWrites``, or None, which makes ``persist`` a
-    plain await.
-    Routed operations: ``select_route`` decides once per request; ``infer_routed`` and the routed branch of
-    ``start_stream`` use that decision and its handler for the provider call and every retry; each provider
-    attempt keeps one record, and a success's receipt names a record that is already stored.
+    Values: ``inference_url`` is the address at which clients reach the inference service
+    (``harness.inference_url``), or ``None``; a client's harness layer sends its model calls there, else to the
+    address that the client gave.
     """
 
     def __init__(
         self,
         dispatcher: Dispatcher,
         *,
-        retry_policy: InferenceRetryPolicy | None = None,
+        inference_url: str | None = None,
         routing: RoutingAdapter | None = None,
         writes: PendingWrites | None = None,
         preview: RoutingPreviewClient | None = None,
+        retry_policy: InferenceRetryPolicy | None = None,
     ) -> None:
         self._dispatcher = dispatcher
-        self._retry_policy = retry_policy or InferenceRetryPolicy()
-        #: The published routing policy; a request reads it once, when it is admitted.
         self.routing = routing
-        self.writes = writes
         self.preview = preview
-        # The harness head of a scenario with several components, by scenario step and active release: it is
-        # read on every inference answer and changes only when a commit lands.
-        self.harness_heads: dict[str, tuple[int, str, str]] = {}
+        self.routed = RoutedInference(dispatcher, preview, retry_policy or InferenceRetryPolicy(), writes)
+        self.inference_url = None if inference_url is None else inference_url.rstrip("/")
 
     @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
 
     async def persist(self, write: Awaitable[WriteResult]) -> WriteResult:
-        """Await one write, retaining it after cancellation in managed deployments."""
-        if self.writes is None:
-            return await write
-        return await self.writes.run(write)
+        """Retain a managed child's submitted writes through request cancellation and drain."""
+        return await self.routed.persist(write)
+
+    def accept_request(
+        self, headers: Mapping[str, str], payload: Mapping[str, Any], *, request_id: str | None = None
+    ) -> tuple[str, str]:
+        """Queue a training request (``Dispatcher.accept_request``); return its scenario and ID."""
+        item = self._dispatcher.accept_request(scenario_header(headers), payload, request_id=request_id)
+        return item.scenario, item.id
 
     def accept(
         self,
@@ -283,8 +155,7 @@ class RequestService:
         A stable client ID makes uploads retryable. The scenario comes from
         the headers, and importing never invokes an inference handler.
         """
-        parsed, item = self.prepare_import_record(headers, body)
-        return self._dispatcher.accept_record(item, release_id=parsed.release_id)
+        return self._dispatcher.accept_record(self.prepare_import_record(headers, body))
 
     def import_records(self, headers: Mapping[str, str], body: Mapping[str, object]) -> tuple[AgentRecord, ...]:
         """Import a bounded, atomic batch using the existing record contract."""
@@ -295,13 +166,10 @@ class RequestService:
         for record in records:
             if not isinstance(record, Mapping):
                 raise ValueError("each record must be an object")
-            parsed, item = self.prepare_import_record(headers, record)
-            items.append(item)
-        return self._dispatcher.accept_records(items, release_id=parsed.release_id)
+            items.append(self.prepare_import_record(headers, record))
+        return self._dispatcher.accept_records(items)
 
-    def prepare_import_record(
-        self, headers: Mapping[str, str], body: Mapping[str, object]
-    ) -> tuple[RequestHeaders, AgentRecord]:
+    def prepare_import_record(self, headers: Mapping[str, str], body: Mapping[str, object]) -> AgentRecord:
         if body.keys() - {"agent_record_id", "request_type", "payload"}:
             raise ValueError("record fields must be agent_record_id, request_type and payload")
         record_id = body.get("agent_record_id")
@@ -309,914 +177,307 @@ class RequestService:
             raise ValueError("agent_record_id must be a non-empty string")
         request_type = body.get("request_type")
         if not isinstance(request_type, str) or request_type not in ("inference", "report"):
-            raise ValueError("import request_type must be 'inference' or 'report'; use /reef/train for instructions")
+            raise ValueError("import request_type must be 'inference' or 'report'")
         payload = body.get("payload")
         if not isinstance(payload, Mapping):
             raise ValueError("record payload must be an object")
         parsed = parse_request_headers(headers, RequestType(request_type))
         normalized, references = normalize_request_payload(parsed.request_type, payload)
-        item = AgentRecord.create(
+        return AgentRecord.create(
             scenario=parsed.scenario,
             request_type=parsed.request_type,
-            payload=_with_tags(normalized, parsed),
+            payload=with_request_tags(normalized, parsed),
             agent_record_id=record_id,
             references=references,
+            artifact_id=normalized.get("artifact_id"),
         )
-        return parsed, item
 
-    async def infer_with_data(
+    def harness_manifest(
         self,
         headers: Mapping[str, str],
-        payload: dict[str, Any],
-        path: str,
-        handler: InferenceHandler | None = None,
+        form: str = "rendered",
+        service_url: str | None = None,
+        root: str | None = None,
         *,
-        record: bool = True,
-        evaluated: str | None = None,
-        rollout: bool = False,
         artifact_id: str | None = None,
-    ) -> tuple[dict[str, Any], AgentRecord | None]:
-        """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
-        ``evaluated`` component (see ``Surface.inference_for_evaluation``). Routed requests use ``infer_routed``.
+    ) -> dict[str, Any]:
+        """The served tree plus its parent snapshot and evaluation metrics.
 
-        ``artifact_id`` names the served artifact that answers, at its own URL (``Scenario.served_release``);
-        ``None`` is the active release.
-
-        ``rollout`` True serves a call of a rollout that Reef runs itself: the served release with its
-        hooks, as for a recorded call, but no record is kept, and the response keeps its ``training`` block
-        with the runtime load ID that answered, so the caller assembles the rollout's samples.
+        ``artifact_id`` addresses one harness artifact instead of the
+        active selection, so a consumer can pin or go back by pulling an older
+        tree; an unknown or unrestorable artifact raises ArtifactNotFound
+        naming it. ``form`` chooses the ``files``: ``rendered`` (the default)
+        is the snapshot rendered for the scenario's adapter, ``source`` is
+        its source tree, the paths a patch names, and ``client`` is the
+        snapshot as a layer for a client that installs it at ``root``, bound
+        to the scenario's route at ``inference_url``, else at ``service_url``
+        (``reef.harness.sync.layer_install``). The client form adds ``run``,
+        the command that runs the agent on the files (``binary``, ``args``,
+        ``env``), the agent's commands that record and remove the install
+        (``register``, ``unregister``) and the agent's pinned ``install``, and ``synced``, the render templates of the files a client
+        sends back. The ``evaluation`` field carries the metrics of the
+        training step that published the snapshot, so a consumer can audit
+        what a pulled tree changed and why it was admitted before running
+        it. Read-only: never creates a scenario.
         """
-        if rollout and record:
-            raise ValueError("a rollout call keeps no record")
-        family = request_family(record, rollout=rollout)
-        operations = await self.inference_operations(headers, record=record, artifact_id=artifact_id)
-        # Evaluation and rollout traffic is measured apart, so Reef's own rollouts do not read as served requests.
-        measurement = operations.start(f"{family}/request")
-        succeeded = False
-        try:
-            original_payload = dict(payload)
-            retry_delay = self._retry_policy.initial_s
-            loop = asyncio.get_running_loop()
-            remaining_budget = self._retry_policy.timeout_s
-            timeout_error = f"inference retry deadline exceeded ({self._retry_policy.timeout_s:g}s)"
-            attempt = 0
-            while True:
-                attempt += 1
-                if attempt > 1:
-                    operations.increment(f"{family}/retries_total")
-                prepared, payload = await self._prepare_request(
-                    headers,
-                    original_payload,
-                    path,
-                    handler,
-                    record=record,
-                    evaluated=evaluated,
-                    rollout=rollout,
-                    artifact_id=artifact_id,
-                )
-                try:
-                    if prepared.durable:
-                        payload = {**payload, "return_meta_info": True}
-                    if remaining_budget <= 0:
-                        raise InferenceRetryTimeout(timeout_error)
-                    started = loop.time()
-                    try:
-                        response = await asyncio.wait_for(
-                            prepared.handler.inference(prepared.served, path, payload),
-                            timeout=remaining_budget,
-                        )
-                    except TimeoutError as exc:
-                        logger.warning(
-                            "inference for scenario %r timed out after %d attempt(s) at artifact %r",
-                            prepared.parsed.scenario,
-                            attempt,
-                            prepared.artifact.ref.release_id,
-                        )
-                        raise InferenceRetryTimeout(timeout_error) from exc
-                    finally:
-                        remaining_budget -= loop.time() - started
-                    interrupted = inference_aborted(response)
-                    if not interrupted:
-                        # A completed response with invalid runtime-load-ID information is a
-                        # handler contract error, not a retryable inference abort.
-                        if prepared.hooks is not None:
-                            prepared.hooks.verify_response(prepared.artifact, path, response)
-                        self._stamp_durable_runtime_load_id(prepared, payload, response)
-                        item = None
-                        if record:
-                            item = await asyncio.to_thread(
-                                self._accept,
-                                prepared.parsed,
-                                {**payload, "response": response},
-                                artifact_ref=prepared.record_ref,
-                            )
-                        succeeded = True
-                        if rollout:
-                            return rollout_inference_response(response, payload), None
-                        return client_inference_response(response), item
-                    # A handler ``abort`` finish reason makes the attempt unusable.
-                    # Restart the request against the latest artifact and never record it.
-                    logger.info(
-                        "retrying handler-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
-                        "engine reported runtime load ID %r",
-                        prepared.parsed.scenario,
-                        attempt,
-                        prepared.artifact.ref.release_id,
-                        reported_runtime_load_id(response),
-                    )
-                finally:
-                    prepared.release()
-                if remaining_budget <= 0:
-                    raise InferenceRetryTimeout(timeout_error)
-                sleep_for = min(retry_delay, remaining_budget)
-                await asyncio.sleep(sleep_for)
-                remaining_budget -= sleep_for
-                retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
-        except RuntimeLoadMismatch:
-            operations.increment(f"{family}/version_mismatch_total")
-            raise
-        except InferenceRetryTimeout:
-            operations.increment(f"{family}/timeouts_total")
-            raise
-        finally:
-            measurement.finish(succeeded=succeeded)
-
-    async def select_route(
-        self, routing: RoutingAdapter, scenario: RoutingScenario, payload: Mapping[str, object]
-    ) -> RoutingDecision:
-        """The target of one routed request under the policy it captured; JSON and SSE requests share it.
-
-        An explicit target is checked locally and never reaches the router. An automatic request makes exactly
-        one routing preview against ``routing``'s router runtime. A failed selection raises before any provider
-        call or record.
-        """
-        decision = routing.explicit_decision(scenario, payload)
-        if decision is not None:
-            return decision
-        if self.preview is None:
-            raise RuntimeError("routing has no Semantic Router preview client")
-        return await self.preview.select(routing, scenario, payload)
-
-    @staticmethod
-    def routed_payload(
-        payload: Mapping[str, object],
-        decision: RoutingDecision,
-        *,
-        request_id: str,
-        attempt_index: int,
-        prior_attempt_ids: Sequence[str],
-        execution_outcome: str,
-        delivery_outcome: str,
-        started: float,
-        client_visible: bool,
-    ) -> dict[str, object]:
-        """Add authoritative routing fields to a stored copy, never the provider body."""
-        raw_metadata = payload.get("metadata")
-        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-        metadata["routing"] = {
-            **decision.metadata(),
-            "request_id": request_id,
-            "attempt_index": attempt_index,
-            "prior_attempt_ids": list(prior_attempt_ids),
-            "purpose": "serve",
-            "execution_outcome": execution_outcome,
-            "delivery_outcome": delivery_outcome,
-            "elapsed_seconds": max(0.0, time.monotonic() - started),
-            "client_visible": client_visible,
-        }
-        stored = {**payload, "metadata": metadata}
-        if execution_outcome != "completed":
-            stored.pop("training", None)
-        return stored
-
-    async def record_routed_failure(
-        self,
-        error: BaseException,
-        prepared: PreparedInference,
-        provider_payload: Mapping[str, object],
-        decision: RoutingDecision,
-        *,
-        request_id: str,
-        prior_attempt_ids: Sequence[str],
-        started: float,
-    ) -> None:
-        """Keep one routed provider attempt that failed before the client received any of its output.
-
-        JSON and SSE requests share it. The caller awaits it before it releases the attempt's admission and
-        lease, then raises its own error.
-        """
-        if isinstance(error, asyncio.CancelledError):
-            execution_outcome = "cancelled"
-        elif isinstance(error, TimeoutError):
-            execution_outcome = "timeout"
-        else:
-            execution_outcome = "error"
-        failed_payload = self.routed_payload(
-            {**provider_payload, "response": {"error_type": type(error).__name__}},
-            decision,
-            request_id=request_id,
-            attempt_index=len(prior_attempt_ids) + 1,
-            prior_attempt_ids=prior_attempt_ids,
-            execution_outcome=execution_outcome,
-            delivery_outcome="not_started",
-            started=started,
-            client_visible=False,
-        )
-        await self.persist(
-            asyncio.to_thread(self._accept, prepared.parsed, failed_payload, artifact_ref=prepared.record_ref)
-        )
-
-    async def infer_routed(
-        self,
-        headers: Mapping[str, str],
-        payload: dict[str, Any],
-        path: str,
-        decision: RoutingDecision,
-        handler: InferenceHandler,
-    ) -> tuple[dict[str, Any], AgentRecord]:
-        """Serve ``payload``, the provider body, with the target and handler the request selected.
-
-        Every attempt and retry uses the same ``handler``; nothing selects again. Each provider attempt keeps
-        a record, and only a completed one is answered with a receipt.
-        """
-        operations = await self.inference_operations(headers)
-        measurement = operations.start("serve/request")
-        request_id = uuid.uuid4().hex
-        prior_attempt_ids: list[str] = []
-        deadline = time.monotonic() + self._retry_policy.timeout_s
-        retry_delay = self._retry_policy.initial_s
-        succeeded = False
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise InferenceRetryTimeout("routed inference retry deadline exceeded")
-                prepared, provider_payload = await self._prepare_request(headers, payload, path, handler)
-                started = time.monotonic()
-                execution_outcome = "completed"
-                # Persistence precedes the HTTP response; client delivery is not yet confirmed.
-                delivery_outcome = "unconfirmed"
-                response: dict[str, Any] = {}
-                try:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise InferenceRetryTimeout("routed inference retry deadline exceeded before dispatch")
-                    try:
-                        response = await asyncio.wait_for(
-                            handler.inference(prepared.served, path, provider_payload), timeout=remaining
-                        )
-                        if inference_aborted(response):
-                            execution_outcome = "aborted"
-                            delivery_outcome = "not_started"
-                    except BaseException as exc:
-                        # This provider boundary records failures, then preserves the original exception.
-                        await self.record_routed_failure(
-                            exc,
-                            prepared,
-                            provider_payload,
-                            decision,
-                            request_id=request_id,
-                            prior_attempt_ids=prior_attempt_ids,
-                            started=started,
-                        )
-                        # A timeout first: aiohttp's ServerTimeoutError is also a ClientError.
-                        if isinstance(exc, TimeoutError):
-                            raise InferenceRetryTimeout("routed inference timed out") from exc
-                        if isinstance(exc, ClientError):
-                            raise UpstreamStatusError(
-                                "routed inference upstream connection failed", status=502
-                            ) from exc
-                        raise
-                    recorded_response = dict(response)
-                    if execution_outcome != "completed":
-                        recorded_response.pop("training", None)
-                    stored_payload = self.routed_payload(
-                        {**provider_payload, "response": recorded_response},
-                        decision,
-                        request_id=request_id,
-                        attempt_index=len(prior_attempt_ids) + 1,
-                        prior_attempt_ids=prior_attempt_ids,
-                        execution_outcome=execution_outcome,
-                        delivery_outcome=delivery_outcome,
-                        started=started,
-                        client_visible=execution_outcome == "completed",
-                    )
-                    item = await self.persist(
-                        asyncio.to_thread(
-                            self._accept, prepared.parsed, stored_payload, artifact_ref=prepared.record_ref
-                        )
-                    )
-                    if execution_outcome == "completed":
-                        succeeded = True
-                        return client_inference_response(response), item
-                    prior_attempt_ids.append(item.agent_record_id)
-                    operations.increment("serve/retries_total")
-                finally:
-                    prepared.release()
-                await asyncio.sleep(min(retry_delay, max(0.0, deadline - time.monotonic())))
-                retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
-        finally:
-            measurement.finish(succeeded=succeeded)
-
-    async def start_stream(
-        self,
-        headers: Mapping[str, str],
-        payload: dict[str, Any],
-        path: str,
-        handler: InferenceHandler | None = None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        decision: RoutingDecision | None = None,
-        artifact_id: str | None = None,
-    ) -> tuple[InferenceStream, PendingInference]:
-        """Open one provider stream. A routed request passes its ``decision`` and the ``handler`` it selected,
-        its ``headers`` name the decision's Scenario, and ``payload`` is then its provider body."""
-        routing_request_id = ""
-        routing_started = 0.0
-        if decision is not None:
-            if handler is None or not record:
-                raise ValueError("a routed stream needs its selected handler and keeps a record")
-            # Checked before the provider call: PendingInference refuses another Scenario only after the stream opens.
-            if parse_request_headers(headers, RequestType.INFERENCE).scenario != decision.scenario:
-                raise ValueError("a routed stream's headers name another Scenario than its routing decision")
-            routing_request_id = uuid.uuid4().hex
-        operations = await self.inference_operations(headers, record=record, artifact_id=artifact_id)
-        measurement = operations.start(f"{request_family(record)}/request")
-        try:
-            prepared, payload = await self._prepare_request(
-                headers, payload, path, handler, record=record, evaluated=evaluated, artifact_id=artifact_id
+        if form not in ("rendered", "source", "client"):
+            raise ValueError(f"form must be 'rendered', 'source' or 'client', got {form!r}")
+        if form == "client" and not (service_url and root):
+            raise ValueError(
+                "form=client needs service_url, the address the client reaches Reef at, and root, the directory "
+                "the client installs the files in"
             )
-            admission = prepared.admission
-            lease = prepared.lease
-            routing_started = time.monotonic()
-            try:
-                stream = await prepared.handler.inference_stream(prepared.served, path, payload)
-                if decision is not None:
-                    content_type = next(
-                        (value for name, value in stream.headers.items() if name.lower() == "content-type"), ""
-                    )
-                    if "text/event-stream" not in content_type.lower():
-                        raise UpstreamStatusError("routed streaming requires an SSE response", status=502)
-                record_response = stream.record_response
-                record_response_pending = stream.record_response_pending
-                if record_response is not None:
-                    # An engine-aborted generation may carry no runtime-load ID; the route
-                    # records it as incomplete, and the record stage excludes it from training.
-                    if not inference_aborted(record_response):
-                        if prepared.hooks is not None:
-                            prepared.hooks.verify_response(prepared.artifact, path, record_response)
-                        self._stamp_durable_runtime_load_id(prepared, payload, record_response)
-                    # Buffered streaming backends have already finished model
-                    # execution. Release the admission handle and the lease now,
-                    # so that a slow client does not hold them.
-                    if admission is not None:
-                        admission.release()
-                        admission = None
-                    if lease is not None:
-                        lease.release()
-                        lease = None
-                elif prepared.durable and not record_response_pending:
-                    raise RuntimeLoadMismatch(
-                        "durable streaming inference requires an atomic record_response with serving runtime load IDs"
-                    )
-            except BaseException as exc:
-                try:
-                    if "stream" in locals():
-                        await stream.close()
-                    if decision is not None:
-                        await self.record_routed_failure(
-                            exc,
-                            prepared,
-                            payload,
-                            decision,
-                            request_id=routing_request_id,
-                            prior_attempt_ids=(),
-                            started=routing_started,
-                        )
-                finally:
-                    try:
-                        if lease is not None:
-                            lease.release()
-                    finally:
-                        if admission is not None:
-                            admission.release()
-                # A timeout first: aiohttp's ServerTimeoutError is also a ClientError.
-                if decision is not None and isinstance(exc, TimeoutError):
-                    raise InferenceRetryTimeout("routed streaming inference timed out") from exc
-                if decision is not None and isinstance(exc, ClientError):
-                    raise UpstreamStatusError("routed streaming upstream connection failed", status=502) from exc
-                raise
-            pending = PendingInference(
-                item=AgentRecord.create(
-                    scenario=prepared.parsed.scenario,
-                    request_type=RequestType.INFERENCE,
-                    payload=_with_tags(payload, prepared.parsed),
-                    artifact_ref=prepared.record_ref,
-                ),
-                release_id=prepared.parsed.release_id,
-                measurement=measurement,
-                admission=admission,
-                lease=lease,
-                deferred_prepared=prepared if record_response_pending else None,
-                path=path if record_response_pending else None,
-                record=record,
-                routing_decision=decision,
-                routing_request_id=routing_request_id,
-                routing_started=routing_started,
-            )
-            return stream, pending
-        except BaseException as exc:
-            measurement.finish(succeeded=False)
-            if isinstance(exc, RuntimeLoadMismatch):
-                operations.increment(f"{request_family(record)}/version_mismatch_total")
-            raise
-
-    async def relay_multimodal(
-        self, headers: Mapping[str, str], payload: dict[str, Any], path: str
-    ) -> InferenceStream:
-        """A multimodal call for a scenario, relayed by the deployment's recipe to the provider it configured;
-        nothing is recorded. The relay is the deployment's: its key and gateway, whatever model a scenario chats
-        with."""
-        parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(
-            self._dispatcher.get_or_create_scenario,
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
-        if scenario is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        relay = self._dispatcher.recipe.multimodal_relay
-        if relay is None:
-            raise NotImplementedError(f"the served recipe relays no multimodal calls, so it serves no {path}")
-        return await relay.relay(path, payload)
-
-    def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
-        succeeded = False
-        try:
-            payload = dict(pending.item.payload)
-            # An abort may have no runtime-load ID. Preserve its captured response;
-            # the record stage decides whether it can enter task creation.
-            if (
-                pending.deferred_prepared is not None
-                and isinstance(response.get("training"), Mapping)
-                and not inference_aborted(response)
-            ):
-                if pending.path is None:
-                    raise ReefError("deferred inference response has no request path")
-                hooks = pending.deferred_prepared.hooks
-                if hooks is not None:
-                    hooks.verify_response(
-                        pending.deferred_prepared.artifact,
-                        pending.path,
-                        response,
-                    )
-                self._stamp_durable_runtime_load_id(pending.deferred_prepared, payload, response)
-            item = replace(
-                pending.item,
-                payload={**payload, "response": dict(response)},
-            )
-            delivery = response.get("stream_delivery", response)
-            complete = isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")
-            if pending.routing_decision is not None:
-                # An explicit abort describes the generation; ``complete`` still describes the transport.
-                if recorded_stream_aborted(response):
-                    execution_outcome = "aborted"
-                elif complete:
-                    execution_outcome = "completed"
-                else:
-                    execution_outcome = "unknown"
-                item = replace(
-                    item,
-                    payload=self.routed_payload(
-                        item.payload,
-                        pending.routing_decision,
-                        request_id=pending.routing_request_id,
-                        attempt_index=1,
-                        prior_attempt_ids=(),
-                        execution_outcome=execution_outcome,
-                        delivery_outcome="unconfirmed" if complete else "incomplete",
-                        started=pending.routing_started,
-                        client_visible=bool(response.get("body")) or complete,
-                    ),
-                )
-            # An evaluation call is served like any other and kept by nobody.
-            stored = (
-                item if not pending.record else self._dispatcher.accept_record(item, release_id=pending.release_id)
-            )
-            # Set after the record step, so a rejected record is never measured as a success.
-            succeeded = complete
-            return stored
-        except Exception as exc:
-            if isinstance(exc, RuntimeLoadMismatch) and pending.measurement is not None:
-                pending.measurement.metrics.increment(f"{request_family(pending.record)}/version_mismatch_total")
-            logger.exception(
-                "dispatcher rejected the stream record for scenario %r (record %s)",
-                pending.item.scenario,
-                pending.item.agent_record_id,
-            )
-            raise
-        finally:
-            if pending.measurement is not None:
-                pending.measurement.finish(succeeded=succeeded)
-            try:
-                if pending.lease is not None:
-                    pending.lease.release()
-            finally:
-                if pending.admission is not None:
-                    pending.admission.release()
-
-    async def inference_operations(
-        self, headers: Mapping[str, str], *, record: bool = True, artifact_id: str | None = None
-    ) -> OperationMetrics:
-        """Resolve the scenario before measuring its inference request lifetime."""
-        parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await self.persist(
-            asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
-        )
-        return scenario.operations
-
-    def inference_scenario(self, parsed: RequestHeaders, *, record: bool, artifact_id: str | None = None) -> Scenario:
-        """The scenario an inference serves. A recorded call may create it, unless it names an artifact
-        (``artifact_id``): only a scenario that exists has one. An evaluation call (``record`` False) reads the
-        loaded instance only, never waiting for the scenario's lock and never creating it (see
-        ``ScenarioRegistry.get_loaded``)."""
-        if record:
-            scenario = self._dispatcher.get_or_create_scenario(
-                parsed.scenario,
-                release_id=parsed.release_id,
-                allow_implicit_creation=None if artifact_id is None else False,
-            )
-        else:
-            scenario = self._dispatcher.loaded_scenario(parsed.scenario, release_id=parsed.release_id)
-        if scenario is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        return scenario
-
-    async def _prepare_request(
-        self,
-        headers: Mapping[str, str],
-        payload: Mapping[str, Any],
-        path: str,
-        handler: InferenceHandler | None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        rollout: bool = False,
-        artifact_id: str | None = None,
-    ) -> tuple[PreparedInference, dict[str, Any]]:
-        """The shared first half of every inference: freeze the serving state
-        (headers, scenario, artifact, handler, surface) and let the surface
-        transform the request payload. ``record`` names the measurement family;
-        an evaluation call (``record`` False) runs every component's hooks but
-        the ``evaluated`` one's, whose candidate the rollout runs."""
-        parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        initial = await self.persist(
-            asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
-        )
-        if evaluated is not None and evaluated not in initial.surface.names:
-            raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
-        if initial.runtime is not None:
-            with initial.operations.measure(f"{request_family(record, rollout=rollout)}/admission"):
-                admission = await initial.runtime.acquire_inference()
-        else:
-            admission = None
-        try:
-            # Re-resolve after admission: a queued request must freeze the head
-            # committed by the weight update that released it, never the head it
-            # observed before waiting.
-            prepared = await self.persist(
-                asyncio.to_thread(
-                    self._prepare_inference,
-                    parsed,
-                    handler,
-                    admission,
-                    record=record,
-                    evaluated=evaluated,
-                    rollout=rollout,
-                    artifact_id=artifact_id,
-                )
-            )
-            hooks = prepared.hooks
-            transformed = (
-                dict(payload)
-                if hooks is None
-                else await self.persist(
-                    asyncio.to_thread(
-                        hooks.prepare_request,
-                        prepared.artifact,
-                        path,
-                        dict(payload),
-                    )
-                )
-            )
-            if isinstance(hooks, LeasingInferenceHooks):
-                # Freeze the served adapter for the attempt: the surface has
-                # named it, so it must stay resident until the attempt ends.
-                lease = await asyncio.to_thread(hooks.begin_request, prepared.artifact, path)
-                prepared = replace(prepared, lease=lease)
-            return prepared, transformed
-        except BaseException:
-            if admission is not None:
-                admission.release()
-            raise
-
-    @staticmethod
-    def _stamp_durable_runtime_load_id(
-        prepared: PreparedInference,
-        payload: dict[str, Any],
-        response: Mapping[str, Any],
-    ) -> None:
-        """Record which engine weights answered a training-scenario request."""
-        if not prepared.durable:
-            return
-        spans = reported_runtime_load_spans(response)
-        if spans:
-            payload["runtime_load_spans"] = [
-                {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id} for span in spans
-            ]
-            versions = {span.runtime_load_id for span in spans}
-            if len(versions) == 1:
-                payload["runtime_load_id"] = versions.pop()
-            else:
-                payload.pop("runtime_load_id", None)
-            return
-        if (version := reported_runtime_load_id(response)) is None:
-            raise RuntimeLoadMismatch("durable training response reports no runtime_load_id")
-        payload["runtime_load_id"] = version
-
-    def _prepare_inference(
-        self,
-        parsed: RequestHeaders,
-        handler: InferenceHandler | None,
-        admission: InferenceAdmissionHandle | None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        rollout: bool = False,
-        artifact_id: str | None = None,
-    ) -> PreparedInference:
-        scenario = self.inference_scenario(parsed, record=record, artifact_id=artifact_id)
-        selected_handler = handler if handler is not None else scenario.inference_handler
-        if selected_handler is None:
-            raise RecipeConfigError("the served recipe has no inference handler")
-        ref = scenario.current_artifact_ref() if artifact_id is None else scenario.served_release(artifact_id)
-        artifact = Artifact(ref, scenario.repository)
-        surface = scenario.surface
-        # A rollout call samples the served policy, so it runs the served hooks as a recorded call does.
-        hooks = surface.inference if record or rollout else surface.inference_for_evaluation(evaluated)
-        # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
-        # loaded component, never a composed release whose root holds only component directories.
-        loaded_component = surface.loader_component
-        if hooks is not None or (not surface.single and loaded_component is not None):
-            # The release is frozen for the attempt: the loaded component's view and every
-            # component hook read this one materialized copy instead of materializing it again.
-            # A flat release's hooks need it too: after a checkpointed commit the head is a
-            # durable release whose runtime load ID lives only in its metadata, and a weight
-            # hook that cannot read it names no adapter, so the frozen base answers instead.
-            # The materialized copy comes from the release cache.
-            artifact = artifact.materialize()
-        served = artifact if loaded_component is None else surface.component_artifact(artifact, loaded_component)
-        return PreparedInference(
-            parsed=parsed,
-            artifact=artifact,
-            served=served,
-            record_ref=recorded_ref(scenario, parsed, ref),
-            handler=selected_handler,
-            surface=surface,
-            durable=scenario.training_component is not None,
-            admission=admission,
-            hooks=hooks,
-        )
-
-    def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
-        """The served tree plus its parent release and evaluation metrics.
-
-        ``release_id`` addresses one catalog release instead of the
-        serving head, so a consumer can pin or go back by pulling an older
-        tree; an unknown or unrestorable release raises ArtifactNotFound
-        naming it. The ``evaluation`` field carries the metrics of the training step
-        that published the active release, so a consumer can audit what a
-        pulled tree changed and why it was admitted before running it.
-        Read-only: never creates a scenario.
-        """
         scenario = self._file_scenario(headers)
-        return self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
+        selected = self.harness_artifact(scenario, artifact_id)
+        manifest = self.harness_manifest_for_artifact(scenario, selected, source=form != "rendered")
+        if form == "client" and service_url is not None and root is not None:
+            descriptor = self.harness_descriptor(scenario)
+            served = self._dispatcher.recipe.harness_served_model(
+                scenario.name, str(scenario.components.files_component)
+            )
+            if served is None:
+                raise ArtifactNotFound(f"scenario {scenario.name!r} evolves no harness that calls a model")
+            # The layer's model calls go to the inference service when the deployment names its address.
+            model_url = service_url.rstrip("/") if self.inference_url is None else self.inference_url
+            scenario_url = f"{model_url}/reef/scenarios/{scenario.name}"
+            layer = layer_install(HarnessTree(manifest["files"]), descriptor, served, scenario_url, root)
+            manifest["files"] = dict(layer.files)
+            install = descriptor.install
+            manifest["run"] = {
+                "binary": descriptor.binary,
+                "args": list(layer.args),
+                "env": dict(layer.env),
+                "register": [list(command) for command in layer.register],
+                "unregister": [list(command) for command in layer.unregister],
+                # The pinned vendor install, so a client can install the agent the rollouts run when it has none.
+                "install": None if install is None else asdict(install),
+            }
+            manifest["synced"] = list(layer.synced)
+        return manifest
+
+    def harness_import(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Commit a sync of a person's harness files: ``POST /reef/harness/import``.
+
+        ``payload["files"]`` maps each file's path under the adapter's render
+        roots to its text. ``payload["base_artifact_id"]`` identifies the installed artifact. The files become the tree that
+        ``reef.harness.sync.import_files`` reads against the base, and
+        ``merge_trees`` puts the client's changes on the tree of the active
+        artifact, not on the training start: a kept
+        tree that the activation rule held stays inactive, so a sync never
+        serves a change that waits for review. A file that the active tree
+        and the client both changed in a way its part's ``merge`` refuses
+        raises ``ArtifactConflict`` naming it. A merged tree that fails
+        validation raises ``ValueError`` naming every problem. A sync that
+        changes nothing publishes nothing. Otherwise the merged tree becomes
+        the active selection and the harness trainer's training start in one
+        ``"sync"`` commit (``ScenarioCommitter.sync_artifact``). The answer
+        names the active selection after the sync, the snapshot it was merged
+        onto, whether it changed, whether it merged onto a newer snapshot than
+        the base, the tree's paths, and the client's paths no part takes.
+        """
+        files = payload.get("files")
+        if not isinstance(files, Mapping) or not all(
+            isinstance(path, str) and isinstance(text, str) for path, text in files.items()
+        ):
+            raise ValueError("files must map each path under the adapter's roots to the file's text")
+        scenario = self._file_scenario(headers)
+        component = scenario.components.files_component
+        if component is None:
+            raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+        if payload.get("base_artifact_id") is None:
+            raise ValueError("base_artifact_id must be the artifact the client installed")
+        base_artifact = self.harness_artifact(scenario, payload.get("base_artifact_id"))
+        base_artifact_id = scenario.components.component_artifact(base_artifact, component).artifact_id
+        descriptor = self.harness_descriptor(scenario)
+        expected_selection = scenario.artifact_selection()
+        active_id = expected_selection.components[component]
+        _, active_artifact = scenario.resolve_artifact(active_id, component)
+        active_manifest = self.harness_manifest_for_artifact(scenario, active_artifact, source=True)
+        active = HarnessTree(active_manifest["files"])
+        if base_artifact_id == active_id:
+            base_tree = active
+        else:
+            base_manifest = self.harness_manifest_for_artifact(scenario, base_artifact, source=True)
+            base_tree = HarnessTree(base_manifest["files"])
+        imported = import_files(files, base_tree, descriptor)
+        merge = merge_trees(base_tree, active, imported.tree, descriptor.layout)
+        if merge.tree is None:
+            located = [(path, descriptor.layout.locate(path)) for path in merge.conflicts]
+            # The person knows each file at its render path, such as plugin/rules.md for rules.md.
+            named = [
+                path if location is None or location.part.renders is None else location.part.render_path(location.name)
+                for path, location in located
+            ]
+            raise ArtifactConflict(
+                f"artifact {active_id} and your files both changed {', '.join(named)} since artifact {base_artifact_id}: "
+                "make each one match one side, or drop yours with sync --discard, then sync again"
+            )
+        tree = merge.tree
+        answer = {
+            "parent_artifact_id": active_manifest["artifact_id"],
+            "merged": base_tree != active,
+            "files": sorted(tree.files),
+            "ignored": list(imported.ignored),
+        }
+        if tree == active:
+            return {
+                **answer,
+                "artifact_id": active_manifest["artifact_id"],
+                "changed": False,
+            }
+        validation = validate_tree(tree, descriptor)
+        if not validation.passed:
+            raise ValueError(f"the synced harness fails validation: {validation.message()}")
+        patch = active.diff(tree)
+        directory = Path(tempfile.mkdtemp(prefix="reef-harness-sync-"))
+        tree.write(directory)
+        artifact = Artifact.local(directory)
+        try:
+            published = self._dispatcher.sync_artifact(
+                scenario.name,
+                artifact,
+                component=component,
+                expected_selection=expected_selection,
+                metrics={
+                    "sync": {
+                        "files": len(tree.files),
+                        "ignored": list(imported.ignored),
+                        "base_artifact_id": base_artifact_id,
+                    },
+                    "patch": clip_record_value(patch.to_json()),
+                    "patch_parts": descriptor.layout.part_names(patch.changes),
+                },
+            )
+        finally:
+            artifact.discard()
+        _, selected = scenario.resolve_artifact(published.artifact_id, published.component)
+        manifest = self.harness_manifest_for_artifact(scenario, selected, source=True)
+        return {
+            **answer,
+            "artifact_id": manifest["artifact_id"],
+            "changed": True,
+        }
+
+    @staticmethod
+    def harness_descriptor(scenario: Scenario) -> AdapterDescriptor:
+        """The adapter of the harness a client pulls; ArtifactNotFound when the scenario serves no harness tree."""
+        component = scenario.components.files_component
+        files = None if component is None else scenario.components.components[component].files
+        if not isinstance(files, HarnessFiles):
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} evolves no harness: the deployment's recipe is not a harness "
+                "evolution recipe"
+            )
+        return files.descriptor
+
+    def harness_state_dir(self, scenario: Scenario) -> Path | None:
+        """The state directory of the harness a client pulls (``Recipe.harness_state_dir``), or None."""
+        component = scenario.components.files_component
+        return None if component is None else self._dispatcher.recipe.harness_state_dir(scenario.name, component)
+
+    def step_progress(self, scenario: Scenario) -> StepProgress | None:
+        """The progress of the harness step that runs now, which the training component writes; None for none."""
+        root = self.harness_state_dir(scenario)
+        return None if root is None else read_step_progress(root / PROGRESS_FILE)
 
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:
         """The trainer evolving the component a client pulls; a flat scenario's only trainer."""
-        return scenario.trainer_for(scenario.surface.files_component)
+        return scenario.trainer_for(scenario.components.files_component)
 
     @staticmethod
-    def _harness_manifest_for_scenario(
-        scenario: Scenario,
-        release_id: str | None = None,
+    def harness_artifact(scenario: Scenario, artifact_id: object) -> Artifact:
+        """The snapshot that holds the harness that a client names by ``artifact_id``; the active harness when it is
+        None. Raise ``ValueError`` when it is not a non-empty string.
+        """
+        if artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id):
+            raise ValueError("artifact_id must be a non-empty string")
+        component = scenario.components.files_component
+        if not isinstance(artifact_id, str):
+            if component is None:
+                raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+            artifact_id = scenario.artifact_selection().components[component]
+        _, selected = scenario.resolve_artifact(artifact_id, component)
+        return selected
+
+    @staticmethod
+    def harness_manifest_for_artifact(
+        scenario: Scenario, artifact: Artifact, *, source: bool = False
     ) -> dict[str, Any]:
-        artifact, evaluation_metrics = scenario.release_queries.artifact_with_metrics(release_id)
-        tree = scenario.surface.files
-        if tree is None:
+        component = scenario.components.files_component
+        if component is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} serves no files: the deployment's recipe "
-                "carries no harness surface (record-only or weight-training recipes have "
-                "no file tree). Point 'reef.recipe' at a harness_evolve recipe."
+                "declares no harness component (record-only or weight-training recipes have "
+                "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
-        files = tree.read_files(artifact)
+        files = (
+            component_files(scenario.components, artifact, component)
+            if source
+            else scenario.components.read_files(artifact)
+        )
         if files is None:
             raise ArtifactNotFound(
-                f"scenario {scenario.name!r} serves no files: no harness composition has "
-                "been published yet. The scenario's initial artifact carries no files "
-                "until the trainer publishes its first step (see docs/user-guide/evolve-your-harness)."
+                f"scenario {scenario.name!r} serves no files: snapshot {artifact.ref.revision!r} holds no "
+                "harness tree. A root snapshot made from the default start holds the recipe's evolution.seed, so an empty seed serves "
+                "nothing until a step publishes a tree."
             )
+        artifact_id = scenario.components.component_artifact(artifact, component).artifact_id
+        catalog = scenario.artifacts()
+        row = next((row for row in catalog if row["artifact_id"] == artifact_id), None)
         manifest = {
-            "release_id": artifact.ref.release_id,
-            "parent_release_id": artifact.ref.parent_release_id,
-            "content_id": artifact.ref.content_id,
+            "artifact_id": artifact_id,
+            "parent_artifact_id": None if row is None else row["parent_artifact_id"],
             "files": dict(files),
-            "evaluation": evaluation_metrics,
-            # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
-            "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
+            "evaluation": None if row is None or row["operation"] != "training" else row.get("metrics"),
+            # The union over the chain, not this evaluation's list: a snapshot whose request named nothing still installs an earlier extension.
+            "requires": required_by(list(reversed(catalog)), artifact_id),
         }
         components = artifact.materialize().components
         if components is not None:
-            # The whole combination the pulled tree belongs to, by component content id.
-            manifest["components"] = components.content_ids
+            manifest["components"] = components.artifact_ids(artifact.ref.revision)
         return manifest
 
-    @staticmethod
-    def harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
-        """The catalog rows a client pulls, newest first, and the release of the active harness artifact.
-
-        A row names the harness artifact it holds or ran on: ``artifact_id``
-        and ``component`` from ``Scenario.artifacts``, with ``active`` and
-        ``activated``. ``active`` is true on exactly one row, the row that
-        made the active harness artifact. In a scenario of several
-        components, a release that minted no harness artifact (another
-        component's step, an activation) is not listed. A listed row names
-        the release that minted its artifact as ``release_id`` and the
-        release that minted its parent's harness artifact as
-        ``parent_release_id``; the ids it had are kept beside them as
-        ``composed_release_id`` and ``composed_parent_release_id``. A step
-        that made no artifact is listed when the harness trainer made it.
-        """
-        files_component = scenario.surface.files_component
-        single = scenario.surface.single
-        harness = [row for row in scenario.artifacts() if single or row["component"] == files_component]
-        by_release = {row["release_id"]: row for row in harness}
-        by_artifact = {row["artifact_id"]: row for row in harness}
-        manifests = scenario.release_queries.manifests(scenario.scenario_step)
-
-        def artifact_of(release_id: str | None) -> dict[str, Any] | None:
-            """The harness artifact that the release ``release_id`` binds, or ``None`` when it is not known."""
-            if release_id is None or release_id in by_release:
-                return None if release_id is None else by_release[release_id]
-            return by_artifact.get((manifests.get(release_id) or {}).get(str(files_component)))
-
-        kept: list[dict[str, Any]] = []
-        for row in scenario.releases():
-            if row["checkpoint"] and row["release_id"] not in by_release:
-                continue
-            if not row["checkpoint"] and row.get("component") not in (None, files_component):
-                continue
-            artifact = artifact_of(row["release_id"])
-            if artifact is None:
-                continue
-            listed = {
-                **row,
-                "artifact_id": artifact["artifact_id"],
-                "component": artifact["component"],
-                "active": row["checkpoint"] and artifact["active"],
-                "activated": artifact["activated"],
-            }
-            if artifact["release_id"] != row["release_id"]:
-                listed["composed_release_id"] = row["release_id"]
-                listed["release_id"] = artifact["release_id"]
-            parent = artifact_of(artifact["parent_release_id"])
-            if parent is not None and parent["release_id"] != row["parent_release_id"]:
-                listed["composed_parent_release_id"] = row["parent_release_id"]
-                listed["parent_release_id"] = parent["release_id"]
-            kept.append(listed)
-        return kept, next((row["release_id"] for row in harness if row["active"]), None)
-
-    @classmethod
-    def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
-        """The catalog rows a client pulls, newest first; see ``harness_lineage``."""
-        rows, _ = cls.harness_lineage(scenario)
-        return rows
-
-    def harness_release_id(self, scenario: Scenario) -> str:
-        """The release that a client pulls: the release that minted the active harness artifact."""
-        current = scenario.repository.require_current_artifact().release_id
-        if scenario.surface.single or scenario.surface.files_component is None:
-            return current
-        step = scenario.scenario_step
-        cached = self.harness_heads.get(scenario.name)
-        if cached is not None and cached[0] == step and cached[1] == current:
-            return cached[2]
-        _, head = self.harness_lineage(scenario)
-        if head is None:
-            head = current
-        self.harness_heads[scenario.name] = (step, current, head)
-        return head
-
-    def harness_head(self, headers: Mapping[str, str]) -> str | None:
-        """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
-        try:
-            scenario = self._file_scenario(headers)
-        except ArtifactNotFound:
-            return None
-        return self.harness_release_id(scenario)
-
-    def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Admit one agent proposal against the head release's entries and hold it for the next evolve step.
-
-        The admission is the backend's own (``admit_mutations`` over a fresh
-        loader), never a touch of its live tree, and it runs again on the
-        training thread when the step takes the proposal, since the head may
-        have moved. The answer names the proposal, whether it was admitted,
-        the refusal when not, and the head it was admitted against.
-        """
-        proposal = ProposalPayload.from_dict(payload)
+    def harness_artifacts(self, headers: Mapping[str, str]) -> dict[str, Any]:
+        """The harness artifacts, oldest first, addressed by artifact ID, with the metrics of the step that published
+        each one, so an update is a decision over numbers. A scenario with several components lists the artifacts of
+        its harness component. Same read-only rules as ``harness_manifest``."""
         scenario = self._file_scenario(headers)
-        backend = self.files_trainer(scenario).candidate_backend
-        if not isinstance(backend, ProposalValidator) or backend.proposals is None:
-            raise ArtifactNotFound(
-                f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
-                "evolution recipe with a proposal inbox"
-            )
-        head = self.harness_release_id(scenario)
-        proposal_id = ProposalInbox.new_id()
-        # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
-        if self.files_trainer(scenario).pipeline.training_mode == "manual":
-            return {
-                "proposal_id": proposal_id,
-                "admitted": False,
-                "reason": "manual mode takes instructions only",
-                "release_id": head,
-            }
-        # The entries of the head, which the served tree.json carries too, not the trainer's live state, which a
-        # step in flight has already moved; the base artifact's before the first commit.
-        logged = scenario.release_queries.entries_for_version(head, scenario.surface.files_component)
-        entries = [dict(entry) for entry in logged or ()]
-        try:
-            mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]
-            _, refusal = backend.admit(entries, mutations)
-        except MutationError as error:
-            refusal = str(error)
-        if refusal is None:
-            refusal = backend.proposals.submit(proposal_id, {**proposal.to_dict(), "head_release_id": head})
-        return {"proposal_id": proposal_id, "admitted": refusal is None, "reason": refusal, "release_id": head}
-
-    def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
-        """The scenario's release catalog with per-release evaluation metrics, newest last.
-
-        The list side of the update channel: every committed release stays
-        addressable through the manifest read's ``release_id``, and each
-        training row carries the metrics of the step that published it, so an
-        update is a decision over numbers rather than a blind pull. A scenario
-        with several components lists the releases that changed the pulled
-        tree (see ``harness_lineage``); the others stay addressable by id.
-        Same read-only rules as ``harness_manifest``.
-        """
-        scenario = self._file_scenario(headers)
-        return {
-            "scenario": scenario.name,
-            "releases": list(reversed(self.harness_rows(scenario))),
-        }
+        return {"scenario": scenario.name, "artifacts": list(reversed(scenario.harness_rows()))}
 
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
         """Raw retained files for a catalog row; presentation belongs to the caller."""
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
-        backend = self.files_trainer(scenario).candidate_backend
-        if not directory or not isinstance(backend, StepRecords):
+        root = self.harness_state_dir(scenario)
+        if not directory or root is None:
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
             raise ValueError("invalid step record directory")
         try:
-            return backend.read_step_records(directory, relative)
+            return read_step_records(root / STEPS_DIR, directory, relative)
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
-    def harness_release_page(
+    def harness_artifact_page(
         self, headers: Mapping[str, str], step: int, link_query: Mapping[str, str] | None = None
     ) -> str:
         """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
 
-        The rows are the ones ``harness_releases`` answers, so the step a
-        client counts there is the step this page names. The release the
+        The rows are the ones ``harness_artifacts`` answers, so the step a
+        client counts there is the step this page names. The snapshot the
         step ran on (the parent of a win, the head a rejected or skipped
         step ran on) comes through the artifact snapshot when it is
-        restorable, so an extension update shows as a diff, else as its new
-        text. ``link_query`` is carried to the Chain's links, so a page
+        restorable, so an updated file shows as a diff, else as its new text.
+        ``link_query`` is carried to the Chain's links, so a page
         opened through query parameters links pages that open the same way.
         An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         if step == len(rows):
             # The next step, while a request runs it: the catalog has no row yet, so the page says so and links the
             # request's page, which follows the step live.
@@ -1227,45 +488,23 @@ class RequestService:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
             )
-        before = before_release_id(rows[step])
-        before_entries: Sequence[Mapping[str, Any]] = ()
+        before = before_artifact_id(rows[step])
+        component = scenario.components.files_component
         before_files: Mapping[str, str] | None = None
-        if before is not None:
-            before_entries = (
-                scenario.release_queries.entries_for_version(before, scenario.surface.files_component) or ()
-            )
-            tree = scenario.surface.files
+        if before is not None and component is not None:
             try:
-                artifact, _ = scenario.release_queries.artifact_with_metrics(before)
-                before_files = None if tree is None else tree.read_files(artifact)
+                _, artifact = scenario.resolve_artifact(before, component)
+                before_files = component_files(scenario.components, artifact, component)
             except ArtifactError:
                 before_files = None
-        backend = self.files_trainer(scenario).candidate_backend
-        return build_release_page(
-            step,
-            rows,
-            before_entries=before_entries,
-            before_files=before_files,
-            node_paths=None if backend is None else backend.harness_node_paths,
-            link_query=link_query,
-            adapter=self.harness_adapter(backend),
-        )
+        return build_artifact_page(step, rows, before_files=before_files, link_query=link_query)
 
-    @staticmethod
-    def harness_adapter(backend: CandidateBackend | None) -> str:
-        """The adapter a harness page names in its commands: the backend's, pi for a backend that names none."""
-        adapter = None if backend is None else backend.harness_adapter
-        return "pi" if adapter is None else adapter
-
-    @classmethod
-    def running_request_id(cls, scenario: Scenario) -> str | None:
-        """The id of the request the scenario's step is running: the reserved job data's, else the backend's progress."""
-        trainer = cls.files_trainer(scenario)
-        reserved = trainer.pending_job_data
+    def running_request_id(self, scenario: Scenario) -> str | None:
+        """The id of the request the scenario's step is running: the reserved job data's, else the step's progress."""
+        reserved = self.files_trainer(scenario).pending_job_data
         if reserved is not None and reserved.request is not None:
             return str(reserved.request.id)
-        backend = trainer.candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = self.step_progress(scenario)
         return None if progress is None or progress.request_id is None else str(progress.request_id)
 
     def harness_request_page(
@@ -1273,51 +512,41 @@ class RequestService:
     ) -> str:
         """One HTML page for the harness request stored as agent record ``record_id``, live until its step settles.
 
-        The record is the ``POST /reef/train`` instruction as stored; the
+        The record is the ``POST /reef/train`` request as stored; the
         catalog row whose ``training_request.id`` names it settles the page.
         Until then the page reads the running step's progress from the
-        scenario's candidate backend, when the backend reports one, and
+        progress file of the harness training component, when a step runs, and
         whether the trainer holds the request in its reserved job data.
         ``link_query`` is carried to the version page link, so a page opened
         through query parameters links one that opens the same way. An
-        unknown id, or one that is not a training instruction, raises
+        unknown id, or one that is not a training request, raises
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
-        record = self._dispatcher.read_record(scenario.name, record_id)
-        if record is None or record.get("request_type") != RequestType.TRAIN.value:
-            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
-        # The step a request settled as counts the catalog rows, the ones the release page opens.
-        rows = list(reversed(self.harness_rows(scenario)))
-        backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        # The step a request settled as counts the catalog rows, the ones the snapshot page opens.
+        rows = list(reversed(scenario.harness_rows()))
+        record = request_view(scenario, record_id, rows)
+        progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(
-            record,
-            rows,
-            progress=progress,
-            consumed=consumed,
-            link_query=link_query,
-            adapter=self.harness_adapter(backend),
+            record, rows, scenario=scenario.name, progress=progress, consumed=consumed, link_query=link_query
         )
 
     def harness_request_progress(self, headers: Mapping[str, str], record_id: str) -> dict[str, Any]:
         """Where a filed request stands, as JSON, for a client with no browser to open its page.
 
         The same reading the page renders: the state
-        (``queued``, ``proposing``, ``evaluating``, ``running``, ``settling``,
-        else the settled row's result), what it means in the page's words,
+        (``queued``, ``proposing``, ``evaluating``, ``running``, else the
+        settled row's result), what it means in the page's words,
         and, once a row answers the request, the step it landed as. A client
         polls this to show a phase; the page itself stays the readable view.
-        An unknown id, or one that is not a training instruction, raises
+        An unknown id, or one that is not a training request, raises
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
-        record = self._dispatcher.read_record(scenario.name, record_id)
-        if record is None or record.get("request_type") != RequestType.TRAIN.value:
-            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
+        record = request_view(scenario, record_id, rows)
         step = settled_step(rows, record_id)
         if step is not None:
             return {
@@ -1327,12 +556,11 @@ class RequestService:
                 "state": result_of(rows[step]),
                 "meaning": None,
                 "started_at": None,
-                "rollouts_total": None,
+                "runs_total": None,
                 "step_record": None,
                 "activity": [],
             }
-        backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)
@@ -1345,152 +573,27 @@ class RequestService:
             "meaning": STATE_WORDS.get(state),
             # The step's own clock, so a client shows the time in the step and not the time since it asked.
             "started_at": None if mine is None else mine.started_at,
-            "rollouts_total": None if mine is None else mine.rollouts_total,
+            "runs_total": None if mine is None else mine.runs_total,
             "step_record": None if mine is None else mine.step_record,
-            # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
+            # What the method has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
         }
 
-    def harness_install_script(
-        self,
-        headers: Mapping[str, str],
-        adapter: str | None,
-        release_id: str | None = None,
-    ) -> str:
-        """A self-contained install script over one served manifest.
-
-        The manifest side is adapter-agnostic files, addressed exactly like
-        ``harness_manifest`` (the harness head by default, any release through
-        ``release_id``); the named ``adapter`` contributes only its
-        descriptor's install section, which the script uses to ensure the
-        pinned binary through the vendor's own channel. An unknown adapter
-        raises ArtifactNotFound naming it, mirroring the unknown-release
-        behavior; a known adapter whose descriptor declares no install
-        section raises DescriptorError (HTTP 400) naming it. Unlike the other
-        harness reads, a missing or empty scenario header creates a new,
-        randomly named file-serving scenario, unless the deployment turned
-        implicit scenario creation off.
-        """
-        if not adapter:
-            raise ReefError("the harness install route requires an 'adapter' query parameter naming an adapter")
-        known = available_adapters()
-        if adapter not in known:
-            raise ArtifactNotFound(f"unknown harness adapter {adapter!r}; known adapters: {', '.join(known)}")
-        scenario = self._file_scenario(
-            headers,
-            create_if_missing=True,
-            release_id=release_id,
-        )
-        manifest = self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
-        descriptor = get_adapter(adapter)
-        binding_files = self._install_binding(scenario, manifest, descriptor, headers)
-        return render_install_script(
-            descriptor=descriptor,
-            files=manifest["files"],
-            release_id=manifest["release_id"],
-            content_id=manifest["content_id"],
-            scenario=scenario.name,
-            binding_files=binding_files,
-            # The install record keeps the address the binding names, for a wrapper whose binding a session changed.
-            service_url=install_service_url(headers) if binding_files else None,
-            requires=manifest["requires"],
-            # The release the script names for a first install must be one the catalog lists.
-            fallback_release_id=ancestor_requiring_nothing(
-                list(reversed(self.harness_rows(scenario))), manifest["release_id"]
-            ),
-            # A request that carried a token reached a service that wants one, so the harness needs it too.
-            is_token_expected=any(name.lower() in ("authorization", "x-api-key") for name in headers),
-        )
-
-    def _install_binding(
-        self, scenario: Scenario, manifest: Mapping[str, Any], descriptor: Any, headers: Mapping[str, str]
-    ) -> dict[str, str]:
-        """The adapter's config targets re-rendered with a binding at the Reef this request reached.
-
-        The served composition never carries an endpoint or a credential, so
-        an installed tree needs one written beside it: the release's own
-        entries (the base artifact's for the creation) plus the descriptor's
-        binding template, the base URL taken from the request's Host, the model from the evaluation the release ran against (the
-        recipe's served model for the base release), and the token left as a
-        placeholder the script fills from the client's environment. Empty
-        when any of those is unknown, and the script then installs the
-        composition as before.
-        """
-        service_url = install_service_url(headers)
-        evaluation_metrics = manifest.get("evaluation") or {}
-        model = (
-            (evaluation_metrics.get("evaluation_context") or {}).get("model")
-            if isinstance(evaluation_metrics, Mapping)
-            else None
-        )
-        info = scenario.surface.harness
-        if not isinstance(model, str) or not model:
-            model = None if info is None else info.served_model
-        entries = scenario.release_queries.entries_for_version(
-            manifest["release_id"], scenario.surface.files_component
-        )
-        if not service_url or not model or not entries:
-            return {}
-        api = "openai" if info is None else info.served_api
-        client_models = () if info is None else info.client_models
-        metadata = None if info is None else info.model_metadata.get(model)
-        if metadata is None and info is not None and model == info.served_model:
-            metadata = info.served_metadata
-        override = scenario.model_config.runtime
-        if override is not None:
-            selected = ModelBinding.from_runtime(override)
-            model, api = selected.model, selected.api
-            if descriptor.name == "codex":
-                selected = selected.with_metadata(None if info is None else info.model_metadata.get(model))
-            metadata = selected.metadata
-            client_models = ()
-        binding = ModelBinding(
-            base_url=service_url, model=model, api_key=TOKEN_PLACEHOLDER, api=api, metadata=metadata
-        )
-        nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
-        try:
-            bound = binding.compose_nodes(descriptor, models=client_models)
-            files = render_composition((*nodes, *bound), descriptor)
-        except (ModelBindingError, RenderError, KeyError, TypeError):
-            return {}
-        targets = {descriptor.config_targets[str(config.get("target", "primary"))].path for _, config in bound}
-        return {path: files[path] for path in sorted(targets) if path in files}
-
-    def _file_scenario(
-        self,
-        headers: Mapping[str, str],
-        *,
-        create_if_missing: bool = False,
-        release_id: str | None = None,
-    ) -> Scenario:
-        """Resolve a file-serving scenario, optionally creating a randomly named one."""
-        normalized = {key.lower(): value.strip() for key, value in headers.items()}
-        if create_if_missing and not normalized.get(SCENARIO_HEADER):
-            if not self._dispatcher.recipe_has_files():
-                raise ArtifactNotFound("no harness recipes are available")
-
-            scenario_name = _random_harness_scenario_name()
-            scenario = self._dispatcher.get_or_create_scenario(scenario_name, release_id=release_id)
-            if scenario is None:
-                raise UnknownScenario(
-                    "this deployment creates no scenario implicitly: create one with POST /reef/scenarios "
-                    f"and name it in the {SCENARIO_HEADER} header"
-                )
-            return scenario
-
+    def _file_scenario(self, headers: Mapping[str, str]) -> Scenario:
+        """The existing file-serving scenario the headers name; ArtifactNotFound for an unknown one or one without files."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         if not self._dispatcher.has_scenario(parsed.scenario):
             raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
-        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)
+        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario)
         if scenario is None:
             raise ReefError(f"scenario {parsed.scenario!r} disappeared during lookup")
-        if scenario.surface.files is None:
+        if scenario.components.files_component is None:
             raise ArtifactNotFound(
                 f"scenario {parsed.scenario!r} serves no files: the deployment's recipe "
-                "carries no harness surface (record-only or weight-training recipes have "
-                "no file tree). Point 'reef.recipe' at a harness_evolve recipe."
+                "declares no harness component (record-only or weight-training recipes have "
+                "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
-        return scenario
+        return self._dispatcher.at_newest_commit(scenario)
 
     def _accept(
         self,
@@ -1498,23 +601,19 @@ class RequestService:
         payload: Mapping[str, Any],
         *,
         agent_record_id: str | None = None,
-        artifact_ref: ArtifactRef | None = None,
     ) -> AgentRecord:
         normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
-        normalized_payload = _with_tags(normalized_payload, parsed)
+        normalized_payload = with_request_tags(normalized_payload, parsed)
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=parsed.request_type,
             payload=normalized_payload,
             agent_record_id=agent_record_id,
             references=references,
-            artifact_ref=artifact_ref,
+            artifact_id=normalized_payload.get("artifact_id"),
         )
         try:
-            return self._dispatcher.accept_record(
-                item,
-                release_id=parsed.release_id,
-            )
+            return self._dispatcher.accept_record(item)
         except Exception as exc:
             logger.warning(
                 "dispatcher rejected %s record for scenario %r (record %s): %s: %s",
@@ -1527,79 +626,10 @@ class RequestService:
             raise
 
 
-def recorded_ref(scenario: Scenario, parsed: RequestHeaders, served: ArtifactRef) -> ArtifactRef:
-    """The release an inference record names: the served one, or the release the client says it runs.
-
-    A ``reef-<adapter>`` session sends the release it installed as
-    ``x-reef-tag-release`` and keeps running it after a newer one is
-    published. Where the client pulls everything a release changes (a file
-    tree, with no request hooks and no served weights), a call answers the
-    same on every release, so the record names the client's release when the
-    scenario's catalog has it. A value the catalog does not have names the
-    served release, as does every call on a scenario that serves its release
-    itself."""
-    claimed = parsed.tags.get("release")
-    surface = scenario.surface
-    if (
-        claimed is None
-        or claimed == served.release_id
-        or surface.files is None
-        or surface.inference is not None
-        or scenario.training_component is not None
-    ):
-        return served
-    return scenario.release_queries.ref_for_version(claimed) or served
-
-
-def _with_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
-    """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
-
-    Only inference: a tag is context about a served exchange, and the
-    processors that read one correlate on the inference side. This stores
-    every pair as sent (method-integration RFC §3.2); only
-    :func:`recorded_ref` reads a value.
-    """
-    if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
-        return payload
-    metadata = dict(payload.get("metadata") or {})
-    metadata["tags"] = {**(metadata.get("tags") or {}), **parsed.tags}
-    return {**payload, "metadata": metadata}
-
-
-def rollout_inference_response(response: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
-    """The response of a rollout call: the training block stays, with the runtime load ID that answered.
-
-    ``payload`` is the request after ``_stamp_durable_runtime_load_id``; its stamp goes into the training block
-    when the block names no version of its own.
-    """
-    training = response.get("training")
-    if not isinstance(training, Mapping):
-        return dict(response)
-    stamped = {key: payload[key] for key in ("runtime_load_id", "runtime_load_spans") if key in payload}
-    return {**response, "training": {**stamped, **training}}
-
-
-def client_inference_response(response: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove Reef-private training tensors from a buffered client response.
-
-    The record keeps the block; no client ever sees it. (The
-    ``x-reef-return-training`` opt-in existed for the external OpenClaw-RL
-    grader, whose judging now runs in-processor off the records.)
-    """
-
-    client_response = dict(response)
-    client_response.pop("training", None)
-    return client_response
-
-
 __all__ = [
     "InferenceRetryPolicy",
     "InferenceRetryTimeout",
-    "PendingInference",
-    "PreparedInference",
     "RequestService",
-    "client_inference_response",
     "normalize_request_payload",
     "page_headers",
-    "rollout_inference_response",
 ]

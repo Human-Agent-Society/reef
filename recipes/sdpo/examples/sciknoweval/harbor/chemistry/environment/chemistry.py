@@ -33,8 +33,7 @@ from reef_client import ReefClient
 #: The reference checkout the container image clones at its pin.
 DATA_DIR = Path(os.environ.get("SDPO_DATA_DIR", "/opt/sdpo-reference/datasets/sciknoweval/chemistry"))
 MODEL = "reef"  # the model name the requests carry; Reef's SGLang serves it
-#: ``user.yaml``: the prompt and response windows, and the decoding of each phase.
-MAX_PROMPT_TOKENS = 2048
+#: ``user.yaml``: the response window, and the decoding of each phase.
 MAX_RESPONSE_TOKENS = int(os.environ.get("SDPO_MAX_RESPONSE_TOKENS", "8192"))
 TRAIN_TEMPERATURE = 1.0
 EVAL_TEMPERATURE = 0.6

@@ -10,13 +10,12 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.artifact.artifact import Artifact
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.errors import UpstreamStatusError
 from reef.inference.http import HttpInferenceHandler
-from reef.runtime.interfaces import UpstreamStatusError
+from reef.inference.interfaces import InferenceArtifact
 
 pytestmark = pytest.mark.unit
-ARTIFACT = Artifact(ArtifactRef("test-content", "test-release", None), None)
+ARTIFACT = InferenceArtifact("test-content")
 CHAT_PATH = "/v1/chat/completions"
 
 

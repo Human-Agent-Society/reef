@@ -3,24 +3,30 @@
 from __future__ import annotations
 
 import math
+from functools import partial
 from pathlib import Path
 
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.samples import open_sample_store
+from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 
-from reef.artifact import Artifact, BaseArtifactSource
+from reef.artifact import Artifact, DefaultStart
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
+from reef.core.training_request import TrainingRequest
+from reef.core.weight_layout import ArtifactFormat
 from reef.pipeline_context import PipelineContext
-from reef.record2record import ReportGrouping, ReportRecord2Record
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.sample2job import Sample2Job
-from reef.storage.samples import TrainerSamples
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.data import NewItem
+from reef.storage.job_data import read_job_data
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -41,14 +47,13 @@ class FakeComponent(TrainingComponent):
         return "fake"
 
     @property
-    def release_format(self) -> ReleaseFormat:
-        return ReleaseFormat("full")
+    def artifact_format(self) -> ArtifactFormat:
+        return ArtifactFormat("full")
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource()
+    def default_start(self) -> DefaultStart:
+        return DefaultStart()
 
-    @property
-    def base_start(self) -> str:
+    def root_start(self, root: ScenarioRoot) -> str:
         return "fake:base"
 
     def import_start(self, release: Path) -> str:
@@ -67,7 +72,7 @@ class FakeComponent(TrainingComponent):
 
 
 def batch(name: str = "b") -> JobData:
-    return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
+    return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
 
 
 FINISHED = JobOutcome("j0", "fake", "finished")
@@ -79,7 +84,7 @@ def component():
 
 
 #: The parameters that the tests submit with each job, as a recipe's stage gives them.
-PARAMETERS = {"method": "sft"}
+PARAMETERS = {"objective": "sft"}
 
 
 def loop_with(component, *, scenario="math"):
@@ -119,8 +124,7 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     submitted = loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS)
     result = submitted.result
     [job] = component.jobs
-    assert (job.backend, job.start, job.parameters) == ("fake", "fake:base", {"method": "sft"})
-    assert submitted.ended is None
+    assert (job.backend, job.start, job.parameters) == ("fake", "fake:base", {"objective": "sft"})
     assert result.artifact is None and result.training_job_id == job.job_id
     assert result.metrics["training_job"] == {"job_id": job.job_id, "backend": "fake", "event": "submitted"}
     assert JobLoopState.from_dict(result.state).job == RunningJob(job.job_id)
@@ -136,6 +140,18 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     # The next job of the same trainer is another job, even with the same data from the same start.
     later = loop.submit(JobLoopState("fake:base", finished_jobs=1, last_job=FINISHED), batch(), PARAMETERS)
     assert later.result.training_job_id != job.job_id
+
+
+@pytest.mark.unit
+def test_every_job_names_its_scenario_component_and_the_job_that_the_trainer_committed_last(component):
+    loop = JobLoop(component, scenario="math", scenario_component="weights")
+    loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS)
+    ended = JobOutcome("job-0", "fake", "finished")
+    loop.submit(JobLoopState("fake:base", finished_jobs=1, last_job=ended), batch(), PARAMETERS)
+    assert [(job.component, job.previous_job_id) for job in component.jobs] == [
+        ("weights", None),
+        ("weights", "job-0"),
+    ]
 
 
 @pytest.mark.unit
@@ -162,7 +178,6 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
     first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"), {"loss": 0.5})
     component.statuses[job_id] = JobStatus(job_id, "running", (first,))
     publication = loop.poll(state)
-    assert publication.ended is None
     published = publication.result
     assert published.artifact is not None and published.artifact.local_path == tmp_path / "1-release"
     # The commit carries the training metrics and the checkpoint's place in its job, and no selection.
@@ -179,7 +194,7 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
     ended = end.result
     state = JobLoopState.from_dict(ended.state)
     assert state.job is None and state.finished_jobs == 1 and state.start == first.path
-    assert end.ended == state.last_job == JobOutcome(job_id, "fake", "finished", {"optimizer_steps": 2})
+    assert state.last_job == JobOutcome(job_id, "fake", "finished", {"optimizer_steps": 2})
     assert ended.metrics["training_job"]["event"] == "finished" and ended.metrics["optimizer_steps"] == 2
     loop.submit(state, batch("next"), PARAMETERS)
     assert component.jobs[-1].start == first.path
@@ -256,10 +271,9 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
     return Trainer.build(
         "math",
         scored_records(),
-        pipeline_factory=threshold_pipeline,
+        pipeline_factory=partial(threshold_pipeline, job_samples=1),
         job_loop=loop_with(component),
         algorithm_state=state.to_dict(),
-        default_job_samples=1,
     )
 
 
@@ -296,7 +310,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
     pending = job_trainer(JobLoopState("fake:base", job=RunningJob("job-2")), component)
     component.statuses["job-2"] = JobStatus("job-2", "finished")
     assert not pending.has_pending_commit
-    assert pending.run_once() is not None
+    assert pending.advance_job() is not None
     assert pending.has_pending_commit
     with pytest.raises(CommitPending, match="waits for its commit"):
         pending.start_from(Artifact.local(Path("/releases/old")))
@@ -318,7 +332,7 @@ def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tm
     component = StartDuringStatus()
     trainer = job_trainer(JobLoopState("/start", RunningJob("job-1")), component)
     component.trainer = trainer
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert not trainer.has_pending_commit and component.cancelled == ["job-1"]
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old")
 
@@ -328,27 +342,28 @@ def test_a_restarted_trainer_polls_its_running_job_before_it_reserves_a_batch(co
     trainer = job_trainer(JobLoopState("fake:base", job=RunningJob("job-1")), component)
     component.statuses["job-1"] = JobStatus("job-1", "running")
     assert trainer.job_running
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert trainer.pending_job_data is None and component.jobs == []
     saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
     component.statuses["job-1"] = JobStatus("job-1", "running", (saved,))
-    published = trainer.run_once()
+    published = trainer.advance_job()
     assert published is not None and published.metrics["training_job"]["event"] == "checkpoint"
     assert trainer.pending_job_data is None
-    trainer.commit(trainer.prepare_commit(published))
+    trainer.settle_commit(trainer.prepare_commit(published))
     assert JobLoopState.from_dict(trainer.state).job == RunningJob("job-1", 1)
 
 
 @pytest.mark.unit
 def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_start(component):
     trainer = job_trainer(JobLoopState("/start", RunningJob("lost")), component)
-    ended = trainer.run_once()
+    ended = trainer.advance_job()
     assert ended is not None and ended.metrics["training_job"]["event"] == "failed"
-    trainer.commit(trainer.prepare_commit(ended))
+    trainer.settle_commit(trainer.prepare_commit(ended))
     state = JobLoopState.from_dict(trainer.state)
     assert (state.job, state.start, state.finished_jobs) == (None, "/start", 1)
     # With the job ended, the ready batch becomes the next job, from the kept start.
-    assert trainer.run_once() is not None
+    make_samples(trainer)
+    assert trainer.advance_job() is not None
     [job] = component.jobs
     assert job.start == "/start"
 
@@ -356,8 +371,8 @@ def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_sta
 class EndedJobs(ThresholdSamples):
     """Threshold samples that keep each job outcome the pipeline gives them, in order."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext) -> None:
+        super().__init__(context)
         self.outcomes: list[JobOutcome] = []
 
     def job_ended(self, outcome: JobOutcome) -> None:
@@ -369,46 +384,50 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     stages: list[EndedJobs] = []
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        stages.append(EndedJobs())
+        stages.append(EndedJobs(context))
         return TrainingPipeline(
             context,
-            record2record=ReportRecord2Record(context, ReportGrouping()),
             record2sample=stages[-1],
-            sample2job=ThresholdJobData(context, None, None),
+            sample2job=ThresholdJobData(context, None, 1),
         )
 
     trainer = Trainer.build(
-        "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1
+        "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), root=STUB_ROOT
     )
     [ended] = stages
-    submitted = trainer.run_once()
-    trainer.commit(trainer.prepare_commit(submitted))
+    make_samples(trainer)
+    submitted = trainer.advance_job()
+    trainer.settle_commit(trainer.prepare_commit(submitted))
     [job] = component.jobs
     saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
     component.statuses[job.job_id] = JobStatus(job.job_id, "running", (saved,))
-    published = trainer.run_once()
-    trainer.commit(trainer.prepare_commit(published))
+    published = trainer.advance_job()
+    trainer.settle_commit(trainer.prepare_commit(published))
     assert ended.outcomes == [], "neither the submission nor a checkpoint publication ends the job"
 
     metrics = {"rollout_rewards": {"task-a": [1.0, 0.0]}}
     component.statuses[job.job_id] = JobStatus(job.job_id, "finished", (saved,), metrics)
-    finished = trainer.run_once()
+    finished = trainer.advance_job()
     prepared = trainer.prepare_commit(finished)
     assert ended.outcomes == [], "the end is not durable before its commit settles"
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
+    assert ended.outcomes == [], "the samples service reads the end, not the commit"
+    make_samples(trainer)
     assert ended.outcomes == [JobOutcome(job.job_id, "fake", "finished", metrics)]
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
+    make_samples(trainer)
     assert len(ended.outcomes) == 1, "a settled commit is not applied again"
 
     # A restart can fall between the end's commit and the stage taking it: the next trainer gives it again.
-    Trainer.build(
+    restarted = Trainer.build(
         "math",
         scored_records(),
         pipeline_factory=pipeline,
         job_loop=loop_with(component),
         algorithm_state=trainer.algorithm_state_dict(),
-        default_job_samples=1,
     )
+    assert stages[-1].outcomes == [], "a control process that makes no samples never feeds the stage"
+    make_samples(restarted)
     assert stages[-1].outcomes == ended.outcomes
 
 
@@ -422,19 +441,29 @@ class TrajectoryAndTaskJobData(Sample2Job):
         return JobData(data_id, samples)
 
 
-def train_record(record_id: str, parameters: dict) -> AgentRecord:
-    payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": parameters}
-    return AgentRecord.create(
-        scenario="math", request_type=RequestType.TRAIN, payload=payload, agent_record_id=record_id
-    )
+def train_record(record_id: str, parameters: dict, sample_id: str) -> TrainingRequest:
+    payload = {
+        "text": "train",
+        "session": "s-1",
+        "artifact_id": "r-1",
+        "parameters": parameters,
+        "samples": [sample_id],
+    }
+    return TrainingRequest.from_dict(payload, request_id=record_id)
 
 
 @pytest.mark.unit
-def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruction(component, tmp_path):
-    session = SQLiteScenarioStorage(tmp_path / "records").open("math")
-    trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
-    session.samples.add_trajectories((("t1", trajectory),))
-    session.samples.add_tasks((write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path / "a"),), "train")
+def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request(component, tmp_path):
+    session, samples = open_sample_store(tmp_path / "records", "math")
+    trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
+    task = write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path)
+    samples.data.create(
+        samples.owner,
+        [
+            NewItem("t1", trajectory.trajectory, {"kind": "trajectory", "scenarios": {"math": "train"}}),
+            NewItem("task-a", task, {"kind": "task", "scenarios": {"math": "train"}}),
+        ],
+    )
     trainer = Trainer.build(
         "math",
         session.records,
@@ -443,28 +472,25 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         ),
         job_loop=loop_with(component),
         training_mode="manual",
-        samples=TrainerSamples(session.samples),
-        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their instruction.
-        job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
-        default_job_samples=1,
+        samples=samples.for_trainer(""),
+        # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
+        job_parameters={"trajectory": {"objective": "sft", "learning_rate": 1e-5}},
+        root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
 
-    def train(sample_id: str, record: AgentRecord) -> dict:
-        pipeline.insert_into_buffer((sample_id,))
-        pipeline.push(record)
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+    def train(record: TrainingRequest) -> dict:
+        pipeline.queue_requests([record])
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         job = component.jobs[-1]
         component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
-        # A scenario's commit removes the trained sample from the manual buffer; this trainer has no scenario.
-        pipeline.remove_from_buffer((sample_id,))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         return dict(job.parameters)
 
-    assert train("t1", train_record("sft", {"learning_rate": 2e-5})) == {"method": "sft", "learning_rate": 2e-5}
-    rl = {"method": "task_group", "rollout": {"rollouts_per_task": 4}}
-    assert train("task-a", train_record("rl", rl)) == rl
-    assert [type(sample).__name__ for job in component.jobs for sample in job.data.samples] == [
+    assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"objective": "sft", "learning_rate": 2e-5}
+    rl = {"objective": "provided:Objective", "rollout": {"rollouts_per_task": 4}}
+    assert train(train_record("rl", rl, "task-a")) == rl
+    assert [type(sample).__name__ for job in component.jobs for sample in read_job_data(job.data_dir).samples] == [
         "TrajectorySample",
         "TaskSample",
     ]

@@ -3,7 +3,7 @@
 Spindle's ``save_state`` writes a full-parameter checkpoint's Hugging Face weights next to its training state, in
 the deployment's checkpoint Volume, at ``<name>/<model_id>/`` for the path ``tinker://<model_id>/weights/<name>``.
 Spindle serves no download of them. So a function on Modal mounts the Volume, adds the base's tokenizer and chat
-template, and commits the files to the release repo; the release then refers to that commit, which any serving
+template, and commits the files to the snapshot repo; the snapshot then refers to that commit, which any serving
 runtime loads.
 """
 
@@ -22,8 +22,11 @@ from reef.train.tinker_backend.config import SpindleFullConfig
 CHECKPOINT_MOUNT = "/checkpoints"
 #: The files of a checkpoint directory that are its Hugging Face weights; the rest is training state.
 WEIGHT_FILES = ("config.json", "generation_config.json", "model.safetensors.index.json")
-#: The base's files that a model needs beside its weights: its tokenizer, chat template and processor.
+#: The base's files that a model needs beside its weights: its tokenizer, chat template, processor and generation
+#: config. Spindle saves no generation config, and without one a serving engine stops only at the tokenizer's EOS
+#: token, not at the chat template's end-of-turn token. A checkpoint's own file of the same name replaces the base's.
 BASE_FILES = (
+    "generation_config.json",
     "tokenizer*",
     "*.jinja",
     "chat_template*",
@@ -49,9 +52,10 @@ class CheckpointExporter(ABC):
 
     Values: ``export(state_path, base)`` returns a commit of the exporter's release repo whose files are exactly the
     weights of the checkpoint at ``state_path`` (its safetensors, ``config.json`` and ``generation_config.json``) and
-    the tokenizer, chat template and processor files of ``base``. It raises ``ValueError`` for a path that names no
+    the tokenizer, chat template, processor and generation config files of ``base``; a checkpoint's file replaces the
+    base's file of the same name. It raises ``ValueError`` for a path that names no
     checkpoint with weights, and ``RuntimeError`` when the export fails. Purpose: the Spindle full-parameter
-    component exports each saved checkpoint, so that its release refers to the weights on the Hub.
+    component exports each saved checkpoint, so that its snapshot refers to the weights on the Hub.
     """
 
     @abstractmethod

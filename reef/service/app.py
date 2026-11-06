@@ -13,13 +13,15 @@ from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
-from reef.service.auth import create_authentication_middleware, normalize_tokens
+from reef.service.auth import normalize_tokens
 from reef.service.cors import configure_browser_access
-from reef.service.errors import translate_errors
+from reef.service.engine_clients import DeploymentEngineClients
+from reef.service.harness_imports import QueuedImports
+from reef.service.inference_service import InferenceReplica, ServedModelsCache
 from reef.service.lifecycle import (
     LifecycleSettings,
     PendingWrites,
@@ -31,17 +33,19 @@ from reef.service.lifecycle import (
     register_admission,
 )
 from reef.service.request_service import InferenceRetryPolicy, RequestService
-from reef.service.routes import register_routes
+from reef.service.routes import register_data_service_routes, register_routes
+from reef.service.routes.harness import register_harness_routes
+from reef.service.routes.records import register_record_routes
+from reef.service.routes.routed_chat import register_routed_chat
 from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import PreviewSettings, RoutingPreviewClient
+from reef.service.web import service_application
 from reef.storage.records import RecordRetention
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
-#: The largest request body the service reads. aiohttp's default is 1 MiB, and a coding agent's first call carries
-#: its whole context: Claude Code with a dozen MCP servers and a few hundred skills sends several MiB, which the
-#: default answered with 413 and the agent reported as a request too large.
-MAX_REQUEST_BYTES = 64 * 1024 * 1024
+#: How often the data service calls ``DataStore.maintain``.
+DATA_STORE_MAINTENANCE_SECONDS = 300.0
 REQUEST_SERVICE_KEY = web.AppKey("reef_request_service", RequestService)
 #: The private lifecycle application of a managed child; ``serve_managed`` serves it on the control socket.
 CONTROL_APPLICATION = web.AppKey("reef_control_application", web.Application)
@@ -129,6 +133,94 @@ class RoutingPublication(RoutingPublisher):
         self.request_service.routing = self.candidate(manifest_path, snapshot_version, router_config_hash)
 
 
+def maintain_data_store(app: web.Application, dispatcher: Dispatcher) -> None:
+    """While ``app`` runs, call ``DataStore.maintain`` every ``DATA_STORE_MAINTENANCE_SECONDS``, when ``dispatcher``
+    runs the data service and has a data store. A failed call is logged, and the next call tries again."""
+    data_store = dispatcher.data_store
+    if not dispatcher.services.runs_data or data_store is None:
+        return
+
+    async def maintain(app: web.Application):
+        stopped = asyncio.Event()
+
+        async def run() -> None:
+            while not stopped.is_set():
+                try:
+                    await asyncio.to_thread(data_store.maintain)
+                except Exception:
+                    logger.exception("data store maintenance failed; will retry on the next run")
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=DATA_STORE_MAINTENANCE_SECONDS)
+                except TimeoutError:
+                    continue
+
+        task = asyncio.create_task(run())
+        try:
+            yield
+        finally:
+            # Let a running call finish before the dispatcher closes the data store.
+            stopped.set()
+            await task
+
+    app.cleanup_ctx.append(maintain)
+
+
+def create_data_app(
+    dispatcher: Dispatcher,
+    *,
+    tokens: str | Iterable[str] | None = None,
+    console_origins: Iterable[str] = (),
+) -> web.Application:
+    """The HTTP app of the data service: the data routes and the reads of what each scenario stores.
+
+    ``dispatcher`` runs the data service and no control (``reef serve --component data``): it loads each scenario
+    on demand, for the checks of a data write and for the reads. The app closes it on cleanup.
+    """
+    if not dispatcher.services.runs_data:
+        raise ValueError("the data app runs the data service: build its dispatcher with the data service")
+    request_service = RequestService(dispatcher)
+    app = service_application(tokens)
+    configure_browser_access(app, console_origins)
+    app[REQUEST_SERVICE_KEY] = request_service
+    register_data_service_routes(app, request_service=request_service, evaluations=ArtifactEvaluations(dispatcher))
+    maintain_data_store(app, dispatcher)
+
+    async def cleanup(app: web.Application) -> None:
+        await asyncio.to_thread(dispatcher.close)
+
+    app.on_cleanup.append(cleanup)
+    return app
+
+
+def create_harness_app(
+    dispatcher: Dispatcher,
+    *,
+    tokens: str | Iterable[str] | None = None,
+    console_origins: Iterable[str] = (),
+    inference_url: str | None = None,
+) -> web.Application:
+    """The HTTP app of the harness service: the routes that a harness client calls (RFC #1048, harness supplement).
+
+    ``dispatcher`` runs the harness service and no control (``reef serve --component harness``): it loads each
+    scenario on demand, without activating it, and reads its commits and artifacts. An import goes to control as a
+    ``harness_sync`` item (``QueuedImports``). ``inference_url`` is ``harness.inference_url``. The app closes the
+    dispatcher on cleanup.
+    """
+    if not dispatcher.services.runs_harness or dispatcher.services.runs_control:
+        raise ValueError("the harness app runs the harness service without control")
+    request_service = RequestService(dispatcher, inference_url=inference_url)
+    app = service_application(tokens)
+    configure_browser_access(app, console_origins)
+    app[REQUEST_SERVICE_KEY] = request_service
+    register_harness_routes(app, request_service=request_service, imports=QueuedImports(dispatcher.queue))
+
+    async def cleanup(app: web.Application) -> None:
+        await asyncio.to_thread(dispatcher.close)
+
+    app.on_cleanup.append(cleanup)
+    return app
+
+
 def create_app(
     dispatcher: Dispatcher,
     *,
@@ -145,6 +237,7 @@ def create_app(
     preview: PreviewSettings | None = None,
     evaluations: ArtifactEvaluations | None = None,
     artifact_imports: ArtifactImports | None = None,
+    harness_inference_url: str | None = None,
 ) -> web.Application:
     """Build the HTTP app around an existing dispatcher; close it only when requested.
 
@@ -167,6 +260,11 @@ def create_app(
     with reef-eval's Harbor lab and evaluates no new artifact.
     ``artifact_imports`` reads and holds artifact imports; None reads the
     built-in sources into the system's temporary directory.
+    ``harness_inference_url`` is ``harness.inference_url``: where a client's harness layer sends its model calls.
+
+    Without routing, the app runs the inference routes in the same process (``reef.service.inference_service``): they read
+    ``served_models`` and reach each row's engine through the runtime that inference serves it with, or through
+    ``inference_handler`` when the caller gives one.
     """
     # Read ``tokens`` once: an iterator is empty after one pass, and no tokens would turn authentication off.
     accepted_tokens = normalize_tokens(tokens)
@@ -189,16 +287,18 @@ def create_app(
         raise ValueError("an unmanaged routed app needs a verified router runtime hash")
     writes = None if lifecycle is None else PendingWrites()
     preview_client = None if preview is None else RoutingPreviewClient(preview)
+    publisher = dispatcher.publisher
+    if publisher is None:
+        raise ValueError("the Reef app runs control: build its dispatcher with the control service")
     request_service = RequestService(
-        dispatcher, retry_policy=inference_retry_policy, routing=routing, writes=writes, preview=preview_client
+        dispatcher,
+        inference_url=harness_inference_url,
+        retry_policy=inference_retry_policy,
+        routing=routing,
+        writes=writes,
+        preview=preview_client,
     )
-    app = web.Application(
-        middlewares=[
-            create_authentication_middleware(accepted_tokens, evaluation_tokens=evaluation_tokens),
-            translate_errors,
-        ],
-        client_max_size=MAX_REQUEST_BYTES,
-    )
+    app = service_application(accepted_tokens, evaluation_tokens=evaluation_tokens)
     app[REQUEST_SERVICE_KEY] = request_service
     if routing is not None:
         app.middlewares.insert(1, routed_routes_only)
@@ -223,17 +323,39 @@ def create_app(
         app.on_shutdown.append(finalize_requests)
     configure_browser_access(app, console_origins)
     artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations
-    register_routes(
-        app,
-        request_service=request_service,
-        inference_handler=inference_handler,
-        evaluations=artifact_evaluations,
-        imports=(
-            ArtifactImports(ArtifactSources.from_setting(()), Path(tempfile.gettempdir()) / "reef-artifact-imports")
-            if artifact_imports is None
-            else artifact_imports
-        ),
-    )
+    if routing is None:
+        runtime = dispatcher.recipe.runtime
+        replica = InferenceReplica(
+            ServedModelsCache(dispatcher.coordination.served_models),
+            dispatcher.record_storage,
+            (
+                DeploymentEngineClients(
+                    runtime,
+                    provider_key=None if runtime is None else runtime.provider_key,
+                    timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
+                )
+                if inference_handler is None
+                else FixedEngineClients(inference_handler)
+            ),
+            timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
+            for_codex=dispatcher.recipe.harness_adapter == "codex",
+        )
+        register_routes(
+            app,
+            request_service=request_service,
+            replica=replica,
+            evaluations=artifact_evaluations,
+            imports=(
+                ArtifactImports(
+                    ArtifactSources.from_setting(()), Path(tempfile.gettempdir()) / "reef-artifact-imports"
+                )
+                if artifact_imports is None
+                else artifact_imports
+            ),
+        )
+    else:
+        register_routed_chat(app, request_service=request_service)
+        register_record_routes(app, request_service=request_service)
     if routing is not None and preview_client is not None:
 
         async def run_selection(app: web.Application) -> AsyncIterator[None]:
@@ -258,6 +380,7 @@ def create_app(
             await asyncio.to_thread(artifact_evaluations.close)
 
     app.cleanup_ctx.append(evaluate_new_artifacts)
+    maintain_data_store(app, request_service.dispatcher)
     if record_retention is not None:
 
         async def maintain_records(app: web.Application):
@@ -312,8 +435,8 @@ def create_app(
 
 
 __all__ = [
-    "InferenceRetryPolicy",
     "RequestService",
     "create_app",
+    "create_data_app",
     "get_dispatcher",
 ]

@@ -37,60 +37,79 @@ and the circle-packing problems for 26 and 32 circles.
 How one step runs
 -----------------
 
-.. flow::
-   :loop: use the committed adapter for the next search step
+.. container:: flow
 
-   Select parents :: PUCT chooses one parent for each group
-   Generate rollouts :: each group samples sibling programs
-   Evaluate and report :: the task judge returns one score per rollout
-   Complete the grid :: Reef waits for every configured coordinate
-   Train the adapter :: Slime and Megatron perform one optimizer step
-   Publish weights :: SGLang loads the scenario's new LoRA revision
-   Commit search state :: the controller records the matching PUCT archive
+   Select parents
+       PUCT chooses one parent for each group
+
+   Generate rollouts
+       each group samples sibling programs
+
+   Evaluate and report
+       the task judge returns one score per rollout
+
+   Complete the grid
+       Reef waits for every configured coordinate
+
+   Train the adapter
+       Slime and Megatron perform one optimizer step
+
+   Publish weights
+       SGLang loads the scenario's new LoRA revision
+
+   Commit search state
+       the controller records the matching PUCT archive
+
+   :Loop: use the committed adapter for the next search step
 
 The harness chooses ``groups_per_step`` parent candidates and samples
 ``rollouts_per_group`` programs from each parent. A prompt contains the task
 instruction. When a parent already has a valid program, the prompt also contains
 that program, its reward, and the end of its recorded output.
 
-Every model request passes through Reef's OpenAI-compatible chat endpoint. The
-SGLang backend records the sampled token IDs, response loss mask, and rollout log
-probabilities. Reef assigns the scenario's current adapter to the request and
-records the adapter version with the inference.
+Every model request passes through Reef's OpenAI-compatible chat endpoint.
+Reef assigns the scenario's current adapter to the request and records the
+provider exchange with the artifact that answered. The record holds no tokens
+or log probabilities: the training component renders each rollout with the
+model's chat template.
 
 The task judge executes the generated program and computes its reward. The
 harness reports that reward with the inference receipt and the rollout's step,
-group, and position. The record stage, ``TTTDRecord2Record``, waits for every
-position in the grid. It rejects a grid that contains more than one release.
+group, and position. The record-to-sample stage, ``TTTDSamples``, waits for
+every position in the grid. It rejects a grid that contains more than one snapshot.
 ``TTTDJobData`` removes the groups with one reward value across all siblings
 after the grid reaches the barrier. If every group is constant, ``TTTDJobData``
 keeps one group so that the training runtime receives zero-signal job data.
 
 Slime computes adaptive-beta entropic leave-one-out advantages within each
-group. The loss uses the rollout log probabilities without PPO clipping and adds
-centered token KL against the frozen base model. Megatron updates rank-32 LoRA
+group. The loss uses the old-policy log probabilities without PPO clipping and
+adds centered token KL against the frozen base model. The training component
+computes the old-policy log probabilities with the weights of the step's
+start; with the default ``max_staleness`` of 0, these are the weights that
+sampled the grid. Slime refuses ``--use-rollout-logprobs``. Megatron updates rank-32 LoRA
 matrices on the attention and MLP projections. Reef publishes the adapter to
 SGLang after the optimizer step succeeds.
 
 The controller writes the updated PUCT archive to
 ``tttd-search-state.json`` with phase ``pending``. It waits for Reef's scenario
-step to advance and for the serving runtime load ID to change. It then records
-phase ``committed`` with the new scenario step and starts the next search step.
+step to advance and for the served artifact (``served_artifact_id``) to
+change. It then records phase ``committed`` with the new scenario step and
+starts the next search step.
 
 Configuration
 -------------
 
-The recipe has three pipeline stages: ``TTTDRecord2Record``, ``TTTDSamples``, and
-``TTTDJobData``. The deployment's ``pipeline`` section configures them. Write
-the step grid once, in the record stage. ``TTTDSamples`` and ``TTTDJobData`` read
-the grid from the record stage.
+The recipe has two pipeline stages: ``TTTDSamples`` and ``TTTDJobData``. The
+deployment's ``pipeline`` section configures them. Write the step grid once, in
+the record-to-sample stage. ``TTTDJobData`` reads the grid from
+``TTTDSamples``.
 
 .. code:: yaml
 
    recipe:
      implementation: recipes.tttd.recipe:TTTDRecipe
    pipeline:
-     record2record:
+     record2sample:
        config:
          groups_per_step: 8
          rollouts_per_group: 64
@@ -98,15 +117,24 @@ the grid from the record stage.
        config:
          job_samples: 512       # the grid: groups_per_step x rollouts_per_group
 
-.. config::
+.. container:: config
 
-   pipeline.record2record.config.groups_per_step | 8 | comparison groups in one step; at least one.
-   pipeline.record2record.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
-   pipeline.record2sample.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
-   pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
+   ``pipeline.record2sample.config.groups_per_step`` : 8
+       comparison groups in one step; at least one.
 
-``TTTDJobData`` reads only ``job_samples`` and ``buffer_size``. One job's data
+   ``pipeline.record2sample.config.rollouts_per_group`` : 64
+       siblings per group; at least two, since a group of one has no relative reward.
+
+   ``pipeline.record2sample.config.max_staleness`` : 0
+       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+
+   ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
+       train a report's trajectory of several model calls as one multi-turn sample; otherwise the report trains only the trajectory's last call.
+
+   ``pipeline.sample2job.config.job_samples`` : required
+       the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
+
+The config of ``TTTDJobData`` has only ``job_samples`` and ``buffer_size``. One job's data
 is always one complete grid: the pipeline stores a complete grid as one group
 of samples, and a job takes a whole group. ``job_samples`` must not exceed the grid's
 rollouts; with a larger one the scenario's pipeline fails to build. Leave
@@ -196,7 +224,8 @@ groups of two rollouts, one step, and thinking disabled; that run checks the
 integration path rather than the sampling budget used for the formal results.
 
 Reef writes its service log to ``work/erdos_min_overlap/reef.log``. The public
-status endpoint reports the scenario step and runtime load ID:
+status endpoint reports the scenario step and the served artifact
+(``served_artifact_id``):
 
 .. code:: bash
 
@@ -205,7 +234,7 @@ status endpoint reports the scenario step and runtime load ID:
      http://127.0.0.1:8900/reef/status
 
 The controller returns an error when the rollout count, scenario step, served
-release, or stored search identity does not match the current run. A successful
+artifact, or stored search identity does not match the current run. A successful
 exit confirms that Reef committed the requested number of training steps.
 
 Choose a problem
@@ -239,24 +268,41 @@ sum the radii. They do not use the sum reported by the generated program.
 Configure a trajectory
 ----------------------
 
-The grid has one source in ``serve.yaml``: ``pipeline.record2record.config``.
+The grid has one source in ``serve.yaml``: ``pipeline.record2sample.config``.
 The harness reads the same ``groups_per_step`` and ``rollouts_per_group``
 values, and ``steps`` and ``max_new_tokens`` from ``training.config``, when it
 starts. Slime's ``--global-batch-size`` and
 ``pipeline.sample2job.config.job_samples`` in that file must equal
 ``groups_per_step x rollouts_per_group``.
 
-.. config::
+.. container:: config
 
-   pipeline.record2record.config.groups_per_step | 8 | parent candidates selected for one step, in ``serve.yaml``.
-   pipeline.record2record.config.rollouts_per_group | 64 | sibling rollouts sampled from each parent, in ``serve.yaml``.
-   training.steps | 1 | search and optimizer steps, in ``serve.yaml``; the Slime command reads it as ``--num-rollout``.
-   training.max_new_tokens | 26000 | maximum completion length, in ``serve.yaml``.
-   MAX_WORKERS | 512 | concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
-   enable_thinking | True | Qwen3 chat-template thinking mode, in ``harness/harbor_agent.py``.
-   TTTD_SEQ_LENGTH | 30000 | training and serving context length; ``run.sh`` sets it per task, ``32768`` for packing, beside ``TTTD_MAX_TOKENS_PER_GPU`` and ``TTTD_LOG_PROBS_CHUNK_SIZE``.
-   num_gpus | 2 | the actor's GPU count in ``serve.yaml``; ``inference.num-gpus`` gives the two serving engines their own two GPUs. Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
-   TTTD_STATE_DIR | work/erdos_min_overlap | the durable state root, exported by ``run.sh`` as an absolute path because Ray workers and Git resolve a relative one from their own directories.
+   ``pipeline.record2sample.config.groups_per_step`` : 8
+       parent candidates selected for one step, in ``serve.yaml``.
+
+   ``pipeline.record2sample.config.rollouts_per_group`` : 64
+       sibling rollouts sampled from each parent, in ``serve.yaml``.
+
+   ``training.steps`` : 1
+       search and optimizer steps, in ``serve.yaml``; the Slime command reads it as ``--num-rollout``.
+
+   ``training.max_new_tokens`` : 26000
+       maximum completion length, in ``serve.yaml``.
+
+   ``MAX_WORKERS`` : 512
+       concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
+
+   ``enable_thinking`` : True
+       Qwen3 chat-template thinking mode, in ``harness/harbor_agent.py``.
+
+   ``TTTD_SEQ_LENGTH`` : 30000
+       training and serving context length; ``run.sh`` sets it per task, ``32768`` for packing, beside ``TTTD_MAX_TOKENS_PER_GPU`` and ``TTTD_LOG_PROBS_CHUNK_SIZE``.
+
+   ``num_gpus`` : 2
+       the actor's GPU count in ``serve.yaml``; ``inference.num-gpus`` gives the two serving engines their own two GPUs. Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
+
+   ``TTTD_STATE_DIR`` : work/erdos_min_overlap
+       the durable state root, exported by ``run.sh`` as an absolute path because Ray workers and Git resolve a relative one from their own directories.
 
 The reference grid contains ``8 x 64 = 512`` rollouts per optimizer step.
 Training starts after all configured coordinates have arrived. Completion length and the
@@ -468,11 +514,12 @@ before it can use an incompatible archive.
 
 A ``pending`` state contains the evaluated children for a step that the
 controller has not observed as committed. On restart, the controller waits for
-that transaction. A ``committed`` state records the scenario step and serving
-runtime load ID that completed it. Serving runtime-load-ID strings belong to one
-engine session, so a restored checkpoint can receive a new string after the
-runtime starts. The controller accepts the new string after Reef restores the
-expected scenario step.
+that transaction. A ``committed`` state records the scenario step and the
+served artifact ID that completed it. The served artifact can change without a
+step, for example when an operator activates another artifact. On restart, the
+controller accepts the artifact that serves after Reef restores the expected
+scenario step, and records it. The controller refuses a state file of an older
+format, such as one that names a runtime load ID.
 
 The repository example creates a checkpoint every two versions and retains the
 latest checkpoint under its storage policy. The formal circle-packing jobs used

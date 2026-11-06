@@ -1,20 +1,19 @@
-# Verbatim port of Gen-Verse/OpenClaw-RL's paper objective (Eq. 1):
-# ruff: noqa: RET504, RUF005, SIM108, RUF019 — verbatim upstream kernel, style kept as-is
+# Port of Gen-Verse/OpenClaw-RL's paper objective (Eq. 1):
+# ruff: noqa: RET504, RUF019 — verbatim upstream kernel, style kept as-is
 # openclaw-combine/openclaw_topk_select_loss.py plus the pure-tensor kernel it
 # imports from hint_opd_loss.py (_opd_one_sample, vocab-parallel gather/LSE,
-# masked lse/softmax) and hint_opd_select_loss.py (_overlap_count_per_token,
-# _select_k_star_per_token, _gather_along_K).
+# masked lse/softmax). Candidate selection from hint_opd_select_loss.py
+# lives in selection.py.
 #
 # Mechanical adaptations, each marked in place: vendored import paths; the
 # max_seq_lens kwarg dropped (older get_log_probs_and_entropy signature);
 # and the knobs upstream reads from OPENCLAW_TOPK_* env vars read from
 # ``args`` instead (reef carries them as --openclawrl-* flags; defaults match
-# the paper launcher). Everything else is upstream text.
+# the paper launcher). Selection is extracted; tensor arithmetic is preserved.
 #
-# ell_old on S^q is upstream's: gathered from the old-actor forward, never
-# from the serving engine. Reef's index set S^q still comes from the
-# generation-time capture — that is only an index set, and it is the one the
-# teacher was scored against.
+# S^q and ell_old on it are upstream's: the old actor's top-K and its
+# log-probs, which the pre-train hook computes from the weights the step starts
+# from, never from the serving engine.
 
 from __future__ import annotations
 
@@ -29,6 +28,7 @@ from megatron.core import mpu
 from slime.backends.megatron_utils.loss import get_log_probs_and_entropy, get_responses
 from slime.utils.ppo_utils import compute_approx_kl, compute_policy_loss
 
+from recipes.openclawrl.slime.selection import select_teacher_topk
 from reef.train.slime_backend.algorithm import objective
 
 logger = logging.getLogger(__name__)
@@ -340,84 +340,6 @@ def _opd_one_sample(
 # ---------------------------------------------------------------------------
 
 
-def _overlap_count_per_token(
-    student_idx: torch.Tensor,  # [R, K_q]
-    teacher_idx: torch.Tensor,  # [K, R, K_p]
-) -> torch.Tensor:
-    """``O[k, t] = | S^q_t ∩ S^p_{t,k} |`` via broadcasted equality.
-
-    Memory: ``[K, R, K_q, K_p]`` boolean intermediate. With K_q=K_p=20 and
-    R≤8192, K≤8 this is ~25 MB per sample — small.
-    """
-    eq = student_idx.unsqueeze(0).unsqueeze(-1) == teacher_idx.unsqueeze(-2)
-    return eq.any(dim=-1).sum(dim=-1).to(torch.long)  # [K, R]
-
-
-def _select_k_star_per_token(
-    overlap_kr: torch.Tensor | None,  # [K, R] or None for shortest
-    *,
-    hint_selection: str,
-    step_token_spans: list[list[int]] | None,  # per-sample list of [t0, t1]
-    R: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Compute ``k*(t) ∈ [0, K)`` per response token.
-
-    * ``shortest``         : ``k* = 0`` for every token (the rollout module
-      orders candidates shortest-first, so candidate 0 is the shortest hint
-      that survived the min-token / dedup filter). ``overlap_kr`` may be
-      ``None`` since no overlap signal is required.
-    * ``token_optimal``    : argmax over candidates per token.
-    * ``sequence_optimal`` : argmax over candidates per PRM step
-      (broadcast over tokens in the step). When ``step_token_spans`` is
-      missing/empty -- the case for the hint_opt_exp single-CoT pipeline
-      where the "sequence" IS the whole response -- this collapses to
-      per-sample argmax (one ``k*`` for every token in the response).
-    """
-    if hint_selection == "shortest":
-        return torch.zeros(R, dtype=torch.long, device=device)
-    if overlap_kr is None:
-        raise ValueError(f"overlap_kr is required for hint_selection={hint_selection!r}")
-    K, R_kr = overlap_kr.shape
-    if R_kr != R:
-        raise ValueError(f"overlap_kr R mismatch: {R_kr} vs {R}")
-    if K == 1:
-        return torch.zeros(R, dtype=torch.long, device=device)
-    if hint_selection == "token_optimal":
-        return overlap_kr.argmax(dim=0)  # [R]
-    if hint_selection == "sequence_optimal":
-        if not step_token_spans:
-            k_star_scalar = int(overlap_kr.sum(dim=-1).argmax().item())
-            return torch.full((R,), k_star_scalar, dtype=torch.long, device=device)
-        out = torch.zeros(R, dtype=torch.long, device=device)
-        for span in step_token_spans:
-            t0, t1 = int(span[0]), int(span[1])
-            t0 = max(0, min(t0, R))
-            t1 = max(t0, min(t1, R))
-            if t1 == t0:
-                continue
-            seg_score = overlap_kr[:, t0:t1].sum(dim=-1)  # [K]
-            out[t0:t1] = int(seg_score.argmax().item())
-        return out
-    raise ValueError(
-        f"Unknown --openclawrl-hint-selection: {hint_selection!r}. "
-        "Expected 'shortest' / 'token_optimal' / 'sequence_optimal'."
-    )
-
-
-def _gather_along_K(
-    cand_tensor: torch.Tensor,  # [K, R, *]
-    k_star_per_token: torch.Tensor,  # [R]
-) -> torch.Tensor:
-    """Slice ``cand_tensor[k*(t), t, ...]`` per token. Returns ``[R, *]``."""
-    R = cand_tensor.size(1)
-    trailing = cand_tensor.shape[2:]
-    expand_shape = (1, R, *trailing)
-    view_shape = (1, R) + tuple(1 for _ in trailing)
-    gather_idx = k_star_per_token.view(view_shape).expand(expand_shape)
-    return torch.gather(cand_tensor, dim=0, index=gather_idx).squeeze(0)
-
-
 # ---------------------------------------------------------------------------
 # Slime entry point
 # ---------------------------------------------------------------------------
@@ -502,11 +424,9 @@ def openclawrl_loss(
     )
     new_log_probs = torch.cat(log_probs_and_entropy["log_probs"], dim=0)
 
-    # Reef adaptation: old-policy log-probs come from the Megatron
-    # old-actor recompute for the sampled-token GRPO branch (upstream
-    # semantics), while the OPD branch's ell_old on S^q ships from the
-    # serving engine's generation-time top-K capture — the true rollout
-    # policy, replacing upstream's megatron old-actor top-K.
+    # Old-policy log-probs come from the Megatron old-actor recompute: for the
+    # sampled-token GRPO branch, and for the OPD branch's ell_old on S^q, which
+    # the pre-train hook gathers with the old actor's top-K (upstream semantics).
 
     grpo_pg_loss = torch.zeros((), device=logits.device, dtype=torch.float32)
     grpo_pg_clipfrac = torch.zeros((), device=logits.device, dtype=torch.float32)
@@ -574,8 +494,8 @@ def openclawrl_loss(
                 "(topk_log_probs / topk_indices) and the teacher top-K "
                 f"(prm_teacher_topk_log_probs{cand_suffix} / "
                 f"prm_teacher_topk_indices{cand_suffix}) in the batch. "
-                "Confirm the serving backend captures generation top-K and "
-                "the grader ships per-candidate teacher top-K tensors."
+                "Confirm the pre-train hook computed the student top-K and "
+                "the teacher pass filled the per-candidate teacher top-K tensors."
             )
         # Narrow the Optionals for the type checker; have_student/have_teacher
         # established this above.
@@ -625,86 +545,25 @@ def openclawrl_loss(
             t_lp_any_i = teacher_topk_lp_any[i].to(device=logits_chunk.device, dtype=torch.float32)
             t_idx_any_i = teacher_topk_idx_any[i].to(device=logits_chunk.device, dtype=torch.long)
 
-            if use_cand_keys:
-                # Multi-candidate path (subset in {student, overlap}):
-                # tensors are [K, R, K_p].
-                if t_idx_any_i.dim() != 3 or t_idx_any_i.size(1) != R:
-                    raise ValueError(
-                        "teacher topk_cand shape mismatch: "
-                        f"t_idx_cand={tuple(t_idx_any_i.shape)} vs R={R}; expected [K, R, K_p]"
-                    )
-                if t_lp_any_i.shape != t_idx_any_i.shape:
-                    raise ValueError(
-                        "teacher logp/idx cand shape mismatch: "
-                        f"lp={tuple(t_lp_any_i.shape)} idx={tuple(t_idx_any_i.shape)}"
-                    )
-
-                # Selection signal (only computed when needed).
-                if hint_selection == "shortest":
-                    overlap_kr = None
-                else:
-                    if subset_mode == "student":
-                        # Cand log-probs are at S^q (constant across k);
-                        # use each candidate's NATIVE top-K for the
-                        # overlap signal instead.
-                        if teacher_native_idx_cand is None:
-                            raise RuntimeError("student subset selection has no native teacher indices")
-                        sel_idx_src = teacher_native_idx_cand[i].to(device=logits_chunk.device, dtype=torch.long)
-                        if sel_idx_src.shape[1] != R:
-                            raise ValueError(
-                                "native_topk shape mismatch: "
-                                f"native={tuple(sel_idx_src.shape)} vs R={R}; expected [K, R, K_p]"
-                            )
-                    else:  # overlap
-                        sel_idx_src = t_idx_any_i
-                    overlap_kr = _overlap_count_per_token(s_idx, sel_idx_src)
-
-                spans_i = (
-                    step_spans_per_sample[i]
-                    if step_spans_per_sample is not None and i < len(step_spans_per_sample)
-                    else None
-                )
-                k_star_per_token = _select_k_star_per_token(
-                    overlap_kr,
-                    hint_selection=hint_selection,
-                    step_token_spans=spans_i,
-                    R=R,
-                    device=logits_chunk.device,
-                )
-
-                # Slice cand tensors at k*(t).
-                t_lp_sel = _gather_along_K(t_lp_any_i, k_star_per_token)
-                if subset_mode == "student":
-                    # Force kernel's S^p to S^q (cand indices are already
-                    # constant across k under student subset; this keeps
-                    # the contract explicit).
-                    t_idx_sel = s_idx
-                else:  # overlap
-                    t_idx_sel = _gather_along_K(t_idx_any_i, k_star_per_token)
-
-                if overlap_kr is None:
-                    # ``shortest``: report selected-overlap as 0 so the
-                    # wandb panel is well-defined and visibly distinct
-                    # from the optimal modes (where it ≈ K_q for student).
-                    overlap_sel_per_token = torch.zeros(R, device=logits_chunk.device, dtype=torch.float32)
-                else:
-                    row_idx = torch.arange(R, device=overlap_kr.device)
-                    overlap_sel_per_token = overlap_kr[k_star_per_token, row_idx].float()
-            else:
-                # Legacy single-cand path (subset == teacher): the actor
-                # has already done k*-selection AND re-gathered
-                # student-old log-probs at the chosen S^p. We consume
-                # the collapsed [R, K_p] tensors directly.
-                if t_idx_any_i.dim() != 2 or t_idx_any_i.size(0) != R:
-                    raise ValueError(
-                        f"teacher topk shape mismatch: t_idx={tuple(t_idx_any_i.shape)} vs R={R}; expected [R, K_p]"
-                    )
-                if t_lp_any_i.shape != t_idx_any_i.shape:
-                    raise ValueError("teacher log-prob and index shapes must match")
-                t_idx_sel = t_idx_any_i
-                t_lp_sel = t_lp_any_i
-                overlap_sel_per_token = torch.zeros(R, device=logits_chunk.device, dtype=torch.float32)
-                k_star_per_token = torch.zeros(R, device=logits_chunk.device, dtype=torch.long)
+            native_indices = (
+                teacher_native_idx_cand[i]
+                if subset_mode == "student" and hint_selection != "shortest" and teacher_native_idx_cand is not None
+                else None
+            )
+            spans_i = (
+                step_spans_per_sample[i]
+                if use_cand_keys and step_spans_per_sample is not None and i < len(step_spans_per_sample)
+                else None
+            )
+            t_idx_sel, t_lp_sel, overlap_sel_per_token, k_star_per_token = select_teacher_topk(
+                s_idx,
+                t_lp_any_i,
+                t_idx_any_i,
+                subset_mode=subset_mode,
+                hint_selection=hint_selection,
+                native_teacher_indices=native_indices,
+                step_token_spans=spans_i,
+            )
 
             pg_t, clip_t, diff_t, drift_t, valid_t = _opd_one_sample(
                 logits_chunk,
@@ -867,12 +726,20 @@ def _same_weights(backuper: Any, left: str, right: str) -> bool:
 
 @objective("reef_actor_pre_train_hook_path")
 def openclawrl_actor_pre_train(actor: Any, rollout_data: dict) -> None:
-    """Run the frozen-teacher K-loop over the batch's hint candidates."""
+    """Compute the student's top-K S^q and ell_old on it with the weights the step starts from, then run the
+    frozen-teacher K-loop over the batch's hint candidates at S^q."""
     if not rollout_data.get("teacher_tokens_cand"):
         return
-    from slime.utils.timer import timer
+    from slime.observability.timer import timer
 
     from recipes.openclawrl.slime.teacher import compute_openclaw_teacher_cands
+    from reef.train.slime_backend.distill.teacher import student_topk
 
+    args = actor.args
+    budget = int(getattr(args, "max_tokens_per_gpu", 0) or args.seq_length)
+    with timer("openclaw_student_topk"):
+        topk_indices, topk_log_probs = student_topk(actor, rollout_data, budget, top_k=int(args.openclawrl_topk))
+    rollout_data["topk_indices"] = topk_indices
+    rollout_data["topk_log_probs"] = topk_log_probs
     with timer("openclaw_teacher"):
         compute_openclaw_teacher_cands(actor, rollout_data)

@@ -10,7 +10,7 @@ For each step of ``PROMPTS_PER_STEP`` training prompts, in the order
               that sample's receipt
     learn   — Reef's recipe batches the step's reports, runs one optimizer
               step and publishes the weights; the loop blocks on that
-              release, so the next step samples from the updated policy
+              snapshot, so the next step samples from the updated policy
 
 Every ``EVAL_EVERY`` steps, and before the first, the stage submits its step
 number to the task's judge, which scores the served model on both skills'
@@ -55,6 +55,8 @@ def main() -> None:
     if STEPS:
         schedule = schedule[:STEPS]
     client = skills.make_client()
+    # The inference routes serve only a scenario that exists: create it before the first model call.
+    client.post("/reef/scenarios", skills.SCENARIO, {"name": skills.SCENARIO})
     print(
         f"[{TASK}] {len(examples)} training prompts, {len(schedule)} steps of {PROMPTS_PER_STEP} "
         f"({EPOCHS} epochs, seed {SEED}); service {skills.SERVICE_URL}, scenario {skills.SCENARIO}",

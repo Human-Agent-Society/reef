@@ -4,14 +4,12 @@ A recipe is *how records and their feedback become a new version of the
 weights or the harness*. This package holds everything a method binds to:
 
 - ``base`` — ``Recipe`` (the default record-only recipe and base contract:
-  ``build``, ``build_surface``) and
-  ``WeightTrainingRecipe`` with its
-  ``WeightTrainingSpec`` (training objective and data processor).
-- ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
-- ``composite`` — ``CompositeRecipe`` binds one recipe per release component
+  ``build``, ``build_components``) and
+  ``WeightTrainingRecipe``, with its default job parameters.
+- ``harness`` — ``HarnessEvolutionRecipe``, the recipe contract every harness
+  evolution method extends; it assembles ``reef.train.harness_backend``.
+- ``composite`` — ``CompositeRecipe`` binds one recipe per snapshot component
   and runs their trainers side by side in one scenario.
-- ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement,
-  gated by a health floor.
 - ``registry`` — dotted class resolution (``recipe_class_for``) and
   ``build_named_recipe`` for a deployment preset.
 - ``config_fields`` — one dataclass field as the whole configuration surface
@@ -24,21 +22,21 @@ every ``Recipe`` carries ``activation``, built from the top-level
 artifact that training makes serves. The contract lives in
 ``reef.core.activation``; the built-in rules live in ``reef.evaluation``.
 
-Reefine and supervised fine-tuning (``sft``) are bundled; other learning
+Supervised fine-tuning (``sft``) is bundled; other learning
 methods live outside the core package. The repository's sibling
 ``recipes`` tree contains cookbook implementations, but Reef neither imports
 them at boot nor ships them in its wheel. Deployments select one explicitly by
 its dotted ``package.module:ClassName`` reference.
 
 The recipe decides; it does not execute or deliver. ``build`` returns a
-``Trainer``, ``build_surface`` the release's components with their serving
-capabilities and admission checks, and the scenario binds them with the
+``Trainer``, ``build_components`` the snapshot's components with their kinds,
+admission checks and client file trees, and the scenario binds them with the
 runtime as peers. Scenario coordination consumes recipes. Recipes depend on ``train``, ``harness``,
-``surface``, ``storage``, and ``runtime``; none imports this package. Concrete
+``artifact``, ``storage``, and ``runtime``; none imports this package. Concrete
 weight backends are loaded only when a weight-training recipe builds them.
 """
 
-from reef.recipe.base import Recipe, WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config import load_recipe_config
 from reef.recipe.config_fields import config_field
@@ -50,7 +48,6 @@ __all__ = [
     "Recipe",
     "RecipeConfigError",
     "WeightTrainingRecipe",
-    "WeightTrainingSpec",
     "build_named_recipe",
     "build_recipe",
     "config_field",

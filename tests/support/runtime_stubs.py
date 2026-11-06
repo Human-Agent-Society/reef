@@ -3,18 +3,29 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact import Artifact, BaseArtifactSource
+from reef.artifact import Artifact, DefaultStart
+from reef.core.evaluation import PolicyModel
+from reef.core.job_data import Sample
+from reef.core.served_models import ServedArtifact
+from reef.core.snapshot import RootSource
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import InferenceProxyRuntime
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.inference.interfaces import InferenceBackend
+from reef.inference.serving import OpenedEngines, ServingEngines
+from reef.storage.job_data import read_job_data
+from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
-#: The release format of a stub component that does not name one.
-FULL_WEIGHTS = ReleaseFormat("full")
+#: The artifact format of a stub component that does not name one.
+FULL_WEIGHTS = ArtifactFormat("full")
 #: The file a stub checkpoint holds: the version name that serving the checkpoint reports.
 VERSION_FILE = "model.txt"
+#: The root snapshot of a trainer that a test builds outside a scenario; a stub's ``root_start`` does not read it.
+STUB_ROOT = ScenarioRoot(Artifact.local(Path("stub-root")), RootSource("default"))
 
 
 class StubTrainingComponent(TrainingComponent):
@@ -25,10 +36,10 @@ class StubTrainingComponent(TrainingComponent):
     saves the checkpoints that :meth:`train` returns; the default saves one
     checkpoint, ``<checkpoint_root>/<n>``, that holds ``model.txt`` with the
     version name ``w<n>`` for the ``n``-th job. ``submitted`` lists the jobs
-    in submission order and ``imported`` the releases given to
+    in submission order and ``imported`` the snapshots given to
     :meth:`import_start`. ``shares_scenarios`` is what the component reports
-    for :attr:`TrainingComponent.shares_scenarios`, and ``release_format`` for
-    :attr:`TrainingComponent.release_format` (full weights by default). Like
+    for :attr:`TrainingComponent.shares_scenarios`, and ``artifact_format`` for
+    :attr:`TrainingComponent.artifact_format` (full weights by default). Like
     the Tinker component, it runs task jobs that carry a ``rollout`` object.
     """
 
@@ -38,12 +49,12 @@ class StubTrainingComponent(TrainingComponent):
         *,
         name: str = "stub",
         shares_scenarios: bool = False,
-        release_format: ReleaseFormat | None = FULL_WEIGHTS,
+        artifact_format: ArtifactFormat | None = FULL_WEIGHTS,
     ) -> None:
         self.checkpoint_root = checkpoint_root
         self.backend_name = name
         self.scenarios_shared = shares_scenarios
-        self.releases = release_format
+        self.releases = artifact_format
         self.submitted: list[TrainingJob] = []
         self.imported: list[Path] = []
         self.statuses: dict[str, JobStatus] = {}
@@ -58,20 +69,24 @@ class StubTrainingComponent(TrainingComponent):
         return self.scenarios_shared
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
+    def artifact_format(self) -> ArtifactFormat | None:
         return self.releases
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         if not isinstance(parameters.get("rollout"), Mapping):
             raise ValueError("a task job needs the rollout parameter as an object")
 
-    def base_artifact_source(self) -> BaseArtifactSource:
+    def default_start(self) -> DefaultStart:
         """An empty base: a stub checkpoint is any directory."""
-        return BaseArtifactSource(inputs={"model": self.backend_name})
+        return DefaultStart(inputs={"model": self.backend_name})
 
     @property
     def base_start(self) -> str:
         return f"{self.backend_name}:base"
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
+        return self.base_start
 
     def import_start(self, release: Path) -> str:
         self.imported.append(release)
@@ -108,22 +123,60 @@ class StubTrainingComponent(TrainingComponent):
         self.closed = True
 
 
-class StubInferenceRuntime(InferenceProxyRuntime):
-    """An inference proxy that records the releases it serves.
+@dataclass(frozen=True)
+class RecordedJob:
+    """What a component got for one job: the data of its job data directory, and the ID of its training request."""
 
-    A release serves under the version its ``model.txt`` names, or under its
+    data_id: str
+    samples: tuple[Sample, ...]
+    request_id: str | None
+
+
+class RecordingComponent(StubTrainingComponent):
+    """A training component that keeps what it got for every job it ran, in ``batches``, and saves no checkpoint, so
+    each job ends at once in ``submit``.
+
+    Purpose: a test of how a trainer reads, batches and commits records, which trains nothing worth publishing.
+    """
+
+    def __init__(self, batches: list[RecordedJob] | None = None, *, name: str = "recording") -> None:
+        super().__init__(name=name, shares_scenarios=True)
+        self.batches: list[RecordedJob] = [] if batches is None else batches
+
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        data = read_job_data(job.data_dir, job.data_id)
+        self.batches.append(RecordedJob(data.data_id, data.samples, job.request_id))
+        return ()
+
+
+class StubInferenceRuntime(InferenceProxyRuntime):
+    """An inference proxy that records the snapshots it serves.
+
+    A snapshot serves under the version its ``model.txt`` names, or under its
     release ID when it holds no such file. ``activated`` lists the versions
-    of the releases it served, at commits, activations and starts, in order;
+    of the snapshots it served, at commits, activations and starts, in order;
     ``served`` is the last one, ``None`` before the first one.
+
+    With ``answers_each_artifact``, the runtime answers each call from the artifact it names, as Tinker does: each
+    artifact has its own model name, ``sampler:<artifact_id>``.
     """
 
     def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
+        kwargs.setdefault("model_path", "stub-model")
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
         self.served: str | None = None
+        self.answers_each_artifact = False
 
-    def current_runtime_load_id(self) -> str | None:
-        return self.served
+    @property
+    def serves_any_artifact(self) -> bool:
+        return self.answers_each_artifact
+
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        return PolicyModel("base", artifact.ref.revision)
+
+    def serve_artifact(self, artifact: Artifact) -> ServedArtifact:
+        return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         version = self.serve(artifact)
@@ -133,7 +186,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     def serve(self, artifact: Artifact) -> str:
         path = artifact.local_path
         marker = None if path is None else Path(path) / VERSION_FILE
-        version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.release_id
+        version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.revision
         self.served = version
         return version
 
@@ -159,3 +212,21 @@ def job_sized_stages(
     sample2job = stages.setdefault("sample2job", {})
     sample2job["config"] = {"job_samples": job_samples, **sample2job.get("config", {})}
     return PipelineConfig.from_setting(stages, spec=spec, environ={})
+
+
+class RunningEngines(ServingEngines):
+    """Engines that a test started behind ``backend`` and stops: opening returns them as new engines, and closing
+    stops nothing.
+
+    Purpose: the serving runtime tests run ``AdapterServingRuntime`` and ``FullWeightServingRuntime`` on fake engines.
+    """
+
+    def __init__(self, backend: InferenceBackend) -> None:
+        self.backend = backend
+
+    @property
+    def base_url(self) -> str:
+        return self.backend.inference_url()
+
+    def open(self) -> OpenedEngines:
+        return OpenedEngines(self.backend, attached=False)

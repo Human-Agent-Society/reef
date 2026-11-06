@@ -6,22 +6,27 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
+from reef.core.chat_rendering import TeacherRequest
 from reef.core.config import config_option
 from reef.core.job_data import TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record, ReportContext
-from reef.record2sample import ReportSamples, SkippedReport
+from reef.record2sample import ReportContext, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.distill import recorded_sample, teacher_overflow
+from reef.record2sample.distill import student_sample
 
 
 @dataclass(frozen=True)
 class OPDSettings(SampleAssemblySettings):
-    """The config of ``OPDSamples``: the teacher's window and the sample assembly. OPD loads no tokenizer."""
+    """The config of ``OPDSamples``: the teacher's window and the sample assembly.
+
+    Values: ``max_teacher_tokens`` is a non-negative int, 0 for no limit; the other keys are as in
+    ``SampleAssemblySettings``. The constructor refuses other values.
+    Purpose: ``OPDSamples.from_config`` parses it from ``pipeline.record2sample.config``.
+    """
 
     max_teacher_tokens: int = config_option(
-        0, help="The longest teacher sequence the trainer scores; a longer report is skipped. 0 is no limit."
+        0, help="The longest teacher sequence the trainer scores; a longer sample does not train. 0 is no limit."
     )
 
     def __post_init__(self) -> None:
@@ -31,21 +36,18 @@ class OPDSettings(SampleAssemblySettings):
 
 
 class OPDSamples(ReportSamples):
-    """One report, one sample: the student's policy tensors, and the same captured ids as the teacher sequence.
+    """One report, one sample: the student's call, whose own sequence the teacher scores.
 
-    Re-rendering the messages can change the sampled prefix, for example a
-    thinking switch or a prefill. A teacher with the student's tokenizer
-    instead reads the exact prompt and response ids that the inference
-    engine recorded, so this stage loads no tokenizer. A sequence longer
-    than ``max_teacher_tokens`` is skipped and counted in
-    ``teacher_overflow_reports``, as in ``DistillSamples``.
+    The sample is the student's call as an ATIF trajectory with a teacher request that names no messages
+    (``TeacherRequest``): the training component renders the student's sequence with the model's chat template and
+    gives the teacher that same sequence. A sequence longer than ``max_teacher_tokens`` does not train. Each report
+    trains by itself and owns its inference records.
     """
 
-    def __init__(self, settings: OPDSettings) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext, settings: OPDSettings) -> None:
+        super().__init__(context, exclusive_sources=True, max_staleness=settings.max_staleness)
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
-        self.overflow_count = 0
 
     @classmethod
     def from_config(
@@ -53,27 +55,19 @@ class OPDSamples(ReportSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(OPDSettings.parse(config, plugin_class=cls))
+        return cls(context, OPDSettings.parse(config, plugin_class=cls))
 
-    def operational_metrics(self) -> Mapping[str, float | int]:
-        return {"teacher_overflow_reports": self.overflow_count}
-
-    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         report = context.parsed_report
         if not isinstance(report, TeacherContextReport):
             raise ValueError("OPD requires TeacherContextReport")
         if report.teacher_context:
             raise ValueError("OPD teacher_context must be empty: the teacher reads the student's sequence")
         # The teacher's distribution is the signal; the reported score is not a reward.
-        sample = recorded_sample(self.assembly, context, 0.0)
-        teacher_tokens = list(sample.training["tokens"])
-        if teacher_overflow(context, teacher_tokens, self.max_teacher_tokens):
-            self.overflow_count += 1
-            return SkippedReport("teacher_overflow")
-        return sample.with_training(teacher_tokens=teacher_tokens)
+        sample = student_sample(self.assembly, context, 0.0)
+        return sample.with_metadata(teacher=TeacherRequest(max_tokens=self.max_teacher_tokens).as_json())
 
 
 __all__ = ["OPDSamples", "OPDSettings"]

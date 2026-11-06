@@ -26,10 +26,11 @@ class TrajectorySample:
     the agent records the trajectory came from. Purpose: the record-to-sample
     stage makes the value, and the training component reads it.
 
-    The document is the single source of trajectory data. Reef-specific feedback,
-    captured provider records, and exact training tensors live in ``extra.reef``.
-    ``training`` reads its ``training`` object without reconstructing tokens.
-    Full ATIF validation and algorithm-required fields belong to the consumer.
+    The document is the single source of trajectory data. Reef-specific feedback, captured provider records and
+    the training fields live in ``extra.reef``. A sample that a record-to-sample stage makes carries no tokens: the
+    training component renders it (``reef.core.chat_rendering``) and writes the tokens into ``training``. A task
+    rollout of a training component carries the exact tokens that its engine sampled. Full ATIF validation and
+    algorithm-required fields belong to the consumer.
     """
 
     trajectory: Mapping[str, Any]
@@ -64,11 +65,29 @@ class TrajectorySample:
 
     @property
     def training(self) -> Mapping[str, Any]:
-        """Captured training fields; absence does not authorize re-tokenization."""
+        """The training fields: the tokens and the loss mask once the sample is rendered or rolled out, and the
+        fields that a recipe adds."""
         training = self.metadata.get("training", {})
         if not isinstance(training, Mapping):
             raise ValueError("ATIF extra.reef.training must be an object")
         return training
+
+    @property
+    def artifact_id(self) -> str | None:
+        """The artifact that produced the trajectory: ``training.artifact_id``, which a rollout of a training component
+        names, else the ``artifact_id`` of the last call that the trajectory recorded (``extra.reef.records``), or
+        None when it names none, as an upload does."""
+        named = self.training.get("artifact_id")
+        if isinstance(named, str) and named:
+            return named
+        records = self.metadata.get("records")
+        last = records[-1] if isinstance(records, list) and records else None
+        if not isinstance(last, Mapping):
+            return None
+        payload = last.get("payload")
+        # A trajectory stored before records carried ``artifact_id`` names the artifact in the payload only.
+        recorded = last.get("artifact_id") or (payload.get("artifact_id") if isinstance(payload, Mapping) else None)
+        return recorded if isinstance(recorded, str) and recorded else None
 
     def with_metadata(self, **fields: Any) -> TrajectorySample:
         """Return a new document with updated Reef metadata, preserving other extensions."""
@@ -108,7 +127,7 @@ class TaskSample:
 
 
 #: One sample of job data: a trajectory that trains as it is, or a Harbor task that the training component rolls
-#: out. The record-to-sample stage makes samples, ``job_samples`` and the sample buffer count them, and
+#: out. The record-to-sample stage makes samples, ``job_samples`` and ``buffer_size`` count them, and
 #: ``JobData.samples`` holds them.
 Sample = TrajectorySample | TaskSample
 
@@ -121,14 +140,14 @@ def check_record_ids(record_ids: tuple[str, ...]) -> None:
 
 @dataclass(frozen=True)
 class JobData:
-    """The data of one training job: an ID, the samples in order, and the training instruction, if any.
+    """The data of one training job: an ID, the samples in order, and the training request, if any.
 
     Values: ``data_id`` is the ID that the training pipeline assigns,
     ``<scenario>:data:<number>`` for automatic data and
-    ``<scenario>:instruction:<request id>`` for an instruction's data.
+    ``<scenario>:request:<request id>`` for a request's data.
     ``samples`` is a tuple of ``TrajectorySample`` and ``TaskSample`` values in
     the order of the sample-to-job stage; it can be empty, for a harness step
-    that runs an instruction with no held samples. ``request`` is the training instruction that
+    that runs a request with no held samples. ``request`` is the training request that
     the data carries, or None. The constructor refuses other sample types.
     Purpose: ``Sample2Job.make_job_data`` makes it, and the training component
     (``TrainingJob.data``) or the harness backend reads it. The consuming
@@ -255,8 +274,8 @@ class JobOutcome:
     ``finished`` or ``failed``; ``metrics`` is the component's telemetry for the whole job, a mapping that
     encodes as JSON and that Reef records without reading, such as a task job's ``rollout_rewards``;
     ``error`` is a non-empty string exactly when ``event`` is ``failed``. Purpose: the weight trainer's job
-    loop makes it when it commits a job's end and keeps the last one in its state; the record-to-sample stage
-    (``Record2Sample.job_ended``) reads it.
+    loop makes it when it commits a job's end and keeps the last one in its state; the samples service gives it to the
+    record-to-sample stage (``Record2Sample.job_ended``).
     """
 
     job_id: str

@@ -34,28 +34,41 @@ The harness samples each question several times through Reef and scores
 every attempt. It reports each attempt with its score and its place in the
 grid. The recipe waits for the whole grid and trains on it in one step.
 
-.. flow::
-   :loop: the next grid is sampled from the updated weights
+.. container:: flow
 
-   Rollout :: several attempts at each question
-   Report :: each attempt's score and grid position against its receipt
-   Step* :: distil the teacher that read a correct sibling onto each attempt
-   Version :: publish the updated weights to the engine
+   Rollout
+       several attempts at each question
+
+   Report
+       each attempt's score and grid position against its receipt
+
+   **Step**
+       distil the teacher that read a correct sibling onto each attempt
+
+   Version
+       publish the updated weights to the engine
+
+   :Loop: the next grid is sampled from the updated weights
 
 How Reef implements it
 ----------------------
 
-SDPO has three pipeline stages
+SDPO has two pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
-``SDPORecord2Record`` groups the reports of one grid. ``SDPOSamples`` turns
-each rollout's report into a task. ``SDPOJobData`` makes one job's data of one complete grid.
+``SDPOSamples`` groups the reports of one grid and turns each rollout's report
+into one sample. ``SDPOJobData`` makes one job's data of one complete grid.
 
 The teacher's request is the question with the first correct attempt by
 another rollout appended, in the reference implementation's words. An attempt whose question no other rollout got right keeps the plain
 request and a sample weight of 0. It stays in the step's mean and has no
 target. A grid whose attempts came from different policy versions is dropped
-and listed in the pipeline's status. A teacher sequence over
-``max_teacher_tokens`` fails the step.
+and listed in the pipeline's status. Each sample carries its teacher's
+request in ``extra.reef.teacher``. The training component renders the
+teacher sequence with the model's chat template: the teacher prompt, cut to
+``max_teacher_prompt_tokens``, followed by the attempt's response tokens. It
+leaves out a sample whose teacher sequence is longer than
+``max_teacher_tokens``, and counts it in the job metric
+``unrenderable_samples``.
 
 The ``sdpo`` loss family is a thin family on the Slime backend's
 distillation base (`Loss families <../../developer-guide/loss-families.rst>`__)
@@ -64,8 +77,8 @@ that moves 5% toward the policy after every step. The loss is the
 Jensen-Shannon divergence over the student's top 100 tokens plus one bucket
 for the rest of the vocabulary. The student picks those tokens in one forward
 before the step, so the trainer needs zero dropout. Each token's loss is
-weighted by the capped ratio between the policy and the rollout engine's
-log-probs.
+weighted by the capped ratio between the policy and the old-policy
+log-probs, which the actor computes with the weights of the job's start.
 
 The report contract
 -------------------
@@ -85,14 +98,13 @@ example leaves it empty.
 Configuration
 -------------
 
-The deployment's top-level ``pipeline`` section configures the three stages.
-Each stage reads only its own ``config``. A later stage reads the values it
-needs from an earlier stage:
+The deployment's top-level ``pipeline`` section configures the two stages.
+Each stage reads only its own ``config``. The sample-to-job stage reads the
+values it needs from the record-to-sample stage:
 
-- ``record2record`` (``SDPORecord2Record``) sets the grid. ``SDPOSamples``
-  reads the grid from it.
-- ``record2sample`` (``SDPOSamples``) sets the teacher's tokenizer and windows.
-  ``SDPOJobData`` reads them from it.
+- ``record2sample`` (``SDPOSamples``) sets the staleness limit, the grid, and
+  the teacher's windows. ``SDPOJobData`` reads the grid and the
+  teacher settings from it.
 - ``sample2job`` (``SDPOJobData``) sets the job size and what the teacher reads.
 
 .. code:: yaml
@@ -100,14 +112,11 @@ needs from an earlier stage:
    recipe:
      implementation: recipes.sdpo.recipe:SDPORecipe
    pipeline:
-     record2record:
+     record2sample:
        config:
          max_staleness: 0
          groups_per_step: 32
          rollouts_per_group: 8
-     record2sample:
-       config:
-         tokenizer_path: /models/Qwen3-8B
          max_teacher_tokens: 18944
      sample2job:
        config:
@@ -116,26 +125,50 @@ needs from an earlier stage:
    training:
      config:
        global_batch_size: 256           # groups_per_step x rollouts_per_group
+     options:
+       apply-chat-template-kwargs: '{"enable_thinking": false}'   # as the engine samples
 
 Reef checks each stage's config when it loads the recipe. A stage key under
 ``recipe.config`` fails the deployment, and the error names the key's place
 in ``pipeline``.
 
-.. config::
+.. container:: config
 
-   pipeline.record2record.config.groups_per_step | 32 | questions in a grid.
-   pipeline.record2record.config.rollouts_per_group | 8 | attempts at each question. At least 2.
-   pipeline.record2sample.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
-   pipeline.record2sample.config.max_teacher_prompt_tokens | 10240 | the rendered teacher prompt is cut to this many tokens.
-   pipeline.record2sample.config.max_teacher_tokens | 18432 | a longer teacher sequence fails the step. Set it to the trainer's window. Must be at least ``max_teacher_prompt_tokens``.
-   pipeline.record2sample.config.enable_thinking | false | the chat template's thinking switch, set as the engine sampled.
-   pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
-   pipeline.sample2job.config.success_reward_threshold | 0.5 | an attempt at or above this score is correct.
-   pipeline.sample2job.config.allow_own_success_as_demonstration | false | let a correct attempt read its own response.
-   pipeline.sample2job.config.remove_thinking_from_demonstration | true | strip ``<think>`` blocks from the demonstration.
-   pipeline.sample2job.config.include_environment_feedback | false | add the report's ``teacher_context`` to the teacher's prompt.
-   pipeline.sample2job.config.environment_feedback_only_without_solution | true | use the feedback only when no correct sibling exists.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
+   ``pipeline.record2sample.config.groups_per_step`` : 32
+       questions in a grid.
+
+   ``pipeline.record2sample.config.rollouts_per_group`` : 8
+       attempts at each question. At least 2.
+
+   ``pipeline.record2sample.config.max_teacher_prompt_tokens`` : 10240
+       the rendered teacher prompt is cut to this many tokens.
+
+   ``pipeline.record2sample.config.max_teacher_tokens`` : 18432
+       a sample with a longer teacher sequence does not train. Set it to the trainer's window. Must be at least ``max_teacher_prompt_tokens``.
+
+   ``training.options.apply-chat-template-kwargs`` : none
+       the chat template arguments, as a JSON object, with which the component renders each sample. Set them as the engine samples, for example ``'{"enable_thinking": false}'``.
+
+   ``pipeline.sample2job.config.job_samples`` : required
+       the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
+
+   ``pipeline.sample2job.config.success_reward_threshold`` : 0.5
+       an attempt at or above this score is correct.
+
+   ``pipeline.sample2job.config.allow_own_success_as_demonstration`` : false
+       let a correct attempt read its own response.
+
+   ``pipeline.sample2job.config.remove_thinking_from_demonstration`` : true
+       strip ``<think>`` blocks from the demonstration.
+
+   ``pipeline.sample2job.config.include_environment_feedback`` : false
+       add the report's ``teacher_context`` to the teacher's prompt.
+
+   ``pipeline.sample2job.config.environment_feedback_only_without_solution`` : true
+       use the feedback only when no correct sibling exists.
+
+   ``pipeline.record2sample.config.max_staleness`` : 0
+       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 ``SDPOSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
@@ -148,24 +181,42 @@ at its default, ``job_samples``: a larger value can put two grids in one
 job's data.
 
 Slime takes ``--loss-type custom_loss`` and
-``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.
-The family adds its own flags:
+``--disable-compute-advantages-and-returns``, and refuses
+``--use-rollout-logprobs``. The family adds its own flags:
 
-.. config::
+.. container:: config
 
-   --sdpo-teacher | self | ``self`` is the model itself. ``separate`` is another checkpoint set by ``--sdpo-teacher-checkpoint``.
-   --sdpo-divergence | jsd | ``forward``, ``reverse`` or ``jsd``. ``--sdpo-jsd-beta`` is the teacher's weight in the mixture and defaults to 0.5.
-   --sdpo-top-k | 100 | tokens per position the divergence is computed on. 0 keeps the whole distribution.
-   --sdpo-top-k-source | student | who picks the tokens, ``student`` or ``teacher``.
-   --sdpo-top-k-distribution | tail | ``tail`` keeps the rest of the vocabulary as one bucket. ``renormalized`` conditions on the picked tokens.
-   --sdpo-teacher-update-rate | 0.05 | fraction of the policy mixed into the teacher after every step. 0 freezes the initial weights.
-   --sdpo-importance-sampling-level | token | ``token`` weights each token by its own ratio. ``sequence`` averages the ratio over the response.
-   --sdpo-importance-sampling-cap | 2.0 | cap of the importance weight. 0 disables the correction.
-   --sdpo-skip-response-tokens | 0 | response tokens at the start of every attempt left out of the loss.
+   ``--sdpo-teacher`` : self
+       ``self`` is the model itself. ``separate`` is another checkpoint set by ``--sdpo-teacher-checkpoint``.
+
+   ``--sdpo-divergence`` : jsd
+       ``forward``, ``reverse`` or ``jsd``. ``--sdpo-jsd-beta`` is the teacher's weight in the mixture and defaults to 0.5.
+
+   ``--sdpo-top-k`` : 100
+       tokens per position the divergence is computed on. 0 keeps the whole distribution.
+
+   ``--sdpo-top-k-source`` : student
+       who picks the tokens, ``student`` or ``teacher``.
+
+   ``--sdpo-top-k-distribution`` : tail
+       ``tail`` keeps the rest of the vocabulary as one bucket. ``renormalized`` conditions on the picked tokens.
+
+   ``--sdpo-teacher-update-rate`` : 0.05
+       fraction of the policy mixed into the teacher after every step. 0 freezes the initial weights.
+
+   ``--sdpo-importance-sampling-level`` : token
+       ``token`` weights each token by its own ratio. ``sequence`` averages the ratio over the response.
+
+   ``--sdpo-importance-sampling-cap`` : 2.0
+       cap of the importance weight. 0 disables the correction.
+
+   ``--sdpo-skip-response-tokens`` : 0
+       response tokens at the start of every attempt left out of the loss.
 
 The sampled reverse-KL mode also accepts score centering for training/inference
-mismatch. See `Score centering <../../developer-guide/loss-families.rst#score-centering>`__
-for the required loss options and sampler top-K capture. The default JSD
+mismatch. Score centering needs the sampler's recorded top-K, which samples
+that serving recorded do not carry. See `Score centering
+<../../developer-guide/loss-families.rst#score-centering>`__. The default JSD
 over top-K plus a tail bucket does not support it.
 
 Run the example

@@ -1,52 +1,98 @@
-"""Artifacts served beside the active release, each at its own URL (RFC #997)."""
+"""Artifacts served beside the active selection, each at its own URL (RFC #997)."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent, dispatcher, train
+from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
 from tests.support.runtime_stubs import runtime_bindings
 
+from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.artifact import ArtifactNotFound
 from reef.core.errors import ReefError
-from reef.core.evaluation import PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
-from reef.runtime.interfaces import InferenceHandler
+from reef.inference.interfaces import InferenceHandler
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
 
-class ReleaseEcho(InferenceHandler):
-    """Answer each call with the release it was given, so a test sees which release answered."""
+class ArtifactEcho(InferenceHandler):
+    """Answer each call with the snapshot it was given, so a test sees which snapshot answered."""
 
     def __init__(self) -> None:
-        self.release_ids: list[str] = []
+        self.artifact_ids: list[str] = []
 
     async def inference(self, artifact, path, payload):
         del path, payload
-        self.release_ids.append(artifact.ref.release_id)
-        return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
+        self.artifact_ids.append(artifact.artifact_id)
+        return {"choices": [{"message": {"content": "ok"}}]}
 
 
-def answering_each_release(runtime) -> None:
-    """Make the stub runtime answer each call from the release that the call names, as Tinker does."""
-    runtime.inference.artifact_model = lambda artifact: PolicyModel("base", artifact.ref.release_id)
+class NamedInference(ImportingInference):
+    """An ``ImportingInference`` whose engine serves every scenario under one model name, so inference writes the
+    scenario's ``served_models`` rows and the inference routes answer."""
+
+    def served_model_name(self, scenario: str) -> str:
+        return "stub-model"
+
+
+class NamedComponent(ImportingComponent):
+    """An ``ImportingComponent`` whose checkpoints a ``NamedInference`` serves."""
+
+    def __init__(self, checkpoint_dir) -> None:
+        super().__init__(checkpoint_dir)
+        self.inference = NamedInference(self.restore_order)
+
+
+def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, RepositoryBackendFactory]:
+    """The dispatcher of ``tests.support.artifact_versions.dispatcher`` whose runtime serves under a model name."""
+    component = NamedComponent(tmp_path / "exported")
+    backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    value = Dispatcher(
+        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        backend_factory,
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
+    )
+    return value, component, backend_factory
+
+
+def answering_each_artifact(runtime) -> None:
+    """Make the stub runtime answer each call from the snapshot that the call names, as Tinker does."""
+    runtime.inference.answers_each_artifact = True
 
 
 def two_artifacts(tmp_path):
     """A scenario that trained twice: the newest artifact is active, and ``older`` is the one before it."""
-    value, runtime, backend_factory = dispatcher(tmp_path)
-    answering_each_release(runtime)
+    value, runtime, backend_factory = serving_dispatcher(tmp_path)
+    answering_each_artifact(runtime)
     train(value, 1)
     train(value, 2)
-    newest, older, _ = value.list_artifacts("math")
+    newest, older, _ = value.get_or_create_scenario("math").artifacts()
     return value, runtime, backend_factory, newest, older
+
+
+def wait_for_serving(value: Dispatcher) -> None:
+    """Wait until inference publishes the scenario's current selection, or report its startup failure."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        item = value.coordination.served_models.current_request("math")
+        if item is not None and item.state == "finished":
+            return
+        if item is not None and item.state == "failed":
+            raise AssertionError(f"inference startup failed: {item.error}")
+        time.sleep(0.01)
+    raise AssertionError("inference did not publish the selected artifact")
 
 
 @pytest.mark.unit
@@ -56,8 +102,15 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
     async def run() -> None:
         value, _, _, newest, older = two_artifacts(tmp_path)
         served = value.serve("math", older["artifact_id"])
-        assert (served.artifact_id, served.release_id) == (older["artifact_id"], older["release_id"])
-        handler = ReleaseEcho()
+        assert served.artifact_id == older["artifact_id"]
+        wait_for_serving(value)
+        # The artifact served beside the active one has its own row, under the runtime's model name for it.
+        rows = value.coordination.served_models.read_scenario("math")
+        assert rows[older["artifact_id"]] == ServedArtifact(
+            older["artifact_id"], "http://trainer", f"sampler:{older['artifact_id']}"
+        )
+        assert rows["active"].model_name == "stub-model"
+        handler = ArtifactEcho()
         client = TestClient(TestServer(create_app(value, inference_handler=handler)))
         await client.start_server()
         try:
@@ -67,16 +120,16 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
                 f"/reef/scenarios/math/artifacts/{older['artifact_id']}/v1/chat/completions", json=CHAT
             )
             assert beside.status == 200
-            # The active release answers at its artifact's URL without a serve.
+            # The active selection answers at its artifact's URL without a serve.
             active = await client.post(
                 f"/reef/scenarios/math/artifacts/{newest['artifact_id']}/v1/chat/completions", json=CHAT
             )
             assert active.status == 200
-            assert handler.release_ids == [newest["release_id"], older["release_id"], newest["release_id"]]
-            # The record names the release that answered.
+            assert handler.artifact_ids == [newest["artifact_id"], older["artifact_id"], newest["artifact_id"]]
+            # The record names the snapshot that answered.
             record_id = beside.headers["x-reef-agent-record-id"]
             record = value.get_or_create_scenario("math").records.get("math", record_id)
-            assert record.artifact_ref.release_id == older["release_id"]
+            assert record.artifact_id == older["artifact_id"]
 
             missing = await client.post("/reef/scenarios/math/artifacts/missing/v1/chat/completions", json=CHAT)
             assert missing.status == 404
@@ -101,8 +154,8 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     # Serving the active artifact keeps it serving after another activation.
     value.serve("math", newest["artifact_id"])
     value.activate("math", older["artifact_id"])
-    assert scenario.current_artifact_ref().release_id == older["release_id"]
-    assert scenario.served_release(newest["artifact_id"]).release_id == newest["release_id"]
+    assert scenario.serving_artifact_id() == older["artifact_id"]
+    assert scenario.served_beside()[newest["artifact_id"]].selection.components == {"weights": newest["artifact_id"]}
     rows = {row["artifact_id"]: row for row in value.list_artifacts("math")}
     assert (rows[newest["artifact_id"]]["served"], rows[newest["artifact_id"]]["active"]) == (True, False)
     assert (rows[older["artifact_id"]]["served"], rows[older["artifact_id"]]["active"]) == (False, True)
@@ -112,14 +165,15 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     assert len(scenario.store.history()) == steps
 
     stopped = value.stop_serving("math", newest["artifact_id"])
-    assert (stopped.artifact_id, stopped.release.release_id) == (newest["artifact_id"], newest["release_id"])
+    assert stopped.artifact_id == newest["artifact_id"]
     assert [record.operation for record in scenario.store.history()[-3:]] == ["serve", "activate", "stop_serving"]
-    with pytest.raises(ArtifactNotFound):
-        scenario.served_release(newest["artifact_id"])
+    assert newest["artifact_id"] not in scenario.served_beside()
     with pytest.raises(ArtifactNotFound):
         value.stop_serving("math", newest["artifact_id"])
-    # The active release still answers at its artifact's URL.
-    assert scenario.served_release(older["artifact_id"]).release_id == older["release_id"]
+    # The active selection still answers at its artifact's URL; the stopped artifact has no row.
+    wait_for_serving(value)
+    rows = value.coordination.served_models.read_scenario("math")
+    assert older["artifact_id"] in rows and newest["artifact_id"] not in rows
     value.close()
 
 
@@ -130,15 +184,16 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
     value.close()
 
     component = ImportingComponent(tmp_path / "restarted-export")
-    answering_each_release(component)
+    answering_each_artifact(component)
     restarted = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, component.inference)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     scenario = restarted.get_or_create_scenario("math")
-    assert scenario.served_release(older["artifact_id"]).release_id == older["release_id"]
+    assert scenario.served_beside()[older["artifact_id"]].selection.components == {"weights": older["artifact_id"]}
     assert [row["artifact_id"] for row in restarted.list_artifacts("math") if row["served"]] == [older["artifact_id"]]
     restarted.close()
 
@@ -147,10 +202,10 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
 def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_serve(tmp_path) -> None:
     value, _, _ = dispatcher(tmp_path)
     train(value, 1)
-    older = value.list_artifacts("math")[-1]
+    older = value.get_or_create_scenario("math").artifacts()[-1]
     scenario = value.get_or_create_scenario("math")
     steps = len(scenario.store.history())
-    with pytest.raises(ReefError, match="answers only from the release it has loaded"):
+    with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
         value.serve("math", older["artifact_id"])
     assert len(scenario.store.history()) == steps
     value.close()
@@ -170,8 +225,6 @@ def test_serve_and_stop_serving_http_api(tmp_path, monkeypatch) -> None:
                 "scenario": "math",
                 "component": older["component"],
                 "artifact_id": older["artifact_id"],
-                "release_id": older["release_id"],
-                "content_id": older["content_id"],
             }
             listed = await (await client.get("/reef/scenarios/math/artifacts")).json()
             assert [row["artifact_id"] for row in listed["artifacts"] if row["served"]] == [older["artifact_id"]]
@@ -185,7 +238,6 @@ def test_serve_and_stop_serving_http_api(tmp_path, monkeypatch) -> None:
                 "scenario": "math",
                 "component": older["component"],
                 "artifact_id": older["artifact_id"],
-                "release_id": older["release_id"],
             }
             for path in ("serve", "stop-serving"):
                 missing = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": "missing"})

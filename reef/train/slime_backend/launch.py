@@ -4,7 +4,11 @@ Slime trains in the HTTP service's process: the runtime factory builds a
 ``SlimeTrainingComponent`` that owns its Ray session and training workers.
 Serving is not Slime's: the deployment's ``inference`` section configures it
 (``reef.service.deploy.serving``), and an activated checkpoint reaches the
-serving engines as files. A distillation teacher runs as its own service.
+serving engines as files. Each job runs in a driver of its own, which Slime
+places; Slime's native options in ``training.options`` reach it unread,
+including those of the rollout engines that a task job's rollouts call
+(``rollout-num-gpus``, ``colocate``, ``sglang-*``). A distillation teacher runs
+as its own service.
 """
 
 from __future__ import annotations
@@ -15,48 +19,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.config import config_value, interpolate_config
-from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, TrainingComponentFactory, http_readiness_command
-from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
-from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.runtime.jobs import TrainingComponent
+from reef.core.errors import DeployConfigError, RuntimeConfigError
+from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
+from reef.execution.executor.config import role_executor_settings, select_executor
+from reef.execution.processes import http_readiness_command
+from reef.storage.job_data import JobDataKind
+from reef.train.algos.registry import loss_family_refs
+from reef.train.component import TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import TrainingDeployment
-
-# These alter engine creation or topology outside Reef's inference request.
-# Reject argparse abbreviations as well as full names, even for omitted values.
-INFERENCE_LAUNCH_OPTIONS = frozenset(
-    {
-        "rollout-num-gpus",
-        "rollout-num-gpus-per-engine",
-        "rollout-external",
-        "rollout-external-engine-addrs",
-        "prefill-num-servers",
-    }
-)
-# Training and serving never share GPUs; these native options would make them.
-PLACEMENT_OPTIONS = frozenset({"colocate", "offload-rollout"})
-
-
-def refuse_serving_options(training_options: Mapping[str, Any]) -> None:
-    """Refuse native training options that would configure serving engines or share GPUs with them.
-
-    Serving engines are configured by the ``inference`` section alone, and
-    training and serving never share GPUs. Raise ``DeployConfigError`` for an
-    option (or an abbreviation of one) that does either.
-    """
-    for name in training_options:
-        if (
-            name.startswith(("sglang-", "router-"))
-            or "sglang".startswith(name)
-            or "router".startswith(name)
-            or any(flag.startswith(name) for flag in INFERENCE_LAUNCH_OPTIONS)
-        ):
-            raise DeployConfigError(
-                f"training.options.{name} configures inference; use inference.num-gpus, "
-                "inference.tensor-parallel-size or inference.options instead"
-            )
-        if any(flag.startswith(name) for flag in PLACEMENT_OPTIONS):
-            raise DeployConfigError(f"training.options.{name} shares GPUs between training and serving; remove it")
+from reef.train.slime_backend.objectives import resolve_slime_objective
 
 
 def require_ray_roles(config: dict[str, Any], *roles: str, backend: str) -> None:
@@ -114,8 +85,9 @@ TEACHER_URL_ENV = "REEF_DISTILL_TEACHER_URL"
 def slime_arguments(settings: Mapping[str, Any], *, loss_family: str, environ: Mapping[str, str]) -> list[str]:
     """Adapt the resolved service settings to the pinned Slime parser.
 
-    Slime starts no rollout engine (``--rollout-num-gpus 0``); the serving
-    engines are the inference section's. References such as
+    The arguments configure Slime only; the serving engines are the inference
+    section's, and a job's driver adds ``--rollout-num-gpus=0`` to a job that
+    rolls nothing out. References such as
     ``${reef.model_path}`` in the options resolve against ``settings``, and the
     teacher's URL comes from ``TEACHER_URL_ENV`` in ``environ``.
     """
@@ -132,7 +104,7 @@ def slime_arguments(settings: Mapping[str, Any], *, loss_family: str, environ: M
         if any(name in training_options for name in (*managed, f"{loss_family}-teacher-checkpoint")):
             raise DeployConfigError("teacher section replaces native teacher URL, model path, timeout and checkpoint")
         training_options.update(managed)
-    return [*native_arguments(training_options), *native_arguments({"rollout-num-gpus": 0})]
+    return native_arguments(training_options)
 
 
 #: The teacher engine's service name; the HTTP service, where Slime trains, reads its endpoint as
@@ -192,7 +164,7 @@ def teacher_service(settings: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 class SlimeDeployment(TrainingDeployment):
-    """Train with Slime in the HTTP service; the inference section serves its activated checkpoints."""
+    """Train each job with Slime in a driver of its own; the inference section serves its activated checkpoints."""
 
     supports_teacher_engine = True
     component_type = "reef.train.slime_backend.launch:component_factory"
@@ -204,7 +176,6 @@ class SlimeDeployment(TrainingDeployment):
         native_arguments(options)
         # Refuse a missing batch size at deploy time; the HTTP service reads it again, resolved.
         global_batch_size(expand_option_references(config, {"global-batch-size": options.get("global-batch-size")}))
-        refuse_serving_options(options)
         if options.get("use-rollout-routing-replay"):
             raise DeployConfigError(
                 "training.options.use-rollout-routing-replay needs each rollout's routed experts, "
@@ -219,7 +190,7 @@ class SlimeDeployment(TrainingDeployment):
         # Resolve/download the model once; Slime and the serving engines read that same path.
         options["hf-checkpoint"] = "${reef.model_path}"
         config["reef"].update(training_backend_options=options)
-        # The HTTP service loads the model into Slime's workers before it serves its first request.
+        # The HTTP service parses Slime's arguments, with Megatron's parser, before it serves its first request.
         config["ready_timeout"] = max(int(config.get("ready_timeout", 30)), int(settings["training_ready_timeout"]))
         teacher = teacher_service(settings)
         return () if teacher is None else (teacher,)
@@ -229,10 +200,20 @@ class SlimeDeployment(TrainingDeployment):
             return {}
         return {TEACHER_URL_ENV: f"${{endpoints.{TEACHER_SERVICE}}}"}
 
-    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(
+        self, settings: Mapping[str, Any], *, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        """The component config, whose startup loss family is that of the recipe's first default objective.
+
+        The trajectory kind comes first, then the task kind. No default objective leaves the family empty, which
+        the factory refuses, so a deployment can be checked without a recipe.
+        """
+        kinds: tuple[JobDataKind, ...] = ("trajectory", "task")
+        objectives = [default_parameters.get(kind, {}).get("objective") for kind in kinds]
+        objective = next((name for name in objectives if name), None)
         return {
             "type": self.component_type,
-            "loss_family": loss_family,
+            "loss_family": "" if objective is None else resolve_slime_objective(objective).loss_family,
             "recipe": settings["recipe"],
             "ray_address": settings["ray_address"] or os.environ.get("RAY_ADDRESS", ""),
             "namespace": settings["ray_namespace"],
@@ -251,7 +232,10 @@ class SlimeComponentFactory(TrainingComponentFactory):
     kind = SlimeDeployment.component_type
 
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
-        from reef.train.slime_backend.component import SlimeSettings, create_slime_component
+        loss_family = config["loss_family"]
+        if not loss_family:
+            raise RuntimeConfigError("Slime starts its workers with the loss family of the recipe's default objective")
+        from reef.train.slime_backend.component import SlimeSettings, SlimeTrainingComponent
         from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_TIMEOUT_S
 
         settings = config["settings"]
@@ -260,10 +244,11 @@ class SlimeComponentFactory(TrainingComponentFactory):
             raise RuntimeConfigError("Slime trains on a Ray cluster: set training.ray-address or RAY_ADDRESS")
         # SlimeSettings checks that the timeout is positive.
         train_timeout_s = config["train_timeout_s"]
-        return create_slime_component(
+        return SlimeTrainingComponent(
             SlimeSettings(
-                arguments=tuple(slime_arguments(settings, loss_family=config["loss_family"], environ=environ)),
-                loss_family=config["loss_family"],
+                arguments=tuple(slime_arguments(settings, loss_family=loss_family, environ=environ)),
+                # A job's driver is a new process, whose registry holds no family a recipe registered by name.
+                loss_family=loss_family_refs().get(loss_family, loss_family),
                 recipe=config["recipe"],
                 execution=config["execution"],
                 ray_address=ray_address,

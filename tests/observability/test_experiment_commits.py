@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.snapshot import SnapshotRef
 from reef.observability.base import (
     ExperimentTracker,
     TrainFromExperimentEvent,
@@ -54,7 +55,7 @@ def training_record(step: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=ArtifactRef(f"content-{step}", f"release-{step}", "seed"),
+        snapshot=SnapshotRef(f"release-{step}", "seed"),
         checkpoint=True,
         algorithm_state={"steps": step},
         high_water_sequence=0,
@@ -62,6 +63,7 @@ def training_record(step: int = 1) -> CommitRecord:
         component="weights",
         metrics={"score": 0.8},
         training_job_id=f"job-{step}",
+        selection=ArtifactSelection({"weights": f"release-{step}"}),
     )
 
 
@@ -73,12 +75,12 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
     storage = SQLiteScenarioStorage(tmp_path)
     inner = storage.open("math")
     tracker = RecordingTracker()
-    seed = ArtifactRef("seed-content", "seed", None)
+    seed = SnapshotRef("seed", None)
     observer = CommitExperimentObserver(
         tracker,
         scenario="math",
         recipe="recipe",
-        source_artifact_ref=seed,
+        source_artifacts=ArtifactSelection({"weights": seed.revision}),
         scenario_step=0,
         store=ObservedScenarioStore(inner, FailingTraceObserver()),
     )
@@ -87,7 +89,7 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         scenario="math",
         recipe="recipe",
         step=1,
-        source_artifact_ref=seed,
+        source_artifacts=ArtifactSelection({"weights": seed.revision}),
         component="weights",
         backend="stub",
         backend_config={"objective": "policy"},
@@ -115,7 +117,7 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         assert event.context == context
         assert event.metrics == landed.metrics
         assert event.metrics["experiment/run_id"] == "run-0"
-        assert event.produced_artifact_ref == landed.artifact_ref
+        assert event.produced_artifacts.components == landed.selection.components
         assert event.training_job_id == "job-1"
         assert event.checkpoint_path == "/checkpoint/1"
         assert observer.run_step == 1
@@ -130,31 +132,34 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
 def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(tmp_path: Path, failing: bool) -> None:
     tracker = RecordingTracker(failing=failing)
     storage = SQLiteScenarioStorage(tmp_path)
-    seed = ArtifactRef("seed-content", "seed", None)
+    seed = SnapshotRef("seed", None)
     observer = CommitExperimentObserver(
         tracker,
         scenario="math",
         recipe="recipe",
-        source_artifact_ref=seed,
+        source_artifacts=ArtifactSelection({"weights": seed.revision}),
         scenario_step=0,
         store=storage.open("math"),
     )
     store = observer.store
-    context = TrainingExperimentContext(scenario="math", recipe="recipe", step=1, source_artifact_ref=seed)
+    context = TrainingExperimentContext(
+        scenario="math", recipe="recipe", step=1, source_artifacts=ArtifactSelection({"weights": seed.revision})
+    )
     correlation = observer.prepare(context, checkpoint_path=None)
     assert correlation == ({} if failing else {"experiment/run_id": "run-0"})
     first = training_record()
 
-    def operation_record(step: int, operation: str, artifact_ref: ArtifactRef) -> CommitRecord:
+    def operation_record(step: int, operation: str, snapshot: SnapshotRef) -> CommitRecord:
         return CommitRecord(
             scenario="math",
             step=step,
-            artifact_ref=artifact_ref,
+            snapshot=snapshot,
             checkpoint=False,
             algorithm_state=None,
             high_water_sequence=0,
             high_water_offset=0,
             operation=operation,
+            selection=ArtifactSelection({"weights": snapshot.revision}),
         )
 
     start = operation_record(2, "train_from", seed)
@@ -163,7 +168,7 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
         store.commit_step(expected_step=1, commit=start)
         store.commit_step(expected_step=1, commit=start)
         # An activation of another artifact moves what serves and leaves the training run and its start alone.
-        store.commit_step(expected_step=2, commit=operation_record(3, "activate", first.artifact_ref))
+        store.commit_step(expected_step=2, commit=operation_record(3, "activate", first.snapshot))
         store.commit_step(expected_step=3, commit=training_record(4))
         # Retrying an earlier step after a later one must not move tracking backwards.
         store.commit_step(expected_step=0, commit=first)
@@ -172,9 +177,9 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
         assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [(0, 0), (2, 0)]
         (event,) = tracker.starts
         assert event.run_segment == 0 and event.step == 2
-        assert event.start_artifact_ref == seed
-        # The step after the new start names the training start as its source, not the active release.
-        assert tracker.events[-1].context.source_artifact_ref == seed
+        assert event.start_artifacts.components == {"weights": seed.revision}
+        # The step after the new start names the training start as its source, not the active selection.
+        assert tracker.events[-1].context.source_artifacts.components == {"weights": seed.revision}
     finally:
         store.close()
         storage.close()
@@ -185,26 +190,28 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
     """Training goes on from its own output, active or not; a step that made nothing leaves the start alone."""
     storage = SQLiteScenarioStorage(tmp_path)
     tracker = RecordingTracker()
-    seed = ArtifactRef("seed-content", "seed", None)
+    seed = SnapshotRef("seed", None)
     observer = CommitExperimentObserver(
         tracker,
         scenario="math",
         recipe="recipe",
-        source_artifact_ref=seed,
+        source_artifacts=ArtifactSelection({"weights": seed.revision}),
         scenario_step=0,
         store=storage.open("math"),
     )
     store = observer.store
     # The activation rule did not activate the artifact, but the next step trains from it.
     held = training_record()
-    rejected = replace(training_record(2), checkpoint=False, artifact_ref=seed, metrics={"selected": False})
+    rejected = replace(training_record(2), checkpoint=False, snapshot=seed, metrics={"selected": False})
     try:
         store.commit_step(expected_step=0, commit=held)
         store.commit_step(expected_step=1, commit=rejected)
         observer.reports.flush()
-        assert [event.produced_artifact_ref for event in tracker.events] == [held.artifact_ref, held.artifact_ref]
+        assert [event.produced_artifacts.components for event in tracker.events] == [
+            {"weights": held.snapshot.revision}
+        ] * 2
         assert tracker.events[-1].outcome == "rejected"
-        assert tracker.events[-1].context.source_artifact_ref == held.artifact_ref
+        assert tracker.events[-1].context.source_artifacts.components == {"weights": held.snapshot.revision}
     finally:
         store.close()
     inner = storage.open("math")
@@ -212,7 +219,7 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
         tracker,
         scenario="math",
         recipe="recipe",
-        source_artifact_ref=seed,
+        source_artifacts=ArtifactSelection({"weights": seed.revision}),
         scenario_step=2,
         store=inner,
     )
@@ -230,10 +237,15 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
 
 
 def training_event(step: int) -> TrainingExperimentEvent:
-    ref = training_record(step).artifact_ref
+    ref = training_record(step).snapshot
     return TrainingExperimentEvent(
-        context=TrainingExperimentContext(scenario="math", recipe="recipe", step=step, source_artifact_ref=ref),
-        produced_artifact_ref=ref,
+        context=TrainingExperimentContext(
+            scenario="math",
+            recipe="recipe",
+            step=step,
+            source_artifacts=ArtifactSelection({"weights": ref.revision}),
+        ),
+        produced_artifacts=ArtifactSelection({"weights": ref.revision}),
         metrics={},
         outcome="committed",
     )
@@ -293,3 +305,66 @@ def test_close_sends_the_queued_events_and_a_later_event_goes_at_once(monkeypatc
     assert [event.context.step for event in tracker.events] == [1, 2]
     reports.put(training_event(3))
     assert [event.context.step for event in tracker.events] == [1, 2, 3]
+
+
+def test_training_start_ids_stay_independent_across_components_and_recovery(tmp_path):
+    storage = SQLiteScenarioStorage(tmp_path)
+    tracker = RecordingTracker()
+    root = ArtifactSelection({"weights": "weights-root", "harness": "harness-root"})
+    observer = CommitExperimentObserver(
+        tracker,
+        scenario="math",
+        recipe="composite",
+        source_artifacts=root,
+        scenario_step=0,
+        store=storage.open("math"),
+    )
+    # A stored snapshot may carry other components' serving artifacts. They
+    # must not overwrite those components' independently selected training starts.
+    weights = replace(
+        training_record(),
+        selection=ArtifactSelection(
+            {
+                "weights": "weights-trained",
+                "harness": "harness-serving",
+            }
+        ),
+    )
+    harness = replace(
+        training_record(2),
+        component="harness",
+        selection=ArtifactSelection(
+            {
+                "weights": "weights-serving",
+                "harness": "harness-trained",
+            }
+        ),
+    )
+    try:
+        observer.store.commit_step(expected_step=0, commit=weights)
+        observer.store.commit_step(expected_step=1, commit=harness)
+        observer.reports.flush()
+        assert tracker.events[1].context.source_artifacts.components == {
+            "weights": "weights-trained",
+            "harness": "harness-root",
+        }
+        expected = {"weights": "weights-trained", "harness": "harness-trained"}
+        assert tracker.events[1].produced_artifacts.components == expected
+        observer.store.close()
+        recovered = CommitExperimentObserver(
+            tracker,
+            scenario="math",
+            recipe="composite",
+            source_artifacts=root,
+            scenario_step=2,
+            store=storage.open("math"),
+        )
+        try:
+            assert recovered.start_artifacts.components == expected
+        finally:
+            recovered.store.close()
+            recovered.reports.close()
+    finally:
+        observer.store.close()
+        observer.reports.close()
+        storage.close()

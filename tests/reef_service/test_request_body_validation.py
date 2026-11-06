@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
 from reef.service.wire import ReportPayload
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 HEADERS = {"x-reef-scenario": "body-validation"}
@@ -20,7 +21,15 @@ NON_OBJECTS = ([], "text", 1, True, None)
 @pytest.mark.unit
 def test_object_routes_reject_non_object_bodies_with_400() -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
+        client = TestClient(
+            TestServer(
+                create_app(
+                    build_default_dispatcher(
+                        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+                    )
+                )
+            )
+        )
         await client.start_server()
         try:
             json_headers = {**HEADERS, "Content-Type": "application/json"}
@@ -29,7 +38,13 @@ def test_object_routes_reject_non_object_bodies_with_400() -> None:
                     # data= so JSON null really travels as null; json=None would send no body at all.
                     response = await client.post(path, data=json.dumps(body), headers=json_headers)
                     assert response.status == 400, (path, body, response.status)
-                    assert "request body must be an object" in await response.text()
+                    # The inference routes read their body in the inference service, with its own message.
+                    expected = (
+                        "request body must be a JSON object"
+                        if path.startswith("/v1/")
+                        else "request body must be an object"
+                    )
+                    assert expected in await response.text()
                 empty = await client.post(path, data="", headers=json_headers)
                 assert empty.status == 400, (path, empty.status)
                 # A caller's malformed JSON stays the caller's 400; only a provider's is a 502.
@@ -59,7 +74,15 @@ def test_report_payload_keeps_finite_scores() -> None:
 @pytest.mark.unit
 def test_report_route_answers_400_for_a_non_finite_score() -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
+        client = TestClient(
+            TestServer(
+                create_app(
+                    build_default_dispatcher(
+                        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+                    )
+                )
+            )
+        )
         await client.start_server()
         try:
             # 1e999 decodes to infinity, so the value reaches the wire contract itself.
@@ -77,15 +100,23 @@ def test_report_route_answers_400_for_a_non_finite_score() -> None:
 
 
 @pytest.mark.unit
-def test_release_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None:
-    """#228 — an empty release_id is a malformed request, not a missing release."""
+def test_artifact_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None:
+    """#228 — an empty artifact_id is a malformed request, not a missing artifact."""
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
+        client = TestClient(
+            TestServer(
+                create_app(
+                    build_default_dispatcher(
+                        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+                    )
+                )
+            )
+        )
         await client.start_server()
         try:
             for path, key in (
-                ("/reef/scenarios", "release_id"),
+                ("/reef/scenarios", "artifact_id"),
                 ("/reef/scenarios/x/activate", "artifact_id"),
                 ("/reef/scenarios/x/train-from", "artifact_id"),
             ):
@@ -95,7 +126,7 @@ def test_release_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None
                     assert f"{key} must be a non-empty string" in await response.text()
 
                 if path == "/reef/scenarios":
-                    # create keeps its current behavior: no release_id is allowed there.
+                    # A scenario without artifact_id starts from the base.
                     missing = await client.post(path, json={"name": "s"})
                     assert missing.status != 400, (path, missing.status)
         finally:
@@ -105,25 +136,28 @@ def test_release_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None
 
 
 @pytest.mark.unit
-def test_create_scenario_strips_surrounding_whitespace_from_release_id() -> None:
-    """#228 — a supplied release_id is stripped before use, matching activate and train-from."""
+def test_create_and_update_refuse_the_retired_release_id_and_model_keys() -> None:
+    """RFC #1062: a scenario starts from an artifact item, and it has no model setting of its own."""
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
-        await client.start_server()
-        try:
-            # A whitespace-padded release id is stripped, so the lookup names "no-such-release",
-            # not " no-such-release " — the 404 blames the real (unknown) release id.
-            response = await client.post(
-                "/reef/scenarios", json={"name": "padded", "release_id": "  no-such-release  "}
+        dispatcher = build_default_dispatcher(
+            scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+        )
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            for key, value in (("release_id", "base"), ("model", {"url": "http://model.test", "model": "m"})):
+                response = await client.post("/reef/scenarios", json={"name": "s", key: value})
+                assert response.status == 400, (key, response.status)
+                text = await response.text()
+                assert key in text and "artifact_id" in text
+            component_alone = await client.post("/reef/scenarios", json={"name": "s", "component": "policy"})
+            assert component_alone.status == 400 and "artifact_id" in await component_alone.text()
+            assert not dispatcher.has_scenario("s")
+            assert (await client.post("/reef/scenarios", json={"name": "s"})).status == 201
+            update = await client.post("/reef/scenarios/s/update", json={"model": None})
+            assert (
+                update.status == 400
+                and "training_mode, artifact_evaluation, activation or serving_config" in await update.text()
             )
-            assert response.status == 404, response.status
-            body = await response.text()
-            assert "no-such-release" in body
-            assert '"  no-such-release  "' not in body
-            assert "no link for scenario" not in body
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
@@ -134,7 +168,15 @@ def test_activation_routes_reject_non_object_bodies_with_400(path: str) -> None:
     """#228 — activate and train-from share the read_object path with the other JSON routes."""
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
+        client = TestClient(
+            TestServer(
+                create_app(
+                    build_default_dispatcher(
+                        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+                    )
+                )
+            )
+        )
         await client.start_server()
         try:
             for body in NON_OBJECTS:
@@ -149,7 +191,9 @@ def test_activation_routes_reject_non_object_bodies_with_400(path: str) -> None:
 
 def test_report_route_rejects_missing_references_and_eligibility_flags() -> None:
     async def run() -> None:
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+        dispatcher = build_default_dispatcher(
+            scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+        )
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:

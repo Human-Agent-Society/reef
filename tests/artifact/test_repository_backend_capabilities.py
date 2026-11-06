@@ -7,15 +7,16 @@ import pytest
 from reef.artifact import (
     Artifact,
     ArtifactPublicationError,
-    ArtifactRef,
     EnumerableRepositoryBackendFactory,
     InMemoryRepositoryBackend,
     RegistrationAwareRepositoryBackendFactory,
     RepositoryBackend,
     RepositoryBackendFactory,
-    StagedReleaseRepositoryBackend,
+    SnapshotRef,
+    StagedSnapshotRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -25,40 +26,49 @@ class BasicBackend(RepositoryBackend):
     def __init__(self, delegate: InMemoryRepositoryBackend) -> None:
         self.delegate = delegate
 
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
-        return self.delegate.resolve_release(release_id)
+    def resolve_snapshot(self, revision: str) -> SnapshotRef:
+        return self.delegate.resolve_snapshot(revision)
 
-    def fork(self, release_id: str | None = None, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
-        return self.delegate.fork(release_id, metadata=metadata)
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
+        return self.delegate.artifact_snapshot(artifact_id)
+
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        return self.delegate.bind_artifact_id(artifact_id, ref)
+
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        return self.delegate.artifact_content(ref, artifact_id)
+
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
+        return self.delegate.register(root, metadata=metadata)
 
     def metadata(self) -> Mapping[str, object] | None:
         return self.delegate.metadata()
 
-    def current(self) -> ArtifactRef:
+    def current(self) -> SnapshotRef:
         return self.delegate.current()
 
-    def materialize(self, ref: ArtifactRef) -> Artifact:
+    def materialize(self, ref: SnapshotRef) -> Artifact:
         return self.delegate.materialize(ref)
 
-    def publish(self, artifact: Artifact, *, expected_parent: ArtifactRef, advance_head: bool = True) -> ArtifactRef:
+    def publish(self, artifact: Artifact, *, expected_parent: SnapshotRef, advance_head: bool = True) -> SnapshotRef:
         return self.delegate.publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
 
 
-class IncompleteStagedBackend(BasicBackend, StagedReleaseRepositoryBackend):
+class IncompleteStagedBackend(BasicBackend, StagedSnapshotRepositoryBackend):
     pass
 
 
 class UndeclaredStagedBackend(BasicBackend):
-    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
-        self.delegate.commit_release(ref, expected_parent=expected_parent)
+    def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
+        self.delegate.commit_snapshot(ref, expected_parent=expected_parent)
 
 
-class StagedBackend(UndeclaredStagedBackend, StagedReleaseRepositoryBackend):
+class StagedBackend(UndeclaredStagedBackend, StagedSnapshotRepositoryBackend):
     pass
 
 
 def test_factory_capabilities_are_declared_independently(tmp_path):
-    backend = InMemoryRepositoryBackend("math", tmp_path)
+    backend = InMemoryRepositoryBackend("math")
 
     class BasicFactory(RepositoryBackendFactory):
         def __call__(self, scenario):
@@ -80,7 +90,7 @@ def test_factory_capabilities_are_declared_independently(tmp_path):
     assert not isinstance(RegistrationFactory(), EnumerableRepositoryBackendFactory)
     assert isinstance(ListingFactory(), EnumerableRepositoryBackendFactory)
     assert not isinstance(ListingFactory(), RegistrationAwareRepositoryBackendFactory)
-    cached = InMemoryRepositoryBackend.factory(tmp_path)
+    cached = InMemoryRepositoryBackend.factory()
     assert isinstance(cached, RegistrationAwareRepositoryBackendFactory)
     assert isinstance(cached, EnumerableRepositoryBackendFactory)
 
@@ -90,10 +100,12 @@ def test_factory_capabilities_are_declared_independently(tmp_path):
 def test_commit_history_rejects_basic_backend_before_reading_or_changing_registration(
     tmp_path, monkeypatch, registered, backend_type
 ):
-    backend = backend_type(InMemoryRepositoryBackend("math", tmp_path))
+    backend = backend_type(InMemoryRepositoryBackend("math"))
     if registered:
         dispatcher = build_default_dispatcher(
-            backend_factory=lambda name: backend, scenario_storage=SQLiteScenarioStorage()
+            backend_factory=lambda name: backend,
+            scenario_storage=SQLiteScenarioStorage(),
+            coordination=memory_coordination(),
         )
         try:
             dispatcher.get_or_create_scenario("math")
@@ -107,11 +119,12 @@ def test_commit_history_rejects_basic_backend_before_reading_or_changing_registr
     dispatcher = build_default_dispatcher(
         backend_factory=lambda name: backend,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
     try:
         with monkeypatch.context() as patch:
             patch.setattr(backend, "metadata", unexpected_metadata)
-            with pytest.raises(ArtifactPublicationError, match="StagedReleaseRepositoryBackend"):
+            with pytest.raises(ArtifactPublicationError, match="StagedSnapshotRepositoryBackend"):
                 dispatcher.get_or_create_scenario("math")
         assert backend.metadata() == before
     finally:
@@ -119,34 +132,37 @@ def test_commit_history_rejects_basic_backend_before_reading_or_changing_registr
 
 
 def test_basic_backend_remains_usable_without_commit_log(tmp_path):
-    backend = BasicBackend(InMemoryRepositoryBackend("math", tmp_path))
+    backend = BasicBackend(InMemoryRepositoryBackend("math"))
     for _ in range(2):
         dispatcher = build_default_dispatcher(
-            backend_factory=lambda name: backend, scenario_storage=SQLiteScenarioStorage()
+            backend_factory=lambda name: backend,
+            scenario_storage=SQLiteScenarioStorage(),
+            coordination=memory_coordination(),
         )
         try:
             scenario = dispatcher.get_or_create_scenario("math")
             assert not scenario.store.durable
-            assert scenario.current_artifact_ref() == backend.current()
+            assert scenario.current_snapshot() == backend.current()
         finally:
             dispatcher.close()
 
 
 def test_staged_backend_requires_a_commit_implementation(tmp_path):
-    with pytest.raises(TypeError, match="commit_release"):
-        IncompleteStagedBackend(InMemoryRepositoryBackend("math", tmp_path))
+    with pytest.raises(TypeError, match="commit_snapshot"):
+        IncompleteStagedBackend(InMemoryRepositoryBackend("math"))
 
 
 def test_custom_staged_backend_can_create_and_recover_scenario_with_commit_log(tmp_path):
-    backend = StagedBackend(InMemoryRepositoryBackend("math", tmp_path))
+    backend = StagedBackend(InMemoryRepositoryBackend("math"))
     for _ in range(2):
         dispatcher = build_default_dispatcher(
             backend_factory=lambda name: backend,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         try:
             scenario = dispatcher.get_or_create_scenario("math")
             assert scenario.store.durable
-            assert scenario.current_artifact_ref() == backend.current()
+            assert scenario.current_snapshot() == backend.current()
         finally:
             dispatcher.close()

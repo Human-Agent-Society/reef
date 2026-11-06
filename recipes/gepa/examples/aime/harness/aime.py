@@ -1,12 +1,12 @@
 """The AIME benchmark as the GEPA method's task side: pins, scorer, feedback.
 
 Everything the method needs to know about AIME lives here, and nothing here
-knows about GEPA: ``evaluate`` and ``feedback`` are the two hooks
-``gepa.yaml`` names under ``evolution``, and the mechanism calls them with a
-task prompt and a rollout result. The answer table is keyed by the prompt
-text because that is all the mechanism carries - ``evolution.tasks`` is a
-list of strings - so the splits are loaded once and indexed by problem
-statement.
+knows about GEPA beyond its ``Feedback`` hook: ``gepa.yaml`` names the scorer
+as ``evolution.evaluation.scorer`` and the feedback as the method's
+``feedback``, and Reef calls them with a task prompt and a run result.
+The answer table is keyed by the prompt text because that is all a run
+carries - ``evolution.evaluation.tasks`` is a list of strings - so the splits
+are loaded once and indexed by problem statement.
 
 The upstream quickstart's scoring rule and its feedback wording are
 reproduced here rather than imported: this example exists to show the Reef
@@ -27,9 +27,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
-from recipes.gepa.method import Feedback
-from reef.evaluation.harness import RolloutScorer
-from reef.harness.rollouts.run import RolloutResult
+from recipes.gepa import Feedback
+from reef.evaluation.harness import TaskScorer
+from reef.harness.tasks.run import TaskResult
 
 # The Pi release the retained record ran and the example still targets; run.py
 # refuses any other binary version before it spends anything.
@@ -59,9 +59,8 @@ AIME_TEST_REVISION = "c94da77eb22bbd6439e62a323bec18493a421302"
 AIME_SPLIT_SIZES = {"train": 45, "validation": 45, "test": 150}
 AIME_DATASET_SHA256 = "74e81306a9a1debadd64c49a4ab3588615f7bb698b695a59c17c65dd3b895185"
 
-# The quickstart's seed prompt, and the extra node the multi-node variant
-# evolves beside it (REEF_GEPA_MULTI=1).
-RULES_SEED = "You are a helpful assistant. Answer the question. Put your final answer in the format '### <answer>'"
+# The extra node that the multi-node variant (REEF_GEPA_MULTI=1) evolves
+# beside the seed's rules.md.
 SKILL_SEED = """# AIME solver
 
 Solve each competition-math problem from first principles. Check the result,
@@ -70,19 +69,19 @@ then put only the final value after `###` on the last answer line.
 SKILL_SEED_NAME = "aime-solver"
 
 #: Prompt text to expected answer string, and prompt text to the optional
-#: context the feedback hook quotes. Filled by :func:`load_aime_splits`; the
-#: mechanism only ever passes tasks that came from those splits.
+#: context the feedback hook quotes. Filled by :func:`load_aime_splits`; Reef
+#: only ever passes tasks that came from those splits.
 ANSWERS: dict[str, str] = {}
 CONTEXTS: dict[str, dict[str, str]] = {}
 
 
 @dataclass(frozen=True)
-class AIMEScorer(Feedback, RolloutScorer):
+class AIMEScorer(Feedback, TaskScorer):
     """A pickleable snapshot, independent of any worker's module globals.
 
     The driver registry is only an input at recipe construction time. Later
     registrations do not change a running campaign's scoring or feedback.
-    These labels belong to the scorer, never to a rollout's prompt/files.
+    These labels belong to the scorer, never to a run's prompt/files.
     """
 
     answers: dict[str, str] = field(repr=False)
@@ -95,17 +94,17 @@ class AIMEScorer(Feedback, RolloutScorer):
     def answer_for(self, task: str) -> str:
         return _answer_for(self.answers, task)
 
-    def score(self, task: str, result: RolloutResult) -> float:
+    def score(self, task: str, result: TaskResult) -> float:
         return _evaluate(self.answers, task, result)
 
     def feedback(self, task: str, output: str, score: float) -> str:
         return _feedback(self.answers, self.contexts, task, output, score)
 
 
-class AIMEAnswerScorer(RolloutScorer):
-    """:func:`evaluate` over the benchmark splits registered in this process, as ``evolution.evaluate`` names it."""
+class AIMEAnswerScorer(TaskScorer):
+    """:func:`evaluate` over the splits registered in this process; ``evolution.evaluation.scorer`` names it."""
 
-    def score(self, task: str, result: RolloutResult) -> float:
+    def score(self, task: str, result: TaskResult) -> float:
         return _evaluate(ANSWERS, task, result)
 
 
@@ -160,7 +159,7 @@ def dataset_sha256(trainset, valset, testset) -> str:
 
 
 def register(*splits: Sequence[Mapping[str, Any]]) -> None:
-    """Index every split by problem statement, the only key the mechanism carries."""
+    """Index every split by problem statement, the only key a run carries."""
     for split in splits:
         for example in split:
             ANSWERS[str(example["input"])] = str(example["answer"])
@@ -181,17 +180,17 @@ def _answer_for(answers: Mapping[str, str], task: str) -> str:
         raise RuntimeError(f"no AIME answer is registered for this task: {task[:120]!r}") from None
 
 
-def evaluate(task: str, result: RolloutResult) -> float:
-    """The quickstart's containment score over one Pi rollout.
+def evaluate(task: str, result: TaskResult) -> float:
+    """The quickstart's containment score over one Pi run.
 
-    A dirty rollout - a non-zero exit or a file the adapter did not declare -
+    A dirty run - a non-zero exit or a file the adapter did not declare -
     scores zero rather than being read for an answer, so a broken harness can
     never be selected on the strength of stdout it happened to leave behind.
     """
     return _evaluate(ANSWERS, task, result)
 
 
-def _evaluate(answers: Mapping[str, str], task: str, result: RolloutResult) -> float:
+def _evaluate(answers: Mapping[str, str], task: str, result: TaskResult) -> float:
     if result.exit_code != 0 or result.residue:
         return 0.0
     response = final_assistant_text(result.trajectory) or result.stdout

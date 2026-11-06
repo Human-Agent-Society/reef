@@ -1,4 +1,4 @@
-"""The weight files of a Tinker release for Reef's engines: the adapter at its sampler path, downloaded once."""
+"""The weight files of a Tinker artifact for Reef's engines: the adapter at its sampler path, downloaded once."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ import pytest
 
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
-from reef.runtime.serving import ReleaseFiles
-from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.inference.serving import ArtifactWeightFiles
+from reef.tinker.checkpoint import TinkerArtifact
 from reef.tinker.weights import TinkerSamplerWeights
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 
 MODEL = "Qwen/Qwen3-8B"
 CHECKPOINT = TinkerCheckpoint(MODEL, 32, "tinker://run/weights/4", "tinker://run/sampler_weights/4")
@@ -129,5 +130,13 @@ def test_a_release_the_weights_cannot_give_is_refused(tmp_path, sdk, monkeypatch
 @pytest.mark.unit
 def test_a_release_without_an_adapter_gives_no_adapter_files(tmp_path):
     with pytest.raises(ReefError, match="holds no PEFT adapter in adapter/"):
-        ReleaseFiles().weight_files(tmp_path, "adapter")
-    assert ReleaseFiles().weight_files(tmp_path, "full").path == tmp_path
+        ArtifactWeightFiles().weight_files(tmp_path, "adapter")
+    assert ArtifactWeightFiles().weight_files(tmp_path, "full").path == tmp_path
+
+
+def test_the_serving_side_reads_the_sampler_of_a_whole_manifest():
+    manifest = replace(CHECKPOINT, algorithm_state={"steps": 2}, objective="sao", service="https://spindle.example")
+    release = TinkerArtifact.from_dict(manifest.to_dict())
+    assert release == TinkerArtifact(MODEL, CHECKPOINT.sampler_path, "https://spindle.example")
+    with pytest.raises(ValueError, match="manifest version"):
+        TinkerArtifact.from_dict({**manifest.to_dict(), "schema_version": 2})

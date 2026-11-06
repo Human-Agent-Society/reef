@@ -3,8 +3,8 @@ Reef CLI: serve
 
 ``reef serve`` reads a deployment config and starts every
 process the config declares, in dependency order. (The wheel also installs
-``reef-native`` and ``reef-terminus``, the loop runners those two harness
-adapters launch per rollout; nothing calls them by hand.)
+``reef-native``, the loop runner that the ``native`` adapter launches per
+rollout; nothing calls it by hand.)
 
 .. code:: bash
 
@@ -22,43 +22,59 @@ Once the stack is running, Ctrl-C requests graceful shutdown. Pressing it
 again during shutdown skips the remaining 30-second grace period and proceeds
 to forced cleanup of the managed service processes.
 
-.. config::
+.. container:: config
 
-   -c, --config | optional config file. No file is loaded unless explicitly selected.
-   --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``reefine``.
-   --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
-   --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
-   --help | the command list
-   -V, --version | the installed reef version. Takes no command: ``reef --version``.
+   ``-c, --config``
+       optional config file. No file is loaded unless explicitly selected.
 
-Starting a recipe's profile
----------------------------
+   ``--model [PROVIDER/]MODEL``
+       the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
 
-A built in recipe can carry a profile: one deployment config that is the same
-for every deployment of that recipe except the model. ``--recipe`` starts it
-without a file of your own:
+   ``--component NAME``
+       run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation`` or ``data``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
 
-.. code:: bash
+   ``--print-config``
+       print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
 
-   reef serve --recipe reefine \
-     --inference.upstream-url http://127.0.0.1:11434 \
-     --inference.upstream-model gemma4:26b
+   ``--help``
+       the command list
 
-Select a file with ``-c`` or a built-in profile with ``--recipe``. With neither,
-Reef uses CLI inference settings and does not discover ``$REEF_CONFIG`` or
-``reef.yaml``. The profile selector is a launcher option; configuration values
-use their full public namespaces as shown above.
+   ``-V, --version``
+       the installed reef version. Takes no command: ``reef --version``.
+
+Check artifacts before an upgrade
+---------------------------------
+
+.. code-block:: bash
+
+   reef check-artifacts -c path/to/stack.yaml
+
+The command checks that each scenario's commit history resolves to stored
+files. It prints each problem, and it exits with status 1 when it finds one and
+0 when it finds none. See the `upgrade steps
+<../user-guide/operate.rst#upgrade-from-a-reef-that-wrote-older-formats>`__.
+
+Selecting the model
+-------------------
+
+Select a file with ``-c``. Without it, Reef uses CLI inference settings and
+does not discover ``$REEF_CONFIG`` or ``reef.yaml``. Configuration values use
+their full public namespaces as shown above.
 
 The optional ``--model`` shorthand remains supported: ``ollama/`` fills
 ``http://127.0.0.1:11434`` and a placeholder key; ``openai/`` fills
 ``https://api.openai.com`` and reads ``REEF_UPSTREAM_API_KEY``. Other prefixes
 and bare values are model IDs and need an upstream URL.
 An explicit ``--inference.upstream-url`` or ``--inference.upstream-api-key`` override wins over
-the prefix. The ``reefine`` profile ships its proposer and evaluator in the
-wheel, so it runs from an installed package; it listens on
-``127.0.0.1:8901`` without authentication unless ``REEF_TOKEN`` is set, and keeps its state under
-``.reef/reefine/``. To change anything else, copy
-``reef/service/profiles/reefine.yaml`` and pass the copy with ``-c``.
+the prefix.
+
+.. code:: bash
+
+   reef serve --model ollama/gemma4:26b
+
+Reef bundles no deployment profiles. ``reef serve --recipe <name>`` exits
+with ``--recipe <name>: built in profiles were removed; pass -c <config file>``.
+Pass a recipe's deployment config with ``-c`` instead.
 
 Overriding config values
 ------------------------
@@ -83,9 +99,26 @@ Bare and ``reef.*`` aliases remain accepted:
      --storage.artifact-work-dir .reef/artifact-work \
      --storage.artifact-cache-dir .reef/artifact-cache
 
+Running one service
+-------------------
+
+``--component`` starts one service of the deployment instead of the stack. All
+processes of a deployment take the same config, so they find the same shared
+store:
+
+.. code:: bash
+
+   reef serve -c deploy.yaml --component control --reef.port 8901
+   reef serve -c deploy.yaml --component inference --reef.port 8902
+   reef serve -c deploy.yaml --component samples --reef.port 8903
+
+A service that only takes work from a queue (``samples``, ``training`` and
+``evaluation``) answers ``/healthz`` and nothing else. The ``data`` service
+answers the data routes and the scenario reads.
+
 Where it writes
 ---------------
 
 Each service gets a log and a PID file under ``reef.run-dir``, which defaults
 to ``.reef/run``. Reef writes its own state, including records, commit histories,
-and the Git-backed release chain, to the ``storage.*`` paths in the config.
+and the Git-backed snapshot chain, to the ``storage.*`` paths in the config.

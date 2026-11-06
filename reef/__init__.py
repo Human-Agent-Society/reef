@@ -1,7 +1,7 @@
 """Reef: continual learning infra for self-improving agents.
 
 ``reef`` holds every shared mechanism
-(records, service, runtime, scenario, artifacts, surfaces, the training
+(records, service, runtime, scenario, artifacts and their components, the training
 loop with the candidate evaluation a recipe configures, and the recipe
 contract a method implements). Learning methods are separate packages selected
 through dotted class references; importing ``reef`` never imports method code.
@@ -18,8 +18,6 @@ from reef.storage.records import RecordStore
 from reef.evaluation import (
     ActivationRule,
     AlwaysSelectMixin,
-    BackendAlwaysSelectPlugin,
-    BackendEvaluateMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
@@ -37,16 +35,14 @@ from reef.recipe import (
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import Sample2Job, Trainer, TrainingPipeline
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent, TrainingJob
+from reef.inference.interfaces import InferenceRuntime
+from reef.train.component import TrainingComponent, TrainingJob
 
 __all__ = [
     "SCENARIO_METADATA_KEY",
     "ActivationRule",
     "AgentRecord",
     "AlwaysSelectMixin",
-    "BackendAlwaysSelectPlugin",
-    "BackendEvaluateMixin",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",

@@ -7,14 +7,16 @@ from pathlib import Path
 import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 
-from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.jobs import ReleaseFormat
+import recipes.sao  # noqa: F401  (registers the sao objective and family)
+from reef.core.errors import DeployConfigError, RuntimeConfigError
+from reef.core.weight_layout import ArtifactFormat
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend.launch import SlimeDeployment, component_factory, slime_arguments
+
+SAO = {"trajectory": {"objective": "sao"}}
 
 MODEL = "/models/demo"
 
@@ -39,9 +41,15 @@ def settings_of(config: dict) -> dict:
     return service_config_from_mapping(config).__dict__
 
 
-def test_native_training_options_become_slime_flags_and_slime_starts_no_engine():
+def test_native_training_options_become_slime_flags_unread():
     settings = {
-        "training_backend_options": {"lr": 1e-6, "use-critic": True},
+        # Slime's own engine and placement options reach Slime as they are; Reef reads none of them.
+        "training_backend_options": {
+            "lr": 1e-6,
+            "use-critic": True,
+            "colocate": True,
+            "sglang-mem-fraction-static": 0.5,
+        },
         # The inference section configures the serving engines, never Slime.
         "inference_num_gpus": 4,
         "tensor_parallel_size": 2,
@@ -50,7 +58,8 @@ def test_native_training_options_become_slime_flags_and_slime_starts_no_engine()
     assert slime_arguments(settings, loss_family="sao", environ={}) == [
         "--lr=1e-06",
         "--use-critic",
-        "--rollout-num-gpus=0",
+        "--colocate",
+        "--sglang-mem-fraction-static=0.5",
     ]
 
 
@@ -59,7 +68,7 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
     assert [service["name"] for service in config["services"]] == ["inference", "reef"]
     settings = settings_of(config)
     assert SlimeDeployment().http_environment(settings) == {}
-    runtime = SlimeDeployment().component_config(settings, loss_family="sao")
+    runtime = SlimeDeployment().component_config(settings, default_parameters=SAO)
     assert (runtime["type"], runtime["loss_family"], runtime["ray_address"]) == (
         "reef.train.slime_backend.launch:component_factory",
         "sao",
@@ -74,7 +83,7 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
         "teacher_timeout",
     }
     assert not {"serving", "inference_timeout_s"} & runtime.keys()
-    serving = serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), ReleaseFormat("full"))
+    serving = serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), ArtifactFormat("full"))
     assert serving["remote"] == config["reef"]["inference_remote"]
     assert (serving["type"], serving["engine"], serving["num_gpus"]) == ("remote_serving", "sglang", 2)
 
@@ -86,11 +95,8 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
 @pytest.mark.parametrize(
     ("inference", "training", "message"),
     [
-        # Training and serving never share GPUs: there is no colocation option.
+        # Reef's serving shares no GPUs with training: colocation is Slime's own, for its rollout engines.
         ({}, {"colocate": True}, "unknown config fields: training.colocate"),
-        ({}, {"options": {"global-batch-size": 4, "offload-rollout": True}}, "shares GPUs"),
-        ({}, {"options": {"global-batch-size": 4, "sglang-mem-fraction-static": 0.5}}, "configures inference"),
-        ({}, {"options": {"global-batch-size": 4, "rollout-num-gpus": 2}}, "configures inference"),
         ({"backend": "vllm", "num-gpus": 2, "tensor-parallel-size": 1}, {}, "vllm serves one engine"),
         ({}, {"options": {"global-batch-size": 4, "hf-checkpoint": "/models/other"}}, "must match"),
         ({}, {"options": {"lr": 1e-6}}, "global-batch-size"),
@@ -112,31 +118,41 @@ def created_components(monkeypatch):
         calls["components"].append(StubTrainingComponent(name="slime"))
         return calls["components"][-1]
 
-    monkeypatch.setattr(slime_component, "create_slime_component", create)
+    monkeypatch.setattr(slime_component, "SlimeTrainingComponent", create)
     return calls
 
 
 def test_the_factory_builds_only_the_training_component(tmp_path, created_components):
-    runtime = SlimeDeployment().component_config(settings_of(deployment_config(tmp_path)), loss_family="sao")
+    runtime = SlimeDeployment().component_config(settings_of(deployment_config(tmp_path)), default_parameters=SAO)
     component = component_factory({**runtime, "train_timeout_s": 600}, MODEL, {})
     assert component is created_components["components"][0]
     (settings,) = created_components["settings"]
+    # The recipe registered sao by name; the drivers get its reference.
     assert (settings.loss_family, settings.ray_address, settings.train_timeout_s) == (
-        "sao",
+        "recipes.sao.slime:SaoAlgorithm",
         "ray://head:10001",
         600,
     )
     # The deployment's execution sections select the training workers' executor.
     assert settings.execution == runtime["execution"]
-    assert "--global-batch-size=4" in settings.arguments and "--rollout-num-gpus=0" in settings.arguments
+    assert "--global-batch-size=4" in settings.arguments
     # Without a configured timeout the component keeps its default worker timeout.
     component_factory(runtime, MODEL, {})
     assert created_components["settings"][1].train_timeout_s == slime_component.DEFAULT_TRAIN_TIMEOUT_S
 
 
+def test_the_factory_hands_the_drivers_a_family_that_a_recipe_registered_by_name(tmp_path, created_components) -> None:
+    # The recipe's package registered the family in this process; a job's driver is a new process.
+    runtime = SlimeDeployment().component_config(
+        settings_of(deployment_config(tmp_path)), default_parameters={"trajectory": {"objective": "sft"}}
+    )
+    component_factory(runtime, MODEL, {})
+    assert created_components["settings"][0].loss_family == "reef.train.slime_backend.sft:SftAlgorithm"
+
+
 @pytest.mark.parametrize("value", [0, -1])
 def test_the_factory_refuses_a_train_timeout_that_is_not_positive(tmp_path, created_components, value):
-    runtime = SlimeDeployment().component_config(settings_of(deployment_config(tmp_path)), loss_family="sao")
+    runtime = SlimeDeployment().component_config(settings_of(deployment_config(tmp_path)), default_parameters=SAO)
     with pytest.raises(ValueError, match="train_timeout_s must be positive"):
         component_factory({**runtime, "train_timeout_s": value}, MODEL, {})
     assert created_components["settings"] == []
@@ -144,7 +160,7 @@ def test_the_factory_refuses_a_train_timeout_that_is_not_positive(tmp_path, crea
 
 def test_the_factory_needs_a_ray_cluster(tmp_path, created_components, monkeypatch):
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
-    runtime = SlimeDeployment().component_config(settings_of(deployment_config(tmp_path)), loss_family="sao")
+    runtime = SlimeDeployment().component_config(settings_of(deployment_config(tmp_path)), default_parameters=SAO)
     with pytest.raises(RuntimeConfigError, match="Ray cluster"):
         component_factory({**runtime, "ray_address": ""}, MODEL, {})
     assert created_components["components"] == []

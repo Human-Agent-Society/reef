@@ -10,10 +10,10 @@ mkdir -p work/recipes work/bin
 SERVE=configs/serve.yaml
 MODE="${1:-}"
 case "$MODE" in
-    ""|native|self) ;;
-    *) echo "usage: ./run.sh [native|self]" >&2; exit 2 ;;
+    ""|native) ;;
+    *) echo "usage: ./run.sh [native]" >&2; exit 2 ;;
 esac
-if [ "$MODE" = native ] || [ "$MODE" = self ]; then
+if [ "$MODE" = native ]; then
     SERVE=configs/serve-native.yaml
     # The native loop is reef's own; this launcher stands in for the
     # reef-native console script an installed reef would put on PATH.
@@ -40,19 +40,17 @@ while ! curl -sf http://127.0.0.1:8900/healthz > /dev/null; do
     sleep 1
 done
 
-if [ "$MODE" != native ] && [ "$MODE" != self ]; then
+if [ "$MODE" != native ]; then
     python3 run.py
     exit 0
 fi
 
-# The serve form: pull the seed tree, then one resident process follows the
-# head while run.py sends the tasks to it as turns. The receipts of every
-# turn spool under work/captures, where run.py's report command claims them.
-export REEF_HARNESS_CAPTURES_DIR="$PWD/work/captures"
+# The serve form: name the scenario and write the binding, then one resident
+# process pulls the served tree and follows the head while run.py sends the
+# tasks to it as turns. Each turn returns its receipts, which run.py reports
+# its score against.
 python3 run.py pull
-SELF_TOOLS=""
-[ "$MODE" = self ] && SELF_TOOLS="--self-tools"
-reef-native serve --tree work/tree --scenario harness-evolve-demo --follow head --poll-interval 5 $SELF_TOOLS \
+reef-native serve --tree work/tree --scenario harness-evolve-demo --follow head --poll-interval 5 \
     > work/serve.log 2>&1 &
 NATIVE_PID=$!
 trap 'kill "$NATIVE_PID" "$SERVE_PID" 2>/dev/null' EXIT

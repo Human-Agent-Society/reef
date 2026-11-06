@@ -22,21 +22,25 @@ import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support._threshold_processor import ThresholdJobData
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.samples import made_task
 
 from reef.artifact.memory import InMemoryRepositoryBackend
-from reef.core.job_data import JobOutcome, TaskSample
+from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.record2record import InferenceRecord2Record
 from reef.record2sample import NoSamples
+from reef.storage.job_data import read_job_data
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples, stage_item_id
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
+from reef.train.backend import ComponentArtifacts
+from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -56,8 +60,12 @@ def scenario_double(
     job_loop=None,
     state: dict | None = None,
 ) -> SimpleNamespace:
-    """A scenario with one trainer; it carries what the status and the local workers read."""
-    pipeline = SimpleNamespace(background_jobs_running=lambda: background_jobs_running, training_mode="auto")
+    """A scenario with one trainer; it carries what the status, the local workers and ``Dispatcher.close`` read."""
+    pipeline = SimpleNamespace(
+        background_jobs_running=lambda: background_jobs_running,
+        training_mode="auto",
+        supported_training_modes=frozenset({"auto"}),
+    )
     trainer = SimpleNamespace(
         pipeline=pipeline,
         trains=True,
@@ -75,12 +83,16 @@ def scenario_double(
         runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
+        served_artifact_id=lambda: "base",
+        close=lambda: None,
     )
 
 
-def registry_double(scenario: SimpleNamespace) -> SimpleNamespace:
+def registry_double(scenario: SimpleNamespace, experiment_reports=None) -> SimpleNamespace:
+    """A registry of ``scenario`` alone; ``experiment_reports`` is what ``Dispatcher.close`` closes."""
     return SimpleNamespace(
         training_status_scenario_names=("s",),
+        experiment_reports=experiment_reports,
         get_optional=lambda name: scenario if name == "s" else None,
         loaded_scenarios=lambda: (scenario,),
         preload_errors={},
@@ -93,10 +105,11 @@ def bound_dispatcher(scenario: SimpleNamespace) -> Dispatcher:
     initial.mkdir()
     dispatcher = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
+        InMemoryRepositoryBackend.factory(directory=root / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
-    dispatcher.registry = registry_double(scenario)
+    dispatcher.registry = registry_double(scenario, dispatcher.registry.experiment_reports)
     dispatcher.local_workers.registry = dispatcher.registry
     dispatcher.training_status.registry = dispatcher.registry
     return dispatcher
@@ -119,30 +132,27 @@ def test_status_exposes_the_last_committed_step_outcome() -> None:
     assert dispatcher.build_training_status()["scenarios"]["s"]["last_committed_step"] == committed
 
 
-def test_status_keeps_the_published_version_until_inference_reopens() -> None:
+def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
     class Runtime:
         open = False
-        current = "engine:old"
         per_scenario_adapters = False
 
         @property
         def inference_admission_status(self):
             return {"open": self.open, "active": 0}
 
-        def current_runtime_load_id(self):
-            return self.current
-
     runtime = Runtime()
-    dispatcher = bound_dispatcher(scenario_double(runtime=runtime))
+    scenario = scenario_double(runtime=runtime)
+    dispatcher = bound_dispatcher(scenario)
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["current_runtime_load_id"] == "engine:old"
+    assert status["served_artifact_id"] == "base"
     assert status["inference_admission"] == {"open": False, "active": 0}
 
-    runtime.current = "engine:new"
+    scenario.served_artifact_id = lambda: "trained"
     runtime.open = True
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["current_runtime_load_id"] == "engine:new"
+    assert status["served_artifact_id"] == "trained"
     assert status["inference_admission"] == {"open": True, "active": 0}
 
 
@@ -250,17 +260,18 @@ def test_a_worker_with_running_background_jobs_polls_on_a_bounded_interval() -> 
     assert timeout is not None and timeout > 0
 
 
-class BackgroundStep(InferenceRecord2Record):
-    """Run one step from no record, as the rounds of generated tasks do.
+class BackgroundStep(NoSamples):
+    """Run one step from no record, as the rounds of generated tasks do, and make the step's one task.
 
     The first look starts the step. The step runs until a look after ``finished`` is set; that look ends it, and
-    ``StepSamples`` makes the step's one task.
+    the stage then makes the step's one task from no record set.
     """
 
     def __init__(self, finished: Event) -> None:
         super().__init__()
         self.finished = finished
         self.step: Literal["not started", "running", "ended"] = "not started"
+        self.made = False
 
     def advance(self, now: float) -> None:
         super().advance(now)
@@ -272,19 +283,11 @@ class BackgroundStep(InferenceRecord2Record):
     def background_jobs_running(self) -> bool:
         return self.step == "running"
 
-
-class StepSamples(NoSamples):
-    """Make the task of the ``BackgroundStep`` once it ended, from no record set."""
-
-    def __init__(self, step: BackgroundStep) -> None:
-        self.background_step = step
-        self.made = False
-
     def made_samples(self) -> tuple[tuple[str, Sample], ...]:
-        if self.made or self.background_step.step != "ended":
+        if self.made or self.step != "ended":
             return ()
         self.made = True
-        return (("generated-task", TaskSample(Path("generated-task"))),)
+        return (("generated-task", made_task("generated-task")),)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -294,12 +297,10 @@ class BackgroundStepRecipe(TestPolicyRecipe):
     step_finished: Event = field(default_factory=Event, compare=False)
 
     def background_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        step = BackgroundStep(self.step_finished)
         return TrainingPipeline(
             context,
-            record2record=step,
-            record2sample=StepSamples(step),
-            sample2job=ThresholdJobData(context, None, None),
+            record2sample=BackgroundStep(self.step_finished),
+            sample2job=ThresholdJobData(context, None, 1),
         )
 
     def build(
@@ -310,7 +311,9 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         algorithm_state: Mapping[str, object] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        artifacts: ComponentArtifacts | None = None,
+        samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -319,7 +322,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
             job_loop=JobLoop(self.training_component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            default_job_samples=1,
+            root=root,
         )
 
 
@@ -331,20 +334,24 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
     recipe = BackgroundStepRecipe(**runtime_bindings(component))
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return dispatcher, recipe, component
 
 
 def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
-    """Wait up to two seconds for the one job, which trains the step's task."""
-    deadline = time.monotonic() + 2
+    """Wait up to ten seconds for the one job, which trains the step's task: it passes the jobs queue, whose
+    workers poll, so a loaded host takes longer than an idle one."""
+    deadline = time.monotonic() + 10
     while not component.submitted and time.monotonic() < deadline:
         time.sleep(0.01)
     [job] = component.submitted
-    assert [str(sample.task_path) for sample in job.data.samples] == ["generated-task"]
+    assert [sample.task_path.name for sample in read_job_data(job.data_dir).samples] == [
+        stage_item_id("generated", "generated-task")
+    ]
 
 
 def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_without_a_record(

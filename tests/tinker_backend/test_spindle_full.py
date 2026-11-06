@@ -8,26 +8,32 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
+from tests.support.job_data import job_data_ref
 
 from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.tinker import TinkerInferenceRuntime
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
 from reef.service.deploy.training import training_deployment_for
-from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos import TrainingSignal
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.algos.signals import TrainingSignal
+from reef.train.component import TrainingJob, job_id_for
 from reef.train.tinker_backend import client as client_module
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
 from reef.train.tinker_backend.config import SpindleFullConfig
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
 from reef.train.tinker_backend.launch import SpindleFullDeployment, spindle_full_settings
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
+from reef.train.tinker_backend.objectives import (
+    TinkerObjective,
+    register_tinker_objective,
+    unregister_tinker_objective,
+)
 from reef.train.tinker_backend.spindle_export import CheckpointExporter, checkpoint_directory, checkpoint_upload
 
 MODEL = "org/model"
@@ -43,7 +49,7 @@ def settings(tmp_path: Path, **options: str) -> SpindleFullConfig:
 
 
 class Exporter(CheckpointExporter):
-    """Exports each checkpoint to the next commit of the release repo, and keeps what it exported."""
+    """Exports each checkpoint to the next commit of the snapshot repo, and keeps what it exported."""
 
     def __init__(self) -> None:
         self.exported: list[tuple[str, HuggingFaceRevision]] = []
@@ -74,6 +80,9 @@ class SpindleClient(TinkerClient, TinkerSampler):
             {},
         )
 
+    def chat_template(self, template_kwargs):
+        return CharTemplate()
+
     def check_remote(self, checkpoint):
         self.checked.append(checkpoint)
 
@@ -83,7 +92,7 @@ class SpindleClient(TinkerClient, TinkerSampler):
     def decode(self, tokens):
         return "hello"
 
-    def sample(self, sampler_path, prompt, params):
+    def sample(self, sampler_path, prompt, params, *, topk_logprobs):
         self.sampled.append(sampler_path)
         return SampleResult((201,), (-0.2,), "stop")
 
@@ -91,7 +100,7 @@ class SpindleClient(TinkerClient, TinkerSampler):
         return
 
 
-class Objective(TrainingObjective):
+class Objective(TinkerObjective):
     loss_family = "importance_sampling"
     name = "spindle-full-test-objective"
 
@@ -102,9 +111,9 @@ class Objective(TrainingObjective):
 @pytest.fixture
 def objective():
     value = Objective()
-    register_objective(value)
+    register_tinker_objective(value)
     yield value
-    unregister_objective(value.name)
+    unregister_tinker_objective(value.name)
 
 
 @pytest.fixture
@@ -127,6 +136,8 @@ def exporter():
 @pytest.fixture
 def component(tmp_path, client, exporter):
     value = SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter)
+    value.start_jobs()
+    value.start_jobs()
     yield value
     value.close()
 
@@ -147,7 +158,7 @@ def train(component, start=None):
                                 "tokens": [10, 11, 20, 21],
                                 "loss_mask": [1, 0],
                                 "rollout_log_probs": [-0.2, -0.4],
-                                "runtime_load_id": "v",
+                                "artifact_id": "v",
                             }
                         }
                     },
@@ -156,10 +167,10 @@ def train(component, start=None):
             ),
         ),
     )
-    parameters = {"method": TrainingMethod(Objective.name).to_dict()}
+    parameters = {"objective": Objective.name}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":
         assert time.monotonic() < deadline, status
@@ -172,24 +183,38 @@ def train(component, start=None):
 def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_fresh(
     component, client, exporter, objective
 ):
-    assert component.release_format == ReleaseFormat("full")
-    base = component.base_artifact_source()
-    assert read_reference(base.model_directory) == HuggingFaceRevision(MODEL, COMMIT)
+    assert component.artifact_format == ArtifactFormat("full")
+    base = component.default_start()
+    assert read_reference(base.model_files.directory()) == HuggingFaceRevision(MODEL, COMMIT)
     assert base.inputs == {"model": BASE, "service": SPINDLE}
     assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
 
     status = train(component)
     assert client.starts == [FreshStart(MODEL)]
-    release = Path(status.checkpoints[0].release_path)
+    release = Path(status.checkpoints[0].artifact_path)
     saved = TinkerCheckpoint.read(release)
     assert saved.lora_rank is None and saved.service == SPINDLE
-    # The release refers to the checkpoint's weights, which the exporter put in the release repo.
+    # The snapshot refers to the checkpoint's weights, which the exporter put in the snapshot repo.
     assert exporter.exported == [(saved.state_path, HuggingFaceRevision(MODEL, COMMIT))]
     assert read_reference(release) == HuggingFaceRevision(RELEASES, f"{1:040x}")
 
-    # A job from a saved release restores its checkpoint, whatever its reference names.
+    # A job from a saved snapshot restores its checkpoint, whatever its reference names.
     train(component, start=str(release))
     assert client.starts[-1] == saved
+
+
+@pytest.mark.unit
+def test_a_new_base_commit_replaces_the_base_reference_in_the_state_dir(tmp_path, client, exporter):
+    # The deployment restarts with a later commit of the same repo in its config.
+    first = SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter)
+    first.prepared_base()
+    first.close_resources()
+    later = "f" * 40
+    component = SpindleFullTrainingComponent(MODEL, settings(tmp_path, base=f"hf://{MODEL}@{later}"), client, exporter)
+    component.start_jobs()
+    files = component.default_start().model_files
+    assert read_reference(files.directory()) == HuggingFaceRevision(MODEL, later)
+    assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
 
 
 @pytest.mark.unit
@@ -197,27 +222,27 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
     full.write(tmp_path / "full")
     with pytest.raises(ValueError, match=f"holds {REFERENCE_FILE} beside its manifest"):
-        component.check_release(DirectoryFiles(tmp_path / "full"))
-    # A release's reference must resolve to full weights.
+        component.check_artifact(DirectoryFiles(tmp_path / "full"))
+    # A snapshot's reference must resolve to full weights.
     (tmp_path / "full" / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision(MODEL, COMMIT).to_dict()))
-    component.check_release(DirectoryFiles(tmp_path / "full"))
+    component.check_artifact(DirectoryFiles(tmp_path / "full"))
     assert client.checked[-1] == full
     del hub.files["config.json"]
     with pytest.raises(ValueError, match="holds no full weights"):
-        component.check_release(DirectoryFiles(tmp_path / "full"))
+        component.check_artifact(DirectoryFiles(tmp_path / "full"))
     hub.files["config.json"] = b"{}"
     TinkerCheckpoint(MODEL, 32, "tinker://l/state", "tinker://l/sampler", service=SPINDLE).write(tmp_path / "lora")
     with pytest.raises(ValueError, match="rank 32 LoRA, not all the parameters"):
-        component.check_release(DirectoryFiles(tmp_path / "lora"))
+        component.check_artifact(DirectoryFiles(tmp_path / "lora"))
 
     copy = tmp_path / "copy"
     copy.mkdir()
     for path, data in FILES.items():
         (copy / path).write_bytes(data)
-    component.check_release(DirectoryFiles(copy))
+    component.check_artifact(DirectoryFiles(copy))
     (copy / "model.safetensors").write_bytes(b"other-weights")
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
-        component.check_release(DirectoryFiles(copy))
+        component.check_artifact(DirectoryFiles(copy))
 
 
 @pytest.mark.unit
@@ -273,7 +298,9 @@ def test_the_sdk_client_creates_a_full_parameter_model_and_restores_only_full_pa
 ):
     created = []
     trainer = SimpleNamespace(
-        forward_backward=lambda data, loss_fn: SimpleNamespace(result=lambda timeout: SimpleNamespace(metrics={})),
+        forward_backward=lambda data, loss_fn, loss_fn_config=None: SimpleNamespace(
+            result=lambda timeout: SimpleNamespace(metrics={})
+        ),
         optim_step=lambda params: SimpleNamespace(result=lambda timeout: None),
         save_state=lambda name, ttl_seconds: SimpleNamespace(
             result=lambda timeout: SimpleNamespace(path="tinker://s/state")
@@ -356,6 +383,7 @@ def test_the_export_commits_exactly_the_checkpoints_weights_and_the_bases_tokeni
     base.mkdir()
     (base / "tokenizer.json").write_text("{}")
     (base / "config.json").write_text('{"base": true}')
+    (base / "generation_config.json").write_text('{"eos_token_id": [1, 8]}')
     uploads = []
 
     class Hub:
@@ -367,16 +395,27 @@ def test_the_export_commits_exactly_the_checkpoints_weights_and_the_bases_tokeni
             assert (
                 Path(folder_path) / "config.json"
             ).read_text() == "{}", "the checkpoint's config replaces the base's"
+            assert (Path(folder_path) / "generation_config.json").read_text() == '{"eos_token_id": [1, 8]}'
             return SimpleNamespace(oid="c" * 40)
 
     monkeypatch.setattr("huggingface_hub.HfApi", Hub)
-    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda repo, revision, allow_patterns: str(base))
+    patterns = []
+
+    def snapshot_download(repo, revision, allow_patterns):
+        patterns.extend(allow_patterns)
+        return str(base)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
     upload = checkpoint_upload()
     commit = upload(
         str(tmp_path / "volume"), "step-2/model-7", RELEASES, MODEL, COMMIT, "tinker://model-7/weights/step-2"
     )
     assert commit == "c" * 40
-    # The training state stays behind, and the commit replaces every file of the previous one.
-    assert uploads == [(RELEASES, ["config.json", "model.safetensors", "tokenizer.json"], ["*"])]
+    # The training state stays behind, the base's generation config comes along since Spindle saves none, and the
+    # commit replaces every file of the previous one.
+    assert "generation_config.json" in patterns
+    assert uploads == [
+        (RELEASES, ["config.json", "generation_config.json", "model.safetensors", "tokenizer.json"], ["*"])
+    ]
     with pytest.raises(FileNotFoundError, match="holds no Hugging Face weights"):
         upload(str(tmp_path / "volume"), "step-3/model-7", RELEASES, MODEL, COMMIT, "tinker://model-7/weights/step-3")

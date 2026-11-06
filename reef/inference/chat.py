@@ -2,10 +2,10 @@
 
 Clients use either ``/v1/chat/completions`` or ``/v1/messages`` while Reef
 normalizes the provider request, renders the prompt once, calls the selected
-engine's native generate route, and records the exact sampled token ids beside
-their rollout log probabilities and the weight version that produced each
-token. Decoded text is only the client-facing view; it is never re-tokenized
-to construct a training sample.
+engine's native generate route, and answers with the provider response. The
+response carries no training tensors: a training component renders a recorded
+call with its own chat template and computes the log probabilities that it
+needs with its own weights.
 
 The engine-specific part is a :class:`NativeGenerateClient`: it shapes the
 native request and parses the native response into a
@@ -14,29 +14,25 @@ native request and parses the native response into a
 
 from __future__ import annotations
 
-import codecs
-import copy
 import json
 import math
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.artifact.artifact import Artifact
+from reef.core.values import JsonValue
+from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.runtime.interfaces import InferenceStream
+from reef.inference.interfaces import InferenceArtifact, InferenceStream
+from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
 ANTHROPIC_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
-#: Request keys forwarded from the provider request to the native payload
-#: unchanged; each engine reads the ones it understands.
-NATIVE_REQUEST_KEYS = ("lora_path", "rid", "sglang_sampling_params", "vllm_sampling_params")
 # ``<think>`` and the newline after it can be several tokens; the end of a
 # rendered prompt this long is enough to read an open tag.
 PROMPT_TAIL_TOKEN_COUNT = 8
@@ -49,7 +45,7 @@ TOOL_CALL_START = "<tool_call>"
 
 @dataclass(frozen=True)
 class CapturedGeneration:
-    """One request's exact engine output, in the shape training records need.
+    """One request's exact engine output.
 
     ``token_runtime_load_ids`` names the weight version that produced each
     sampled token; a request paused for a weight update and resumed spans two.
@@ -65,8 +61,6 @@ class CapturedGeneration:
     finish_reason: str
     text: str | None
     public_meta: dict[str, Any]
-    topk_indices: list[list[int]] | None = None
-    topk_log_probs: list[list[float]] | None = None
 
     def __post_init__(self) -> None:
         count = len(self.output_ids)
@@ -76,8 +70,6 @@ class CapturedGeneration:
             raise ValueError("captured response has no sampled tokens")
         if self.finish_reason not in {"stop", "length", "abort"}:
             raise ValueError(f"captured finish reason must be stop, length or abort, got {self.finish_reason!r}")
-        if (self.topk_indices is None) != (self.topk_log_probs is None):
-            raise ValueError("captured top-k indices and log-probs must be given together")
 
 
 class NativeGenerateClient(ABC):
@@ -99,13 +91,12 @@ class NativeGenerateClient(ABC):
         prompt_ids: list[int],
         sampling_params: Mapping[str, Any],
         *,
-        capture_topk: int,
         stream: bool,
     ) -> dict[str, Any]:
-        """The native request body for ``prompt_ids``, asking for log-probs and, if ``capture_topk``, top-k."""
+        """The native request body for ``prompt_ids``, asking for the sampled tokens' log-probs."""
 
     @abstractmethod
-    def parse(self, artifact: Artifact, response: Mapping[str, Any], *, capture_topk: int) -> CapturedGeneration:
+    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
         """Validate one buffered native response and read the exact sample out of it."""
 
     @abstractmethod
@@ -121,24 +112,11 @@ class NativeGenerateClient(ABC):
 
 
 async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
-    """Decode arbitrarily chunked SSE bytes into JSON data events."""
+    """Decode arbitrarily chunked SSE bytes into JSON data events, up to the ``[DONE]`` event.
 
-    decoder = codecs.getincrementaldecoder("utf-8")()
-    buffer = ""
-
-    def complete_events(*, final: bool = False) -> tuple[list[str], str]:
-        nonlocal buffer
-        # Engines use LF, but accepting CRLF keeps the proxy correct behind
-        # HTTP middleware that normalizes line endings.
-        buffer = buffer.replace("\r\n", "\n").replace("\r", "\n")
-        blocks = buffer.split("\n\n")
-        buffer = blocks.pop() if not final else ""
-        payloads = []
-        for block in blocks:
-            data = [line[5:].removeprefix(" ") for line in block.split("\n") if line.startswith("data:")]
-            if data:
-                payloads.append("\n".join(data))
-        return payloads, buffer
+    An event without data is skipped. An event whose data is not a JSON object,
+    or that reports an ``error``, raises :class:`ValueError`.
+    """
 
     def decode_event(payload: str) -> dict[str, Any]:
         value = json.loads(payload)
@@ -148,19 +126,17 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
             raise ValueError(f"native stream failed: {value['error'].get('message', value['error'])}")
         return value
 
+    decoder = SSEFrameDecoder()
     async for chunk in chunks:
-        buffer += decoder.decode(chunk)
-        payloads, _ = complete_events()
-        for payload in payloads:
-            if payload == "[DONE]":
+        for frame in decoder.feed(chunk):
+            payload = frame_data(frame)
+            if payload == SSE_DONE:
                 return
-            yield decode_event(payload)
+            if payload:
+                yield decode_event(payload)
 
-    buffer += decoder.decode(b"", final=True)
-    payloads, _ = complete_events(final=True)
-    for payload in payloads:
-        if payload == "[DONE]":
-            return
+    payload = frame_data(decoder.finish())
+    if payload and payload != SSE_DONE:
         yield decode_event(payload)
 
 
@@ -534,40 +510,13 @@ def template_kwargs_of(value: Any, label: str) -> dict[str, Any]:
     return dict(value)
 
 
-#: Rollouts whose latest call the handler keeps for continuation; the oldest is forgotten first.
-ROLLOUT_PREFIX_LIMIT = 1024
-#: A message content no chat template rewrites, used to find where a rendered assistant turn ends.
-ROLLOUT_BOUNDARY_SENTINEL = "reef-rollout-boundary-7f3a9c"
-
-
-@dataclass(frozen=True)
-class RolloutPrefix:
-    """The exact tokens of a rollout's latest call, for the rollout's next call to extend.
-
-    Values: ``tokens`` is a non-empty tuple of non-negative ints, the prompt
-    ids followed by the sampled ids of the latest call; ``request`` is that
-    call's validated chat request, a dict whose ``messages`` is a non-empty
-    list.
-    Purpose: :class:`TokenNativeChatHandler` makes one after each call of an
-    rollout when ``rollout_continuation`` is on, and reads it when the same
-    rollout's next request extends ``request["messages"]``. The next prompt is
-    then ``tokens`` followed by the rendered new messages.
-    """
-
-    tokens: tuple[int, ...]
-    request: dict[str, Any]
-
-    def __post_init__(self) -> None:
-        if not self.tokens or any(
-            not isinstance(token, int) or isinstance(token, bool) or token < 0 for token in self.tokens
-        ):
-            raise ValueError("a rollout prefix requires non-negative integer token ids")
-        if not isinstance(self.request.get("messages"), list) or not self.request["messages"]:
-            raise ValueError("a rollout prefix requires a validated chat request with messages")
+#: The sampling fields that a scenario may set for the token-native chat handler (RFC #1097). OpenAI chat and
+#: Anthropic messages requests both carry them, so a scenario's value applies alike to either protocol.
+SERVING_SAMPLING_FIELDS = ("temperature", "top_p", "top_k")
 
 
 class TokenNativeChatHandler(HttpInferenceHandler):
-    """Serve OpenAI or Anthropic chat with engine-native policy tensors.
+    """Serve OpenAI or Anthropic chat over an engine's token-native generate API.
 
     Subclasses supply the :class:`NativeGenerateClient` for their engine and
     may override :meth:`inference_stream` with an incremental relay. The
@@ -601,26 +550,20 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         timeout_s: float = 300.0,
         tokenizer: Any = None,
         tool_call_parser: str | None = None,
-        capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
-        rollout_continuation: bool = False,
         request_headers: RequestHeadersFactory | None = None,
     ) -> None:
         super().__init__(
             upstream_url, request_headers=request_headers, timeout_s=timeout_s, error_label=client.error_label
         )
         if tokenizer is None and not model_path:
-            raise ValueError("chat training inference requires model_path")
+            raise ValueError("token-native chat requires model_path")
         self._client = client
         self._model_path = model_path
         self._tokenizer = tokenizer
         self._tool_call_parser = tool_call_parser.strip() if tool_call_parser else None
-        # OpenClaw-RL top-K objective: capture the generation-time top-K
-        # vocab log-probs per sampled token (the old-policy ``ell_old`` on
-        # S^q) into ``response.training``. 0 disables the capture.
-        self._capture_topk = int(capture_topk)
         # Sampling values applied when the client omits a parameter. Native
         # generate routes have engine defaults (temperature 1.0), NOT the
         # model generation_config the chat endpoint would use — a recipe
@@ -632,13 +575,6 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         # Chat template arguments for a request that omits them, for example
         # {"enable_thinking": false}. A request's own chat_template_kwargs win key by key.
         self._chat_template_kwargs = template_kwargs_of(chat_template_kwargs, "chat_template_kwargs")
-        # Multi-turn rollouts served from their exact sampled tokens: the
-        # client names the rollout in the OpenAI ``user`` field, and each later
-        # request's prompt is the previous call's tokens plus the rendered new
-        # messages, so a template that rewrites earlier turns cannot change
-        # the trained tokens. Off, every request renders from the template.
-        self._rollout_continuation = bool(rollout_continuation)
-        self._rollout_prefixes: OrderedDict[str, RolloutPrefix] = OrderedDict()
 
     @property
     def client(self) -> NativeGenerateClient:
@@ -648,13 +584,53 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     def model_path(self) -> str:
         return self._model_path
 
-    @property
-    def capture_topk(self) -> int:
-        return self._capture_topk
+    def serving_config(self, override: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """The sampling fields ``temperature``, ``top_p`` and ``top_k``, the ones that both chat protocols carry:
+        the override's value of each, else the handler's ``sampling_defaults`` value.
+
+        ``temperature`` is a number of at least 0, ``top_p`` a number in (0, 1], and ``top_k`` -1 (no limit) or a
+        positive integer. ``ValueError`` for another field or value."""
+        unknown = sorted(set(override) - set(SERVING_SAMPLING_FIELDS))
+        if unknown:
+            raise ValueError(
+                f"unknown serving fields {unknown}: the chat handler takes {list(SERVING_SAMPLING_FIELDS)}"
+            )
+        for name, value in override.items():
+            number = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            if name == "temperature" and not (number is not None and number >= 0):
+                raise ValueError("serving field temperature must be a number of at least 0")
+            if name == "top_p" and not (number is not None and 0 < number <= 1):
+                raise ValueError("serving field top_p must be a number in (0, 1]")
+            if name == "top_k" and not (isinstance(number, int) and (number == -1 or number > 0)):
+                raise ValueError("serving field top_k must be -1 or a positive integer")
+        return {
+            name: override.get(name, self._sampling_defaults.get(name))
+            for name in SERVING_SAMPLING_FIELDS
+            if name in override or name in self._sampling_defaults
+        }
+
+    def request_payload(
+        self, payload: Mapping[str, Any], *, serving_config: Mapping[str, JsonValue]
+    ) -> dict[str, Any]:
+        """``payload`` with each sampling field of ``serving_config`` that the client did not set: the scenario's
+        value is a default, as ``sampling_defaults`` is."""
+        body = dict(payload)
+        for name in SERVING_SAMPLING_FIELDS:
+            if name in serving_config and body.get(name) is None:
+                body[name] = serving_config[name]
+        return body
+
+    def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
+        """The engine serves the base model under its path and each adapter under its own name, which a native
+        request names in ``lora_path``."""
+        addressed = {key: value for key, value in payload.items() if key != "lora_path"}
+        if model_name == self._model_path:
+            return {**addressed, "model": model_name}
+        return {**addressed, "model": model_name, "lora_path": model_name}
 
     # -- Buffered requests ------------------------------------------------------
 
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == ANTHROPIC_COUNT_TOKENS_PATH:
             return self._anthropic_count_tokens(artifact, payload)
         if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
@@ -666,45 +642,43 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         response, provider_response = await self._complete(artifact, call)
         return provider_response if call.anthropic else response
 
-    async def _complete(self, artifact: Artifact, call: ChatCall) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def _complete(self, artifact: InferenceArtifact, call: ChatCall) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run one buffered generation; return the OpenAI-shaped response and the provider-shaped one."""
         native = await super().inference(
             artifact,
             self._client.generate_path,
-            self._client.payload(
-                call.request, call.prompt_ids, call.sampling_params, capture_topk=self._capture_topk, stream=False
-            ),
+            self._client.payload(call.request, call.prompt_ids, call.sampling_params, stream=False),
         )
-        captured = self._client.parse(artifact, native, capture_topk=self._capture_topk)
+        captured = self._client.parse(artifact, native)
         response = self._response_from_capture(call, captured, call.tool_parser)
         if not call.anthropic:
             return response, response
-        return response, self._anthropic_response(call.payload, call.request, response)
+        return response, anthropic_response(call.payload, response)
 
     def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
         """Normalize the provider request and render the prompt once for either endpoint."""
         anthropic = path == ANTHROPIC_MESSAGES_PATH
-        request = self._anthropic_request(payload) if anthropic else dict(payload)
+        request = anthropic_request(payload) if anthropic else dict(payload)
         if request.get("n", 1) != 1:
-            raise ValueError("exact training capture currently requires n=1")
+            raise ValueError("token-native chat requires n=1")
         return ChatCall(
             anthropic=anthropic,
             payload=payload,
             request=request,
-            prompt_ids=self._prompt_ids(request),
+            prompt_ids=self._render_prompt(request),
             sampling_params=self._client.sampling_params(request, self._sampling_defaults),
             tool_parser=self._configured_tool_parser(request),
         )
 
     def _response_from_capture(self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any) -> dict[str, Any]:
-        """The OpenAI-shaped response, with training tensors, for one exact sample."""
+        """The OpenAI-shaped response of one exact sample."""
         text = captured.text
         if text is None:
             text = self._require_tokenizer().decode(captured.output_ids, skip_special_tokens=True)
         message, parsed_tool_calls = self._assistant_message(
             text, tool_parser, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
         )
-        # Tool parsing must not hide an engine abort from receipt and training checks.
+        # Tool parsing must not hide an engine abort from the service's abort check.
         if parsed_tool_calls and captured.finish_reason != "abort":
             finish_reason = "tool_calls"
         else:
@@ -717,24 +691,6 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         }
         if call.request.get("logprobs") is True:
             choice["logprobs"] = {"content": self._openai_logprobs(captured.output_ids, captured.rollout_log_probs)}
-        runtime_load_spans = self._runtime_load_spans(captured.token_runtime_load_ids)
-        versions = {span["runtime_load_id"] for span in runtime_load_spans}
-        runtime_load_id = versions.pop() if len(versions) == 1 else None
-        training: dict[str, Any] = {
-            "tokens": [*call.prompt_ids, *captured.output_ids],
-            "loss_mask": [1] * len(captured.output_ids),
-            "rollout_log_probs": list(captured.rollout_log_probs),
-            "prompt_length": len(call.prompt_ids),
-            "response_length": len(captured.output_ids),
-            "runtime_load_id": None if runtime_load_id is None else str(runtime_load_id),
-            "runtime_load_spans": runtime_load_spans,
-        }
-        if captured.topk_indices is not None and captured.topk_log_probs is not None:
-            training["topk_indices"] = captured.topk_indices
-            training["topk_log_probs"] = captured.topk_log_probs
-        rollout_id = self._rollout_id(call.request)
-        if rollout_id is not None:
-            self._remember_rollout(rollout_id, training["tokens"], call.request)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -746,19 +702,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 "completion_tokens": len(captured.output_ids),
                 "total_tokens": len(call.prompt_ids) + len(captured.output_ids),
             },
-            "training": training,
         }
-
-    @staticmethod
-    def _runtime_load_spans(token_runtime_load_ids: list[str]) -> list[dict[str, Any]]:
-        """Collapse one version per token into contiguous ``[start, end)`` spans."""
-        spans: list[dict[str, Any]] = []
-        for index, version in enumerate(token_runtime_load_ids):
-            if spans and spans[-1]["runtime_load_id"] == version:
-                spans[-1]["end"] = index + 1
-            else:
-                spans.append({"start": index, "end": index + 1, "runtime_load_id": version})
-        return spans
 
     # -- Streaming --------------------------------------------------------------
 
@@ -802,14 +746,16 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         frames = relay.reconcile(response["choices"][0]["message"])
         output_tokens = response["usage"]["completion_tokens"]
         if call.anthropic:
-            provider_response = self._anthropic_response(call.payload, call.request, response)
+            provider_response = anthropic_response(call.payload, response)
             provider_response["id"] = message_id
         else:
             provider_response = response
         frames.extend(relay.writer.finish(provider_response, output_tokens=output_tokens))
         return provider_response, frames
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
         """Stream the buffered result as one burst of protocol frames.
 
         The engine is asked for a buffered generation, so the exact sample is
@@ -842,420 +788,10 @@ class TokenNativeChatHandler(HttpInferenceHandler):
 
     # -- Anthropic Messages -----------------------------------------------------
 
-    def _anthropic_count_tokens(self, artifact: Artifact, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Count the exact templated input without creating policy tensors."""
-        request = self._anthropic_request({**payload, "max_tokens": 1})
-        prompt_ids = self._render_prompt(request)
-        runtime_load_id = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id
-        return {
-            "input_tokens": len(prompt_ids),
-            # RequestService strips this block from the client response. It
-            # supplies the producing version required by durable-request validation, but
-            # deliberately contains no tokens/loss mask/log-probabilities, so
-            # a token-count call can never become a policy sample.
-            "training": {
-                "runtime_load_id": str(runtime_load_id),
-                "request_messages": list(request.get("messages") or []),
-                "request_tools": request.get("tools"),
-            },
-        }
-
-    @classmethod
-    def _anthropic_request(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Normalize an Anthropic Messages request to the internal chat shape.
-
-        The normalized request is what the tokenizer sees and what the private
-        training record retains. Keeping this boundary provider-independent is
-        important for multi-turn policy assembly and OpenClaw-RL's judge, both
-        of which must render the exact same transcript as the rollout backend.
-        """
-
-        model = payload.get("model")
-        if not isinstance(model, str) or not model:
-            raise ValueError("Anthropic messages requires a non-empty model")
-        max_tokens = payload.get("max_tokens")
-        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
-            raise ValueError("Anthropic messages max_tokens must be a positive integer")
-
-        messages: list[dict[str, Any]] = []
-        system = cls._anthropic_text_content(payload.get("system"), "system", allow_missing=True)
-        if system:
-            messages.append({"role": "system", "content": system})
-
-        raw_messages = payload.get("messages")
-        if not isinstance(raw_messages, list) or not raw_messages:
-            raise ValueError("Anthropic messages requires a non-empty messages list")
-        for index, raw_message in enumerate(raw_messages):
-            if not isinstance(raw_message, Mapping):
-                raise ValueError(f"Anthropic message at index {index} must be an object")
-            role = raw_message.get("role")
-            if role == "user":
-                messages.extend(cls._anthropic_user_messages(raw_message.get("content"), index))
-            elif role == "assistant":
-                messages.append(cls._anthropic_assistant_message(raw_message.get("content"), index))
-            elif role == "system":
-                text = cls._anthropic_text_content(raw_message.get("content"), f"message {index} system")
-                messages.append({"role": "system", "content": text})
-            else:
-                raise ValueError(f"Anthropic message at index {index} has unsupported role {role!r}")
-
-        request: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_completion_tokens": max_tokens,
-        }
-        for key in ("temperature", "top_p", "top_k", "stream", "chat_template_kwargs", *NATIVE_REQUEST_KEYS):
-            if key in payload and payload[key] is not None:
-                request[key] = payload[key]
-        stop_sequences = payload.get("stop_sequences")
-        if stop_sequences is not None:
-            if not isinstance(stop_sequences, list) or any(
-                not isinstance(value, str) or not value for value in stop_sequences
-            ):
-                raise ValueError("Anthropic stop_sequences must be a list of non-empty strings")
-            request["stop"] = list(stop_sequences)
-
-        tools = cls._anthropic_tools(payload.get("tools"))
-        if tools is not None:
-            request["tools"] = tools
-            request["tool_choice"] = cls._anthropic_tool_choice(payload.get("tool_choice"))
-        elif payload.get("tool_choice") is not None:
-            raise ValueError("Anthropic tool_choice requires tools")
-        return request
-
-    @classmethod
-    def _anthropic_user_messages(cls, content: Any, message_index: int) -> list[dict[str, Any]]:
-        if isinstance(content, str):
-            return [{"role": "user", "content": content}]
-        if not isinstance(content, list):
-            raise ValueError(f"Anthropic user message {message_index} content must be text or content blocks")
-
-        normalized: list[dict[str, Any]] = []
-        text_parts: list[str] = []
-
-        def flush_text() -> None:
-            if text_parts:
-                normalized.append({"role": "user", "content": "\n".join(text_parts)})
-                text_parts.clear()
-
-        for block_index, block in enumerate(content):
-            if not isinstance(block, Mapping):
-                raise ValueError(
-                    f"Anthropic user message {message_index} content block {block_index} must be an object"
-                )
-            kind = block.get("type")
-            if kind == "text":
-                text = block.get("text")
-                if not isinstance(text, str):
-                    raise ValueError("Anthropic text blocks require string text")
-                text_parts.append(text)
-                continue
-            if kind != "tool_result":
-                raise ValueError(
-                    f"Anthropic content block type {kind!r} is not supported by exact text-token training"
-                )
-            flush_text()
-            tool_call_id = block.get("tool_use_id", block.get("id"))
-            if not isinstance(tool_call_id, str) or not tool_call_id:
-                raise ValueError("Anthropic tool_result requires tool_use_id")
-            tool_content = cls._anthropic_text_content(
-                block.get("content"),
-                f"tool_result {tool_call_id}",
-                allow_missing=True,
-            )
-            normalized.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": tool_content or "",
-                }
-            )
-        flush_text()
-        if not normalized:
-            normalized.append({"role": "user", "content": ""})
-        return normalized
-
-    @classmethod
-    def _anthropic_assistant_message(cls, content: Any, message_index: int) -> dict[str, Any]:
-        if isinstance(content, str):
-            return {"role": "assistant", "content": content}
-        if not isinstance(content, list):
-            raise ValueError(f"Anthropic assistant message {message_index} content must be text or content blocks")
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        for block_index, block in enumerate(content):
-            if not isinstance(block, Mapping):
-                raise ValueError(
-                    f"Anthropic assistant message {message_index} content block {block_index} must be an object"
-                )
-            kind = block.get("type")
-            if kind == "text":
-                text = block.get("text")
-                if not isinstance(text, str):
-                    raise ValueError("Anthropic text blocks require string text")
-                text_parts.append(text)
-            elif kind == "thinking":
-                thinking = block.get("thinking")
-                if not isinstance(thinking, str):
-                    raise ValueError("Anthropic thinking blocks require string thinking")
-                reasoning_parts.append(thinking)
-            elif kind == "redacted_thinking":
-                raise ValueError("Anthropic redacted_thinking history is not supported")
-            elif kind == "tool_use":
-                tool_id = block.get("id")
-                name = block.get("name")
-                arguments = block.get("input", {})
-                if not isinstance(tool_id, str) or not tool_id or not isinstance(name, str) or not name:
-                    raise ValueError("Anthropic tool_use requires non-empty id and name")
-                if not isinstance(arguments, Mapping):
-                    raise ValueError("Anthropic tool_use input must be an object")
-                tool_calls.append(
-                    {
-                        "id": tool_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": json.dumps(dict(arguments), ensure_ascii=False),
-                        },
-                    }
-                )
-            else:
-                raise ValueError(f"Anthropic assistant content block type {kind!r} is not supported by exact training")
-        message: dict[str, Any] = {
-            "role": "assistant",
-            "content": "\n".join(text_parts) if text_parts else None,
-        }
-        if reasoning_parts:
-            message["reasoning_content"] = "\n".join(reasoning_parts)
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-        return message
-
-    @staticmethod
-    def _anthropic_text_content(content: Any, label: str, *, allow_missing: bool = False) -> str:
-        if content is None and allow_missing:
-            return ""
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            raise ValueError(f"Anthropic {label} content must be text or text blocks")
-        texts: list[str] = []
-        for block in content:
-            if not isinstance(block, Mapping) or block.get("type") != "text" or not isinstance(block.get("text"), str):
-                raise ValueError(f"Anthropic {label} supports only text blocks")
-            texts.append(block["text"])
-        return "\n".join(texts)
-
-    @staticmethod
-    def _anthropic_tools(value: Any) -> list[dict[str, Any]] | None:
-        if value is None:
-            return None
-        if not isinstance(value, list) or not value:
-            raise ValueError("Anthropic tools must be a non-empty list of objects")
-        tools: list[dict[str, Any]] = []
-        for index, tool in enumerate(value):
-            if not isinstance(tool, Mapping):
-                raise ValueError(f"Anthropic tool at index {index} must be an object")
-            name = tool.get("name")
-            schema = tool.get("input_schema")
-            if not isinstance(name, str) or not name or not isinstance(schema, Mapping):
-                raise ValueError("Anthropic custom tools require non-empty name and input_schema")
-            function: dict[str, Any] = {"name": name, "parameters": dict(schema)}
-            description = tool.get("description")
-            if description is not None:
-                if not isinstance(description, str):
-                    raise ValueError("Anthropic tool description must be a string")
-                function["description"] = description
-            tools.append({"type": "function", "function": function})
-        return tools
-
-    @staticmethod
-    def _anthropic_tool_choice(value: Any) -> Any:
-        if value is None:
-            return "auto"
-        if not isinstance(value, Mapping):
-            raise ValueError("Anthropic tool_choice must be an object")
-        kind = value.get("type")
-        if kind == "auto":
-            return "auto"
-        if kind == "any":
-            return "required"
-        if kind == "none":
-            return "none"
-        if kind == "tool":
-            name = value.get("name")
-            if not isinstance(name, str) or not name:
-                raise ValueError("Anthropic tool_choice type 'tool' requires name")
-            return {"type": "function", "function": {"name": name}}
-        raise ValueError(f"unsupported Anthropic tool_choice type {kind!r}")
-
-    @classmethod
-    def _anthropic_response(
-        cls,
-        original_request: Mapping[str, Any],
-        normalized_request: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        choice = response["choices"][0]
-        message = choice["message"]
-        content: list[dict[str, Any]] = []
-        reasoning = message.get("reasoning_content")
-        if isinstance(reasoning, str) and reasoning:
-            content.append(
-                {
-                    "type": "thinking",
-                    "thinking": reasoning,
-                    # Local reasoning parsers do not produce Anthropic's
-                    # cryptographic signature. Engines' own compatibility
-                    # layers likewise emit an empty signature for local models.
-                    "signature": "",
-                }
-            )
-        text = message.get("content")
-        if isinstance(text, str) and text:
-            content.append({"type": "text", "text": text})
-        for call in message.get("tool_calls") or []:
-            if not isinstance(call, Mapping) or not isinstance(call.get("function"), Mapping):
-                raise ValueError("internal assistant tool call is malformed")
-            function = call["function"]
-            arguments = function.get("arguments", "{}")
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError as exc:
-                    raise ValueError("sampled tool-call arguments are not valid JSON") from exc
-            if not isinstance(arguments, Mapping):
-                raise ValueError("sampled tool-call arguments must decode to an object")
-            content.append(
-                {
-                    "type": "tool_use",
-                    "id": str(call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"),
-                    "name": str(function.get("name", "")),
-                    "input": dict(arguments),
-                }
-            )
-
-        usage = response.get("usage")
-        usage = usage if isinstance(usage, Mapping) else {}
-        training = dict(response.get("training") or {})
-        # Provider-neutral transcript fields are private (client responses
-        # strip the whole training block) and let processors render Anthropic
-        # traffic with the exact same chat template used for generation.
-        training.update(
-            {
-                "request_messages": list(normalized_request.get("messages") or []),
-                "request_tools": normalized_request.get("tools"),
-                "response_message": dict(message),
-                "finish_reason": choice.get("finish_reason"),
-            }
-        )
-        return {
-            "id": f"msg_{uuid.uuid4().hex}",
-            "type": "message",
-            "role": "assistant",
-            "model": str(original_request.get("model", response.get("model", ""))),
-            "content": content,
-            "stop_reason": cls._anthropic_stop_reason(choice.get("finish_reason")),
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": int(usage.get("prompt_tokens") or 0),
-                "output_tokens": int(usage.get("completion_tokens") or 0),
-            },
-            "training": training,
-        }
-
-    @staticmethod
-    def _anthropic_stop_reason(value: Any) -> str:
-        if value == "tool_calls":
-            return "tool_use"
-        if value == "length":
-            return "max_tokens"
-        return "end_turn"
-
-    # -- Rollout continuation ---------------------------------------------------
-
-    def _rollout_id(self, request: Mapping[str, Any]) -> str | None:
-        """The rollout a request belongs to: its OpenAI ``user`` field, when continuation is on."""
-        if not self._rollout_continuation:
-            return None
-        rollout_id = request.get("user")
-        if isinstance(rollout_id, str) and rollout_id:
-            return rollout_id
-        return None
-
-    def _prompt_ids(self, request: dict[str, Any]) -> list[int]:
-        """Render the prompt, or extend the rollout's previous call when the request continues one."""
-        rollout_id = self._rollout_id(request)
-        prefix = None if rollout_id is None else self._rollout_prefixes.get(rollout_id)
-        if prefix is None:
-            return self._render_prompt(request)
-        return self._continuation_prompt(request, prefix)
-
-    def _continuation_prompt(self, request: Mapping[str, Any], prefix: RolloutPrefix) -> list[int]:
-        """The previous call's exact tokens followed by the rendered new messages.
-
-        The request repeats the previous request's messages, then carries the
-        sampled assistant turn and one or more user or tool messages, with the
-        same model, tools and chat template arguments. Only the new messages
-        are rendered: a two-message boundary conversation whose assistant turn
-        holds a sentinel, then the new messages and the generation prompt; the
-        text after the sentinel is the suffix. A sampled turn that ended with
-        the template's end-of-turn token already carries it, so the suffix's
-        leading copy is dropped; a length-limited turn keeps it as context.
-        """
-        messages = request.get("messages")
-        previous = prefix.request["messages"]
-        count = len(previous)
-        if (
-            not isinstance(messages, list)
-            or messages[:count] != previous
-            or len(messages) < count + 2
-            or not isinstance(messages[count], Mapping)
-            or messages[count].get("role") != "assistant"
-        ):
-            raise ValueError(
-                "rollout continuation requires the previous messages, the sampled assistant turn, "
-                "and at least one new message; name a new rollout in the user field to start over"
-            )
-        new_messages = messages[count + 1 :]
-        if any(
-            not isinstance(message, Mapping) or message.get("role") not in ("user", "tool") for message in new_messages
-        ):
-            raise ValueError("rollout continuation accepts only user and tool messages after the sampled turn")
-        for key in ("model", "tools", "chat_template_kwargs"):
-            if request.get(key) != prefix.request.get(key):
-                raise ValueError(f"rollout continuation cannot change {key}")
-        tokenizer = self._require_tokenizer()
-        render_kwargs = {
-            **self._chat_template_kwargs,
-            **template_kwargs_of(request.get("chat_template_kwargs"), "chat_template_kwargs"),
-        }
-        boundary = [
-            {"role": "user", "content": ROLLOUT_BOUNDARY_SENTINEL},
-            {"role": "assistant", "content": ROLLOUT_BOUNDARY_SENTINEL},
-        ]
-        rendered = tokenizer.apply_chat_template(
-            [*boundary, *self._template_messages(list(new_messages))],
-            tokenize=False,
-            add_generation_prompt=True,
-            **render_kwargs,
-        )
-        if not isinstance(rendered, str) or rendered.count(ROLLOUT_BOUNDARY_SENTINEL) != 2:
-            raise ValueError("the chat template cannot render a rollout's new messages on their own")
-        suffix = rendered[rendered.rindex(ROLLOUT_BOUNDARY_SENTINEL) + len(ROLLOUT_BOUNDARY_SENTINEL) :]
-        suffix_ids = integer_tokens(tokenizer.encode(suffix, add_special_tokens=False), "rollout continuation")
-        if suffix_ids and suffix_ids[0] == prefix.tokens[-1]:
-            suffix_ids = suffix_ids[1:]
-        return [*prefix.tokens, *suffix_ids]
-
-    def _remember_rollout(self, rollout_id: str, tokens: list[int], request: Mapping[str, Any]) -> None:
-        """Keep the call's exact tokens as the rollout's latest; forget the oldest rollout past the limit."""
-        prefixes = self._rollout_prefixes
-        prefixes.pop(rollout_id, None)
-        prefixes[rollout_id] = RolloutPrefix(tuple(tokens), copy.deepcopy(dict(request)))
-        while len(prefixes) > ROLLOUT_PREFIX_LIMIT:
-            prefixes.popitem(last=False)
+    def _anthropic_count_tokens(self, artifact: InferenceArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Count the exact templated input."""
+        request = anthropic_request({**payload, "max_tokens": 1})
+        return {"input_tokens": len(self._render_prompt(request))}
 
     # -- Prompt rendering and tool parsing -------------------------------------
 

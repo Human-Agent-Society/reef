@@ -42,7 +42,7 @@ function resolveHref(href: string, sourcePath: string) {
   const suffix = hash ? `#${hash}` : "";
 
   // Only pages the site actually builds become internal links. The rest of the
-  // repository — rfcs/, historical/, code, examples — is linked on GitHub,
+  // repository — code and examples — is linked on GitHub,
   // where those files are read.
   if (resolved.startsWith("docs/") && resolved.endsWith(".rst")) {
     const slug = resolved.slice("docs/".length, -".rst".length);

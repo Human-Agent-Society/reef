@@ -5,7 +5,7 @@ for the native variant) carries both the deployment (`service`, `inference`, `se
 and the harness_evolve recipe itself. The registry loads named recipes from
 REEF_RECIPE_CONFIG_DIR, so run.sh writes the versioned recipe, pipeline and inference sections
 plus execution selectors and executor profiles there before starting Reef, and the
-task list beside them for run.py. An omitted model uses the deployment runtime.
+evaluation task list beside them for run.py. An omitted model uses the deployment runtime.
 """
 
 import argparse
@@ -22,7 +22,8 @@ def materialize(serve: Path, work: Path) -> None:
     recipe.update({key: config[key] for key in ("pipeline", "inference", "execution", "executors") if key in config})
     (work / "recipes").mkdir(parents=True, exist_ok=True)
     (work / "recipes" / "harness_evolve.yaml").write_text(yaml.safe_dump(recipe, sort_keys=False))
-    (work / "tasks.json").write_text(json.dumps(recipe["recipe"]["config"]["evolution"]["tasks"], indent=2) + "\n")
+    tasks = recipe["recipe"]["config"]["evolution"]["evaluation"]["tasks"]
+    (work / "tasks.json").write_text(json.dumps(tasks, indent=2) + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:

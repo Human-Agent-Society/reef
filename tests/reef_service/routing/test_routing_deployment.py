@@ -475,6 +475,13 @@ def test_managed_settings_parse_at_the_service_boundary() -> None:
         RoutingDeploymentSettings().require_identity()
 
 
+def test_routed_retry_deadline_follows_inference_timeout_unless_supplied() -> None:
+    config = {"reef": {"recipe": "recipe", "inference_timeout_s": 42}}
+    assert service_config_from_mapping(normalize_service_config(config)).inference_retry_timeout_s == 42
+    config["reef"]["inference_retry_timeout_s"] = 12
+    assert service_config_from_mapping(normalize_service_config(config)).inference_retry_timeout_s == 12
+
+
 def test_unknown_routing_settings_are_named_without_their_values() -> None:
     with pytest.raises(ValueError, match="unknown config fields: client_token") as error:
         routing_deployment_settings({"deployment_id": "valid", "client-token": "secret-value"})

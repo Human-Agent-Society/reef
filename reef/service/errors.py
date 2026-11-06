@@ -13,24 +13,22 @@ import logging
 from aiohttp import web
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
-from reef.artifact.release_chain import ReleaseNotRestorable
+from reef.artifact.snapshot_chain import SnapshotNotRestorable
 from reef.core.errors import (
     CommitPending,
     InferenceUnavailable,
-    ManualBufferRefused,
     ReefError,
     ScenarioCapacityFull,
     ScenarioLimitReached,
     UnknownScenario,
+    UpstreamStatusError,
 )
-from reef.runtime.interfaces import UpstreamStatusError
-from reef.service.artifact_evaluations import EvaluationLimitReached
-from reef.service.request_service import InferenceRetryTimeout
+from reef.service.data import NoDataStore
+from reef.service.routed_inference import InferenceRetryTimeout
 from reef.service.routing import RoutingRequestError
 from reef.service.routing_preview import PREVIEW_BODY_LIMIT_BYTES
+from reef.storage.data import ItemConflict, ItemNotFound
 from reef.storage.records import RecordConflict
-from reef.storage.samples import SampleConflict
-from reef.surface.weights import RuntimeLoadMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +36,15 @@ logger = logging.getLogger(__name__)
 ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactNotFound, web.HTTPNotFound),
     (UnknownScenario, web.HTTPNotFound),
+    (ItemNotFound, web.HTTPNotFound),
+    (ItemConflict, web.HTTPConflict),
+    (NoDataStore, web.HTTPServiceUnavailable),
     (ScenarioLimitReached, web.HTTPConflict),
     (ScenarioCapacityFull, web.HTTPServiceUnavailable),
     (ArtifactConflict, web.HTTPConflict),
     (CommitPending, web.HTTPConflict),
-    (ManualBufferRefused, web.HTTPConflict),
-    (ReleaseNotRestorable, web.HTTPBadRequest),
+    (SnapshotNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
-    (SampleConflict, web.HTTPConflict),
-    (EvaluationLimitReached, web.HTTPTooManyRequests),
-    (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
     (InferenceUnavailable, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),

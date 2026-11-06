@@ -60,7 +60,7 @@ def build_executor(
     ``egress_hosts``, ``limits``, and an explicit ``env_from`` list of host
     variable names from the same section. The executor is
     preflighted at build so a hosted deployment that requires the sandbox
-    fails to start, not at the first rollout. The caller binds the result to
+    fails to start, not at the first run. The caller binds the result to
     the program it runs with :meth:`ProgramExecutor.for_program`.
     """
     config = config or {}
@@ -77,7 +77,7 @@ def build_executor(
         return remote
     if kind != "sandbox":
         kinds = ", ".join(f"'{name}'" for name in ("local", "sandbox", *sorted(REMOTE_EXECUTORS)))
-        raise ReefError(f"unknown rollout executor {kind!r}; use one of {kinds}")
+        raise ReefError(f"unknown run executor {kind!r}; use one of {kinds}")
     sandbox_config = config.get("sandbox") or {}
     if not isinstance(sandbox_config, Mapping):
         raise ReefError("evolution.sandbox must be a mapping")

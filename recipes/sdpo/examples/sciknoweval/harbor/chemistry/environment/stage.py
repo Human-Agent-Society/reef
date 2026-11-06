@@ -12,7 +12,7 @@ from the seed:
     learn   — the recipe holds the step until the grid is complete, builds it
               as one batch (each rollout's teacher rereads the question with a
               successful sibling's response) and publishes the weights; the
-              loop blocks on that release, so the next grid is on-policy
+              loop blocks on that snapshot, so the next grid is on-policy
 
 Every ``EVAL_EVERY`` steps, and before the first, the stage evaluates avg@16 on
 the 210 test questions and appends it to ``RESULT_PATH``: that series is the
@@ -33,7 +33,7 @@ from pathlib import Path
 
 import chemistry
 
-# The grid MUST equal serve.yaml's pipeline.record2record.config: groups_per_step and rollouts_per_group.
+# The grid MUST equal serve.yaml's pipeline.record2sample.config: groups_per_step and rollouts_per_group.
 GROUPS_PER_STEP = int(os.environ.get("SDPO_GROUPS_PER_STEP", "32"))
 ROLLOUTS_PER_GROUP = int(os.environ.get("SDPO_ROLLOUTS_PER_GROUP", "8"))
 EPOCHS = int(os.environ.get("SDPO_EPOCHS", "30"))  # the reference's total_epochs ceiling
@@ -62,6 +62,8 @@ def main() -> None:
     if STEPS:
         schedule = schedule[:STEPS]
     client = chemistry.make_client(timeout_s=TRAIN_TIMEOUT_S)
+    # The inference routes serve only a scenario that exists: create it before the first model call.
+    client.post("/reef/scenarios", chemistry.SCENARIO, {"name": chemistry.SCENARIO})
     print(
         f"[chemistry] {len(train)} training and {len(test)} test questions; {len(schedule)} steps of "
         f"{GROUPS_PER_STEP}x{ROLLOUTS_PER_GROUP} (seed {SEED}); service {chemistry.SERVICE_URL}, "

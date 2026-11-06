@@ -11,10 +11,10 @@ from dataclasses import replace
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.runtime.interfaces import TrainingMethod
-from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.schedule import RolloutUnit, StepScheduling, schedule_job_data
+from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
+from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters import preparation
 from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
 from reef.train.types import JobData
@@ -54,7 +54,6 @@ def wire_payload(
         # or from the order in which a dict happens to be traversed.
         "rollout_ids": [0, 0, 1],
         "loss": loss,
-        "method": TrainingMethod(loss).to_dict(),
         "external_step_sizes": [2],
     }
     if advantages != "default":
@@ -69,7 +68,6 @@ def test_to_slime_rollout_data_converts_non_empty_payload_and_preserves_groups()
             "samples": [wire_row("first"), wire_row("second", reward=1.0)],
             "rollout_ids": [7, 7],
             "loss": "pg",
-            "method": TrainingMethod("pg").to_dict(),
             "advantages": [0.25, -0.25],
             "external_step_sizes": [1],
         }
@@ -102,7 +100,6 @@ def test_to_slime_rollout_data_aggregates_rollout_mask_sums() -> None:
         ],
         "rollout_ids": [0, 0, 1],
         "loss": "pg",
-        "method": TrainingMethod("pg").to_dict(),
         "advantages": [0.25, -0.25, 0.0],
         "external_step_sizes": [2],
     }
@@ -145,14 +142,10 @@ def test_to_slime_rollout_data_rejects_non_empty_log_prob_shape_mismatch() -> No
 
 
 @pytest.mark.unit
-def test_to_slime_rollout_data_rejects_mixed_empty_and_non_empty_log_probs() -> None:
-    with pytest.raises(ValueError, match="log_prob"):
-        to_slime_rollout_data(
-            wire_payload(
-                log_probs=[[], [0.3, 0.4], [0.5, 0.6]],
-                loss="sft",
-            )
-        )
+def test_a_batch_with_rows_without_log_probs_ships_none() -> None:
+    # The actor computes the old-policy log-probabilities, so a rendered row next to recorded ones is no error.
+    data = to_slime_rollout_data(wire_payload(log_probs=[[], [0.3, 0.4], [0.5, 0.6]], loss="sft"))
+    assert "rollout_log_probs" not in data
 
 
 @pytest.mark.unit
@@ -172,7 +165,6 @@ def test_to_slime_rollout_data_rejects_mixed_empty_and_non_empty_log_probs() -> 
                 ],
                 "rollout_ids": [0],
                 "loss": "pg",
-                "method": TrainingMethod("pg").to_dict(),
             },
             "sample",
         ),
@@ -400,7 +392,6 @@ def test_to_slime_rollout_data_validates_step_layout() -> None:
         "samples": [sample, sample, sample, sample],
         "rollout_ids": [0, 1, 2, 3],
         "loss": "sft",
-        "method": TrainingMethod("sft").to_dict(),
     }
 
     assert to_slime_rollout_data({**payload, "external_step_sizes": [3, 1]})["external_step_sizes"] == [3, 1]
@@ -415,7 +406,7 @@ def test_to_slime_rollout_data_validates_step_layout() -> None:
 
 @pytest.mark.unit
 def test_prepare_slime_job_reports_schedule_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
-    class ScheduleObjective(TrainingObjective):
+    class ScheduleObjective(SlimeObjective):
         name = "test-schedule"
         loss_family = "pg"
         supports_multiple_epochs = True
@@ -423,11 +414,11 @@ def test_prepare_slime_job_reports_schedule_metrics(monkeypatch: pytest.MonkeyPa
         def prepare(self, batch, state):
             return TrainingSignal("train", {}, {"steps": 1}, tuple(range(8)))
 
-    monkeypatch.setattr(preparation, "resolve_objective", lambda _name: ScheduleObjective())
+    monkeypatch.setattr(preparation, "resolve_slime_objective", lambda _name: ScheduleObjective())
 
     result = preparation.prepare_slime_job(
         grouped_batch(8, 1),
-        TrainingMethod("any"),
+        "any",
         {},
         StepScheduling(epochs=2, remainder="drop"),
         step_size=3,
@@ -442,7 +433,7 @@ def test_prepare_slime_job_reports_schedule_metrics(monkeypatch: pytest.MonkeyPa
 def test_prepare_slime_job_groups_rows_by_the_objective_rollout_unit(
     monkeypatch: pytest.MonkeyPatch, unit: RolloutUnit, rollout_ids: list[int]
 ) -> None:
-    class GroupedObjective(TrainingObjective):
+    class GroupedObjective(SlimeObjective):
         name = "test-rollout-unit"
         loss_family = "pg"
         rollout_unit = unit
@@ -450,11 +441,9 @@ def test_prepare_slime_job_groups_rows_by_the_objective_rollout_unit(
         def prepare(self, batch, state):
             return TrainingSignal("train", {}, {}, (1.0, -1.0, 1.0, -1.0))
 
-    monkeypatch.setattr(preparation, "resolve_objective", lambda _name: GroupedObjective())
+    monkeypatch.setattr(preparation, "resolve_slime_objective", lambda _name: GroupedObjective())
 
-    result = preparation.prepare_slime_job(
-        grouped_batch(2, 2), TrainingMethod("any"), {}, StepScheduling(), step_size=1
-    )
+    result = preparation.prepare_slime_job(grouped_batch(2, 2), "any", {}, StepScheduling(), step_size=1)
 
     assert result.payload is not None
     assert result.payload["rollout_ids"] == rollout_ids

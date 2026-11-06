@@ -1,14 +1,13 @@
-"""What a release needs from the person: the ``requires`` items a training request carries.
+"""What a snapshot needs from the person: the ``requires`` items a training request carries.
 
 A request posted to ``POST /reef/train`` may name what its change needs
 from the person's machine, as ``{name, kind, check, prompt}`` items (the
 ``prompt`` is one sentence telling the person what to enter or grant); the
 proposer may add items its extension needs, and the commit that answered the
-request carries the merged list under ``training_request.requires``. A release's
-items are per step, so the manifest, the install script, ``reef-<adapter>
-setup`` and the update notice read the union over the release's chain with
-:func:`required_by`, the one rule for all four. Nothing here runs a check:
-the checks run on the person's machine, after the person read them.
+request carries the merged list under ``training_request.requires``. A snapshot's
+items are per step, so the manifest and the snapshot pages read the union over
+the snapshot's chain with :func:`required_by`. Nothing here runs a check: a
+client runs the checks where the harness runs, after the person read them.
 """
 
 from __future__ import annotations
@@ -20,13 +19,13 @@ from typing import Any
 #: What a ``requires`` item asks of the person: an OS permission to grant, a variable to set, a service to
 #: connect, a program to install. A ``binary`` item's name is the program, looked for on PATH.
 REQUIRE_KINDS = ("permission", "env", "service", "binary")
-#: A release names a handful of things to set up; a longer list is a request that should be split.
+#: A snapshot names a handful of things to set up; a longer list is a request that should be split.
 MAX_REQUIRES = 8
 #: A prompt is one sentence saying what to enter or grant; the listings show it beside the item, so it stays short.
 MAX_REQUIRE_PROMPT = 200
 #: An item's name is shown, checked off and matched by name, so it keeps to the entry name pattern.
 _REQUIRE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-#: An env item names a variable the wrapper and the extension read from the environment, so it is an identifier.
+#: An env item names a variable the harness reads from the environment, so it is an identifier.
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -91,8 +90,8 @@ def merge_requires(base: Sequence[Mapping[str, Any]], added: Sequence[Mapping[st
     return merged
 
 
-def _row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-    """The ``training_request.requires`` items of one release's gate metrics; empty when the step read no request."""
+def row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The ``training_request.requires`` items of one snapshot's gate metrics; empty when the step read no request."""
     request = metrics.get("training_request") if isinstance(metrics, Mapping) else None
     requires = request.get("requires") if isinstance(request, Mapping) else None
     if not isinstance(requires, Sequence) or isinstance(requires, str):
@@ -100,64 +99,46 @@ def _row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     return [dict(item) for item in requires if isinstance(item, Mapping) and isinstance(item.get("name"), str)]
 
 
-def _chain(rows: Sequence[Mapping[str, Any]], release_id: str | None) -> list[Mapping[str, Any]]:
-    """The content chain of ``release_id`` through the catalog ``rows``, newest first.
+def artifact_chain(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -> list[Mapping[str, Any]]:
+    """The content chain of ``artifact_id`` through the catalog ``rows``, newest first.
 
-    ``rows`` come oldest first, as ``GET /reef/harness/releases`` lists
+    ``rows`` come oldest first, as ``GET /reef/harness/artifacts`` lists
     them, and the row that published an id is its oldest row; the chain
     continues at each row's parent."""
     published: dict[str, Mapping[str, Any]] = {}
     for row in rows:
-        if isinstance(row, Mapping) and isinstance(row.get("release_id"), str):
-            published.setdefault(row["release_id"], row)
+        if isinstance(row, Mapping) and isinstance(row.get("artifact_id"), str):
+            published.setdefault(row["artifact_id"], row)
     chain: list[Mapping[str, Any]] = []
     seen: set[str] = set()
-    current = release_id
+    current = artifact_id
     while isinstance(current, str) and current in published and current not in seen:
         seen.add(current)
         chain.append(published[current])
-        current = published[current].get("parent_release_id")
+        current = published[current].get("parent_artifact_id")
     return chain
 
 
-def required_by(rows: Sequence[Mapping[str, Any]], release_id: str | None) -> list[dict[str, Any]]:
-    """What a release needs from the person: every ``training_request.requires`` item over its chain, by name.
+def required_by(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -> list[dict[str, Any]]:
+    """What a snapshot needs from the person: every ``training_request.requires`` item over its chain, by name.
 
-    A request's items are per release, so a later release whose request
+    A request's items are per snapshot, so a later snapshot whose request
     named nothing still carries the extension an earlier one added. The
-    walk starts at ``release_id`` and follows its chain through the
+    walk starts at ``artifact_id`` and follows its chain through the
     catalog ``rows``. Names keep the order of their oldest definition and
-    the newest definition of a name wins. The one rule for the manifest,
-    the install script, ``reef-<adapter> setup`` and the update notice."""
+    the newest definition of a name wins. The one rule for the manifest and
+    the snapshot pages."""
     merged: dict[str, dict[str, Any]] = {}
-    for row in reversed(_chain(rows, release_id)):
-        for item in _row_requires(row.get("metrics")):
+    for row in reversed(artifact_chain(rows, artifact_id)):
+        for item in row_requires(row.get("metrics")):
             merged[item["name"]] = item
     return list(merged.values())
-
-
-def ancestor_requiring_nothing(rows: Sequence[Mapping[str, Any]], release_id: str | None) -> str | None:
-    """The newest release before ``release_id`` in its chain that requires nothing over its own chain.
-
-    The one a machine with nothing set up installs: every later release
-    in the chain needs an item, and the local release file records no completed setup.
-    The creation row always qualifies; ``None`` when ``release_id`` has no
-    ancestor in ``rows``."""
-    ancestors = list(reversed(_chain(rows, release_id)))[:-1]
-    # Oldest first, the union stays empty until the first row that named an item.
-    latest = None
-    for row in ancestors:
-        if _row_requires(row.get("metrics")):
-            break
-        latest = str(row["release_id"])
-    return latest
 
 
 __all__ = [
     "MAX_REQUIRES",
     "MAX_REQUIRE_PROMPT",
     "REQUIRE_KINDS",
-    "ancestor_requiring_nothing",
     "merge_requires",
     "parse_requires",
     "required_by",

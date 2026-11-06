@@ -27,7 +27,7 @@ Environment:
   SAO_RECORDS_PATH  where one JSON line per scored rollout is appended
   SAO_SEED          sampling seed for the problem order (default 0)
   SAO_BATCH         rollouts per optimizer step (the global batch size); the
-                    driver waits for BUDGET // SAO_BATCH training releases
+                    driver waits for BUDGET // SAO_BATCH training snapshots
                     before exiting, so the stack is not torn down mid-step
   SAO_TRAIN_DRAIN_TIMEOUT_S  how long to wait for that drain (default 14400)
   SAO_PROGRESS_FILE  optional file holding the number of optimizer steps done
@@ -136,16 +136,16 @@ def training_step_count() -> int | None:
     return 0 if scenario is None else int(scenario["scenario_step"])
 
 
-def serving_release() -> str | None:
-    """The release of the scenario's active artifact, so each record names the weights that served it."""
+def serving_artifact() -> str | None:
+    """The active artifact ID observed before submitting a rollout."""
     rows = artifacts()
-    return next((str(row["release_id"]) for row in rows or () if row["active"]), None)
+    return next((str(row["artifact_id"]) for row in rows or () if row["active"]), None)
 
 
 class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
-    Reef drops rollouts that exceed pipeline.record2record.config.max_staleness, and the driver
+    Reef drops rollouts that exceed pipeline.record2sample.config.max_staleness, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
     batch of credit; otherwise a burst of dropped rollouts would deadlock.
     """
@@ -197,7 +197,7 @@ def wait_for_training(expected: int) -> None:
 
 def one_rollout(client: ReefClient, model: str, problem: dict, position: int) -> dict:
     started = time.time()
-    release = serving_release()
+    artifact_id = serving_artifact()
     response, receipt = client.inference_with_record(
         SCENARIO,
         "/v1/chat/completions",
@@ -219,7 +219,7 @@ def one_rollout(client: ReefClient, model: str, problem: dict, position: int) ->
         "score": score,
         "predicted": predicted,
         "gold": str(problem["gold"]),
-        "serving_release_id": release,
+        "serving_artifact_id": artifact_id,
         "agent_record_id": receipt,
         "prompt_tokens": response["usage"]["prompt_tokens"],
         "completion_tokens": response["usage"]["completion_tokens"],
@@ -233,7 +233,7 @@ def one_rollout(client: ReefClient, model: str, problem: dict, position: int) ->
             out.write(json.dumps(record) + "\n")
     print(
         f"[{RECIPE} {position}] idx={problem['problem_idx']} score={score:.0f} "
-        f"tokens={record['completion_tokens']} release={release} predicted={predicted!r}",
+        f"tokens={record['completion_tokens']} artifact_id={artifact_id} predicted={predicted!r}",
         flush=True,
     )
     return record
@@ -243,6 +243,8 @@ def main() -> None:
     problems = load_problems()
     order = problem_order(problems, BUDGET)
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=7200)
+    # The inference routes serve only a scenario that exists: create it before the first rollout.
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     model = os.environ.get("SAO_MODEL_NAME", "reef")  # the name run.py sends; Reef's SGLang serves it
     pacer = TrainerPacer(PROGRESS_FILE)
     print(

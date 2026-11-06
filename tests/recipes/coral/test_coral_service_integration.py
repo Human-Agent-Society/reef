@@ -19,12 +19,17 @@ import pytest
 reef_service = pytest.importorskip("reef.service.app", reason="requires a reef checkout")
 
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 
 from recipes.beta.coral.journal import CallJournal
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
 from recipes.beta.coral.reporter import AttemptReport
-from reef.dispatcher import build_default_dispatcher
-from reef.runtime.interfaces import InferenceHandler
+from reef.artifact import InMemoryRepositoryBackend
+from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler
+from reef.recipe import Recipe
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -91,17 +96,21 @@ async def _post_through(mw, scope, body: bytes):
 
 @pytest.mark.unit
 def test_full_loop_against_real_reef_service(tmp_path):
+    # The runtime's engine has an HTTP address, so the scenario has a served model; the stub answers for it.
+    dispatcher = Dispatcher(
+        Recipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
+    )
+    # An inference call never creates a scenario.
+    dispatcher.get_or_create_scenario("coral-demo")
+
     async def run():
-        reef_client = TestClient(
-            TestServer(
-                reef_service.create_app(
-                    build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()),
-                    inference_handler=_EchoBackend(),
-                )
-            )
-        )
+        reef_client = TestClient(TestServer(reef_service.create_app(dispatcher, inference_handler=_EchoBackend())))
         await reef_client.start_server()
         try:
+            await wait_for_inference(reef_client, "coral-demo")
             journal = CallJournal(tmp_path / "calls.jsonl")
             mw = ReefGatewayMiddleware(
                 _HttpForwarder(reef_client),
@@ -157,4 +166,7 @@ def test_full_loop_against_real_reef_service(tmp_path):
         finally:
             await reef_client.close()
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()

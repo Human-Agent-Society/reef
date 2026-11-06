@@ -289,7 +289,7 @@ def test_constant_reward_step_can_commit_without_a_parameter_change():
                 **metrics,
             },
             position=TrainingPosition(3, 1, None),
-            runtime_load_id=None,
+            served_artifact_id=None,
         )
 
     args = {"expected_rollouts": 4, "actual_rollouts": 4, "retained_trajectories": 2, "lora_rank": 32}

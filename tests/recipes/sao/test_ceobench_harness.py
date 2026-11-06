@@ -874,7 +874,7 @@ def test_training_pacer_waits_for_the_batches_the_reported_turns_filled(monkeypa
     monkeypatch.setattr(report.time, "sleep", lambda _s: None)
     pacer = report.TrainingPacer(8, 60.0, Steps([3, 3, 4, 4]), SimpleNamespace(warning=lambda *a, **k: None))
     assert pacer.wait(1, 7) < 1.0  # no full batch yet: nothing to wait for
-    pacer.wait(2, 8)  # one batch: waits until the release count moves from 3 to 4
+    pacer.wait(2, 8)  # one batch: waits until the snapshot count moves from 3 to 4
     assert pacer.expected_steps(16) == 2
 
 

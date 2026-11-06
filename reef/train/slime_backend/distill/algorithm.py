@@ -255,9 +255,6 @@ class DistillAlgorithm(SlimeAlgorithm):
     """
 
     loss_type = "custom_loss"
-    # The truncated importance-sampling weight compares the policy against the
-    # rollout engine's log-probs; Reef ships them per row.
-    requires_rollout_logprobs = True
     advantages = "forbidden"
     forbidden_advantages_message = (
         "a distillation family distils its teacher's distribution; the Reef payload must omit advantages"
@@ -269,7 +266,7 @@ class DistillAlgorithm(SlimeAlgorithm):
         "distill_teacher_topk_log_probs": "float32",
         "distill_teacher_sampled_log_probs": "float32",
     }
-    external_batch_keys = ("rollout_log_probs", "distill_sample_weights", *TEACHER_BATCH_KEYS)
+    external_batch_keys = ("distill_sample_weights", *TEACHER_BATCH_KEYS)
     rollout_log_skip_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS)
     required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
     #: The recipe's settings type, with its defaults.

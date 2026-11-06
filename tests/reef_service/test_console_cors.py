@@ -11,6 +11,7 @@ from reef.service import assembly
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 ORIGIN = "https://api.reefinfra.ai"
@@ -25,7 +26,7 @@ def make_client(origins=(ORIGIN,)):
         return web.json_response({"scenario": request.headers.get("x-reef-scenario")})
 
     async def stream(request):
-        response = web.StreamResponse(headers={"content-type": "text/event-stream", "x-reef-release-id": "release-1"})
+        response = web.StreamResponse(headers={"content-type": "text/event-stream", "x-reef-artifact-id": "release-1"})
         await response.prepare(request)
         await response.write(b"data: hello\n\n")
         await response.write_eof()
@@ -113,7 +114,8 @@ def test_streaming_responses_and_errors_have_cors_headers():
             response = await client.get("/stream", headers={"Origin": ORIGIN, "Authorization": "Bearer local-secret"})
             assert response.status == 200
             assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
-            assert "x-reef-release-id" in response.headers["Access-Control-Expose-Headers"]
+            assert "x-reef-artifact-id" in response.headers["Access-Control-Expose-Headers"]
+            assert "x-reef-artifact-id" in response.headers["Access-Control-Expose-Headers"]
             assert "Origin" in response.headers.getall("Vary")
             assert await response.text() == "data: hello\n\n"
             response = await client.get("/missing", headers={"Origin": ORIGIN, "Authorization": "Bearer local-secret"})
@@ -163,7 +165,7 @@ def test_config_defaults_and_explicit_origins():
 
 
 def test_serve_settings_enable_browser_access_on_real_scenario_routes(monkeypatch):
-    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     dispatcher.get_or_create_scenario("existing-local")
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
     settings = service_config_from_mapping(

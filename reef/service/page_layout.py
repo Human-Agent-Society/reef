@@ -1,8 +1,8 @@
 """The layout both harness pages share: the document wrapper, the design tokens and the status vocabulary.
 
-``GET /reef/harness/releases/{step}/page`` and
+``GET /reef/harness/artifacts/{step}/page`` and
 ``GET /reef/harness/requests/{record_id}/page`` are two views of one thing, a
-request becoming a release, and a person moves between them by the link each
+request becoming a snapshot, and a person moves between them by the link each
 carries. They therefore share this module's header, palette, card shapes and
 status wording, and each adds only the CSS its own sections need.
 
@@ -62,11 +62,11 @@ padding:6px 12px;font-size:12px;background:var(--card);white-space:nowrap}
 .tone-selected{--status:var(--good);--status-bg:var(--good-bg)}
 .tone-inactive,.tone-skipped{--status:var(--warn);--status-bg:var(--warn-bg)}
 .tone-rejected,.tone-failed{--status:var(--bad);--status-bg:var(--bad-bg)}
-.tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-settling,.tone-creation,
+.tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-creation,
 .tone-recovery,.tone-unknown{--status:var(--accent);--status-bg:var(--soft)}
 .status{color:var(--status);background:var(--status-bg);border-color:transparent}
-.selected,.complete{color:var(--good)}
-.inactive,.skipped,.partial,.queued,.proposing,.evaluating,.running,.settling{color:var(--warn)}
+.selected{color:var(--good)}
+.inactive,.skipped,.queued,.proposing,.evaluating,.running{color:var(--warn)}
 .rejected,.failed{color:var(--bad)}.creation,.recovery,.unknown{color:var(--accent)}
 /* A status word inside a pill takes the pill's tone, which the hero and the summary set. */
 .status span{color:inherit}
@@ -101,15 +101,14 @@ STATUS_LABELS = {
     "proposing": "Designing the change",
     "evaluating": "Checking the harness",
     "running": "In progress",
-    "settling": "Saving the result",
     "selected": "Published",
     "inactive": "Waiting for activation",
     "rejected": "Not selected",
     "skipped": "No changes",
     "failed": "Failed",
-    "complete": "Complete",
-    "partial": "Partial",
     "creation": "Starting point",
+    "import": "Imported by a person",
+    "sync": "Synced by a person",
     "recovery": "Recovered at boot",
 }
 
@@ -168,12 +167,12 @@ def document(
     ``style`` is appended to :data:`BASE_STYLE`, so a page declares only what
     its own sections need. ``breadcrumb`` is the section the page sits under
     and ``context`` the scenario shown beside it. ``home`` is where the logo
-    and the "Harness" crumb lead, the page of the active release; both stay
+    and the "Harness" crumb lead, the page of the active selection; both stay
     plain text when it is empty, since the only pages a browser can open are
-    the two ``/page`` routes and a catalog may have no active release.
+    the two ``/page`` routes and a catalog may have no active selection.
     ``head`` adds elements to
     the document head, a reload for instance, and ``tail`` follows the footer,
-    where the release page puts its inline data. ``subtitle``, ``body``,
+    where the snapshot page puts its inline data. ``subtitle``, ``body``,
     ``head`` and ``tail`` are HTML the caller has already escaped; every other
     argument is escaped here. Pure ASCII out: other characters leave as
     numeric references.

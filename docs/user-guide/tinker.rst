@@ -4,7 +4,7 @@ Train with Tinker
 The optional ``tinker`` backend runs LoRA training and sampling through
 `Tinker's SDK <https://tinker-docs.thinkingmachines.ai/>`__. Reef runs on a CPU
 host and retains ownership of requests, feedback, candidate selection, and the
-versioned release chain. By default it launches no Ray cluster, no Slime and
+versioned snapshot chain. By default it launches no Ray cluster, no Slime and
 no inference engine; `Serve on inference engines`_ describes the option to
 serve the trained adapters on SGLang engines. The tested SDK interface is
 pinned to ``tinker==0.28.1``.
@@ -63,10 +63,17 @@ per request, ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
 multimodal messages, and Anthropic routes fail explicitly.
 
 Streaming is buffered: the complete sampled response is emitted as valid
-OpenAI SSE events, with the exact private training capture retained separately.
-It does not provide token-by-token latency. Prompt IDs come from the tokenizer's
-chat template. Sampled IDs and log probabilities come directly from Tinker;
-the backend never recovers training tokens by tokenizing decoded output.
+OpenAI SSE events. It does not provide token-by-token latency. Prompt IDs come
+from the tokenizer's chat template.
+
+Serving returns and records no training tensors. The training component
+renders each recorded call with the base model's tokenizer and
+``training.options.chat_template_kwargs``, which must equal the chat template
+arguments of serving, for example ``{enable_thinking: false}``. It computes
+the rollout log probabilities with a forward pass at the job's start, before
+the first optimizer step. A sample that cannot render does not train, and the
+job metric ``unrenderable_samples`` counts it. A task job's own rollouts keep
+the sampled IDs and log probabilities that Tinker returns.
 
 Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
 one training component (``reef.train.tinker_backend``) and one inference
@@ -74,7 +81,7 @@ runtime (``reef.inference.tinker``). Reef submits each job's ready data to the
 component as one training job. They share nothing in process: each saved
 checkpoint carries a ``tinker-checkpoint.json`` manifest that names its
 remote training state and sampler. The inference side serves the sampler that
-a release names. Each job starts from the scenario's last saved checkpoint,
+a snapshot names. Each job starts from the scenario's last saved checkpoint,
 which ``state-dir`` keeps across restarts.
 
 ``training.options.batch-size`` (default 1) is the batch size: the samples in
@@ -104,8 +111,8 @@ locally and no shipped recipe uses it. The TTTD recipe's
 ``recipes/tttd/tinker.py`` keeps its unmasked policy term and masked,
 centered frozen-base KL on ``importance_sampling``, matching its Slime
 objective. ``training.options.kl-coef`` controls that penalty. The base
-sampler scores the original token IDs, and those probabilities never replace
-the captured behavior-policy probabilities. SAO and OpenClaw-RL losses are
+sampler scores the same token IDs, and those probabilities never replace
+the rollout log probabilities. SAO and OpenClaw-RL losses are
 not implemented by this integration; selecting an unregistered loss family
 fails before training.
 
@@ -120,7 +127,7 @@ group of samples, keeps the rollouts in its job directory so a resumed job
 trains the same samples, and reports each task's rewards in the job's metrics.
 The ``rollout`` job parameter sets the rollouts, the agent and the sandbox.
 Reef's serving takes no part, so another runtime, such as an inference
-component, can serve the releases.
+component, can serve the snapshots.
 
 Each job trains the Tinker loss of the objective that its recipe selected
 (`Train each kind of sample with its own method
@@ -168,9 +175,9 @@ in the originating account/project. Local disk retention does not remove remote
 files. Use Tinker's checkpoint management for remote retention, preserving all
 checkpoints referenced by Reef.
 
-Requests that are already admitted keep the sampler of the release they
+Requests that are already admitted keep the sampler of the snapshot they
 started with. Restart creates a fresh runtime-load incarnation and serves the
-active release. Train-from works: Reef imports the older artifact's manifest
+active selection. Train-from works: Reef imports the older artifact's manifest
 into the component, cancels the running job, and the next job starts from that
 artifact's weights and optimizer state.
 
@@ -221,25 +228,24 @@ training scenarios; a scenario's new adapter replaces its own served adapter
 when no slot is free.
 
 Each scenario trains its own adapter. A job runs the optimizer steps of its data
-on Tinker from the scenario's last saved checkpoint. A release still holds only
-its manifest. When the control plane loads a release, it downloads the adapter
+on Tinker from the scenario's last saved checkpoint. A snapshot still holds only
+its manifest. When the control plane loads a snapshot, it downloads the adapter
 that the manifest's ``sampler_path`` names, as ``tinker-cookbook``'s
 ``weights.download`` does, and converts it into a PEFT adapter with
 ``weights.build_lora_adapter``. It keeps the result under
-``<state-dir>/sampler-weights/``, one directory per sampler path, so a release
+``<state-dir>/sampler-weights/``, one directory per sampler path, so a snapshot
 downloads once. A service that serves no checkpoint archives, such as Spindle,
 fails the load. The control plane loads the PEFT adapter into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
-weight surface. The engines capture the sampled tokens and log probabilities
-as they do for Slime. A rejected candidate loads nothing. A restart starts the
+scenario's ``served_models`` route. A rejected candidate loads nothing. A restart starts the
 engines again and loads each scenario's committed adapter before the scenario
 serves. The converter is pinned in the ``tinker`` extra; it brings torch and
 transformers.
 
 The trajectories then come from Reef's engines while Tinker computes the loss,
-so the base model and tokenizer on both sides must match, and the
-importance-sampling ratio carries the numerical difference between the two
-engines' log probabilities. ``reef serve`` refuses ``training.colocate``:
+so the base model and tokenizer on both sides must match. Set
+``training.options.chat_template_kwargs`` to the engines' chat template
+arguments, so that Tinker renders each sample as the engines served it. ``reef serve`` refuses ``training.colocate``:
 there are no training GPUs to share. Tinker's adapters also carry a LoRA on ``lm_head``,
 which the Slime configuration never targets; whether the installed SGLang
 accepts that module is checked only when the engines load the adapter.
@@ -292,8 +298,8 @@ GPU host downloads ``model-path``; the Reef host keeps it as a remote
 identifier.
 
 The HTTP service sends inference requests to the component, and the
-component forwards each request and its answer unchanged. Token capture and
-version stamps therefore come from the engines. When the control plane stops,
+component forwards each request and its answer unchanged. Version stamps
+therefore come from the engines. When the control plane stops,
 the component stops its engines and keeps running. When the component
 restarts, for example because its host replaced the container, it runs no
 engines. The control plane notices within 30 seconds, starts the engines
@@ -358,16 +364,16 @@ Prerequisites:
        modal-environment: spindle            # where the deployment runs
        learning-rate: 1.0e-6
 
-The base artifact is a reference to the base revision (`Import an artifact
-<operate.rst#import-an-artifact>`__); a job from it starts a new model with
-the base's own weights.
+The default start is a reference to the base revision (`Import an artifact
+<operate.rst#import-an-artifact>`__), which a new scenario's root snapshot
+holds; a job from it starts a new model with the base's own weights.
 
-Every release refers to its weights on Hugging Face. When Spindle saves a
+Every snapshot refers to its weights on Hugging Face. When Spindle saves a
 checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint
 Volume (``checkpoint-volume``, default ``spindle-checkpoints``). A Modal
 function then commits those weights, with the base's tokenizer, chat template
 and processor files, to ``release-repo``. Each saved checkpoint is one commit,
-which holds exactly that checkpoint's files. The release holds two files:
+which holds exactly that checkpoint's files. The snapshot holds two files:
 
 - ``hf-reference.json``, the commit with the weights. Any serving runtime can
   load it: Reef's engines (``inference.serving: engines``) download it, and a
@@ -381,6 +387,53 @@ the base model on the same service beside a reference to full weights, or the
 base's own files, by reference or as a copy. The engine trains only its base, so other full weights are refused
 with HTTP 400. To train another checkpoint, deploy a Spindle engine for it and
 a scenario with it as ``base``. A component trains one base.
+
+Score centering
+~~~~~~~~~~~~~~~
+
+A policy gradient whose token weight is not the full importance ratio
+``p / q`` drifts the trained policy ``p`` toward the sampler ``q``. Score
+centering (`arXiv:2609.20807 <https://arxiv.org/abs/2609.20807>`__) removes
+that drift. With ``training.options.score-centering: true``, a ``spindle_full``
+component trains each ``importance_sampling`` job, such as a generated-task or
+task job, as Spindle's ``cispo`` loss with the centering term:
+
+- ``cispo`` weights each sampled token's score by
+  ``clamp(p / q, score-centering-weight-low, score-centering-weight-high)``.
+  The default bounds, 1 and 1, are REINFORCE. Wider bounds, such as 0 and 2,
+  are truncated importance sampling. The term is zero under the full ratio,
+  so the weight cannot be the full ratio.
+- A task job's rollouts record the sampler's top ``score-centering-top-k``
+  log probabilities (default 128) at each sampled token. Those must come from
+  the distribution that the trainer reads, so the rollouts sample at
+  temperature 1 without truncation. A model call that sets another
+  ``temperature``, or a ``top_p`` or ``top_k``, gets HTTP 400. Harbor's
+  ``terminus-2`` agent sets none of them by default.
+- Only a task job's rollouts record the sampler's top-k. Serving records
+  none, so a job of samples that serving recorded, or of uploaded
+  trajectories, fails with score centering on.
+- ``sft`` jobs train as they are. A job of another policy-gradient loss family
+  is refused, since the term must match the gradient it corrects. So is a
+  nonzero ``kl-coef``.
+
+.. code:: yaml
+
+   training:
+     backend: spindle_full
+     options:
+       score-centering: true
+       score-centering-top-k: 128           # sampler log probabilities per sampled token
+       score-centering-weight-low: 1.0      # 1 and 1: REINFORCE
+       score-centering-weight-high: 1.0
+       score-centering-min-tail-mass: 1.0e-6
+
+The Spindle deployment must implement the sampler's ``topk_sample_logprobs``
+and score centering on ``cispo`` (``loss_fn_config.score_centering`` with the
+``sampler_topk_token_ids`` and ``sampler_topk_logprobs`` inputs). A
+deployment without them refuses the rollouts' sample requests or the training
+call, so the job fails. Spindle reports the term in each job's metrics, as
+``score_centering:sum``, ``score_centering_sampler_head_mass:mean`` and
+``score_centering_trainer_head_mass:mean``.
 
 A full-parameter run is single tenant: each job holds the engine's training
 GPUs while it runs, for example 8 H200 GPUs to train and 4 to sample for a

@@ -12,8 +12,8 @@ import json
 import math
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from aiohttp import ClientConnectionError, ClientError, ClientPayloadError, ServerTimeoutError, web
@@ -29,20 +29,23 @@ from tests.reef_service.routing.routing_fakes import (
     running_router,
 )
 
-from reef.artifact import Artifact, InMemoryRepositoryBackend
+from reef.artifact import InMemoryRepositoryBackend
 from reef.core import RequestType
 from reef.core.records_types import AgentRecord
+from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.dispatcher import Dispatcher
 from reef.inference.http import HttpInferenceHandler
+from reef.inference.interfaces import InferenceStream
+from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceStream
 from reef.service.app import InferenceRetryPolicy, create_app
-from reef.service.request_service import PendingInference, RequestService
+from reef.service.request_service import RequestService
+from reef.service.routed_inference import RoutedAttempt
 from reef.service.routing import RoutingDecision
 from reef.service.routing_preview import PreviewSettings
 from reef.service.streaming import stream_record
-from reef.service.wire import parse_request_headers
 from reef.storage.records import AppendResult
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
 
@@ -59,9 +62,11 @@ def provider_server(*routes: tuple[str, str, web.Handler]) -> TestServer:
 def test_routed_abort_retry_records_each_attempt_without_selecting_again(tmp_path: Path) -> None:
     async def run() -> None:
         received = []
+        artifact_ids = []
 
         async def upstream(request: web.Request) -> web.Response:
             received.append(await request.json())
+            artifact_ids.append(request.headers.get("x-reef-artifact-id"))
             if len(received) == 1:
                 return web.json_response({"choices": [{"finish_reason": "abort"}], "training": {"response_ids": [10]}})
             return web.json_response({"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]})
@@ -80,13 +85,20 @@ def test_routed_abort_retry_records_each_attempt_without_selecting_again(tmp_pat
                         inference_retry_policy=retry,
                     )
                     async with TestClient(TestServer(app)) as client:
-                        payload = {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}
+                        payload = {
+                            "model": "auto",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "artifact_id": "caller-supplied",
+                        }
                         response = await client.post("/v1/chat/completions", headers=routing_headers(), json=payload)
                         assert response.status == 200, await response.text()
                         provider_payload = {**payload, "model": "student-v1"}
                         assert received == [provider_payload, provider_payload]
                         assert len(router.selections) == 1
                         aborted, succeeded = dispatcher.get_or_create_scenario("coding").records.replay("coding")
+                        assert artifact_ids == [None, None]
+                        assert aborted.artifact_id is None and succeeded.artifact_id is None
+                        assert "artifact_id" not in aborted.payload and "artifact_id" not in succeeded.payload
                         first = aborted.payload["metadata"]["routing"]
                         second = succeeded.payload["metadata"]["routing"]
                         assert first["execution_outcome"] == "aborted"
@@ -189,11 +201,11 @@ def test_routed_transport_failure_before_any_output_keeps_one_diagnostic_attempt
 ) -> None:
     calls: list[dict[str, object]] = []
 
-    async def fail(handler: HttpInferenceHandler, artifact: object, path: str, payload: dict[str, object]) -> None:
+    async def fail(handler: HttpInferenceHandler, path: str, payload: dict[str, object]) -> None:
         calls.append(payload)
         raise error_type("provider transport failed")
 
-    monkeypatch.setattr(HttpInferenceHandler, "inference_stream" if streaming else "inference", fail)
+    monkeypatch.setattr(HttpInferenceHandler, "post_stream" if streaming else "post_json", fail)
 
     async def run() -> None:
         async with provider_server() as provider:
@@ -390,6 +402,16 @@ def test_a_routed_stream_records_an_explicit_abort_apart_from_its_delivery(
     asyncio.run(run())
 
 
+def publish_direct_model(dispatcher: Dispatcher, scenario: str, url: str, model: str) -> None:
+    """Publish the row from which upstream's inference replica reads the direct model."""
+    current = dispatcher.get_or_create_scenario(scenario)
+    dispatcher.coordination.served_models.write(
+        ScenarioModel(scenario, ACTIVE),
+        ServedArtifact(current.serving_artifact_id(), url, model),
+        control_lease_number=dispatcher.publisher.lease_number,
+    )
+
+
 @pytest.mark.unit
 def test_routing_disabled_preserves_direct_inference(tmp_path: Path) -> None:
     async def run() -> None:
@@ -404,6 +426,7 @@ def test_routing_disabled_preserves_direct_inference(tmp_path: Path) -> None:
         async with TestServer(provider_app) as provider:
             dispatcher = routing_dispatcher(tmp_path)
             handler = HttpInferenceHandler(str(provider.make_url("")).rstrip("/"))
+            publish_direct_model(dispatcher, "legacy", str(provider.make_url("")), "legacy-upstream")
             payload = {"model": "unregistered-direct-model", "messages": []}
             try:
                 async with TestClient(TestServer(create_app(dispatcher, inference_handler=handler))) as client:
@@ -411,7 +434,7 @@ def test_routing_disabled_preserves_direct_inference(tmp_path: Path) -> None:
                         "/v1/chat/completions", headers={"x-reef-scenario": "legacy"}, json=payload
                     )
                     assert response.status == 200
-                    assert received == [payload]
+                    assert received == [{**payload, "model": "legacy-upstream"}]
                     [record] = dispatcher.get_or_create_scenario("legacy").records.replay("legacy")
                     assert response.headers["x-reef-agent-record-id"] == record.agent_record_id
                     assert "routing" not in record.payload.get("metadata", {})
@@ -440,16 +463,21 @@ def test_direct_evaluation_keeps_no_record_or_receipt(tmp_path: Path, streaming:
             dispatcher = routing_dispatcher(tmp_path)
             scenario = dispatcher.get_or_create_scenario("legacy")
             handler = HttpInferenceHandler(str(provider.make_url("")).rstrip("/"))
+            publish_direct_model(dispatcher, "legacy", str(provider.make_url("")), "direct-model")
             payload = {"model": "direct-model", "messages": [], "stream": streaming}
             try:
                 async with TestClient(TestServer(create_app(dispatcher, inference_handler=handler))) as client:
                     response = await client.post("/reef/scenarios/legacy/evaluation/v1/chat/completions", json=payload)
-                    assert response.status == 200
                     assert "x-reef-agent-record-id" not in response.headers
-                    assert "x-reef-release-id" not in response.headers
                     body = await response.text()
-                    assert "evaluated" in body and '"reef"' not in body
-                    assert received == [payload]
+                    if streaming:
+                        assert response.status == 400 and "does not stream" in body
+                        assert received == []
+                    else:
+                        assert response.status == 200
+                        assert response.headers["x-reef-artifact-id"] == scenario.serving_artifact_id()
+                        assert "evaluated" in body and '"reef"' not in body
+                        assert received == [payload]
                     assert scenario.records.count("legacy") == 0
             finally:
                 dispatcher.close()
@@ -501,6 +529,7 @@ def test_a_one_pass_token_iterable_keeps_authentication_on(
                     if routed:
                         app = create_app(dispatcher, tokens=make_tokens(), routing=adapter, preview=router.settings)
                     else:
+                        publish_direct_model(dispatcher, "coding", url, "student")
                         app = create_app(dispatcher, tokens=make_tokens(), inference_handler=HttpInferenceHandler(url))
                     async with TestClient(TestServer(app)) as client:
                         chat = {"model": "student", "messages": [{"role": "user", "content": "hi"}]}
@@ -613,13 +642,12 @@ class SpecializedRecipe(Recipe):
 
 @pytest.mark.unit
 def test_routing_rejects_specialized_recipes(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = Dispatcher(
         SpecializedRecipe(),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     try:
         adapter = routing_adapter(tmp_path, "http://127.0.0.1:1")
@@ -636,52 +664,22 @@ def test_routing_rejects_specialized_recipes(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_a_pending_stream_is_routed_exactly_when_it_has_a_decision_for_its_own_scenario(tmp_path: Path) -> None:
+def test_a_routed_attempt_requires_its_own_scenario_request_id_and_start(tmp_path: Path) -> None:
     snapshot = routing_adapter(tmp_path, "http://127.0.0.1:1").snapshot
     decision = RoutingDecision(snapshot.targets["student"], snapshot.version, "coding", "student", "explicit_pin")
-
-    def item(scenario: str = "coding") -> AgentRecord:
-        return AgentRecord.create(scenario=scenario, request_type=RequestType.INFERENCE, payload={"messages": []})
-
-    assert PendingInference(item(), None, routing_decision=decision, routing_request_id="request").record
-    # An unrouted stream also records when its provider call started; zero and past readings are readings too.
-    assert PendingInference(item(), None, record=False, routing_started=time.monotonic()).routing_request_id == ""
-    assert PendingInference(item(), None, routing_started=-1).routing_started == -1
-    for make in (
-        lambda: PendingInference(item(), None, routing_decision=decision),
-        lambda: PendingInference(item(), None, record=False, routing_decision=decision, routing_request_id="request"),
-        lambda: PendingInference(item("other"), None, routing_decision=decision, routing_request_id="request"),
-        lambda: PendingInference(item(), None, routing_request_id="request"),
-        lambda: PendingInference(
-            item(), None, routing_decision=SimpleNamespace(scenario="coding"), routing_request_id="r"
-        ),
-        lambda: PendingInference(item(), None, routing_request_id=None),
-        lambda: PendingInference(item(), None, routing_started=math.nan),
-        lambda: PendingInference(item(), None, routing_started=True),
+    item = AgentRecord.create(scenario="coding", request_type=RequestType.INFERENCE, payload={"messages": []})
+    measurement = OperationMetrics(("serve/request",)).start("serve/request")
+    attempt = RoutedAttempt(item, decision, "request", (), time.monotonic(), measurement)
+    for fields in (
+        {"item": replace(item, scenario="other")},
+        {"decision": None},
+        {"request_id": ""},
+        {"request_id": None},
+        {"started": math.nan},
+        {"started": True},
     ):
         with pytest.raises(ValueError):
-            make()
-
-
-@pytest.mark.unit
-def test_a_pending_stream_has_both_or_neither_of_its_deferred_check_inputs(tmp_path: Path) -> None:
-    dispatcher = routing_dispatcher(tmp_path)
-    try:
-        prepared = RequestService(dispatcher)._prepare_inference(
-            parse_request_headers({"x-reef-scenario": "coding"}, RequestType.INFERENCE),
-            HttpInferenceHandler("http://127.0.0.1:1"),
-            None,
-        )
-        item = AgentRecord.create(scenario="coding", request_type=RequestType.INFERENCE, payload={"messages": []})
-        assert PendingInference(item, None).deferred_prepared is None
-        both = PendingInference(item, None, deferred_prepared=prepared, path="/v1/chat/completions")
-        assert (both.deferred_prepared, both.path) == (prepared, "/v1/chat/completions")
-        # Either one alone is refused now, not after the stream when record_stream checks the final response.
-        for fields in ({"deferred_prepared": prepared}, {"path": "/v1/chat/completions"}):
-            with pytest.raises(ValueError, match="prepared inference and its path"):
-                PendingInference(item, None, **fields)
-    finally:
-        dispatcher.close()
+            replace(attempt, **fields)
 
 
 @pytest.mark.unit
@@ -703,34 +701,34 @@ def test_a_routed_stream_whose_headers_name_another_scenario_never_reaches_the_p
             )
             handler = HttpInferenceHandler(url)
             opened: list[InferenceStream] = []
-            open_stream = handler.inference_stream
+            open_stream = handler.post_stream
 
-            async def keep_opened(artifact: Artifact, path: str, payload: dict[str, object]) -> InferenceStream:
-                stream = await open_stream(artifact, path, payload)
+            async def keep_opened(path: str, payload: dict[str, object]) -> InferenceStream:
+                stream = await open_stream(path, payload)
                 opened.append(stream)
                 return stream
 
-            monkeypatch.setattr(handler, "inference_stream", keep_opened)
+            monkeypatch.setattr(handler, "post_stream", keep_opened)
             dispatcher = routing_dispatcher(tmp_path)
             service = RequestService(dispatcher)
             payload = {"model": "student-v1", "messages": [{"role": "user", "content": "hi"}], "stream": True}
             try:
                 with pytest.raises(ValueError, match="Scenario"):
-                    await service.start_stream(
+                    await service.routed.start_routed_stream(
                         routing_headers("other"), payload, "/v1/chat/completions", handler, decision=decision
                     )
                 # Refused before any provider call, record or Scenario.
                 assert received == [] and opened == [] and dispatcher.list_scenarios() == ()
                 # The same Scenario, however its header is spelled, streams and is recorded under it.
-                stream, pending = await service.start_stream(
+                stream, pending = await service.routed.start_routed_stream(
                     {"X-Reef-Scenario": " coding "}, payload, "/v1/chat/completions", handler, decision=decision
                 )
                 body = b"".join([chunk async for chunk in stream.chunks])
                 await stream.close()
-                record = service.record_stream(pending, stream_record(stream, body, complete=True))
+                record = service.routed.record_routed_stream(pending, stream_record(stream, body, complete=True))
                 assert received == [payload] and record.scenario == "coding"
                 assert record.payload["metadata"]["routing"]["target_id"] == "student"
-                assert dispatcher.loaded_scenario("other") is None
+                assert dispatcher.registry.get_loaded("other") is None
             finally:
                 for stream in opened:
                     await stream.close()

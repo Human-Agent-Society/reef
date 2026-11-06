@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support._training_deployment import LocalDeployment
+from tests.support.runtime_stubs import STUB_ROOT
 
-from reef.runtime.deployment import RuntimeConfigError
+from reef.core.errors import RuntimeConfigError
 from reef.service.assembly import _training_recipe, connect_training_component
 from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
@@ -42,7 +43,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         "training.backend": BACKEND,
         "training.options.lora-rank": "16",
         "training.options.checkpoint-layers": "false",
-        "pipeline.record2record.config.max_staleness": "2",
+        "pipeline.record2sample.config.max_staleness": "2",
     }
     file_config, _ = resolve_deployment_config(deployment(), overrides, tmp_path / "serve.yaml")
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
@@ -51,7 +52,9 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime, inference = connect_training_component(settings, model_path=settings.model_path, loss_family="sao")
+        runtime, inference = connect_training_component(
+            settings, model_path=settings.model_path, default_parameters={}
+        )
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
@@ -77,7 +80,7 @@ def test_invalid_options_fail_before_constructing_runtime(tmp_path, options):
     [
         {"training.ray-address": "auto"},
         {"execution.training.backend": "ray"},
-        # The backend serves its own releases; Reef's engines are not that serving.
+        # The backend serves its own snapshots; Reef's engines are not that serving.
         {"inference.serving": "trainer", "inference.backend": "sglang"},
         {"inference.serving": "trainer", "inference.tensor-parallel-size": "2"},
         {"recipe.runtime.type": "ray_training"},
@@ -108,14 +111,11 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     from reef.inference.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(base_url="http://unused")
-    closed = []
-    monkeypatch.setattr(runtime, "shutdown", lambda: closed.append(True))
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
-            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", loss_family="sao"
+            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
         )
-    assert closed == [True]
 
 
 def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanup(tmp_path):
@@ -128,8 +128,7 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = SQLiteRecordStore()
     try:
-        trainer = recipe.build("scenario", records)
-        assert trainer.candidate_backend is None
+        trainer = recipe.build("scenario", records, root=STUB_ROOT)
         assert trainer.job_loop.component is recipe.training_component
         assert type(recipe.training_component).__name__ == "LocalRuntime"
         # The deployment's pipeline section sets the job size.

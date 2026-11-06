@@ -52,7 +52,7 @@ Otherwise, the provider selects its default output limit. Executor service error
 `serve.yaml` defaults to one update with two groups of four rollouts on four GPUs.
 `run.sh` selects GPUs `0,1,2,3` unless `CUDA_VISIBLE_DEVICES` is set: two for the
 LoRA actor and two for the serving engines.
-The grid is `pipeline.record2record.config` in `serve.yaml`; the harness reads it there.
+The grid is `pipeline.record2sample.config` in `serve.yaml`; the harness reads it there.
 Set the grid to 8 by 16, `global-batch-size` to 128, and `steps` to 30 for
 the paper's search budget. Set `GUIDANCE_MODEL=Qwen/Qwen3-14B` for the paper's
 AHC058 and TriMul configurations. Size the GPU allocation for that model.

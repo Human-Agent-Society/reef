@@ -1,8 +1,7 @@
 """Reported feedback: assemble a report and its inference records into a policy sample.
 
-The record-to-record stage (:class:`~reef.record2record.ReportRecord2Record`) forms a
-set for each valid report that trains, and a recipe's
-:class:`~reef.record2sample.ReportSamples` turns it into a sample. ``SampleAssembly``
+:class:`~reef.record2sample.ReportSamples` forms a set for each valid report that
+trains, and a recipe's ``make_sample`` turns it into a sample. ``SampleAssembly``
 is the shared assembly that those recipes use in ``make_sample``.
 """
 
@@ -15,9 +14,10 @@ from typing import Any
 
 from reef.core.config import config_option
 from reef.core.job_data import TrajectorySample
-from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord
-from reef.record2record import ReportContext
+from reef.core.trajectories import make_trajectory
+from reef.record2sample.base import Record2SampleSettings
+from reef.record2sample.reports import ReportContext
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 
 logger = logging.getLogger(__name__)
@@ -41,11 +41,16 @@ def reported_task(metadata: object) -> dict[str, Any] | None:
 
 
 @dataclass(frozen=True)
-class SampleAssemblySettings(PluginSettings):
-    """The sample-assembly keys of a record-to-sample stage's config. A stage's settings extend this class."""
+class SampleAssemblySettings(Record2SampleSettings):
+    """The sample-assembly keys of a record-to-sample stage's config, with ``max_staleness``. A stage's settings
+    extend this class."""
 
     accept_multi_turn_policy_samples: bool = config_option(
-        False, help="Train on a report that references several model calls as one multi-turn sample."
+        False,
+        help=(
+            "Train a report's trajectory of several model calls as one multi-turn sample; otherwise the report "
+            "trains only the last call of its trajectory."
+        ),
     )
     realign_threshold: int = config_option(
         1024, help="Tokens a multi-turn sample may realign where a later prompt rewrote an earlier response."
@@ -55,6 +60,7 @@ class SampleAssemblySettings(PluginSettings):
     )
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.realign_threshold < 0:
             raise ValueError("realign_threshold must be non-negative")
         if self.scaffold_tolerance < 0:
@@ -64,12 +70,12 @@ class SampleAssemblySettings(PluginSettings):
 class SampleAssembly:
     """Shape a resolved report into a policy sample, without recipe policy.
 
-    One model call becomes one sample (``single_sample``); an ordered
-    multi-reference report becomes one assembled multi-turn sample. The
-    settings' ``accept_multi_turn_policy_samples`` gates consumption only;
-    assembly always runs first. An unsupported or unassemblable trajectory
-    raises a training data error and retains its source records. A recipe
-    whose single sample carries more fields overrides ``single_sample``.
+    ``build`` makes the ATIF sample of a report that serving recorded, which the training component renders: the
+    trajectory's last call, or with ``accept_multi_turn_policy_samples`` every call. ``assemble`` builds the tensor
+    sample of the calls of a training component's own task rollout, which carry the tokens that its engine sampled:
+    one call becomes one sample (``single_sample``), and the ordered calls of a trajectory one multi-turn sample,
+    realigned within ``realign_threshold`` and ``scaffold_tolerance``. An unassemblable trajectory raises a training
+    data error. A recipe whose single sample carries more fields overrides ``single_sample``.
     """
 
     def __init__(self, settings: SampleAssemblySettings) -> None:
@@ -102,8 +108,25 @@ class SampleAssembly:
         return make_policy_trajectory(record, score)
 
     def build(self, context: ReportContext, score: float) -> TrajectorySample:
-        """Build training data, raising if the recorded trajectory cannot be used."""
-        sample = self.assemble(context.inferences, score, source_id=context.report.agent_record_id)
+        """The report's trajectory as one ATIF sample with the reward ``score``, which the training component renders.
+
+        Without ``accept_multi_turn_policy_samples``, the sample is the trajectory's last call: its earlier turns are
+        context (``is_copied_context``), and only its reply trains. With it, the sample is every call of the report's
+        trajectories, and every reply trains. ``ValueError``: a report of several trajectories without
+        ``accept_multi_turn_policy_samples``.
+        """
+        if self.settings.accept_multi_turn_policy_samples:
+            calls = context.inferences
+        elif len(context.ends) == 1:
+            calls = context.ends
+        else:
+            raise ValueError(
+                "training data requires accept_multi_turn_policy_samples for a report of several trajectories"
+            )
+        return self.with_report(make_trajectory(calls, score), context)
+
+    def with_report(self, sample: TrajectorySample, context: ReportContext) -> TrajectorySample:
+        """``sample`` with the report's feedback, ID, references and task in its metadata."""
         fields: dict[str, Any] = {
             "feedback": context.report.payload.get("feedback"),
             "report_agent_record_id": context.report.agent_record_id,

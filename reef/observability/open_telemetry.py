@@ -32,7 +32,6 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 from opentelemetry.trace import Link, NonRecordingSpan, SpanContext, SpanKind, TraceFlags, set_span_in_context
 from opentelemetry.util.types import AttributeValue
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import exchange_messages
 from reef.core.version import __version__
@@ -108,8 +107,8 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "reef.agent_record_id": item.agent_record_id,
             "reef.request_type": item.request_type.value,
         }
-        if item.artifact_ref is not None:
-            attributes.update(_artifact_attributes(item.artifact_ref))
+        if item.artifact_id is not None:
+            attributes["reef.artifact_id"] = item.artifact_id
         tags = _tags(item.payload)
         if tags:
             attributes["reef.tags"] = tags
@@ -121,7 +120,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             attributes.update(self.inference_attributes(item.payload))
             model = attributes.get("gen_ai.request.model")
             name = f"chat {model}" if isinstance(model, str) else "chat"
-        elif item.request_type is RequestType.REPORT:
+        else:
             name = "feedback"
             attributes.update(self._report_attributes(item.payload))
             if item.references:
@@ -131,9 +130,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
                     Link(record_span_context(item.scenario, reference), {"reef.agent_record_id": reference})
                     for reference in item.references[1:]
                 ]
-        else:
-            name = "training request"
-            attributes.update(self._training_request_attributes(item.payload))
         self._emit(
             name,
             planned=record_span_context(item.scenario, item.agent_record_id),
@@ -152,7 +148,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "reef.commit_operation": commit.operation,
             "reef.checkpoint": commit.checkpoint,
             "reef.consumed_record_count": len(commit.consumed_ids),
-            **_artifact_attributes(commit.artifact_ref),
+            **commit_artifact_attributes(commit),
         }
         if commit.training_job_id is not None:
             attributes["reef.training_job_id"] = commit.training_job_id
@@ -176,7 +172,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
             "reef.step": commit.step,
-            **_artifact_attributes(commit.artifact_ref),
+            **commit_artifact_attributes(commit),
         }
         if commit.training_job_id is not None:
             consumed_attributes["reef.training_job_id"] = commit.training_job_id
@@ -234,9 +230,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
         model = payload.get("model")
         if isinstance(model, str) and model:
             attributes["gen_ai.request.model"] = model
-        runtime_load_id = payload.get("runtime_load_id")
-        if isinstance(runtime_load_id, str) and runtime_load_id:
-            attributes["reef.runtime_load_id"] = runtime_load_id
         response = payload.get("response")
         response = response if isinstance(response, Mapping) else {}
         response_model = response.get("model")
@@ -274,20 +267,18 @@ class OpenTelemetryRecordObserver(RecordObserver):
             attributes["reef.feedback"] = feedback if isinstance(feedback, str) else _json_text(feedback)
         return attributes
 
-    def _training_request_attributes(self, payload: Mapping[str, Any]) -> dict[str, AttributeValue]:
-        attributes: dict[str, AttributeValue] = {}
-        for key in ("session", "release_id"):
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                attributes[f"reef.{key}"] = value
-        text = payload.get("text")
-        if isinstance(text, str):
-            attributes["reef.instruction"] = text
-        return attributes
 
-
-def _artifact_attributes(ref: ArtifactRef) -> dict[str, AttributeValue]:
-    return {"reef.release_id": ref.release_id, "reef.content_id": ref.content_id}
+def commit_artifact_attributes(commit: CommitRecord) -> dict[str, AttributeValue]:
+    """Return component artifact IDs for a commit; none for a record of a local snapshot."""
+    components = commit.artifact_ids
+    if components is None:
+        return {}
+    attributes: dict[str, AttributeValue] = {
+        f"reef.artifacts.{name}": artifact_id for name, artifact_id in components.items()
+    }
+    if commit.component is not None:
+        attributes["reef.artifact_id"] = components[commit.component]
+    return attributes
 
 
 def _tags(payload: Mapping[str, Any]) -> list[str]:

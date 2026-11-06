@@ -1,4 +1,4 @@
-"""The serving engines' input that Reef builds from the inference settings and the training component's release format."""
+"""The serving engines' input that Reef builds from the inference settings and the training component's snapshot format."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import config as sglang_config
 from reef.inference.sglang import deployment as sglang_deployment
@@ -15,16 +16,15 @@ from reef.inference.sglang.deployment import create_inference
 from reef.inference.sglang.launch import engine_environment
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.inference.vllm.config import VLLMConfig
-from reef.runtime.jobs import ReleaseFormat
 
-FULL = ReleaseFormat("full")
-ADAPTER = ReleaseFormat("adapter", 8, ("q_proj", "v_proj"))
+FULL = ArtifactFormat("full")
+ADAPTER = ArtifactFormat("adapter", 8, ("q_proj", "v_proj"))
 
 
 def engine_input(
     engine: str = "sglang",
     *,
-    release_format: ReleaseFormat = FULL,
+    artifact_format: ArtifactFormat = FULL,
     options: dict | None = None,
     prefix_sharing: bool = False,
     adapter_capacity: int = 1,
@@ -38,7 +38,7 @@ def engine_input(
         num_gpus=num_gpus,
         tensor_parallel_size=tensor_parallel_size,
         options=options or {},
-        release_format=release_format,
+        artifact_format=artifact_format,
         adapter_capacity=adapter_capacity,
         prefix_sharing=prefix_sharing,
         executor="auto",
@@ -92,7 +92,7 @@ def test_sglang_shares_prefixes_only_when_each_load_retracts_the_requests_in_fli
 
 
 def test_adapter_releases_size_the_engines_adapter_table_from_the_release_format_and_capacity(lora_receiver):
-    config = create_inference(engine_input(release_format=ADAPTER, adapter_capacity=4)).config
+    config = create_inference(engine_input(artifact_format=ADAPTER, adapter_capacity=4)).config
     assert {
         name: config.options[name]
         for name in (
@@ -119,9 +119,9 @@ def test_retracting_adapter_engines_share_prefixes_only_when_sglang_keys_them_by
 ):
     """One engine holds several scenarios' adapters; the engine must keep their prefix-cache entries apart."""
     monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
-    config = create_inference(engine_input(release_format=ADAPTER, prefix_sharing=True)).config
+    config = create_inference(engine_input(artifact_format=ADAPTER, prefix_sharing=True)).config
     assert config.options["disable_radix_cache"] is not adapter_scoped
-    values = engine_input(release_format=ADAPTER, prefix_sharing=True, options={"disable-radix-cache": False})
+    values = engine_input(artifact_format=ADAPTER, prefix_sharing=True, options={"disable-radix-cache": False})
     if adapter_scoped:
         create_inference(values)
     else:
@@ -148,7 +148,7 @@ def test_router_options_configure_the_router_and_router_port_binds_it():
 
 
 def test_another_engine_name_gets_the_sglang_input():
-    values = engine_input("my.engines:create", release_format=ADAPTER)
+    values = engine_input("my.engines:create", artifact_format=ADAPTER)
     assert values["options"]["enable_lora"] is True
     assert values["env_vars"] == {} and values["router_options"] == {}
 
@@ -165,7 +165,7 @@ def test_vllm_input_keeps_vllm_option_names_and_the_pause_mode():
 def test_vllm_refuses_adapter_releases():
     # The serving assembly refuses more than one vLLM engine (tests/reef_service/test_training_startup.py).
     with pytest.raises(ValueError, match="vllm serves full weights only"):
-        engine_input("vllm", release_format=ADAPTER)
+        engine_input("vllm", artifact_format=ADAPTER)
 
 
 def test_the_engine_input_imports_no_engine_implementation_or_training_framework():
@@ -178,9 +178,9 @@ import json
 import sys
 sys.modules.update(dict.fromkeys(('sglang', 'torch', 'megatron', 'slime', 'reef.train.slime_backend')))
 from reef.inference.remote.runtime import serving_engine_config
-from reef.runtime.jobs import ReleaseFormat
+from reef.train.component import ArtifactFormat
 values = serving_engine_config('sglang', model_path='model', num_gpus=1, tensor_parallel_size=1, options={},
-    release_format=ReleaseFormat('adapter', 8, ('all',)), adapter_capacity=1, prefix_sharing=False,
+    artifact_format=ArtifactFormat('adapter', 8, ('all',)), adapter_capacity=1, prefix_sharing=False,
     executor='auto', executor_options={}, environ={})
 json.dumps(values)
 assert 'ray' not in sys.modules

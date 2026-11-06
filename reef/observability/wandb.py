@@ -19,9 +19,10 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
-from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
+from reef.core.artifact_selection import ArtifactSelection
 from reef.observability.base import (
     ExperimentLogger,
+    ExperimentRun,
     ExperimentTracker,
     TrainFromExperimentEvent,
     TrainingExperimentContext,
@@ -110,13 +111,13 @@ class _WandbScenarioLogger(ExperimentLogger):
         *,
         scenario: str,
         recipe: str,
-        source_artifact_ref: ArtifactRef,
+        source_artifacts: ArtifactSelection,
         run_segment: int,
     ) -> None:
         self._tracker = tracker
         self._scenario = scenario
         self._recipe = recipe
-        self._source_artifact_ref = source_artifact_ref
+        self._source_artifacts = source_artifacts
         self._run_segment = run_segment
         self._event_counts: dict[str, int] = {}
         self._defined_namespaces: set[str] = set()
@@ -129,20 +130,20 @@ class _WandbScenarioLogger(ExperimentLogger):
             scenario=self._scenario,
             recipe=self._recipe,
             step=self._run_segment,
-            source_artifact_ref=self._source_artifact_ref,
+            source_artifacts=self._source_artifacts,
             run_segment=self._run_segment,
         )
 
-    def _rebind(self, *, recipe: str, source_artifact_ref: ArtifactRef, run_segment: int) -> None:
+    def _rebind(self, *, recipe: str, source_artifacts: ArtifactSelection, run_segment: int) -> None:
         self._recipe = recipe
         if run_segment != self._run_segment:
             self._event_counts = {}
             self._defined_namespaces = set()
-        self._source_artifact_ref = source_artifact_ref
+        self._source_artifacts = source_artifacts
         self._run_segment = run_segment
 
-    def _rotate(self, *, source_artifact_ref: ArtifactRef, run_segment: int) -> None:
-        self._source_artifact_ref = source_artifact_ref
+    def _rotate(self, *, source_artifacts: ArtifactSelection, run_segment: int) -> None:
+        self._source_artifacts = source_artifacts
         self._run_segment = run_segment
         self._event_counts = {}
         self._defined_namespaces = set()
@@ -194,7 +195,7 @@ class WandbExperimentTracker(ExperimentTracker):
         *,
         scenario: str,
         recipe: str,
-        source_artifact_ref: ArtifactRef,
+        source_artifacts: ArtifactSelection,
         run_segment: int,
     ) -> ExperimentLogger:
         with self._lock:
@@ -204,14 +205,14 @@ class WandbExperimentTracker(ExperimentTracker):
                     self,
                     scenario=scenario,
                     recipe=recipe,
-                    source_artifact_ref=source_artifact_ref,
+                    source_artifacts=source_artifacts,
                     run_segment=run_segment,
                 )
                 self._scenario_loggers[scenario] = logger
             else:
                 logger._rebind(
                     recipe=recipe,
-                    source_artifact_ref=source_artifact_ref,
+                    source_artifacts=source_artifacts,
                     run_segment=run_segment,
                 )
             if self.config.active:
@@ -227,7 +228,7 @@ class WandbExperimentTracker(ExperimentTracker):
         self.bind_scenario(
             scenario=context.scenario,
             recipe=context.recipe,
-            source_artifact_ref=context.source_artifact_ref,
+            source_artifacts=context.source_artifacts,
             run_segment=context.run_segment,
         )
         metrics: dict[str, Any] = {
@@ -239,6 +240,35 @@ class WandbExperimentTracker(ExperimentTracker):
         if self.config.entity is not None:
             metrics["experiment/entity"] = self.config.entity
         return metrics
+
+    def experiment_run(self, context: TrainingExperimentContext) -> ExperimentRun | None:
+        """The W&B run of ``context`` while this tracker has it open; None when tracking is off, or the run never
+        opened in this process or ended.
+
+        The URL is the one that the open run gives (``run.url``). When the run gives none, such as an offline run,
+        it is ``https://wandb.ai/<entity>/<project>/runs/<run_id>`` with the configured entity, where the run is once
+        it is synced; without a configured entity it is None.
+        """
+        if not self.config.active:
+            return None
+        run_id = self._run_id(context)
+        with self._lock:
+            run = self._runs.get(run_id)
+        if run is None:
+            return None
+        try:
+            run_url = run.url
+        except Exception as exc:
+            logger.warning("W&B run URL lookup failed (%s)", type(exc).__name__)
+            run_url = None
+        entity = self.config.entity
+        if isinstance(run_url, str) and run_url:
+            url: str | None = run_url
+        elif entity is not None:
+            url = f"https://wandb.ai/{entity}/{self.config.project}/runs/{run_id}"
+        else:
+            url = None
+        return ExperimentRun("wandb", self.config.project, run_id, entity, url)
 
     def record(self, event: TrainingExperimentEvent) -> None:
         with self._lock:
@@ -267,7 +297,7 @@ class WandbExperimentTracker(ExperimentTracker):
                         {
                             "reef/ended_by": "train_from",
                             "reef/train_from_step": event.step,
-                            "reef/train_from_release_id": event.start_artifact_ref.release_id,
+                            "reef/train_from_artifact_ids": event.start_artifacts.artifact_ids,
                         }
                     )
                     run.finish()
@@ -276,7 +306,7 @@ class WandbExperimentTracker(ExperimentTracker):
             scenario_logger = self._scenario_loggers.get(event.scenario)
             if scenario_logger is not None:
                 scenario_logger._rotate(
-                    source_artifact_ref=event.start_artifact_ref,
+                    source_artifacts=event.start_artifacts,
                     run_segment=event.step,
                 )
                 context = scenario_logger._context()
@@ -487,7 +517,7 @@ class WandbExperimentTracker(ExperimentTracker):
             "backend": context.backend,
             "model": self._model,
             "run_segment": context.run_segment,
-            "source_artifact": encode_artifact_ref(context.source_artifact_ref),
+            "source_artifact_ids": context.source_artifacts.artifact_ids,
         }
         backend: dict[str, Any] = _safe_mapping(context.backend_config or {})
         if context.component is not None:
@@ -517,8 +547,8 @@ class WandbExperimentTracker(ExperimentTracker):
         )
 
     def _event_metadata(self, event: TrainingExperimentEvent, run_id: str) -> dict[str, Any]:
-        source = event.context.source_artifact_ref
-        produced = event.produced_artifact_ref
+        source = event.context.source_artifacts
+        produced = event.produced_artifacts
         return {
             "step": event.context.step,
             "run_segment": event.context.run_segment,
@@ -529,8 +559,8 @@ class WandbExperimentTracker(ExperimentTracker):
             "backend": event.context.backend,
             "training_job_id": event.training_job_id,
             "outcome": event.outcome,
-            "source_release_id": source.release_id,
-            "produced_release_id": produced.release_id,
+            "source_artifact_ids": source.artifact_ids,
+            "produced_artifact_ids": produced.artifact_ids,
             "checkpoint_path": event.checkpoint_path,
         }
 
@@ -538,7 +568,7 @@ class WandbExperimentTracker(ExperimentTracker):
         client = self._client
         if client is None or event.checkpoint_path is None:
             return
-        identity = event.training_job_id or event.produced_artifact_ref.release_id
+        identity = event.training_job_id or f"{event.context.scenario}-step-{event.context.step}"
         artifact = client.Artifact(name=f"reef-checkpoint-{_artifact_name(identity)}", type="model")
         artifact.add_dir(event.checkpoint_path)
         run.log_artifact(artifact)

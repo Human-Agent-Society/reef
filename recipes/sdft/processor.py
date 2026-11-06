@@ -6,10 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
+from reef.core.chat_rendering import normalize_messages_for_template
 from reef.core.config import config_option
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record
-from reef.record2sample.distill import DistillSamples, DistillSettings, normalize_messages_for_template
+from reef.record2sample.distill import DistillSamples, DistillSettings
 
 #: The reference implementation's demonstration block (idanshen/Self-Distillation, ``main.py``).
 DEFAULT_CONTEXT_TEMPLATE = (
@@ -44,10 +44,9 @@ class SDFTSamples(DistillSamples):
     block is ``context_template`` with ``{context}`` replaced.
     """
 
-    def __init__(self, settings: SDFTSettings) -> None:
-        # The template is read before the tokenizer loads.
+    def __init__(self, context: PipelineContext, settings: SDFTSettings) -> None:
         self.template = settings.context_template
-        super().__init__(settings)
+        super().__init__(context, settings)
 
     @classmethod
     def from_config(
@@ -55,10 +54,9 @@ class SDFTSamples(DistillSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(SDFTSettings.parse(config, plugin_class=cls))
+        return cls(context, SDFTSettings.parse(config, plugin_class=cls))
 
     def teacher_request(
         self, messages: list[Any], tools: list[Any] | None, response: str, teacher_context: str

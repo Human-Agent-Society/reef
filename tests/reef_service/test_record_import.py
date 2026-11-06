@@ -4,26 +4,28 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.train.test_reef_trainer_contracts import ExampleBackend
+from tests.support.inference import wait_for_inference
+from tests.support.runtime_stubs import RecordingComponent
+from tests.support.samples import made_task
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
-from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.record2sample import ReportSamples
-from reef.runtime.interfaces import InferenceHandler
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import JobData, PreparedStep, Trainer
+from reef.train import JobData, Trainer
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskSample
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 
@@ -47,7 +49,7 @@ def imported(record_id, payload=None, request_type="inference"):
 
 class FeedbackSamples(ReportSamples):
     def make_sample(self, context):
-        return TaskSample(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
+        return made_task(context.report.agent_record_id, metadata=context.inferences[0].payload)
 
 
 class FeedbackJobData(Sample2Job):
@@ -58,20 +60,9 @@ class FeedbackJobData(Sample2Job):
 def feedback_pipeline(context):
     return TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ReportGrouping()),
-        record2sample=FeedbackSamples(),
-        sample2job=FeedbackJobData(context, None, None),
+        record2sample=FeedbackSamples(context),
+        sample2job=FeedbackJobData(context, None, 2),
     )
-
-
-class LearningBackend(ExampleBackend):
-    def __init__(self, scenario, batches):
-        super().__init__(scenario, [])
-        self.batches = batches
-
-    def prepare_step(self, batch, state, scenario_step):
-        self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": state.get("trained", 0) + len(batch.samples)})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -83,19 +74,34 @@ class LearningRecipe(Recipe):
         return ScoredRolloutReport
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        artifacts=None,
+        samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=feedback_pipeline,
-            candidate_backend=LearningBackend(scenario, self.batches),
+            job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             report_type=self.report_type,
             training_mode=self.training_mode,
-            default_job_samples=2,
+            root=root,
         )
+
+
+def served_recipe() -> LearningRecipe:
+    """A learning recipe whose runtime names an HTTP engine and a model, so its scenarios have a served model; the
+    app's ``inference_handler`` answers for that engine."""
+    return LearningRecipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="example-model"))
 
 
 class EchoHandler(InferenceHandler):
@@ -108,25 +114,36 @@ class EchoHandler(InferenceHandler):
 
 
 def dispatcher_for(tmp_path, recipe):
-    initial = tmp_path / "initial"
-    initial.mkdir()
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
 
 
-async def wait_for_training(scenario, count):
+async def wait_for_training(scenario, recipe, count):
+    """Wait until the recipe's jobs trained ``count`` samples and the last job's end committed."""
+
+    def trained() -> int:
+        return sum(len(batch.samples) for batch in recipe.batches)
+
+    def ended() -> int:
+        return sum(
+            (record.metrics or {}).get("training_job", {}).get("event") in ("finished", "failed")
+            for record in scenario.store.history()
+        )
+
     async with asyncio.timeout(5):
-        while scenario.trainer.state.get("trained", 0) < count:
+        while trained() < count or ended() < len(recipe.batches):
             await asyncio.sleep(0.01)
-    assert scenario.trainer.state["trained"] == count
+    assert trained() == count
 
 
 @pytest.mark.parametrize("endpoint", ("/v1/chat/completions", "/v1/messages"))
 def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
-    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+    dispatcher = dispatcher_for(tmp_path, served_recipe())
+    dispatcher.get_or_create_scenario("s")
     handler = EchoHandler()
     text = "x" * (3 * 1024 * 1024)
 
@@ -134,6 +151,7 @@ def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
         async with TestClient(
             TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
         ) as client:
+            await wait_for_inference(client, "s", headers=HEADERS)
             response = await client.post(
                 endpoint, headers=HEADERS, json={"messages": [{"role": "user", "content": text}]}
             )
@@ -169,7 +187,7 @@ def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path
 
 @pytest.mark.parametrize("bulk", (False, True))
 def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk):
-    recipe = LearningRecipe()
+    recipe = served_recipe()
     dispatcher = dispatcher_for(tmp_path, recipe)
     handler = EchoHandler()
 
@@ -199,7 +217,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                     assert response.status == 200, await response.text()
             scenario = dispatcher.get_or_create_scenario("s")
             processor = scenario.trainer.pipeline
-            await wait_for_training(scenario, 6)
+            await wait_for_training(scenario, recipe, 6)
             if bulk:
                 retry = await client.post("/reef/records/batch", headers=HEADERS, json={"records": records})
                 assert retry.status == 200
@@ -215,6 +233,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                 "/reef/records", headers=HEADERS, json=imported("offline-0", inference_payload("changed"))
             )
             assert conflict.status == 409
+            await wait_for_inference(client, "s", headers=HEADERS)
             for index in range(2):
                 text = f"online-{index}"
                 response = await client.post(
@@ -228,10 +247,11 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                     "/reef/report", headers=HEADERS, json={"score": 1, "references": [receipt]}
                 )
                 assert feedback.status == 200, await feedback.text()
-            await wait_for_training(scenario, 8)
+            await wait_for_training(scenario, recipe, 8)
             assert handler.calls == 2
             assert scenario.trainer.pipeline is processor
-            assert len(scenario.store.history()) == len(recipe.batches) == 4
+            # Each batch is one job: its submission and its end.
+            assert len(scenario.store.history()) == 2 * len(recipe.batches) == 8
             samples = [sample for batch in recipe.batches for sample in batch.samples]
             assert [sample.metadata["messages"][0]["content"] for sample in samples] == [
                 *(f"offline-{index}" for index in range(6)),
@@ -351,7 +371,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
                 {"records": [imported("first"), imported("bad", {"references": ["first"]}, "report")]},
                 {"records": [imported("first"), imported("bad", {"score": 1, "references": ["missing"]}, "report")]},
                 {"records": [imported("bad", {"score": 1, "references": ["first"]}, "report"), imported("first")]},
-                {"records": [imported("first"), imported("instruction", {}, "train")]},
+                {"records": [imported("first"), imported("request", {}, "train")]},
             ]
             for body in invalid:
                 response = await client.post(endpoint, headers=HEADERS, json=body)

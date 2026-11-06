@@ -9,6 +9,7 @@ from typing import Any
 from reef.dispatcher.errors import TrainingErrors, error_text
 from reef.recipe.base import Recipe
 from reef.scenario.registry import ScenarioRegistry
+from reef.scenario.scenario import Scenario
 from reef.train.jobs import JobLoopState
 
 logger = logging.getLogger(__name__)
@@ -58,21 +59,29 @@ class TrainingStatus:
         current = self.registry.get_optional(scenario_name)
         if current is None:
             return None
+        try:
+            return self.instance_status(current)
+        except RuntimeError:
+            # A reload can replace the instance and close it while this read runs: read the new instance then.
+            replacement = self.registry.get_optional(scenario_name)
+            if replacement is None or replacement is current:
+                raise
+            return self.instance_status(replacement)
+
+    def instance_status(self, current: Scenario) -> dict[str, Any]:
+        """The status block of the loaded instance ``current``."""
         runtime = current.runtime
         stepping_trainer = current.trainer
         job_data_ready = stepping_trainer.job_data_ready()
         # The stepping trainer's status is read once and reported again in its component block.
         stepping_pipeline_status = stepping_trainer.pipeline_status()
         processor = dict(stepping_pipeline_status)
-        if "buffered_requests" in processor:
-            # Include instructions still unread in storage alongside the buffered ones.
-            processor["pending_instructions"] = stepping_trainer.pending_instructions()
+        if "manual" in stepping_trainer.pipeline.supported_training_modes:
+            processor["pending_requests"] = current.pending_requests()
         block: dict[str, Any] = {
             **current.commit_status,
-            # A version is current only after Reef commits its head
-            # and reopens admission. The backend may report it
-            # earlier while the update is still being published.
-            "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
+            # The artifact that answers the scenario's requests now: the one that served_models names.
+            "served_artifact_id": current.served_artifact_id(),
             "job_data_ready": job_data_ready,
             "training_mode": stepping_trainer.pipeline.training_mode,
             "processor": processor,
@@ -89,7 +98,7 @@ class TrainingStatus:
             )
             block["finished_jobs"] = state.finished_jobs
         if runtime is not None and runtime.per_scenario_adapters:
-            block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
+            block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(current.name)
         if len(current.trainers) > 1:
             # Each component's trainer commits on its own; report each one beside the scenario-wide step.
             components: dict[str, Any] = {}

@@ -7,7 +7,7 @@ re-parsed a cookbook YAML's flags. These tests close that hole: for each Slime
 deployment they build the Slime arguments exactly as ``reef serve`` and the
 HTTP service do (``SlimeDeployment.runtime_config`` and ``slime_arguments``),
 strip the retention and loss-family options exactly as
-``create_slime_component`` does, and then feed the remaining flags to the
+``start_slime_runner`` does, and then feed the remaining flags to the
 actual Slime argparse surface plus the recipe's ``validate_backend_args`` and
 ``validate_slime_args``.
 
@@ -285,8 +285,10 @@ def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
     recipe_type = recipe_class_for(recipe)
     weight_type = None if recipe_type is None else selected_weight_training(recipe_type, config)
     assert weight_type is not None, f"reef.recipe {recipe!r} must train weights"
-    loss_family = weight_type.training_spec().loss_family.strip()
-    runtime = SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family=loss_family)
+    runtime = SlimeDeployment().component_config(
+        asdict(service_config_from_mapping(config)), default_parameters=weight_type.default_parameters()
+    )
+    loss_family = runtime["loss_family"]
     assert runtime["recipe"] == recipe
     # The teacher's address reaches the HTTP service as an environment variable once its service is up.
     environ = {TEACHER_URL_ENV: "http://127.0.0.1:30010"}
@@ -416,7 +418,10 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
-        "tutorials/reefine/configs/deployment.yaml",
+        "recipes/ace/examples/serve.yaml",
+        "recipes/beta/reefine/examples/configs/deployment.yaml",
+        "recipes/beta/reefine/examples/configs/serve.yaml",
+        "recipes/reasoning_bank/examples/serve.yaml",
         "tutorials/tinker/serve.yaml",
         "tutorials/evolve-your-harness/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/serve-native.yaml",
@@ -509,7 +514,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
     args, spec, options, recipe = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)
-    # Match create_slime_component: family projection can intentionally re-enable
+    # Match start_slime_runner: family projection can intentionally re-enable
     # the Slime pre-train pass after the YAML's initial --disable flag.
     configure_reef_loss_args(args)
 

@@ -57,7 +57,8 @@ class HarborAgent(BaseAgent):
         return None
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        """Nothing to install: the agent logic runs on the host."""
+        """Create the scenario if it does not exist yet: the inference routes serve only a scenario that exists."""
+        await asyncio.to_thread(self._client.post, "/reef/scenarios", SCENARIO, {"name": SCENARIO})
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         response, receipt = await asyncio.to_thread(self._ask_reef, instruction)
@@ -67,16 +68,8 @@ class HarborAgent(BaseAgent):
         if result.return_code != 0:
             raise RuntimeError(f"writing {ANSWER_PATH} failed: {result.stderr}")
 
-        meta = response.get("metadata") or response.get("meta_info") or {}
-        runtime_load_id = meta.get("runtime_load_id")  # only a training runtime reports one
-        # The receipt: report.py grades the verifier reward against it.
-        context.metadata = {
-            **(context.metadata or {}),
-            "reef": {
-                "agent_record_ids": [receipt],
-                "runtime_load_ids": [runtime_load_id] if runtime_load_id else [],
-            },
-        }
+        # The receipt: report.py grades the verifier reward against it. Its record names the artifact that answered.
+        context.metadata = {**(context.metadata or {}), "reef": {"agent_record_ids": [receipt]}}
         context.n_input_tokens = response["usage"]["prompt_tokens"]
         context.n_output_tokens = response["usage"]["completion_tokens"]
 

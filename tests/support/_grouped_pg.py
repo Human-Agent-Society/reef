@@ -9,7 +9,7 @@ uses them — the grouping machinery they exercise (group keys, slots, the
 runtime) IS production code, and these suites are what keep it pinned.
 
 ``GROUPED_PG_OBJECTIVE`` is the dotted ``module:Objective`` spelling the
-resolver (``reef.train.algos.registry.resolve_objective``) accepts, so tests exercise
+resolver (``reef.train.slime_backend.objectives.resolve_slime_objective``) accepts, so tests exercise
 the same custom-objective path a reader's package would.
 """
 
@@ -22,19 +22,19 @@ from typing import Any
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2sample import ReportSamples
+from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job
-from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.pipeline import TrainingPipeline
+from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.types import JobData, Sample, TrajectorySample, trajectory_groups
 
 GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
 
 
-class GroupedPolicyObjective(TrainingObjective):
+class GroupedPolicyObjective(SlimeObjective):
     name = "test-grouped-pg"
     loss_family = "pg"
     rollout_unit = "comparison_set"
@@ -68,10 +68,10 @@ class ComparisonSetGrouping(ReportGrouping):
 
 
 class ComparisonSetSamples(ReportSamples):
-    """One report as one sample in its comparison set."""
+    """One report as one sample in its comparison set (``ComparisonSetGrouping``)."""
 
-    def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext, settings: SampleAssemblySettings | None = None) -> None:
+        super().__init__(context, ComparisonSetGrouping())
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
@@ -86,11 +86,12 @@ class GroupedPolicyJobData(Sample2Job):
         return JobData(data_id, samples)
 
 
-def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
+def grouped_policy_pipeline(
+    context: PipelineContext, buffer_size: int | None = None, job_samples: int | None = None
+) -> TrainingPipeline:
     """Reports grouped by ``metadata.comparison_set``, two to a group."""
     return TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ComparisonSetGrouping()),
-        record2sample=ComparisonSetSamples(),
-        sample2job=GroupedPolicyJobData(context, buffer_size, None),
+        record2sample=ComparisonSetSamples(context),
+        sample2job=GroupedPolicyJobData(context, buffer_size, job_samples),
     )

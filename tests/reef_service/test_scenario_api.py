@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import UnknownScenario
@@ -11,18 +13,18 @@ from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.scenario.admission import ScenarioLimits
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher:
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir(exist_ok=True)
     return Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         allow_implicit_creation=allow_implicit_creation,
         scenario_storage=SQLiteScenarioStorage(None),
+        coordination=memory_coordination(),
     )
 
 
@@ -57,7 +59,8 @@ def test_list_scenarios_shows_loaded_bindings(tmp_path) -> None:
     rows = dispatcher.list_scenarios()
     names = [row["scenario"] for row in rows]
     assert names == ["a", "b"]
-    assert all(row["loaded"] and row["release_id"] for row in rows)
+    assert all(row["loaded"] and row["components"] for row in rows)
+    assert all("release_id" not in row and "content_id" not in row for row in rows)
     assert all("recipe" not in row for row in rows)
 
 
@@ -73,6 +76,18 @@ def test_scenario_contract_returns_processor_and_request_types(tmp_path) -> None
     assert "recipe" not in contract
     assert contract["processor"] == "NoJobData"
     assert contract["required_request_types"] == ["inference", "report"]
+    assert contract["parameters_schema"] == {}, "a recipe without a training component declares no schema"
+
+
+def test_scenario_contract_serves_the_training_components_schema_by_sample_kind(tmp_path) -> None:
+    class Declaring(StubTrainingComponent):
+        def parameters_schema(self, kind):
+            return {"title": kind} if kind == "task" else None
+
+    dispatcher = _dispatcher(tmp_path)
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario._binding = replace(scenario._binding, training_component=Declaring())
+    assert dispatcher.scenario_contract("math")["parameters_schema"] == {"task": {"title": "task"}}
 
 
 def test_scenario_contract_raises_for_unknown_scenario(tmp_path) -> None:
@@ -85,7 +100,7 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     value = _dispatcher(tmp_path)
     created = value.get_or_create_scenario("delivery")
     assert created is not None
-    first_release = created.repository.require_current_artifact().release_id
+    first_snapshot = created.repository.require_current_artifact().revision
 
     result = value.delete_scenario("delivery")
 
@@ -98,11 +113,11 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     # The name is free: a new scenario under it starts from the base, not the dropped chain.
     again = value.get_or_create_scenario("delivery")
     assert again is not None and again is not created
-    assert again.repository.require_current_artifact().release_id == first_release or again.scenario_step == 0
+    assert again.repository.require_current_artifact().revision == first_snapshot or again.scenario_step == 0
 
 
 def test_delete_scenario_refuses_names_that_are_paths() -> None:
-    value = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    value = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     for name in ("", ".", "..", "a/b"):
         with pytest.raises(UnknownScenario):
             value.delete_scenario(name)
@@ -111,14 +126,13 @@ def test_delete_scenario_refuses_names_that_are_paths() -> None:
 def test_delete_scenario_archives_its_records_and_commit_log(tmp_path) -> None:
     """With a record directory, the scenario's SQLite store and commit history move under ``archived``; the
     directory keeps nothing of the name at the top level, so a restart does not find it."""
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
     record_dir = tmp_path / "records"
     value = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(record_dir),
+        coordination=memory_coordination(),
     )
     assert value.get_or_create_scenario("delivery") is not None
     before = {path.name for path in record_dir.iterdir() if path.is_file()}
@@ -136,7 +150,15 @@ def test_delete_scenario_archives_its_records_and_commit_log(tmp_path) -> None:
 @pytest.mark.unit
 def test_delete_scenario_over_http() -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
+        client = TestClient(
+            TestServer(
+                create_app(
+                    build_default_dispatcher(
+                        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+                    )
+                )
+            )
+        )
         await client.start_server()
         try:
             created = await client.post("/reef/scenarios", json={"name": "delivery"})
@@ -155,14 +177,13 @@ def test_delete_scenario_over_http() -> None:
 
 @pytest.mark.unit
 def test_scenario_limits_answer_409_and_503_over_http(tmp_path) -> None:
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
     dispatcher = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=ScenarioLimits(max_loaded_scenarios=1, max_scenarios=2),
+        coordination=memory_coordination(),
     )
 
     async def run() -> None:
@@ -172,7 +193,8 @@ def test_scenario_limits_answer_409_and_503_over_http(tmp_path) -> None:
             assert (await client.post("/reef/scenarios", json={"name": "a"})).status == 201
             busy = dispatcher.get_or_create_scenario("a")
             assert busy is not None
-            measurement = busy.operations.start("serve/request")
+            # A running record write keeps the loaded scenario busy, so it cannot be unloaded.
+            measurement = busy.operations.start("ingest/write")
             full = await client.post("/reef/scenarios", json={"name": "b"})
             assert full.status == 503
             assert full.headers["Retry-After"] == "30"

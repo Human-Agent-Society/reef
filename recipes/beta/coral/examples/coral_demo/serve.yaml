@@ -20,7 +20,7 @@ inference:
 recipe:
   implementation: recipes.beta.coral.recipe:CoralRecipe
 pipeline:
-  record2record:
+  record2sample:
     config:
       group_size: 2        # two scored siblings release a training group
   sample2job:
@@ -53,7 +53,7 @@ training:
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
     num-rollout: "${training.config.steps}"
     rollout-batch-size: "2"
-    n-samples-per-prompt: "${pipeline.record2record.config.group_size}"
+    n-samples-per-prompt: "${pipeline.record2sample.config.group_size}"
     global-batch-size: "4"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
     num-gpus-per-node: "4"
@@ -66,7 +66,6 @@ training:
     lr: "4e-5"
     lr-decay-style: "constant"
     loss-type: "custom_loss"
-    use-rollout-logprobs: true
     kl-coef: "0.1"
     rollout-temperature: "1"
     rollout-max-response-len: "4096"

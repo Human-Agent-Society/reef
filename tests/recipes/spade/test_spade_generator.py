@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from recipes.beta.spade import SpadeTaskGenerator
@@ -15,7 +16,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks import GeneratedTaskSamples
+from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -23,17 +24,10 @@ from reef.recipe.generated_tasks.generator import (
     RejectedTask,
     RolledOutTask,
 )
-from reef.recipe.generated_tasks.processor import (
-    GeneratedTaskRecord2Record,
-    GenerationJob,
-    RoundSettings,
-    TaskGroupSettings,
-)
+from reef.recipe.generated_tasks.processor import GenerationJob
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import GeneratorError, TaskNameConflict
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.storage.samples import TrainerSamples
-from reef.storage.sqlite import SQLiteScenarioStorage
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 REQUEST = TaskGenerationRequest((), DESCRIPTION)
@@ -285,12 +279,11 @@ def test_from_config_reads_its_section_and_keeps_one_state_directory_for_each_sc
 def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
-    session = SQLiteScenarioStorage(tmp_path / "records").open("spade")
-    context = PipelineContext("spade", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+    session, samples = open_sample_store(tmp_path / "records", "spade")
+    context = PipelineContext("spade", task_storage=session.tasks, samples=samples.for_trainer(""))
     generation = GeneratedTaskSamples(
         context,
-        RoundSettings(rounds=1, description=DESCRIPTION),
-        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
+        GeneratedTaskSettings(rounds=1, description=DESCRIPTION),
         task_generator=generator,
         generator_service=service,
     )

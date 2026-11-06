@@ -38,7 +38,7 @@ zero-padding rule; candidates 1 and 3, which do, lost on validation.
 ## Stored files
 
 `summary.json` is the driver's own summary. `archive.json` is the method's
-archive with the reflection prompts and the model's minibatch answers
-removed: every candidate's text, parent, validation vector, and minibatch
-scores; the per-iteration plans; each reflection's scores and verdict; the
-metric-call count.
+archive as the run stored it, with the reflection prompts and the model's
+minibatch answers removed: every candidate's text, parent, validation vector,
+and minibatch scores; the per-iteration plans; each reflection's scores and
+whether its child was accepted; the metric-call count.

@@ -1,1 +1,0 @@
-"""SkillClaw cookbook method."""

@@ -1,0 +1,1 @@
+This harness is {title}, whose extension API this step does not know: write no file under extensions/. Harness notes: {command} Its own tools: {tools}. {mode}{config} Prefer a skill or rules.md; write a command for a repeatable prompt. When these files cannot deliver the behavior the request asks for, write the design saying why and no file.

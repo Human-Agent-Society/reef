@@ -22,8 +22,8 @@ from pathlib import Path
 
 import yaml
 
-from reef.runtime.durable_files import fsync_dir
 from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
+from reef.storage.durable_files import fsync_dir
 
 # Kept in sync with the submodule gitlink by the source dependency test; wheels need no Git checkout.
 SEMANTIC_ROUTER_REVISION = "c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59"

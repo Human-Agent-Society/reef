@@ -1,91 +1,56 @@
-"""The GEPA candidate as named texts, and the diff back into mutations.
+"""The GEPA candidate as named texts: one per evolvable file of the harness tree.
 
 GEPA optimizes a ``dict[str, str]``: one instruction text per named
 component of the program under search, and every reflective mutation
-rewrites exactly one entry of that mapping. Reef's evolution backend speaks
-a composition tree instead - ``(kind, config)`` pairs in tree order, with
-entry ids stripped - so this module is the translation both ways: which
-nodes are evolvable text, what GEPA calls each one, and how a rewritten
-mapping becomes the ``Mutation`` sequence the backend applies.
-
-A component key doubles as the entry id the mutation addresses, under the
-seed id convention ``GEPARecipe`` validates: a ``rules`` node has entry id
-``rules``, and a named node's entry id is its ``config.name``. Because
-``propose`` never sees entry ids, that convention is the only thing that
-lets a proposal point back at the node a text came from.
+rewrites exactly one entry of that mapping. Here a component is one file of
+the served tree whose part carries instructions (the rules, a skill, a
+command), and its name is the file's tree path. A candidate's tree is
+therefore the served tree with the candidate's texts in place, path for path.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
 
-from reef.harness.tree.mutations import Mutation
+from reef.harness.adapters.parts import Format, TreeLayout
+from reef.harness.tree import HarnessTree, TreePatch
 
-#: The node kinds whose config carries one free-text field GEPA can rewrite.
-#: ``config`` and ``code_extension`` nodes are structure, not instructions:
-#: a reflection reply is prose, and letting it rewrite JSON or executable
-#: code would break the tree rather than evolve it.
-EVOLVABLE_KINDS = ("rules", "skill", "agent_command")
-
-
-def component_key(kind: str, config: Mapping[str, Any]) -> str | None:
-    """GEPA's name for one node, or ``None`` when the node is not evolvable."""
-    if kind == "rules":
-        return "rules"
-    if kind in ("skill", "agent_command"):
-        name = config.get("name")
-        if isinstance(name, str) and name:
-            return f"{kind}:{name}"
-    return None
+#: The formats whose files are free text GEPA can rewrite. Config, code and
+#: native files are structure, not instructions: a reflection reply is prose,
+#: and letting it rewrite JSON or executable code would break the tree rather
+#: than evolve it.
+EVOLVABLE_FORMATS = (Format.TEXT, Format.SKILL, Format.COMMAND)
 
 
-def texts_of(nodes: Sequence[tuple[str, Any]], kinds: Sequence[str]) -> dict[str, str]:
-    """The composition as a GEPA candidate: component key to text, tree order.
+def texts_of(tree: HarnessTree, layout: TreeLayout, parts: Sequence[str]) -> dict[str, str]:
+    """The tree as a GEPA candidate: the path of every file of one of ``parts``, to its text, in path order.
 
-    ``kinds`` is the recipe's evolvable subset, so a deployment can evolve
-    only its rules while its skills stay fixed. A node with no text yet
-    still enters the mapping, empty: it is a component GEPA may fill.
+    ``parts`` is the method's evolvable subset, so a deployment can evolve
+    only its rules while its skills stay fixed. ValueError for a name that
+    is not a part of ``layout`` whose format is free text.
     """
-    texts: dict[str, str] = {}
-    for kind, config in nodes:
-        if kind not in kinds:
-            continue
-        options = config if isinstance(config, Mapping) else {}
-        key = component_key(kind, options)
-        if key is not None:
-            texts[key] = str(options.get("text", ""))
-    return texts
+    for name in parts:
+        part = layout.parts.get(name)
+        if part is None or part.format not in EVOLVABLE_FORMATS:
+            evolvable = [part.name for part in layout.parts.values() if part.format in EVOLVABLE_FORMATS]
+            raise ValueError(f"GEPA components must name text parts of the tree: {', '.join(evolvable)}")
+    return {
+        path: text
+        for path, text in tree.files.items()
+        if (location := layout.locate(path)) is not None and location.part.name in parts
+    }
 
 
-def entry_id(key: str) -> str:
-    """The composition entry id a component key addresses."""
-    kind, separator, name = key.partition(":")
-    return name if separator else kind
+def candidate_tree(served: HarnessTree, texts: Mapping[str, str]) -> HarnessTree:
+    """The served tree with a candidate's texts in place of its own: the tree a candidate's tasks run.
 
-
-def component_kind(key: str) -> str:
-    """The node kind a component key belongs to."""
-    return key.partition(":")[0]
-
-
-def mutations(served: Mapping[str, str], child: Mapping[str, str]) -> tuple[Mutation, ...]:
-    """One ``update`` per component whose text the child rewrote.
-
-    The proposal is stated against the *served* composition, not against the
-    child's parent: the backend applies mutations to the served tree, so a
-    child descended from an older archive candidate carries every component
-    where the two now differ, not just the one reflection touched. A key the
-    served composition does not have is skipped - GEPA rewrites components,
-    it never invents them, and an update to an absent entry would only make
-    the backend skip the whole step.
+    Every other file of the served tree stays. The texts replace files of the
+    *served* tree, not of the candidate's parent: a candidate descended from
+    an older archive candidate carries every component where the two now
+    differ, not just the one reflection touched. A path the served tree does
+    not hold is skipped: GEPA rewrites components, it never invents them.
     """
-    changed = []
-    for key, text in child.items():
-        if key not in served or served[key] == text:
-            continue
-        kind = component_kind(key)
-        name = entry_id(key)
-        config = {"text": text} if kind == "rules" else {"name": name, "text": text}
-        changed.append(Mutation("update", name, {"name": kind, "config": config}))
-    return tuple(changed)
+    return served.apply(TreePatch({path: text for path, text in texts.items() if path in served.files}))
+
+
+__all__ = ["EVOLVABLE_FORMATS", "candidate_tree", "texts_of"]

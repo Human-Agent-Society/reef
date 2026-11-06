@@ -132,7 +132,7 @@ need a new RFC.
 
 Open an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml)
 and complete the full proposal in the issue body. The issue is the RFC and its
-decision record; do not add a new document under `docs/rfcs`. Keep material
+decision record; do not add an RFC document to the repository. Keep material
 design changes, the maintainer decision, and implementation links on the issue.
 An RFC must be explicitly accepted there before its implementation is treated
 as approved project direction.
@@ -201,7 +201,7 @@ Use the [codebase structure map](https://reefinfra.ai/docs/contributing/codebase
 decide which package owns a change. Each package's `__init__` docstring states
 the invariants inside its area; the map is the repository-wide routing guide.
 
-When adding a recipe, training integration, runtime, surface, artifact type,
+When adding a recipe, training integration, runtime, component, artifact type,
 service route, or harness adapter, follow the
 [component playbooks](https://reefinfra.ai/docs/contributing/adding-components/). They list the
 implementation location, registration point, tests, configuration, and

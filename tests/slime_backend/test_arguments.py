@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -131,14 +133,28 @@ def component_args(**overrides):
         "offload_rollout": False,
         "release_train": False,
         "megatron_lora_rank": 0,
+        "rollout_num_gpus": 0,
+        "actor_num_nodes": 1,
+        "actor_num_gpus_per_node": 4,
         **overrides,
     }
     return SlimeArguments(**values)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("overrides", [{}, {"megatron_lora_rank": 32}, {"offload_train": True}])
-def test_slime_args_accept_a_training_only_run(overrides) -> None:
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"megatron_lora_rank": 32},
+        {"offload_train": True},
+        # The component's own rollout engines: on GPUs of their own, or on some or all of the training GPUs.
+        {"rollout_num_gpus": 2},
+        {"colocate": True, "offload_train": True, "offload_rollout": True, "rollout_num_gpus": 4},
+        {"colocate": True, "offload_train": True, "offload_rollout": True, "rollout_num_gpus": 2},
+    ],
+)
+def test_slime_args_accept_a_run_the_training_component_can_run(overrides) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import validate_slime_args
 
     validate_slime_args(component_args(**overrides), None)
@@ -148,14 +164,13 @@ def test_slime_args_accept_a_training_only_run(overrides) -> None:
 @pytest.mark.parametrize(
     ("overrides", "refusal"),
     [
-        # Training and serving never share GPUs, so nothing hands GPU memory over between them.
-        ({"colocate": True, "offload_train": True, "offload_rollout": True}, "remove --colocate"),
-        ({"offload_rollout": True}, "remove --offload-rollout"),
+        # Reef's LoRA adapters are not wired into Slime's weight transfer to its engines.
+        ({"rollout_num_gpus": 2, "megatron_lora_rank": 32}, "remove --megatron-lora-rank"),
         ({"debug_train_only": True}, "--debug-train-only"),
         ({"debug_rollout_only": True}, "--debug-rollout-only"),
         ({"num_rollout": 0}, "positive --num-rollout"),
         ({"save_hf": "/tmp/hf/checkpoint"}, "{rollout_id}"),
-        # The workers keep running between jobs, so nothing releases and recreates them.
+        # The workers keep running through a job, so nothing releases and recreates them.
         ({"release_train": True}, "remove --release-train"),
     ],
 )
@@ -199,3 +214,25 @@ def test_checkpoint_preflight_preserves_invalid_interval_for_validation(tmp_path
     with pytest.raises(ValueError, match="critic_save_interval"):
         prepare_checkpoint_storage(args, RetentionConfig())
     assert not (tmp_path / "megatron").exists()
+
+
+@pytest.mark.unit
+def test_slime_parses_tensor_parallel_arguments_without_the_workers_cuda_variable(monkeypatch) -> None:
+    """Megatron's check wants CUDA_DEVICE_MAX_CONNECTIONS=1 in the parsing process: the HTTP service and each driver."""
+    from reef.train.slime_backend.reef_adapters import slime_arguments, startup
+    from reef.train.slime_backend.reef_adapters.megatron import hf_arguments
+
+    seen: list[str | None] = []
+
+    def parse_args(add_custom_arguments):
+        import os
+
+        seen.append(os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS"))
+        return argparse.Namespace()
+
+    monkeypatch.delenv("CUDA_DEVICE_MAX_CONNECTIONS", raising=False)
+    monkeypatch.setitem(sys.modules, "slime.utils.arguments", SimpleNamespace(parse_args=parse_args))
+    monkeypatch.setattr(hf_arguments, "add_hf_architecture_arguments", lambda arguments: list(arguments))
+    monkeypatch.setattr(slime_arguments, "finalize_reef_slime_args", lambda args, arguments: None)
+    startup.parse_slime_args(["--tensor-model-parallel-size=4"])
+    assert seen == ["1"]

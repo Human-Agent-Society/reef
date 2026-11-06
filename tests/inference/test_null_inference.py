@@ -9,7 +9,7 @@ import pytest
 from reef.artifact import Artifact
 from reef.core.errors import InferenceUnavailable
 from reef.inference.null import NULL_INFERENCE_URL, NullInferenceHandler, NullInferenceRuntime
-from reef.runtime.deployment import RuntimeRegistry
+from reef.inference.registry import RuntimeRegistry
 
 
 def test_the_factory_builds_a_runtime_that_serves_nothing_and_loads_nothing(tmp_path):
@@ -24,8 +24,7 @@ def test_the_factory_builds_a_runtime_that_serves_nothing_and_loads_nothing(tmp_
     assert runtime.shared_by_training_scenarios is True
     assert runtime.per_scenario_adapters is False
     release = Artifact.local(tmp_path)
-    assert runtime.activate_checkpoint(release, scenario="math") == release.ref.release_id
-    assert runtime.current_runtime_load_id() is None
+    assert runtime.activate_checkpoint(release, scenario="math") == release.artifact_id
     runtime.shutdown()
 
 

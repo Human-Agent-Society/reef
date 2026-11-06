@@ -1,9 +1,9 @@
 """TTT-Discover's pipeline stages: the step barrier, the grouped policy samples, and the step data.
 
-``TTTDRecord2Record`` owns the step grid (``groups_per_step`` x
-``rollouts_per_group``). ``TTTDSamples`` and ``TTTDJobData`` read the grid from
-the record stage that they receive, so the deployment writes it once, in
-``pipeline.record2record.config``.
+``TTTDSamples`` owns the step grid (``groups_per_step`` x
+``rollouts_per_group``). ``TTTDJobData`` reads the grid from the sample stage
+that it receives, so the deployment writes it once, in
+``pipeline.record2sample.config``.
 """
 
 from __future__ import annotations
@@ -18,15 +18,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2record import (
-    GroupDecision,
-    Record2Record,
-    Record2RecordSettings,
-    ReportContext,
-    ReportGrouping,
-    ReportRecord2Record,
-)
-from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample, trajectories
@@ -34,19 +26,13 @@ from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 logger = logging.getLogger(__name__)
 
 
-def inference_release_id(context: ReportContext) -> str | None:
-    """The release that served the report's first inference, if the record names one."""
-    inference = context.inferences[0]
-    return inference.artifact_ref.release_id if inference.artifact_ref is not None else None
-
-
 @dataclass(frozen=True)
-class TTTDGridSettings(Record2RecordSettings):
-    """The config of ``TTTDRecord2Record``: the step grid, and the staleness limit.
+class TTTDSettings(SampleAssemblySettings):
+    """The config of ``TTTDSamples``: the step grid, the sample assembly, and the staleness limit.
 
-    Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two;
-    ``max_staleness`` is as in ``Record2RecordSettings``. The constructor refuses other values.
-    Purpose: ``TTTDRecord2Record.from_config`` parses it from ``pipeline.record2record.config``.
+    Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two; the other keys
+    are as in ``SampleAssemblySettings``. The constructor refuses other values.
+    Purpose: ``TTTDSamples.from_config`` parses it from ``pipeline.record2sample.config``.
     """
 
     groups_per_step: int = config_option(8, help="The comparison groups in one step.")
@@ -86,9 +72,9 @@ class TTTDGrouping(ReportGrouping):
         expected_count = self.groups_per_step * self.rollouts_per_group
         if len(members) != expected_count:
             return GroupDecision.INCOMPLETE
-        # 2. A step whose reports span releases is discarded
+        # 2. A step whose reports span artifacts is discarded
         #    wholesale — mixed-version rewards are not comparable.
-        versions = {release_id for member in members if (release_id := inference_release_id(member)) is not None}
+        versions = {member.ends[0].artifact_id for member in members} - {None}
         if len(versions) <= 1:
             return GroupDecision.READY
         if not isinstance(key, int):
@@ -97,7 +83,7 @@ class TTTDGrouping(ReportGrouping):
         ordered_versions = tuple(sorted(versions))
         self.failed_step_versions[step] = ordered_versions
         logger.error(
-            "TTTD step %d failed because its %d reports span releases %s",
+            "TTTD step %d failed because its %d reports span artifacts %s",
             step,
             expected_count,
             list(ordered_versions),
@@ -110,48 +96,32 @@ class TTTDGrouping(ReportGrouping):
             "failed_steps": [
                 {
                     "step": step,
-                    "reason": "mixed_release_ids",
-                    "release_ids": list(versions),
+                    "reason": "mixed_artifact_ids",
+                    "artifact_ids": list(versions),
                 }
                 for step, versions in sorted(self.failed_step_versions.items())
             ]
         }
 
 
-class TTTDRecord2Record(ReportRecord2Record):
-    """TTTD's record stage: one group per step; a terminal report owns its sources.
+class TTTDSamples(ReportSamples):
+    """One rollout as one sample, checked against the step grid, with its grid coordinates.
 
-    Config: ``groups_per_step`` and ``rollouts_per_group``, the step grid, and ``max_staleness``.
-    The later stages read the grid from this stage.
+    One step is one group (``TTTDGrouping``); a terminal report owns its sources. Config: ``TTTDSettings``.
+    ``TTTDJobData`` reads the grid from this stage.
     """
 
-    def __init__(self, context: PipelineContext, settings: TTTDGridSettings) -> None:
-        #: The comparison groups in one step.
-        self.groups_per_step = settings.groups_per_step
-        #: The sibling rollouts in each group.
-        self.rollouts_per_group = settings.rollouts_per_group
+    def __init__(self, context: PipelineContext, settings: TTTDSettings) -> None:
         super().__init__(
             context,
             TTTDGrouping(settings.groups_per_step, settings.rollouts_per_group),
             exclusive_sources=True,
             max_staleness=settings.max_staleness,
         )
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(context, TTTDGridSettings.parse(config, plugin_class=cls))
-
-
-class TTTDSamples(ReportSamples):
-    """One rollout as one sample, checked against the record stage's step grid, with its grid coordinates.
-
-    Config: the sample-assembly keys of ``SampleAssemblySettings``.
-    """
-
-    def __init__(self, settings: SampleAssemblySettings, record2record: TTTDRecord2Record) -> None:
-        super().__init__()
-        self.groups_per_step = record2record.groups_per_step
-        self.rollouts_per_group = record2record.rollouts_per_group
+        #: The comparison groups in one step.
+        self.groups_per_step = settings.groups_per_step
+        #: The sibling rollouts in each group.
+        self.rollouts_per_group = settings.rollouts_per_group
         self.assembly = SampleAssembly(settings)
 
     @classmethod
@@ -160,15 +130,9 @@ class TTTDSamples(ReportSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = SampleAssemblySettings.parse(config, plugin_class=cls)
-        if not isinstance(record2record, TTTDRecord2Record):
-            raise PluginConfigError(
-                f"{cls.__name__} needs TTTDRecord2Record as record2record, not {type(record2record).__name__}"
-            )
-        return cls(settings, record2record)
+        return cls(context, TTTDSettings.parse(config, plugin_class=cls))
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
         parsed: Any = context.parsed_report
@@ -185,7 +149,7 @@ class TTTDSamples(ReportSamples):
                 "step": parsed.step,
                 "group": parsed.group,
                 "rollout": parsed.rollout,
-                "release_id": inference_release_id(context),
+                "artifact_id": context.ends[0].artifact_id,
             }
         )
 
@@ -200,7 +164,7 @@ class TTTDJobData(Sample2Job):
     set — its barrier is the recipe's ``TTTDGrouping``, its (group, rollout)
     coordinates are candidate slots (a retried report at an occupied
     coordinate is terminal; the first durable report wins), and a step whose
-    reports span releases is discarded wholesale with every row
+    reports span artifacts is discarded wholesale with every row
     released.
 
     Constant-reward groups are removed only after the complete step is
@@ -209,7 +173,7 @@ class TTTDJobData(Sample2Job):
     the backend performs a well-defined zero-gradient step, also matching the
     reference behavior.
 
-    The grid comes from the record stage. ``max_job_samples`` is the grid,
+    The grid comes from ``TTTDSamples``. ``max_job_samples`` is the grid,
     so the trainer refuses a larger ``job_samples``, and one job's data is
     exactly one step. Config: ``buffer_size`` and ``job_samples``
     (``Sample2JobSettings``); set ``job_samples`` to the grid.
@@ -218,12 +182,12 @@ class TTTDJobData(Sample2Job):
     def __init__(
         self,
         context: PipelineContext,
-        record2record: TTTDRecord2Record,
+        record2sample: TTTDSamples,
         buffer_size: int | None,
         job_samples: int | None,
     ) -> None:
-        self.groups_per_step = record2record.groups_per_step
-        self.rollouts_per_group = record2record.rollouts_per_group
+        self.groups_per_step = record2sample.groups_per_step
+        self.rollouts_per_group = record2sample.rollouts_per_group
         super().__init__(
             context, buffer_size, job_samples, max_job_samples=self.groups_per_step * self.rollouts_per_group
         )
@@ -234,16 +198,15 @@ class TTTDJobData(Sample2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         settings = Sample2JobSettings.parse(config, plugin_class=cls)
-        if not isinstance(record2record, TTTDRecord2Record):
+        if not isinstance(record2sample, TTTDSamples):
             raise PluginConfigError(
-                f"{cls.__name__} needs TTTDRecord2Record as record2record, not {type(record2record).__name__}"
+                f"{cls.__name__} needs TTTDSamples as record2sample, not {type(record2sample).__name__}"
             )
-        return cls(context, record2record, settings.buffer_size, settings.job_samples)
+        return cls(context, record2sample, settings.buffer_size, settings.job_samples)
 
     def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         steps = {item.metadata["tttd"]["step"] for item in items}

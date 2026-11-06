@@ -13,6 +13,7 @@ from typing import NoReturn
 import pytest
 import yaml
 
+from reef.service.components import COMPONENT_APPS, build_component_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.containers import ContainerRuntime
 from reef.service.deploy.service_config import ServiceConfig
@@ -195,6 +196,23 @@ def test_an_ordinary_deployment_never_installs_a_sighup_handler(
     assert orchestrator._run_orchestrator(str(path)) == 0
     assert signal.SIGTERM in installed and signal.SIGINT in installed
     assert signal.SIGHUP not in installed
+
+
+@pytest.mark.parametrize("component", ["control", "inference"])
+def test_managed_routing_refuses_standalone_components(
+    tmp_path: Path, component: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_managed_config(tmp_path)
+
+    def refuse_start(*args, **kwargs) -> NoReturn:
+        pytest.fail("a managed deployment started a standalone component")
+
+    monkeypatch.setattr(COMPONENT_APPS[component], "build", refuse_start)
+    settings = ServiceConfig(recipe="recipe", routing_manifest=str(tmp_path / "manifest.yaml"))
+    with pytest.raises(ValueError, match="requires reef serve without --component"):
+        build_component_app(component, settings)
+    with pytest.raises(orchestrator.DeployConfigError, match="requires reef serve without --component"):
+        orchestrator.run_component(str(path), None, component)
 
 
 def test_managed_object_config_prepares_controller_and_private_child(
