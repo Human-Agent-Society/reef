@@ -290,7 +290,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     """Runs rollouts of task directories with one agent against one Reef scenario, and reports every scored rollout.
 
     This is the Harbor agent runner of ``RolloutRunner``. It runs the harness ``harness``, the Harbor agent with
-    no plugin, and the model ``served_model``, which ``reef_url`` serves: ``model``, with the LoRA adapter
+    no plugin, and the model ``policy_model``, which ``reef_url`` serves: ``model``, with the LoRA adapter
     ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
     ``concurrency`` rollouts at a time.
     """
@@ -333,7 +333,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.scenario = scenario
         self.model = model
         # The model that reef_url serves, which every request must name.
-        self.served_model = PolicyModel(model, model_adapter)
+        self.policy_model = PolicyModel(model, model_adapter)
         self.token = token
         self.work_dir = Path(work_dir)
         self.agent: dict[str, object] = dict(agent) if agent is not None else dict(DEFAULT_AGENT)
@@ -399,8 +399,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         for request in requests:
             if request.harness != self.harness:
                 raise ValueError(f"this runner runs the Harbor agent {self.agent_name!r} with no plugin")
-            if request.model != self.served_model:
-                raise ValueError(f"this runner serves {self.served_model}, not {request.model}")
+            if request.model != self.policy_model:
+                raise ValueError(f"this runner serves {self.policy_model}, not {request.model}")
             if request.record_dir is not None:
                 raise ValueError("this runner keeps each trial under its work_dir, not in a request's record_dir")
             if not (Path(request.task) / "task.toml").is_file():
