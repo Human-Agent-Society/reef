@@ -823,7 +823,14 @@ The body takes these fields:
   "terminus-2"}`` runs Reef's default terminus-2 configuration. Any other
   agent is its whole Harbor configuration, with ``{model}``, ``{base_url}``
   and ``{api_key}`` where Reef fills them in, as the Tinker job parameter
-  ``rollout.agent`` takes it.
+  ``rollout.agent`` takes it. ``{"item": "<item id>"}`` runs a harness tree: a
+  published artifact item of the scenario's owner, also from another scenario.
+  The item has the kind ``harness_plugin``, and ``adapter`` in its metadata. Its
+  adapter must install with npm and call the runtime's API dialect. Each agent
+  runs in the task's container, so a remote environment is not available yet
+  (RFC #986). Reef refuses a task that declares MCP servers or skills. This
+  evaluation does not reach the activation rule, and an automatic evaluation
+  cannot use an item.
 - ``model``: the model binding that a harness artifact runs on. A request
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.

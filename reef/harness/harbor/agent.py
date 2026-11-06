@@ -32,14 +32,18 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from harbor.models.task.config import TaskConfig
 
 from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.execution.sandbox.environment import run_sync
 from reef.execution.sandbox.process import ProgramLaunchError
-from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
 from reef.harness.tasks.trajectory import reader_for
+from reef.harness.tree import HarnessTree, render_tree
 
 #: Where the rendered tree goes in the task's container: the run root of ``run.task``.
 CONTAINER_ROOT = "/reef-run"
@@ -162,6 +166,84 @@ class AdapterAgent(BaseInstalledAgent):
         """Keep Harbor's context as it is: Reef reads the session files, not Harbor's token counts."""
 
 
+class TreeAgent(AdapterAgent):
+    """An ``AdapterAgent`` that renders one harness tree for its model when Harbor builds it.
+
+    Values: ``adapter`` names the adapter, and ``tree_dir`` is the directory of the tree. ``model``, ``base_url``,
+    ``api_key`` and ``api`` are the values of a ``ModelBinding``. ``files_dir`` receives the rendered tree. The other
+    values are ``AdapterAgent``'s.
+    Purpose: ``tree_agent`` names this class. The runner fills the placeholders of the binding in the agent's
+    configuration, and the tree stays in a directory so that the runner does not fill them in the tree's own text.
+    """
+
+    def __init__(
+        self,
+        logs_dir: Path,
+        *,
+        adapter: str,
+        tree_dir: str,
+        model: str,
+        base_url: str,
+        api_key: str,
+        api: str,
+        files_dir: str,
+        **kwargs: Any,
+    ) -> None:
+        descriptor = get_adapter(adapter)
+        binding = ModelBinding(base_url, model, api_key, api)
+        files = render_tree(HarnessTree.read(Path(tree_dir)), descriptor, binding.config_overlays(descriptor))
+        write_rendered(descriptor, files, Path(files_dir), CONTAINER_ROOT)
+        super().__init__(logs_dir, files_dir=files_dir, **kwargs)
+
+
+def adapter_agent_kwargs(
+    descriptor: AdapterDescriptor, install: InstallSpec, files_dir: Path, timeout: float
+) -> dict[str, object]:
+    """The keyword arguments of an ``AdapterAgent`` for ``descriptor``, whose install is ``install``."""
+    return {
+        "package": install.package,
+        "version": install.version,
+        "binary": descriptor.binary,
+        "argv": list(descriptor.argv),
+        "env": headless_env(descriptor, Path(CONTAINER_ROOT)),
+        "writable_paths": list(descriptor.writable_paths),
+        "sessions": descriptor.trajectory_path,
+        "files_dir": str(files_dir),
+        "timeout_s": timeout,
+    }
+
+
+def tree_agent(
+    descriptor: AdapterDescriptor, *, api: str, tree_dir: Path, files_dir: Path, timeout: float
+) -> dict[str, object]:
+    """The Harbor agent configuration that runs the tree in ``tree_dir``, with the placeholders of the model binding,
+    as ``TaskRolloutRunner``'s ``agent``. ``ValueError`` for an adapter that cannot run in a task's container."""
+    install = descriptor.install
+    if install is None or not can_run_in_task_container(descriptor):
+        raise ValueError(f"adapter {descriptor.name!r} cannot play a Harbor task directory in the task's container")
+    return {
+        "import_path": f"{__name__}:{TreeAgent.__name__}",
+        "kwargs": {
+            **adapter_agent_kwargs(descriptor, install, files_dir, timeout),
+            "adapter": descriptor.name,
+            "tree_dir": str(tree_dir),
+            "model": "{model}",
+            "base_url": "{base_url}",
+            "api_key": "{api_key}",
+            "api": api,
+        },
+    }
+
+
+def task_agent_tools(task: Path) -> tuple[str, ...]:
+    """The settings of the Harbor task directory ``task`` that ``AdapterAgent`` does not give its agent."""
+    environment = TaskConfig.model_validate_toml((task / "task.toml").read_text(encoding="utf-8")).environment
+    return (
+        *(("mcp_servers",) if environment.mcp_servers else ()),
+        *(("skills_dir",) if environment.skills_dir else ()),
+    )
+
+
 def trial_directory(trial_uri: str | None) -> Path | None:
     """The local trial directory that Harbor's ``file://`` trial URI names, or ``None``."""
     if trial_uri is None or not trial_uri.startswith("file://"):
@@ -220,17 +302,7 @@ def run_harbor_task(
         tree_dir.mkdir(exist_ok=True)
         agent = {
             "import_path": f"{__name__}:{AdapterAgent.__name__}",
-            "kwargs": {
-                "package": install.package,
-                "version": install.version,
-                "binary": descriptor.binary,
-                "argv": list(descriptor.argv),
-                "env": headless_env(descriptor, Path(CONTAINER_ROOT)),
-                "writable_paths": list(descriptor.writable_paths),
-                "sessions": descriptor.trajectory_path,
-                "files_dir": str(tree_dir),
-                "timeout_s": timeout,
-            },
+            "kwargs": adapter_agent_kwargs(descriptor, install, tree_dir, timeout),
         }
         runner = lab or ReefEvalLab(work / "lab")
         try:
@@ -279,4 +351,12 @@ def run_harbor_task(
         shutil.rmtree(work, ignore_errors=True)
 
 
-__all__ = ["CONTAINER_ROOT", "AdapterAgent", "can_run_in_task_container", "run_harbor_task"]
+__all__ = [
+    "CONTAINER_ROOT",
+    "AdapterAgent",
+    "TreeAgent",
+    "can_run_in_task_container",
+    "run_harbor_task",
+    "task_agent_tools",
+    "tree_agent",
+]

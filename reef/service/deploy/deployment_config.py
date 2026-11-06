@@ -98,6 +98,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "recipe",
         "training",
         "storage",
+        "evaluation",
         "execution",
         "executors",
         "activation",
