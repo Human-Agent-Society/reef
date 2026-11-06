@@ -12,9 +12,9 @@ import pytest
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.harbor_task import CONTAINER_ROOT, can_run_in_task_container, run_harbor_task
+from reef.harness.harbor.agent import CONTAINER_ROOT, can_run_in_task_container, run_harbor_task
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.run import TaskRunError
 from reef.harness.tasks.trajectory import failed_trial_error
 
@@ -69,7 +69,7 @@ def test_the_agent_plays_the_task_in_its_container_and_the_verifier_reward_score
     assert (tmp_path / "kept" / "session.jsonl").is_file()
     (agent,) = lab.agents
     kwargs = agent["kwargs"]
-    assert agent["import_path"] == "reef.harness.tasks.harbor_task:AdapterAgent"
+    assert agent["import_path"] == "reef.harness.harbor.agent:AdapterAgent"
     assert (kwargs["package"], kwargs["version"]) == (pi.install.package, pi.install.version)
     assert kwargs["argv"] == list(pi.argv) and kwargs["sessions"] == pi.trajectory_path
     # The run's environment points the agent at the root in the container, where the tree lands.
