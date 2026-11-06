@@ -477,7 +477,7 @@ class ScenarioCommitter:
         training result waits for its commit. Raise ``ReefError`` when the
         scenario keeps no durable commit history. Raise it also when the
         runtime answers only from the snapshot that it has loaded
-        (``InferenceRuntime.serves_artifacts_on_request`` is False).
+        (``InferenceRuntime.serves_any_artifact`` is False).
         """
         with self._lock, self._publication_lock:
             if not self._store.durable:
@@ -495,7 +495,7 @@ class ScenarioCommitter:
             runtime = self._binding.runtime
             # The calls use the artifact's own weights, or the active selection's weights for an artifact of another
             # component. The runtime must answer each call from the snapshot that the call names.
-            if loaded is not None and runtime is not None and not runtime.serves_artifacts_on_request:
+            if loaded is not None and runtime is not None and not runtime.serves_any_artifact:
                 raise ReefError(
                     f"scenario {self._name!r}'s runtime answers only from the snapshot it has loaded, so it "
                     f"cannot serve artifact {selected.artifact_id!r} beside the active selection"
