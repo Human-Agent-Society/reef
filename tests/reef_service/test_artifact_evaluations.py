@@ -443,6 +443,35 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
     asyncio.run(run())
 
 
+class NoCallLab(TaskLab):
+    """A trial whose verifier writes a reward, though the agent reached no model: the endpoint went away."""
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        return RolloutRow(rewards={"reward": 0.0})
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+@pytest.mark.integration
+def test_a_rollout_that_reached_no_model_fails_though_its_verifier_wrote_a_reward(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, NoCallLab())
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+
+        assert answer["policy_evaluation"]["scores"] == [{"task": "add", "scores": ["failed"]}]
+        assert answer["mean_score"] is None
+
+    asyncio.run(run())
+
+
 @pytest.mark.integration
 def test_a_candidate_that_inference_cannot_serve_fails_its_rollouts_and_scores_nothing(tmp_path: Path) -> None:
     runtime = ArtifactRuntime()
