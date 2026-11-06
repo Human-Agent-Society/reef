@@ -60,8 +60,8 @@ from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.adapters.parts import TreeLayout
+from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
-from reef.harness.tasks.harbor_task import can_run_in_task_container
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
