@@ -33,9 +33,10 @@ class SftAlgorithm(SlimeAlgorithm):
     def shape_sample_row(self, sample: TrajectorySample) -> list[Any]:
         """The default row, with reward 0 for a trajectory that records none: ``sft_loss`` reads no reward.
 
-        Uploaded demonstrations usually carry no reward. A recorded reward must still be finite.
+        Uploaded demonstrations usually carry no reward, and a trajectory from records holds ``None`` for it. A
+        recorded reward must still be finite.
         """
-        reward = trajectory_reward(sample) if "reward" in sample.metadata else 0.0
+        reward = 0.0 if sample.metadata.get("reward") is None else trajectory_reward(sample)
         return [
             source_record_id(sample),
             list(sample.training.get("tokens", [])),
