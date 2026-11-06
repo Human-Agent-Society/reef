@@ -558,7 +558,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
-                "capabilities": current.capabilities().to_json(),
                 "parameters_schema": {kind: schema for kind, schema in schemas.items() if schema is not None},
             }
 

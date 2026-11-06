@@ -256,16 +256,3 @@ def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_
         assert dispatcher.queue.get(JOBS_QUEUE, "job-t").state == "queued"
 
     served(dispatcher, check)
-
-
-def test_the_contract_reports_what_the_scenario_can_run(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
-
-    async def check(client: TestClient) -> None:
-        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
-        contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
-        # The trainer's component starts jobs from releases, so it can start from an artifact; the scenario has no runtime to
-        # evaluate on and none that loads its artifacts, so a served artifact needs only the durable history.
-        assert contract["capabilities"] == {"serve_beside": True, "evaluate": [], "train_from": ["records"]}
-
-    served(dispatcher, check)
