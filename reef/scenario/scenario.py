@@ -219,7 +219,7 @@ class Scenario:
         with a kind; None when it can.
 
         Reef evaluates a model artifact (``RFC #959``): the artifacts hold no harness, and the runtime answers each
-        call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``).
+        call from the artifact that the call names (``InferenceRuntime.serves_any_artifact``).
         """
         kinds = {name: declared.kind for name, declared in self._components.components.items()}
         if kinds[component] == "harness_plugin":
@@ -227,7 +227,7 @@ class Scenario:
         if "harness_plugin" in kinds.values():
             return "Reef evaluates a model artifact only in a scenario whose artifacts hold no harness"
         runtime = self.runtime
-        if runtime is None or not runtime.serves_artifacts_on_request:
+        if runtime is None or not runtime.serves_any_artifact:
             return (
                 f"scenario {self.name!r}'s runtime serves only its current artifact, so it cannot evaluate an "
                 "artifact on request"

@@ -1,7 +1,7 @@
 """A loopback endpoint that answers model calls from one artifact, for the rollouts that evaluate it.
 
 An artifact evaluation runs its rollouts against an artifact that the scenario may not serve. A runtime that
-answers each call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``) can
+answers each call from the artifact that the call names (``InferenceRuntime.serves_any_artifact``) can
 answer them without loading the artifact: ``ArtifactEndpoint`` hands each call to the runtime's handler with that
 artifact, under the runtime's inference admission. Reef's serving takes no part, and no call is a record.
 """
@@ -18,6 +18,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, UpstreamStatusError
+from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
 
 #: The model call routes that the endpoint answers, as Reef's own inference routes do.
@@ -28,7 +29,8 @@ class ArtifactEndpoint:
     """An OpenAI endpoint on loopback that answers every call from ``artifact`` with ``runtime``'s handler.
 
     Values: ``runtime`` is an ``InferenceRuntime`` that serves artifacts on request, and ``artifact``
-    the materialized artifact that every call samples. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
+    the materialized artifact that every call samples. ``served`` is the value that reaches an engine that answers
+    for the artifact, or None for the runtime's own handler. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
     body that is not a JSON object 400, a runtime that admits no call 503, a handler refusal its own status, and
     any other handler failure 502 with the reason. Purpose: the artifact evaluation service points its rollouts
     at ``url``. Use it as a context manager: it binds its loopback port and sets ``url`` when it is entered, and
@@ -36,11 +38,12 @@ class ArtifactEndpoint:
     ``artifact`` on request.
     """
 
-    def __init__(self, runtime: InferenceRuntime, artifact: Artifact) -> None:
-        if not runtime.serves_artifacts_on_request:
+    def __init__(self, runtime: InferenceRuntime, artifact: Artifact, served: ServedArtifact | None = None) -> None:
+        if not runtime.serves_any_artifact:
             raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.revision!r}")
         self.runtime = runtime
         self.artifact = artifact
+        self.served = served
         self.server: ThreadingHTTPServer | None = None
         self.url = ""
 
@@ -51,9 +54,13 @@ class ArtifactEndpoint:
         except InferenceUnavailable as exc:
             return 503, {"error": {"message": str(exc)}}
         try:
-            return 200, await self.runtime.inference_handler.inference(
-                InferenceArtifact.from_artifact(self.artifact), path, payload
-            )
+            handler = self.runtime.inference_handler
+            if self.served is not None:
+                reached = self.runtime.handler_for(self.served.url)
+                if reached is None:
+                    raise ValueError(f"the runtime has no handler for {self.served.url}")
+                handler, payload = reached, reached.address_model(payload, self.served.model_name)
+            return 200, await handler.inference(InferenceArtifact.from_artifact(self.artifact), path, payload)
         except UpstreamStatusError as exc:
             return exc.status, {"error": {"message": str(exc)}}
         except (ValueError, TimeoutError, OSError) as exc:
