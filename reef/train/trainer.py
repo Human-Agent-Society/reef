@@ -366,12 +366,6 @@ class Trainer:
         return self._job_loop is not None
 
     @property
-    def can_train_from(self) -> bool:
-        """Whether ``start_from`` can take an artifact: a trainer whose training component takes releases
-        (``TrainingComponent.starts_from_artifacts``); a trainer that trains nothing never can."""
-        return self._job_loop is not None and self._job_loop.component.starts_from_artifacts
-
-    @property
     def job_running(self) -> bool:
         """Whether this trainer's committed state names a running job, which its worker polls."""
         with self._lock:

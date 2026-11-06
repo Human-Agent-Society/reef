@@ -67,10 +67,6 @@ model. Reef reads none of the parameters. The component contract is:
    to describe jobs and import starts, and never run a job. A component that
    keeps its job state on disk, such as Tinker's ``state_dir``, locks it
    here, so one process at a time runs its jobs.
-``starts_from_artifacts``
-   False when ``import_start`` refuses every snapshot; the default is true.
-   A client reads it in the scenario contract before it offers a
-   ``train-from``.
 ``name``
    The backend name that jobs carry.
 ``shares_scenarios``
