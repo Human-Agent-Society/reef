@@ -33,7 +33,7 @@ from typing import Any, Generic, TypeVar
 
 from reef.core.job_data import TrajectorySample
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
-from reef.harness.tasks.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
+from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
 from reef.train.slime_backend.engine_chat import EngineChat
