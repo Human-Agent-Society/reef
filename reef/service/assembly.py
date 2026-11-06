@@ -525,7 +525,10 @@ def build_dispatcher(
             for _ in range(ROLLOUT_WORKERS):
                 dispatcher.workers.add(
                     EvaluationRolloutWorker(
-                        dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
+                        dispatcher.queue,
+                        LocalCandidateEndpoints(dispatcher),
+                        worker_id=instance_id("evaluation"),
+                        agent_host=settings.evaluation_agent_host,
                     )
                 )
         if dispatcher.services.runs_control and not dispatcher.services.runs_harness and recipe.harness_adapter:
@@ -597,7 +600,9 @@ def build_app(
         new_artifacts=new_artifacts,
         components=components,
     )
-    evaluations = ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts)
+    evaluations = ArtifactEvaluations(
+        dispatcher, new_artifacts=new_artifacts, sources=ArtifactSources.from_setting(settings.artifact_sources)
+    )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
