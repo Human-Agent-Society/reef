@@ -133,8 +133,10 @@ def test_routed_upstream_failure_is_diagnostic_and_has_no_success_receipt(
 ) -> None:
     async def run() -> None:
         finish = asyncio.Event()
+        received_paths = []
 
         async def upstream(request: web.Request) -> web.Response:
+            received_paths.append(request.path)
             if failure == "timeout":
                 await finish.wait()
             if failure == "non_sse":
@@ -148,7 +150,7 @@ def test_routed_upstream_failure_is_diagnostic_and_has_no_success_receipt(
             return web.json_response({"error": "temporarily unavailable"}, status=503)
 
         async with provider_server(("POST", "/v1/chat/completions", upstream)) as provider:
-            adapter = routing_adapter(tmp_path, str(provider.make_url("")).rstrip("/"), timeout_s=0.2)
+            adapter = routing_adapter(tmp_path, str(provider.make_url("")).rstrip("/"))
             dispatcher = routing_dispatcher(tmp_path)
             try:
                 async with running_router(adapter.snapshot) as router:
@@ -164,6 +166,8 @@ def test_routed_upstream_failure_is_diagnostic_and_has_no_success_receipt(
                             },
                         )
                         assert response.status == status
+                        # The provider received the request; a connect-phase timeout must not satisfy the case.
+                        assert received_paths == ["/v1/chat/completions"]
                         assert "x-reef-agent-record-id" not in response.headers
                         assert len(router.selections) == 1
                         scenario = dispatcher.get_or_create_scenario("coding")
