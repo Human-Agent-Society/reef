@@ -39,7 +39,7 @@ from recipes.beta.autoenvscaling.designer import AgentTools, ModelCalls, Recordi
 from reef.core.tasks import HarborTask
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, SandboxProgram
-from reef.harness.tasks.rollouts import TaskRollout
+from reef.harness.harbor.rollouts import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
