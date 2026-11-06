@@ -26,13 +26,19 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
-from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
+from reef.evaluation.rollout_worker import (
+    EVALUATIONS_QUEUE,
+    EvaluationRollout,
+    EvaluationRolloutWorker,
+    LocalCandidateEndpoints,
+)
 from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import TreeAgent
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
@@ -232,6 +238,12 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             assert response.status == 202, await response.text()
             accepted = await response.json()
             assert accepted["state"] == "running" and accepted["request"]["component"] == "weights"
+            assert (dispatcher.candidate_task("s", "add") / "task.toml").is_file()
+            with pytest.raises(ReefError, match="uses no task"):
+                dispatcher.candidate_task("s", "missing")
+            # A worker in another Pod finds each task by its name: a path here would mean nothing there.
+            queued = dispatcher.queue.items(EVALUATIONS_QUEUE, scenario="s")
+            assert queued and all("task_path" not in item.payload for item in queued)
 
             answer = await finished(client, accepted["evaluation_id"])
             assert answer["state"] == "finished", answer

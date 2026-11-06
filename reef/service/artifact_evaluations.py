@@ -553,7 +553,6 @@ class ArtifactEvaluations:
                         request.component,
                         index,
                         name,
-                        str(held[name]),
                         repeat,
                         model,
                         agent,

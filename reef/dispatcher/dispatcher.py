@@ -19,7 +19,7 @@ from reef.artifact.repository import EnumerableRepositoryBackendFactory, Reposit
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
-from reef.core.job_data import TrajectorySample
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
 from reef.core.serving_config import ServingConfig
@@ -894,6 +894,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 raise ReefError(f"scenario {scenario!r} has no runtime")
             _, snapshot = current.resolve_artifact(artifact_id, component)
             return runtime, snapshot.materialize()
+
+    def candidate_task(self, scenario: str, task_name: str) -> Path:
+        """The directory of the Harbor task ``task_name`` of ``scenario`` here (``CandidateArtifacts``)."""
+        with self.locked_scenario(scenario) as current:
+            samples = self.storage.sample_store(scenario, current.store)
+            found = () if samples is None else samples.get((task_name,))
+        sample = found[0].sample if found else None
+        if not isinstance(sample, TaskSample):
+            raise ReefError(f"scenario {scenario!r} uses no task {task_name!r}")
+        return sample.task_path
 
     def request_artifact_copy(self, scenario: str) -> None:
         """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""
