@@ -24,6 +24,9 @@ Reef stores each request's Scenario, target, matched rule, manifest version
 and SR runtime hash (`null` for a pin) in its record, and links feedback sent
 to `POST /reef/report` to that record.
 
+To run this flow with two real models on one GPU and measure the serving
+pause during a policy change, see the [Qwen2.5 student and teacher example](qwen2.5/README.md).
+
 What this covers, and what it does not:
 
 - Reef listens on `127.0.0.1` only, runs with the local `uni` executor, and
