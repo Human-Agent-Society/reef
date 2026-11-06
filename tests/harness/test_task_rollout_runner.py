@@ -400,7 +400,7 @@ def test_concurrent_rollouts_each_get_their_own_proxy_and_report(reef: StandInRe
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, concurrency=3)
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths]
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in paths]
     )
     assert [rollout.name for rollout in rollouts] == ["t1", "t2", "t3"] and all(
         rollout.report_agent_record_ids != () for rollout in rollouts
@@ -417,7 +417,7 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
     running = runner(reef, tmp_path, lab, concurrency=7, environment="e2b")
     names = ["t1", "t2", "t1", "t3", "t2", "t1", "t2"]
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(paths[name])) for name in names]
+        [RolloutRequest(running.harness, running.policy_model, str(paths[name])) for name in names]
     )
     assert [(rollout.name, rollout.reward, rollout.error) for rollout in rollouts] == [
         (name, 1.0, "") for name in names
@@ -433,7 +433,7 @@ def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None
     lab = TemplateLab()
     running = runner(reef, tmp_path, lab, concurrency=1, environment="e2b")
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths * 2]
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in paths * 2]
     )
     assert [rollout.reward for rollout in rollouts] == [1.0] * 4
     assert lab.most_building == 1, "with one slot, the two builds run one after the other"
@@ -444,7 +444,7 @@ def test_a_task_whose_environment_does_not_build_runs_no_rollout(reef: StandInRe
     lab = TemplateLab({"bad": "COPY app.py: no such file"})
     running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(path)) for path in (bad, good, bad, good)]
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in (bad, good, bad, good)]
     )
     assert [rollout.reward for rollout in rollouts] == [None, 1.0, None, 1.0]
     assert rollouts[0].error == rollouts[2].error == "the environment of bad did not start: COPY app.py: no such file"
@@ -458,7 +458,7 @@ def test_a_build_that_fails_once_is_tried_again_and_the_rollouts_run(reef: Stand
     task = written_task(tmp_path / "tasks", "t1")
     lab = TemplateLab({"t1": "429: rate limit"}, failing_builds=1)
     running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
-    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.served_model, str(task))] * 3)
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 3)
     assert [(rollout.reward, rollout.error) for rollout in rollouts] == [(1.0, "")] * 3
     assert len(lab.builds) == 2 and lab.template_builds == ["t1", "t1"]
 
@@ -467,7 +467,7 @@ def test_docker_rollouts_start_with_no_build_first(reef: StandInReef, tmp_path: 
     task = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, concurrency=4, environment="docker")
-    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.served_model, str(task))] * 3)
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 3)
     assert [rollout.reward for rollout in rollouts] == [1.0] * 3
     assert lab.builds == [], "Harbor builds one Docker image at a time"
 
@@ -481,7 +481,7 @@ def test_run_rollouts_refuses_a_directory_without_task_toml_before_any_build(
     running = runner(reef, tmp_path, lab)
     with pytest.raises(TaskRolloutError, match="not a Harbor task directory"):
         running.run_rollouts(
-            [RolloutRequest(running.harness, running.served_model, str(path)) for path in (task, task, empty, empty)]
+            [RolloutRequest(running.harness, running.policy_model, str(path)) for path in (task, task, empty, empty)]
         )
     assert lab.calls == [] and lab.builds == []
 
@@ -714,16 +714,16 @@ def test_run_rollouts_refuses_a_harness_a_model_or_a_record_dir_it_cannot_use(
     task = str(written_task(tmp_path / "tasks", "t1"))
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, model_adapter="tinker://start/sampler")
-    assert running.served_model.kind == "model_adapter" and running.harness.kind == "harness"
+    assert running.policy_model.kind == "model_adapter" and running.harness.kind == "harness"
     refused = (
         (
-            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.served_model, task),
+            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.policy_model, task),
             "agent",
         ),
         (RolloutRequest(running.harness, PolicyModel(running.model), task), "serves"),
-        (RolloutRequest(running.harness, running.served_model, task, tmp_path / "keep"), "work_dir"),
+        (RolloutRequest(running.harness, running.policy_model, task, tmp_path / "keep"), "work_dir"),
     )
     for request, message in refused:
         with pytest.raises(ValueError, match=message):
-            running.run_rollouts([RolloutRequest(running.harness, running.served_model, task), request])
+            running.run_rollouts([RolloutRequest(running.harness, running.policy_model, task), request])
     assert lab.calls == [], "a refused request runs no rollout"

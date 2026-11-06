@@ -27,6 +27,7 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
@@ -58,9 +59,11 @@ class ArtifactHandler(InferenceHandler):
 
     def __init__(self) -> None:
         self.releases: list[str] = []
+        self.models: list[str] = []
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.releases.append(artifact.artifact_id)
+        self.models.append(payload["model"])
         return {"choices": [{"message": {"role": "assistant", "content": "ls"}, "finish_reason": "stop"}]}
 
 
@@ -70,10 +73,12 @@ class ArtifactRuntime(InferenceRuntime):
     Its engine serves every scenario under one model name, so control writes the ``served_models`` rows that the
     inference routes answer from."""
 
-    def __init__(self, *, serves_any_artifact: bool = True) -> None:
+    def __init__(self, *, any_artifact: bool = True) -> None:
         super().__init__(base_url="http://runtime.invalid")
         self.handler = ArtifactHandler()
-        self.serves_any_artifact = serves_any_artifact
+        self.served: list[str] = []
+        self.serve_error: str | None = None
+        self.any_artifact = any_artifact
 
     @property
     def inference_handler(self) -> InferenceHandler:
@@ -87,11 +92,17 @@ class ArtifactRuntime(InferenceRuntime):
         return "base"
 
     @property
-    def serves_artifacts_on_request(self) -> bool:
-        return self.serves_any_artifact
+    def serves_any_artifact(self) -> bool:
+        return self.any_artifact
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}")
+
+    def serve_artifact(self, artifact: Artifact) -> ServedArtifact:
+        self.served.append(artifact.artifact_id)
+        if self.serve_error is not None:
+            raise ValueError(self.serve_error)
+        return ServedArtifact(artifact.artifact_id, self.base_url, f"engine:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
@@ -235,6 +246,13 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             }
             assert answer["mean_score"] == 0.5
             assert runtime.handler.releases == [artifact_id] * 4, "every call samples the evaluated release"
+            assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
+            assert runtime.served == [artifact_id] * 6, "inference serves the candidate before each trial"
+            routes = dispatcher.coordination.served_models.read_scenario("s")
+            assert set(routes) == {
+                "active",
+                artifact_id,
+            }, "the active artifact's two names, and no route of the evaluation"
             rollouts_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/rollouts"
             rollouts = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
             assert [(rollout["task"], rollout["repeat"], rollout["score"]) for rollout in rollouts] == [
@@ -414,6 +432,28 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
 
 
 @pytest.mark.integration
+def test_a_candidate_that_inference_cannot_serve_fails_its_rollouts_and_scores_nothing(tmp_path: Path) -> None:
+    runtime = ArtifactRuntime()
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
+    lab = ModelCallingLab({"add": 1.0})
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            runtime.serve_error = "the weights are gone"
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+
+        assert answer["policy_evaluation"]["scores"] == [{"task": "add", "scores": ["failed"]}]
+        assert runtime.handler.releases == [], "no trial ran"
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
 def test_an_artifact_that_is_not_published_is_refused_before_any_rollout(tmp_path: Path, monkeypatch) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
 
@@ -477,7 +517,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
                 refused = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
                 assert refused.status == 400 and "harness artifact yet" in await refused.text()
 
-    current = ArtifactRuntime(serves_any_artifact=False)
+    current = ArtifactRuntime(any_artifact=False)
     asyncio.run(
         run(
             dispatcher_for(tmp_path / "current", WeightRecipe(runtime=current)),

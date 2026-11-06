@@ -235,7 +235,7 @@ class ReefGeneratorRollouts(GeneratorRollouts):
             # The task's verifier finished for its oracle, so a verifier still running at its timeout is the agent's.
             verifier_timeout_reward=0.0,
         )
-        request = RolloutRequest(runner.harness, runner.served_model, str(task_path))
+        request = RolloutRequest(runner.harness, runner.policy_model, str(task_path))
         return tuple(await runner.run_rollouts_async([request] * count, self.rollout_slots))
 
 
