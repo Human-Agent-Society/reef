@@ -17,6 +17,8 @@ from reef.storage.work_queue import JsonValue, WorkItem
 SERVING_QUEUE = "serving"
 SERVING_KIND = "serve"
 STOP_SERVING_KIND = "stop_serving"
+#: The kind of an item that asks inference to serve one artifact, with no route: an evaluation rollout's model.
+SERVE_ARTIFACT_KIND = "serve_artifact"
 INFERENCE_OWNER_QUEUE = "inference-owner"
 #: The metadata key of a serving request that control made to retry a failed request by itself: the number of such
 #: retries of the same payload in a row, a positive int. A request without the key has the count 0.
@@ -189,6 +191,7 @@ class ServedModelsWriter(ServedModels):
 __all__ = [
     "AUTOMATIC_RETRIES",
     "INFERENCE_OWNER_QUEUE",
+    "SERVE_ARTIFACT_KIND",
     "SERVING_KIND",
     "SERVING_QUEUE",
     "STOP_SERVING_KIND",
