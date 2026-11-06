@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -31,7 +32,6 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
         "weights",
         2,
         "add",
-        "/tasks/add",
         repeat,
         PolicyModel("m", "a"),
         {"name": "x"},
@@ -48,6 +48,9 @@ class ServedWorker(EvaluationRolloutWorker):
 
 
 class UnreachableEndpoints(CandidateEndpoints):
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        return Path("/tasks") / rollout.task_name
+
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         raise ConnectionError("the candidate cannot be served")
