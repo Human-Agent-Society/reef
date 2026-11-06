@@ -15,7 +15,7 @@ from tests.support.job_data import job_data_ref
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample, trajectories
 from reef.core.trajectories import trajectory_reward
-from reef.harness.tasks.rollouts import RolloutRow, TaskLab
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob
