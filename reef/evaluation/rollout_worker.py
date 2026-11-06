@@ -124,8 +124,7 @@ class EvaluationRollout:
 
     Values: ``scenario`` and ``evaluation_id`` name the evaluation; ``artifact_id`` is the candidate artifact and
     ``component`` the component of the scenario's artifacts that it is;
-    ``task_index`` is the task's position in the evaluation and ``task_name`` its name; ``task_path`` is the
-    Harbor task directory; ``repeat`` numbers the rollouts of one task from 0; ``model`` is the model that the
+    ``task_index`` is the task's position in the evaluation and ``task_name`` its name; ``repeat`` numbers the rollouts of one task from 0; ``model`` is the model that the
     service serves for the candidate; ``agent`` is the Harbor agent configuration, or None when ``tree`` is the
     harness; ``environment`` is the Harbor environment type; ``selection`` is the artifact selection that serves the
     candidate, as ``ArtifactSelection.to_dict`` gives it; ``tree`` is the harness tree, or None when ``agent``
@@ -140,7 +139,6 @@ class EvaluationRollout:
     component: str
     task_index: int
     task_name: str
-    task_path: str
     repeat: int
     model: PolicyModel
     agent: Mapping[str, object] | None
@@ -155,7 +153,6 @@ class EvaluationRollout:
             (self.artifact_id, "artifact_id"),
             (self.component, "component"),
             (self.task_name, "task_name"),
-            (self.task_path, "task_path"),
             (self.environment, "environment"),
         ):
             require_text(value, name)
@@ -186,7 +183,6 @@ class EvaluationRollout:
                 "component": self.component,
                 "task_index": self.task_index,
                 "task_name": self.task_name,
-                "task_path": self.task_path,
                 "repeat": self.repeat,
                 "model": self.model.to_json(),
                 "agent": None if self.agent is None else dict(self.agent),
@@ -206,7 +202,6 @@ class EvaluationRollout:
             payload["component"],
             payload["task_index"],
             payload["task_name"],
-            payload["task_path"],
             payload["repeat"],
             PolicyModel.from_json(payload["model"]),
             payload["agent"],
@@ -242,6 +237,10 @@ class CandidateEndpoints(ABC):
     """
 
     @abstractmethod
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        """The Harbor task directory of ``rollout``'s task, on this process's file system."""
+
+    @abstractmethod
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         """The endpoint of ``rollout``'s candidate, until the block ends."""
@@ -257,6 +256,9 @@ class LocalCandidateEndpoints(CandidateEndpoints):
 
     def __init__(self, artifacts: CandidateArtifacts) -> None:
         self.artifacts = artifacts
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        return self.artifacts.candidate_task(rollout.scenario, rollout.task_name)
 
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
@@ -322,6 +324,7 @@ class EvaluationRolloutWorker(QueueWorker):
 
     def score(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> RolloutScore:
         """Run ``rollout`` once, when its candidate is ready, and return its score."""
+        task_directory = self.endpoints.task_directory(rollout)
         served = self.served_candidate(rollout, lease_lost)
         with (
             tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work,
@@ -343,7 +346,7 @@ class EvaluationRolloutWorker(QueueWorker):
                 concurrency=1,
                 lab=self.lab,
             )
-            [result] = runner.run_rollouts([RolloutRequest(runner.harness, runner.policy_model, rollout.task_path)])
+            [result] = runner.run_rollouts([RolloutRequest(runner.harness, runner.policy_model, str(task_directory))])
             return runner.rollout_score(result)
 
 
