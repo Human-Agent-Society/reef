@@ -308,10 +308,6 @@ class JobQueueComponent(TrainingComponent):
     def shares_scenarios(self) -> bool:
         return self.component.shares_scenarios
 
-    @property
-    def starts_from_artifacts(self) -> bool:
-        return self.component.starts_from_artifacts
-
     def check_job(self, job: TrainingJob) -> None:
         self.component.check_job(job)
 
