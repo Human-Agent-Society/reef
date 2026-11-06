@@ -14,13 +14,15 @@ The map, one subpackage per job:
     render steps. pi, opencode, claude, codex, dsh, hermes, and native, the
     program Reef ships. Another distribution adds an adapter through the
     ``reef.harness_adapters`` entry point group.
-``runs/``
+``tasks/``
     one headless run and its reading: launch on a rendered root through any
     ``reef.execution.sandbox`` executor (``run``), the adapter as the program that
     executor runs and its install (``vendor_install``), the model binding,
-    the trajectory readers, Harbor task runs that report to Reef
-    (``tasks``), and one adapter's agent playing a Harbor task in the task's
-    container (``harbor_task``).
+    and the trajectory readers.
+``harbor/``
+    Harbor, seen from a harness: one adapter's agent playing a Harbor task in
+    the task's container (``agent``), and rollouts of Harbor tasks with any
+    Harbor agent (``rollouts``).
 ``runners/``
     the program an adapter's ``binary`` points at when Reef ships it:
     ``native`` (the loop, its graph and the resident ``serve`` form).

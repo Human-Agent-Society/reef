@@ -37,7 +37,7 @@ from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.execution.sandbox.environment import run_sync
 from reef.execution.sandbox.process import ProgramLaunchError
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
+from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
 from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
 from reef.harness.tasks.trajectory import reader_for
 
