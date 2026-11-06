@@ -11,7 +11,7 @@ rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No 
 ``reef.service.routes.evaluations`` adapts it to HTTP.
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
-artifact on request (``InferenceRuntime.serves_artifacts_on_request``), on the Harbor tasks of the eval split of the
+artifact on request (``InferenceRuntime.serves_any_artifact``), on the Harbor tasks of the eval split of the
 scenario's imported tasks (its samples). Its harness is a Harbor agent, or a harness tree that an artifact item of
 the scenario's owner names, also from another scenario. It refuses a harness artifact, and a model artifact on any
 other runtime.
@@ -60,7 +60,7 @@ from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import StoredEvaluation
 from reef.storage.observer import RecordObserver
-from reef.storage.work_queue import NewWork, WorkItem
+from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +522,7 @@ class ArtifactEvaluations:
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             request, _artifact, model, api = self.checked(current, artifact_id, settings)
+            selection = {**current.artifact_selection().to_dict(), request.component: request.artifact_id}
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
             held = {
                 stored.sample_id: stored.sample.task_path
@@ -557,6 +558,7 @@ class ArtifactEvaluations:
                         model,
                         agent,
                         request.environment,
+                        cast(dict[str, JsonValue], selection),
                         tree,
                     )
                     self.queue.add(

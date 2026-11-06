@@ -262,7 +262,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         )
 
     @property
-    def served_model(self) -> PolicyModel:
+    def policy_model(self) -> PolicyModel:
         """The model that every request must name: the served model, which the runs call."""
         return PolicyModel(self.models.served.model)
 
@@ -286,7 +286,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         remote worker returns the kept record as an archive; it is extracted
         here into the request's ``record_dir``.
         """
-        served = self.served_model
+        served = self.policy_model
         for request in requests:
             if request.harness.base != self.descriptor.name:
                 raise ValueError(
@@ -344,7 +344,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
                 harnesses[checksums[index]] = self.policy_harness(tree)
             task_run, record_dir = self.history.new_run()
             task_runs.append(task_run)
-            to_run.append(RolloutRequest(harnesses[checksums[index]], self.served_model, task, record_dir))
+            to_run.append(RolloutRequest(harnesses[checksums[index]], self.policy_model, task, record_dir))
         scored = self.run_rollouts(to_run)
         for index, task_run, request, result in zip(missing, task_runs, to_run, scored, strict=True):
             record = RunRecord.from_scored(
