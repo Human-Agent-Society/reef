@@ -572,10 +572,7 @@ class RequestService:
                 "declares no harness component (record-only or weight-training recipes have "
                 "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
-        if not self._dispatcher.services.runs_control:
-            # Control commits in another process: serve the snapshot of its newest commit.
-            return self._dispatcher.follow_commits(scenario)
-        return scenario
+        return self._dispatcher.at_newest_commit(scenario)
 
     def _accept(
         self,
