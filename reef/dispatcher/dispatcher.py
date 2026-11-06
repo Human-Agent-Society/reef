@@ -419,6 +419,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return current
         return self.registry.reload(current.name)
 
+    def at_newest_commit(self, current: Scenario) -> Scenario:
+        """``current``, or its new instance in a process where another process runs control (``follow_commits``)."""
+        return current if self.services.runs_control else self.follow_commits(current)
+
     def scenario_reloaded(self, instance: Scenario) -> None:
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
         workers keep the failure until the samples come and the next cycle runs."""
@@ -505,7 +509,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
         """Each component's artifacts of ``scenario``, newest first, with each component's active one marked."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).artifacts()
+            return self.at_newest_commit(self.registry.require(scenario)).artifacts()
 
     def read_records(
         self, scenario: str, *, after_sequence: int = 0, limit: int = 50, request_type: RequestType | None = None
@@ -791,7 +795,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
     @contextmanager
     def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
-        """The loaded scenario ``scenario``, loaded again when it was unloaded, held under its lock.
+        """The loaded scenario ``scenario`` at its newest commit, loaded again when it was unloaded, held under its lock.
 
         Raise ``UnknownScenario`` when the scenario does not exist. The caller must not keep the scenario, or its
         storage session, after the block: an unload closes the session.
@@ -800,7 +804,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            yield current
+            yield self.at_newest_commit(current)
 
     def set_evaluation_and_activation(
         self, scenario: str, *, artifact_evaluation: Mapping[str, object] | None, activation: object
