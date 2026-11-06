@@ -13,6 +13,7 @@ no call is a record, so an evaluation never trains the scenario.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import threading
 import time
@@ -36,6 +37,8 @@ from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunn
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+
+logger = logging.getLogger(__name__)
 
 #: The queue of evaluations and their rollouts.
 EVALUATIONS_QUEUE = "evaluations"
@@ -347,6 +350,10 @@ class EvaluationRolloutWorker(QueueWorker):
                 lab=self.lab,
             )
             [result] = runner.run_rollouts([RolloutRequest(runner.harness, runner.policy_model, str(task_directory))])
+            if not result.turns:
+                # A verifier can write a reward with no call, so that reward says nothing of the candidate's model.
+                logger.warning("rollout %s reached no model: %s", rollout.item_id(), result.error)
+                return RolloutScore.failed()
             return runner.rollout_score(result)
 
 
