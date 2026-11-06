@@ -14,6 +14,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
@@ -120,9 +121,15 @@ class CandidateArtifacts(ABC):
     ``candidate(scenario, artifact_id, component)`` returns the runtime of ``scenario`` and the materialized
     artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
     runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
+    ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """
+
+    @abstractmethod
+    def candidate_task(self, scenario: str, task_name: str) -> Path:
+        """The directory of the Harbor task ``task_name`` of ``scenario`` on this process's file system, which the task
+        file store fetches when another process stored it. ``ReefError`` for a task that the scenario does not use."""
 
     @abstractmethod
     def candidate(
