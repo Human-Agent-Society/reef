@@ -1,7 +1,7 @@
 """A loopback endpoint that answers model calls from one artifact, for the rollouts that evaluate it.
 
 An artifact evaluation runs its rollouts against an artifact that the scenario may not serve. A runtime that
-answers each call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``) can
+answers each call from the artifact that the call names (``InferenceRuntime.serves_any_artifact``) can
 answer them without loading the artifact: ``ArtifactEndpoint`` hands each call to the runtime's handler with that
 artifact, under the runtime's inference admission. Reef's serving takes no part, and no call is a record.
 """
@@ -37,7 +37,7 @@ class ArtifactEndpoint:
     """
 
     def __init__(self, runtime: InferenceRuntime, artifact: Artifact) -> None:
-        if not runtime.serves_artifacts_on_request:
+        if not runtime.serves_any_artifact:
             raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.revision!r}")
         self.runtime = runtime
         self.artifact = artifact

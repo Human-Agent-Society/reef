@@ -70,10 +70,10 @@ class ArtifactRuntime(InferenceRuntime):
     Its engine serves every scenario under one model name, so control writes the ``served_models`` rows that the
     inference routes answer from."""
 
-    def __init__(self, *, serves_any_artifact: bool = True) -> None:
+    def __init__(self, *, any_artifact: bool = True) -> None:
         super().__init__(base_url="http://runtime.invalid")
         self.handler = ArtifactHandler()
-        self.serves_any_artifact = serves_any_artifact
+        self.any_artifact = any_artifact
 
     @property
     def inference_handler(self) -> InferenceHandler:
@@ -87,8 +87,8 @@ class ArtifactRuntime(InferenceRuntime):
         return "base"
 
     @property
-    def serves_artifacts_on_request(self) -> bool:
-        return self.serves_any_artifact
+    def serves_any_artifact(self) -> bool:
+        return self.any_artifact
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}")
@@ -477,7 +477,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
                 refused = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
                 assert refused.status == 400 and "harness artifact yet" in await refused.text()
 
-    current = ArtifactRuntime(serves_any_artifact=False)
+    current = ArtifactRuntime(any_artifact=False)
     asyncio.run(
         run(
             dispatcher_for(tmp_path / "current", WeightRecipe(runtime=current)),

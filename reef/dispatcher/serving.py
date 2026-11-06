@@ -242,7 +242,7 @@ class ServingWorker(QueueWorker):
                 raise ValueError("a beside artifact needs its snapshot and component")
             component = require_text(value.get("component"), "component")
             if component == components.loaded_component:
-                beside_model = runtime.served_artifact_on_request(
+                beside_model = runtime.serve_artifact(
                     components.component_artifact(selected_artifact(value), component)
                 )
                 if beside_model is None:

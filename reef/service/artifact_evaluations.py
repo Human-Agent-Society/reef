@@ -11,7 +11,7 @@ rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No 
 ``reef.service.routes.evaluations`` adapts it to HTTP.
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
-artifact on request (``InferenceRuntime.serves_artifacts_on_request``), on the Harbor tasks of the eval split of the
+artifact on request (``InferenceRuntime.serves_any_artifact``), on the Harbor tasks of the eval split of the
 scenario's imported tasks (its samples). Its harness is a Harbor agent, or a harness tree that an artifact item of
 the scenario's owner names, also from another scenario. It refuses a harness artifact, and a model artifact on any
 other runtime.

@@ -307,7 +307,7 @@ class EvaluationRolloutWorker(QueueWorker):
                 concurrency=1,
                 lab=self.lab,
             )
-            [result] = runner.run_rollouts([RolloutRequest(runner.harness, runner.served_model, rollout.task_path)])
+            [result] = runner.run_rollouts([RolloutRequest(runner.harness, runner.policy_model, rollout.task_path)])
             return runner.rollout_score(result)
 
 
