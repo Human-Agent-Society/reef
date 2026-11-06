@@ -1164,7 +1164,7 @@ returns HTTP 404, and you create the scenario first:
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types, training_mode,      |
-|                                             | status, capabilities,                       |
+|                                             | status,                                     |
 |                                             | parameters_schema}``;                       |
 |                                             | ``parameters_schema`` maps a sample kind    |
 |                                             | to the JSON Schema of a job's parameters,   |
@@ -1258,24 +1258,6 @@ job of the scenario. It answers ``{scenario, job}``, with the job as ``GET
 The trainer reads the failed job and records its end. An unknown scenario, or
 a job that the scenario does not have, returns 404. Control answers this
 route.
-
-The contract's ``capabilities`` tell a client which artifact operations the
-scenario can run, so that it offers only those:
-
-- ``serve_beside``: whether ``POST /reef/scenarios/{scenario}/serve`` can
-  serve an artifact beside the active selection. It is false when the runtime
-  answers only from the snapshot that it has loaded, or when the store keeps
-  no durable commit history.
-- ``evaluate``: the components whose artifacts ``POST
-  /reef/scenarios/{scenario}/evaluations`` can evaluate. It is empty when the
-  runtime cannot serve an artifact on request, or when the artifacts hold a
-  harness.
-- ``train_from``: the components whose trainer ``POST
-  /reef/scenarios/{scenario}/train-from`` can start from an artifact. A Slime
-  component, which continues only from its own checkpoints, is not in it.
-
-An operation that the capabilities allow can still refuse one artifact, for
-example a snapshot whose weights the training component cannot import.
 
 Deleting a scenario
 -------------------
