@@ -33,8 +33,8 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.harness.adapters import get_adapter
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
-from reef.harness.tasks.rollouts import RolloutRow, TaskLab
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
 from reef.service.app import create_app
