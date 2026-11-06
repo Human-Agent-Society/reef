@@ -46,7 +46,7 @@ from reef.execution.executor.config import ExecutorSelection
 from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.harbor_task import can_run_in_task_container
+from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TrajectoryKeepError
 from reef.harness.tasks.trajectory import sum_agents

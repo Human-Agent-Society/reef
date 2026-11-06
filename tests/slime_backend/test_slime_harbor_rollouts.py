@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from reef.harness.tasks.rollouts import RolloutRow, TaskLab
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.durable_files import write_json
 from reef.train.slime_backend import harbor_rollouts
 from reef.train.slime_backend.dataset import DATASET_FILE
