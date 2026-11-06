@@ -5,16 +5,18 @@ item for each rollout (``reef.service.artifact_evaluations``). An ``EvaluationRo
 runs the task once with a Harbor agent against the candidate's model, and finishes the item with the rollout's
 ``RolloutScore``. Control reads the scores back when every rollout of the evaluation is final.
 
-A worker serves the candidate itself: it resolves the candidate artifact from the scenario's repository and answers
-the agent's model calls from it with the scenario's runtime, on a loopback endpoint (``CandidateEndpoints``). The
-inference service and ``served_models`` take no part, and no call is a record, so an evaluation never trains the
-scenario.
+A worker asks inference to serve the candidate before each trial (a ``serve_artifact`` item of the ``serving`` queue),
+and waits until the engine is ready. It answers the agent's model calls from that engine on a loopback endpoint
+(``CandidateEndpoints``). The item writes no route, so no client reaches the candidate through ``served_models``, and
+no call is a record, so an evaluation never trains the scenario.
 """
 
 from __future__ import annotations
 
 import tempfile
 import threading
+import time
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -22,15 +24,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from reef.core.errors import ReefError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
+from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
-from reef.execution.workers import QueueWorker
+from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import tree_agent
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
-from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
+from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
+from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
 #: The queue of evaluations and their rollouts.
 EVALUATIONS_QUEUE = "evaluations"
@@ -38,6 +43,10 @@ EVALUATIONS_QUEUE = "evaluations"
 EVALUATION_ROLLOUT_KIND = "evaluation_rollout"
 #: The address at which a task's container reaches this host, by default.
 DEFAULT_AGENT_HOST = "host.docker.internal"
+#: The longest wait for inference to serve a candidate, in seconds: a first start can quantize its weights.
+SERVE_WAIT_S = 12 * 3600.0
+#: The wait between two reads of a serve item, in seconds.
+SERVE_POLL_S = 1.0
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
 
@@ -118,7 +127,8 @@ class EvaluationRollout:
     ``task_index`` is the task's position in the evaluation and ``task_name`` its name; ``task_path`` is the
     Harbor task directory; ``repeat`` numbers the rollouts of one task from 0; ``model`` is the model that the
     service serves for the candidate; ``agent`` is the Harbor agent configuration, or None when ``tree`` is the
-    harness; ``environment`` is the Harbor environment type; ``tree`` is the harness tree, or None when ``agent``
+    harness; ``environment`` is the Harbor environment type; ``selection`` is the artifact selection that serves the
+    candidate, as ``ArtifactSelection.to_dict`` gives it; ``tree`` is the harness tree, or None when ``agent``
     is the harness. The names are non-empty strings and the two numbers are non-negative integers.
 
     Purpose: control makes it when it adds an evaluation (``to_payload``); a worker reads it (``from_item``).
@@ -135,6 +145,7 @@ class EvaluationRollout:
     model: PolicyModel
     agent: Mapping[str, object] | None
     environment: str
+    selection: Mapping[str, JsonValue]
     tree: TreeHarness | None = None
 
     def __post_init__(self) -> None:
@@ -180,6 +191,7 @@ class EvaluationRollout:
                 "model": self.model.to_json(),
                 "agent": None if self.agent is None else dict(self.agent),
                 "environment": self.environment,
+                "selection": dict(self.selection),
                 "tree": None if self.tree is None else self.tree.to_json(),
             },
         )
@@ -199,6 +211,7 @@ class EvaluationRollout:
             PolicyModel.from_json(payload["model"]),
             payload["agent"],
             payload["environment"],
+            payload["selection"],
             None if payload["tree"] is None else TreeHarness.from_json(payload["tree"]),
         )
 
@@ -224,31 +237,31 @@ class CandidateEndpoint:
 class CandidateEndpoints(ABC):
     """Opens the endpoint of a candidate artifact for the time of one rollout.
 
-    Purpose: an ``EvaluationRolloutWorker`` opens one around each rollout. The evaluation service serves the
-    candidate itself (``reef.service.artifact_evaluations.LocalCandidateEndpoints``): no other service takes part.
+    Purpose: an ``EvaluationRolloutWorker`` opens one around each rollout, with the value that reaches the engine
+    that inference started for the candidate (``LocalCandidateEndpoints``).
     """
 
     @abstractmethod
     @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         """The endpoint of ``rollout``'s candidate, until the block ends."""
 
 
 class LocalCandidateEndpoints(CandidateEndpoints):
-    """The candidate's model, served in the process of the evaluation workers: an ``ArtifactEndpoint`` that
-    answers from the candidate artifact with its scenario's runtime.
+    """The candidate's model, on loopback in the process of the evaluation workers: an ``ArtifactEndpoint`` that
+    sends each call to the engine that inference started, or to its scenario's runtime for an engine with no address.
 
     Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation workers open it around each
-    rollout, so neither control nor the inference service serves the candidate.
+    rollout.
     """
 
     def __init__(self, artifacts: CandidateArtifacts) -> None:
         self.artifacts = artifacts
 
     @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         runtime, artifact = self.artifacts.candidate(rollout.scenario, rollout.artifact_id, rollout.component)
-        with ArtifactEndpoint(runtime, artifact) as endpoint:
+        with ArtifactEndpoint(runtime, artifact, served) as endpoint:
             yield CandidateEndpoint(endpoint.url, None)
 
 
@@ -283,13 +296,36 @@ class EvaluationRolloutWorker(QueueWorker):
         self.agent_host = agent_host
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
-        return {"score": self.score(EvaluationRollout.from_item(item)).to_json()}
+        return {"score": self.score(EvaluationRollout.from_item(item), lease_lost).to_json()}
 
-    def score(self, rollout: EvaluationRollout) -> RolloutScore:
-        """Run ``rollout`` once and return its score."""
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        """Ask inference to serve the candidate of ``rollout``, wait until it is ready, and return the value that
+        reaches it: None for a runtime with no address. Raise ``ReefError`` when inference fails or takes too long, so
+        that the rollout fails and does not score 0."""
+        item_id = f"{SERVE_ARTIFACT_KIND}:{uuid.uuid4().hex}"
+        payload: dict[str, JsonValue] = {"selection": dict(rollout.selection), "component": rollout.component}
+        self.queue.add(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
+        deadline = time.monotonic() + SERVE_WAIT_S
+        while time.monotonic() < deadline:
+            if self.stopped.is_set():
+                raise WorkerStopped
+            if lease_lost.is_set():
+                raise WorkLeaseLost("the evaluation worker lost its lease")
+            item = self.queue.get(SERVING_QUEUE, item_id)
+            if item is not None and item.final:
+                if item.state != "finished":
+                    raise ReefError(f"inference could not serve artifact {rollout.artifact_id}: {item.error}")
+                served = cast(Mapping[str, Any], item.result)["served"]
+                return None if served is None else ServedArtifact.from_json(served)
+            time.sleep(SERVE_POLL_S)
+        raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
+
+    def score(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> RolloutScore:
+        """Run ``rollout`` once, when its candidate is ready, and return its score."""
+        served = self.served_candidate(rollout, lease_lost)
         with (
             tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work,
-            self.endpoints.open(rollout) as endpoint,
+            self.endpoints.open(rollout, served) as endpoint,
         ):
             runner = TaskRolloutRunner(
                 reef_url=endpoint.url,

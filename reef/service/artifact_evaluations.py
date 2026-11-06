@@ -60,7 +60,7 @@ from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import StoredEvaluation
 from reef.storage.observer import RecordObserver
-from reef.storage.work_queue import NewWork, WorkItem
+from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +522,7 @@ class ArtifactEvaluations:
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             request, _artifact, model, api = self.checked(current, artifact_id, settings)
+            selection = {**current.artifact_selection().to_dict(), request.component: request.artifact_id}
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
             held = {
                 stored.sample_id: stored.sample.task_path
@@ -557,6 +558,7 @@ class ArtifactEvaluations:
                         model,
                         agent,
                         request.environment,
+                        cast(dict[str, JsonValue], selection),
                         tree,
                     )
                     self.queue.add(

@@ -9,6 +9,7 @@ import pytest
 from reef.artifact.artifact import Artifact
 from reef.core.errors import UpstreamStatusError
 from reef.core.evaluation import PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
@@ -76,5 +77,9 @@ def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_
         assert runtime.inference_admission_status == {"open": True, "active": 0}, "every call releases admission"
         runtime.close_admission()
         assert call(endpoint.url, "/v1/chat/completions", chat)[0] == 503
+    elsewhere = ServedArtifact("artifact:r7", "http://elsewhere.invalid", "m")
+    with ArtifactEndpoint(Runtime(any_artifact=True), release, elsewhere) as endpoint:
+        status, body = call(endpoint.url, "/v1/chat/completions", {"messages": [{"content": "ok"}]})
+        assert status == 502 and "no handler" in body["error"]["message"]
     with pytest.raises(ValueError, match="serves only its current artifact"):
         ArtifactEndpoint(Runtime(any_artifact=False), release)

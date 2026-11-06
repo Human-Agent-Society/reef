@@ -21,7 +21,13 @@ from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.base import Recipe
 from reef.scenario.binding import activate_snapshot
 from reef.storage.coordination import Coordination
-from reef.storage.served_models import INFERENCE_OWNER_QUEUE, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
+from reef.storage.served_models import (
+    INFERENCE_OWNER_QUEUE,
+    SERVE_ARTIFACT_KIND,
+    SERVING_KIND,
+    SERVING_QUEUE,
+    STOP_SERVING_KIND,
+)
 from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
 logger = logging.getLogger(__name__)
@@ -84,7 +90,10 @@ class ServingWorker(QueueWorker):
         local_artifact_dir: Path | None = None,
     ) -> None:
         super().__init__(
-            coordination.work_queue, SERVING_QUEUE, (SERVING_KIND, STOP_SERVING_KIND), worker_id=worker_id
+            coordination.work_queue,
+            SERVING_QUEUE,
+            (SERVING_KIND, STOP_SERVING_KIND, SERVE_ARTIFACT_KIND),
+            worker_id=worker_id,
         )
         self.recipe = recipe
         self.backends = backends
@@ -199,15 +208,13 @@ class ServingWorker(QueueWorker):
                 runtime.stop_serving(served)
                 logger.info("stopped serving artifact %s at %s", served.artifact_id, served.url)
             return {}
+        if item.kind == SERVE_ARTIFACT_KIND:
+            return self.serve_artifact(item, runtime)
         selected = self.routes.current_request(item.scenario)
         if selected is None or selected.id != item.id or not item.payload:
             return {}
         artifact_id = require_text(item.payload.get("artifact_id"), "artifact_id")
-        backend = self.backends(item.scenario)
-        repository = self.repositories.get(item.scenario)
-        if repository is None or repository.backend is not backend:
-            repository = Repository(backend, backend.current(), local_dir=self.local_artifact_dir)
-            self.repositories[item.scenario] = repository
+        repository = self.repository(item.scenario)
 
         def selected_artifact(value: Mapping[str, object]) -> Artifact:
             return repository.select(ArtifactSelection.from_dict(value["selection"]))
@@ -252,9 +259,32 @@ class ServingWorker(QueueWorker):
                 models[name] = active
         return {name: dict(served.to_json()) for name, served in models.items()}
 
+    def repository(self, scenario: str) -> Repository:
+        """The repository of ``scenario``, which this worker keeps while its backend stays."""
+        backend = self.backends(scenario)
+        repository = self.repositories.get(scenario)
+        if repository is None or repository.backend is not backend:
+            repository = Repository(backend, backend.current(), local_dir=self.local_artifact_dir)
+            self.repositories[scenario] = repository
+        return repository
+
+    def serve_artifact(self, item: WorkItem, runtime: InferenceRuntime) -> Mapping[str, JsonValue]:
+        """Serve the artifact that ``item`` names, with no route, and give its ``ServedArtifact``, or null for a runtime
+        with no address that another process can call. This worker is the only one that starts engines, one item at a
+        time, so a second item for a served artifact starts nothing."""
+        selection = ArtifactSelection.from_dict(item.payload["selection"])
+        component = require_text(item.payload.get("component"), "component")
+        components = self.recipe.scenario_components(item.scenario)
+        artifact = components.component_artifact(self.repository(item.scenario).select(selection), component)
+        served = runtime.serve_artifact(artifact)
+        return {"served": None if served is None else dict(served.to_json())}
+
     def finish_item(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
         if self.owner is None or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost runtime ownership")
+        if item.kind == SERVE_ARTIFACT_KIND:
+            super().finish_item(item, result)
+            return
         if item.kind == STOP_SERVING_KIND:
             moment = item.payload["stop_after"]
             if not isinstance(moment, (int, float)):
