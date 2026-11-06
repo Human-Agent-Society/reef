@@ -240,10 +240,6 @@ class SlimeJobs(LocalJobComponent):
         """The start of the startup weights, which the workers load when they first start."""
         return str(self.base_start_dir)
 
-    @property
-    def starts_from_artifacts(self) -> bool:
-        return False
-
     def root_start(self, root: ScenarioRoot) -> str:
         """The startup weights, when ``root`` holds the default start of this configuration; else ``ValueError``.
 
