@@ -258,23 +258,13 @@ class TrainingComponent(ABC):
         """The start of the first job of a trainer whose scenario has the root snapshot ``root``.
 
         The default is ``import_start`` of the root's files. A component that imports no snapshot
-        (``starts_from_artifacts`` False) overrides it, and raises ``ValueError`` for a root that it cannot start
+        overrides it, and raises ``ValueError`` for a root that it cannot start
         from.
         """
         local_path = root.artifact.materialize().local_path
         if local_path is None:
             raise ValueError(f"the root snapshot {root.artifact.ref.revision} has no local files to train from")
         return self.import_start(local_path)
-
-    @property
-    def starts_from_artifacts(self) -> bool:
-        """Whether ``import_start`` can take a published snapshot as the start of later jobs.
-
-        False exactly when the component refuses every snapshot, so no trainer of it can train from an artifact.
-        True, the default, when it takes some releases; ``import_start`` still refuses one whose weights it cannot
-        start from.
-        """
-        return True
 
     @property
     def shares_scenarios(self) -> bool:
@@ -365,8 +355,7 @@ class TrainingComponent(ABC):
         (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
-        component cannot start from these weights. A component whose
-        ``starts_from_artifacts`` is False refuses every snapshot.
+        component cannot start from these weights.
         """
 
     @abstractmethod
