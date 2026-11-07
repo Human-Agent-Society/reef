@@ -393,16 +393,18 @@ def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
 
 
 def touched_items(store: DataStore, owner: str, ids: Sequence[object]) -> list[StoredItem]:
-    """The stored items of ``ids``, in the order given; ``ValueError`` for a bad ID, ``ItemNotFound`` if unknown."""
-    found: list[StoredItem] = []
+    """The stored items of ``ids``, each once, in the order given, from one read; ``ValueError`` for a bad ID,
+    ``ItemNotFound`` if unknown."""
+    item_ids: list[str] = []
     for item_id in dict.fromkeys(ids):
         if not isinstance(item_id, str) or not item_id:
             raise ValueError("an item ID is a non-empty string")
-        item = store.read(owner, item_id)
-        if item is None:
-            raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
-        found.append(item)
-    return found
+        item_ids.append(item_id)
+    found = {item.item_id: item for item in store.read_many(owner, item_ids)}
+    missing = [item_id for item_id in item_ids if item_id not in found]
+    if missing:
+        raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")
+    return [found[item_id] for item_id in item_ids]
 
 
 def parsed_metadata(text: str | None) -> Mapping[str, Any]:

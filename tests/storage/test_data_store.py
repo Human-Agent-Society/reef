@@ -95,6 +95,15 @@ def test_created_items_keep_their_content_and_arrival_order(store):
     assert [item.item_id for item in store.query("acme", limit=1)] == ["t1"]
 
 
+def test_a_read_of_many_items_gives_each_known_one_once_in_the_order_asked(store):
+    store.create("acme", [trajectory("t1", "one"), trajectory("t2", "two"), trajectory("t3", "three")])
+    store.create("globex", [trajectory("t4", "globex")])
+    found = store.read_many("acme", ["t3", "unknown", "t1", "t3", "t4"])
+    assert [item.item_id for item in found] == ["t3", "t1"]
+    assert [item.content for item in found] == [store.read("acme", "t3").content, store.read("acme", "t1").content]
+    assert store.read_many("acme", []) == ()
+
+
 def test_the_same_content_again_changes_nothing_and_other_content_is_a_conflict_that_stores_nothing(store):
     (first,) = store.create("acme", [trajectory("t1", "one")])
     assert store.create("acme", [trajectory("t1", "one")]) == (first,)
