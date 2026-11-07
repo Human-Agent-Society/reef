@@ -17,7 +17,15 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, SnapshotRef
+from reef.artifact.artifact import (
+    Artifact,
+    ArtifactConflict,
+    ArtifactNotFound,
+    ArtifactPublicationError,
+    SnapshotRef,
+    serving_profile_of,
+    with_serving_profile,
+)
 from reef.artifact.components import ArtifactLayout
 from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
 from reef.artifact.sources import SourceFiles
@@ -25,10 +33,10 @@ from reef.core.activation import MadeArtifact
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents, validate_component_name
 from reef.core.errors import CommitPending, ReefError
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import ItemIdentity, RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
-from reef.scenario.binding import ScenarioBinding
+from reef.scenario.binding import ScenarioBinding, profiled_artifact
 from reef.scenario.snapshots import ScenarioSnapshots, ServedBesideArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
@@ -576,7 +584,7 @@ class ScenarioCommitter:
         *,
         source: Mapping[str, str],
         directory: Path,
-        artifact_id: str | None = None,
+        item: ItemIdentity | None = None,
     ) -> ComponentArtifact:
         """Publish ``files``, which an import's URI names, as a new artifact of ``component``; return it.
 
@@ -587,7 +595,7 @@ class ScenarioCommitter:
         own admission check runs on what is stored, as at a training
         publication. The imported artifact receives an independent ID,
         including when its bytes match an existing artifact, unless
-        ``artifact_id`` names the artifact of an artifact item (RFC #1218): it
+        the files are those of the artifact item ``item`` with an artifact ID (RFC #1218): the artifact
         keeps that ID, and when ``component`` lists that ID already, this call
         returns it and reads nothing. The snapshot binds the artifact as ``component`` and every other
         component as the active selection binds it; its parent is the chain tip,
@@ -595,12 +603,14 @@ class ScenarioCommitter:
         the next step with ``source``, the ``{"uri", "version"}`` that the
         files were read from (and the ``item`` of an artifact item's import), as its metrics. The active selection, the chain
         tip, every training start and the activation rule are left alone.
+        The artifact names the item's serving profile, when it has one (``profiled_artifact``).
         Raise ``ValueError`` for an unknown component, a component that takes
-        no import, or files that the layout or the admission check refuses;
+        no import, a profile that the runtime refuses, or files that the layout or the admission check refuses;
         ``ArtifactSourceError`` when the copy fails; ``CommitPending`` while a
         training result waits for its commit. Nothing changes then.
         """
         component, layout = self.import_target(component)
+        artifact_id = None if item is None else item.artifact_id
         if artifact_id is not None:
             with self._publication_lock:
                 listed = self.snapshot_queries.artifacts(self._step, self.component_names())
@@ -608,7 +618,11 @@ class ScenarioCommitter:
                 return ComponentArtifact(component, artifact_id)
         components = self._binding.components
         spec = components.components[component]
-        imported = layout.stored(files, directory, artifact_id=artifact_id)
+        imported = profiled_artifact(
+            self._binding.runtime,
+            layout.stored(files, directory, artifact_id=artifact_id),
+            None if item is None else item.serving_profile,
+        )
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1
@@ -841,6 +855,7 @@ class ScenarioCommitter:
         durable = self._store.durable
         if publication.component is None:
             publication = SavedArtifactPublication(publication.artifact, component)
+        publication = self.inherit_serving_profile(publication)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
             # The durable snapshot must exist before inference can take the committed selection.
@@ -878,6 +893,25 @@ class ScenarioCommitter:
             raise
 
         self.finish_committed_step(prepared, record, trainer, expected=head, expected_checkpoint=checkpoint)
+
+    def inherit_serving_profile(self, publication: SavedArtifactPublication) -> SavedArtifactPublication:
+        """``publication``, whose artifact names the serving profile of its trainer's training start (RFC #1233).
+
+        The weights of a training artifact come from its training start, so the start's profile holds for them. An
+        artifact that names a profile already, or whose start names none, stays as it is.
+        """
+        component = publication.component
+        if component is None or serving_profile_of(publication.artifact) is not None:
+            return publication
+        # A component that the scenario does not serve has no start; ``stage_publication`` refuses it.
+        start = self.artifact_status().get(component, {}).get("training_start")
+        if start is None:
+            return publication
+        _, snapshot = self.resolve_artifact(start, component)
+        profile = serving_profile_of(self._binding.components.component_artifact(snapshot, component))
+        if profile is None:
+            return publication
+        return SavedArtifactPublication(with_serving_profile(publication.artifact, profile), component)
 
     def published_attempt(self, publication: SavedArtifactPublication, checkpoint: SnapshotRef) -> SnapshotRef | None:
         """The snapshot that an earlier attempt of ``publication`` stored, or None when no attempt stored one.

@@ -18,6 +18,7 @@ from reef.core.snapshot import LOCAL_SNAPSHOT_PREFIX, SnapshotRef, decode_snapsh
 __all__ = [
     "ARTIFACT_ID_METADATA_KEY",
     "LOCAL_SNAPSHOT_PREFIX",
+    "SERVING_PROFILE_METADATA_KEY",
     "SNAPSHOT_METADATA_KEYS",
     "Artifact",
     "ArtifactConflict",
@@ -33,6 +34,8 @@ __all__ = [
     "content_metadata",
     "decode_snapshot_ref",
     "encode_snapshot_ref",
+    "serving_profile_of",
+    "with_serving_profile",
 ]
 
 #: Files a repository adds to a materialized snapshot; a snapshot with nothing else holds no weights.
@@ -41,6 +44,8 @@ REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 ARTIFACT_ID_METADATA_KEY = "artifact_id"
 #: Metadata keys that describe a snapshot, not the content of the artifact it holds.
 SNAPSHOT_METADATA_KEYS = frozenset({COMPONENTS_METADATA_KEY, "scenario_commit_record"})
+#: The key of an artifact's own metadata that names its serving profile (RFC #1233).
+SERVING_PROFILE_METADATA_KEY = "serving_profile"
 
 
 class ArtifactError(ReefError):
@@ -271,3 +276,27 @@ def content_metadata(snapshot: Artifact, component: str | None) -> dict[str, obj
     if component is None or manifest is None:
         return {key: value for key, value in snapshot.metadata.items() if key not in SNAPSHOT_METADATA_KEYS}
     return dict(manifest.entries[component].metadata)
+
+
+def serving_profile_of(artifact: Artifact) -> str | None:
+    """The serving profile in the own metadata of ``artifact`` (RFC #1233), or None when it names none.
+
+    A profile is a non-empty string that the inference runtime defines; None selects the runtime's default model.
+    ``artifact`` is one artifact: a flat snapshot or a component view. Raise ``ValueError`` for another value.
+    """
+    profile = artifact.metadata.get(SERVING_PROFILE_METADATA_KEY)
+    if profile is not None and (not isinstance(profile, str) or not profile):
+        raise ValueError(f"an artifact's serving profile is a non-empty string, not {profile!r}")
+    return profile
+
+
+def with_serving_profile(artifact: Artifact, profile: str) -> Artifact:
+    """``artifact``, unpublished, with ``profile`` as the serving profile in its own metadata."""
+    if not isinstance(profile, str) or not profile:
+        raise ValueError("a serving profile is a non-empty string")
+    return Artifact(
+        artifact.ref,
+        artifact.repository,
+        local_path=artifact.local_path,
+        metadata={**artifact.storage_metadata, SERVING_PROFILE_METADATA_KEY: profile},
+    )
