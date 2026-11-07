@@ -26,6 +26,8 @@ to `POST /reef/report` to that record.
 
 To run this flow with two real models on one GPU and measure the serving
 pause during a policy change, see the [Qwen2.5 student and teacher example](qwen2.5/README.md).
+To route student rollouts into two on-policy distillation updates with a separate
+training service, see the [OPD routing feasibility test](opd/README.md).
 
 What this covers, and what it does not:
 
