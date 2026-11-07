@@ -38,6 +38,7 @@ from tests.support.component_trainers import (
     seeded_start,
     stop_workers,
 )
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
@@ -70,7 +71,6 @@ from reef.storage.commits import (
 )
 from reef.storage.job_data import read_job_data
 from reef.storage.samples import consumed_sample_id, stage_item_id
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, TrainingJob
 from reef.train.job_queue import JOBS_QUEUE
@@ -1582,7 +1582,7 @@ def test_commit_record_carries_its_component() -> None:
 @pytest.mark.unit
 def test_component_trainers_must_match_the_components() -> None:
     def trainer() -> Trainer:
-        return Trainer.build("agent", SQLiteRecordStore(), pipeline_factory=TrainingPipeline)
+        return Trainer.build("agent", memory_records("agent"), pipeline_factory=TrainingPipeline)
 
     flat = ScenarioComponents(components={HARNESS: ComponentSpec(files=TextFileTree())})
     composed = ScenarioComponents(components={WEIGHTS: ComponentSpec(), HARNESS: ComponentSpec(files=TextFileTree())})

@@ -104,8 +104,11 @@ def test_old_naming_modules_are_removed(module: str) -> None:
         "AgentDataStore",
         "AgentDataCodec",
         "AgentDataConflict",
-        # Inlined into SQLiteRecordStore as private methods; never a public class again.
+        # Inlined into the SQL record store as private methods; never a public class again.
         "RecordCodec",
+        # The record tables went with RFC #1219: a scenario's records are record items.
+        "SQLiteRecordStore",
+        "PostgresRecordStore",
     ],
 )
 def test_old_naming_symbols_are_not_exported(symbol: str) -> None:

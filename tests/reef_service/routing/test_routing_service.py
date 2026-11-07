@@ -44,9 +44,10 @@ from reef.service.routed_inference import RoutedAttempt
 from reef.service.routing import RoutingDecision
 from reef.service.routing_preview import PreviewSettings
 from reef.service.streaming import stream_record
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.records import AppendResult
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def provider_server(*routes: tuple[str, str, web.Handler]) -> TestServer:
@@ -558,17 +559,17 @@ def test_a_one_pass_token_iterable_keeps_authentication_on(
 def test_persistence_failure_has_no_receipt_and_releases_the_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool
 ) -> None:
-    append_result = SQLiteRecordStore.append_result
+    append_result = ItemRecordStore.append_result
     failures_remaining = 1
 
-    def fail_first_append(store: SQLiteRecordStore, item: AgentRecord) -> AppendResult:
+    def fail_first_append(store: ItemRecordStore, item: AgentRecord) -> AppendResult:
         nonlocal failures_remaining
         if failures_remaining:
             failures_remaining -= 1
             raise OSError("test record storage is full")
         return append_result(store, item)
 
-    monkeypatch.setattr(SQLiteRecordStore, "append_result", fail_first_append)
+    monkeypatch.setattr(ItemRecordStore, "append_result", fail_first_append)
 
     async def run() -> None:
         first_chunk = b'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n'

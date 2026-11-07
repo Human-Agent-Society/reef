@@ -56,10 +56,10 @@ class RecordStore(ABC):
     Reads are scoped to the supplied scenario. Record ids are
     unique across the store: retries with identical content are idempotent,
     while different content raises ``RecordConflict``. Retry comparison ignores
-    ``created_at`` and continues to work after capacity eviction.
+    ``created_at``.
 
-    Append sequences increase and must never be reused, including after a
-    capacity eviction. Reads include all retained bodies regardless of consumption.
+    Append sequences increase and must never be reused, including after
+    retention deletes a record. Reads include all retained bodies regardless of consumption.
     Implementations serialize conflicting writes so callers
     can append while training and eviction run in other threads.
     """
@@ -70,17 +70,13 @@ class RecordStore(ABC):
 
     @abstractmethod
     def append_result(self, item: AgentRecord) -> AppendResult:
-        """Append with insertion status; retries never restore evicted records.
-
-        Reports referencing evicted records remain outside training reads.
-        Their content is still remembered so conflicting retries are rejected.
-        """
+        """Append with insertion status: ``inserted`` is False for a retry of a stored record."""
 
     def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
         """Atomically append a bounded batch from one scenario, in input order.
 
         Any conflict rolls back the entire batch. Identical retries retain
-        the same semantics as append_result, including evicted records.
+        the same semantics as append_result.
         Adapters without atomic batch support must reject before writing.
         """
         raise NotImplementedError("this record store does not support atomic batch append")
@@ -142,7 +138,7 @@ class RecordStore(ABC):
         return () if self.get_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
 
     def loss(self, scenario: str) -> RecordLoss:
-        """Capacity losses, including after restart; non-evicting stores return zero."""
+        """The records that retention deleted, including after a restart; a store without retention returns zero."""
         return RecordLoss()
 
     @abstractmethod

@@ -1,12 +1,10 @@
 """The data service: the work on a deployment's data store that runs apart from control (RFC #1028).
 
-The data service needs no control lease: it writes the data store, the marks of its record copies and the items of
+The data service needs no control lease: it writes the data store and the items of
 the ``data`` queue, and no table that control alone writes. A ``DataWorker`` takes the ``data`` queue items of the
 data service and runs each with the ``DataJob`` of its kind; the ``data_sync`` items are control's
 (``reef.dispatcher.data_sync_worker``).
 
-- ``record_copy``: nothing. Records are record items when they arrive (``ItemRecordStorage``); the job completes
-  the copy requests that an earlier version queued.
 - ``artifact_copy``: make the artifact items of one scenario's artifacts (``copy_scenario_artifacts``).
 - ``data_import`` and ``data_export``: the transfers of ``reef.service.data_transfer``.
 """
@@ -25,13 +23,7 @@ from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, NoDataStore
 from reef.service.data_transfer import ArchiveWriters, run_export, run_import
 from reef.storage.artifact_items import artifact_item
 from reef.storage.data import ItemConflict, ItemNotFound, NewItem
-from reef.storage.data_queue import (
-    ARTIFACT_COPY_KIND,
-    DATA_EXPORT_KIND,
-    DATA_IMPORT_KIND,
-    DATA_QUEUE,
-    RECORD_COPY_KIND,
-)
+from reef.storage.data_queue import ARTIFACT_COPY_KIND, DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
 
@@ -88,16 +80,6 @@ class DataJob(ABC):
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]: ...
 
 
-class RecordCopy(DataJob):
-    """Completes a copy request that an earlier version queued: records are record items when they arrive
-    (``ItemRecordStorage``), so it copies nothing: ``{pages: 0}``."""
-
-    kind = RECORD_COPY_KIND
-
-    def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        return {"pages": 0}
-
-
 class ArtifactCopy(DataJob):
     """Makes the artifact items of the item's scenario (``copy_scenario_artifacts``): ``{items}``."""
 
@@ -137,10 +119,9 @@ class DataExport(DataJob):
 
 
 def data_jobs(dispatcher: Dispatcher, sources: ArtifactSources, writers: ArchiveWriters) -> tuple[DataJob, ...]:
-    """The jobs of the data service over ``dispatcher``'s data store: record and artifact copies, imports that
+    """The jobs of the data service over ``dispatcher``'s data store: artifact copies, imports that
     ``sources`` read, and exports that ``writers`` write."""
     return (
-        RecordCopy(),
         ArtifactCopy(dispatcher),
         DataImport(dispatcher, sources),
         DataExport(dispatcher, writers),
@@ -177,7 +158,6 @@ __all__ = [
     "DataImport",
     "DataJob",
     "DataWorker",
-    "RecordCopy",
     "copy_scenario_artifacts",
     "data_jobs",
 ]

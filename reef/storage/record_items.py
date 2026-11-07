@@ -1,6 +1,6 @@
 """Record items: the inferences and reports of a scenario as items of its owner (RFC #1028).
 
-Let ``s`` be a scenario, ``o`` its owner, and ``r`` an inference or report in the record store of ``s``. Its record
+Let ``s`` be a scenario, ``o`` its owner, and ``r`` an inference or report of ``s``. Its record
 item ``record_item(r)`` is the item of ``o`` with:
 
 * the ID ``<s>/<r.agent_record_id>``, unique within ``o`` because a scenario name has no ``/`` and a record ID is
@@ -9,40 +9,28 @@ item ``record_item(r)`` is the item of ``o`` with:
 * the metadata ``kind: record``, ``scenarios: {s: train}`` and ``origin: {scenario: s, artifact_id}``,
   where ``artifact_id`` names the artifact that answered it, or null when ``r`` names none.
 
-The records of ``s`` are its record items (RFC #1219). ``ItemRecordStorage`` gives each session of ``s`` an
-``ItemRecordStore``, which appends each record as its record item and reads the record items that ``s`` made, in item
-sequence order. A record store from before this keeps its records. The first open of ``s`` in a process copies them
-(``copy_records``): the mark ``record_copy:<s>`` keeps how far the records of ``s`` are copied, and each record of ``s``
-with a sequence at most the mark that ``record_item`` gives an item has that item in the store of ``o``.
+The records of ``s`` are its record items (RFC #1219). Each session of ``s`` has an ``ItemRecordStore``, which
+appends each record as its record item and reads the record items that ``s`` made, in item sequence order.
 
 Another scenario ``t`` of ``o`` uses a record item ``i`` whose ``scenarios`` names ``t``. A trainer of ``t`` reads it from
 the data store as ``copied_record(i, t)``, with the record ID ``i.item_id``, and each reference ``x`` of ``i`` becomes
 ``<origin>/x`` (``used_records``). Nothing is stored in ``t``, so when ``i`` leaves ``t``, the read stops
-giving it (RFC #1219). A record store from before this can still hold such a copy. It stays, it has no record item of
-its own, and a read skips the item.
+giving it (RFC #1219).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
-from pathlib import Path
-from threading import Lock
-from typing import Any, Self
+from typing import Any
 
-from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
-from reef.storage.commits import CommitRecord, CommitSnapshots
+from reef.core.trajectory_index import trajectory_calls
 from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, NewItem, StoredItem, item_digest_matches
-from reef.storage.evaluations import EvaluationStore
 from reef.storage.item_kinds import copied_record, record_digest
-from reef.storage.marks import Marks
 from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
-from reef.storage.samples import SampleStore, TrainingState
-from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore, TaskStorage
-from reef.storage.tasks import TaskFileStore
 
-#: The most records that one ``copy_records`` call reads.
+#: The most record items that one ``used_records`` call reads.
 RECORD_PAGE_SIZE = 256
 
 
@@ -80,48 +68,14 @@ def origin_of(item: StoredItem) -> str:
     return item.metadata["origin"]["scenario"]
 
 
-def is_record_copy(data: DataStore, owner: str, scenario: str, record: AgentRecord) -> bool:
-    """Whether ``record`` of ``scenario`` is the copy of a record item of ``owner`` that another scenario made."""
-    item = data.read(owner, record.agent_record_id)
-    return item is not None and item.kind == "record" and origin_of(item) != scenario
-
-
-def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: str, after_sequence: int) -> int:
-    """Create the record items of the next page of records of ``scenario`` after ``after_sequence``.
-
-    The page is at most ``RECORD_PAGE_SIZE`` records of ``records`` with a sequence greater than
-    ``after_sequence``; its training requests and its copies of other scenarios' record items get no item.
-    Return the sequence of the page's last record, or ``after_sequence`` for an empty page. A record item that
-    ``owner`` stores already changes nothing, so a copy that runs twice is safe. Raise ``ItemConflict``, and
-    create nothing, when ``owner`` stores one of the IDs with other content.
-    """
-    page = records.replay_page(scenario, after_sequence=after_sequence, limit=RECORD_PAGE_SIZE)
-    if not page:
-        return after_sequence
-    data.create(
-        owner,
-        [record_item(record) for _, record in page if not is_record_copy(data, owner, scenario, record)],
-    )
-    return page[-1][0]
-
-
-def record_copy_mark(scenario: str) -> str:
-    """The name of the mark that keeps how far the records of ``scenario`` are copied."""
-    return f"record_copy:{scenario}"
-
-
-def copy_scenario_records(records: RecordStore, data: DataStore, marks: Marks, owner: str, scenario: str) -> int:
-    """Copy the records of ``scenario`` in ``records`` after its mark to items of ``owner``, page by page, and advance
-    the mark after each page. Return the number of pages copied. A crash between a page and its mark copies the page
-    again, which changes nothing."""
-    name = record_copy_mark(scenario)
-    after = marks.read(name)
-    pages = 0
-    while (sequence := copy_records(records, data, owner, scenario, after)) != after:
-        marks.advance(name, sequence)
-        after = sequence
-        pages += 1
-    return pages
+def old_record_copied(data: DataStore, owner: str, scenario: str, record_id: str) -> bool:
+    """Whether the record ``record_id`` of the old record store of ``scenario`` is in ``data``: as its own record item,
+    or, for a copy of another scenario's record item from before RFC #1219, as that item."""
+    for item_id in (f"{scenario}/{record_id}", record_id):
+        item = data.read(owner, item_id)
+        if item is not None and item.kind == "record":
+            return True
+    return False
 
 
 def used_records(
@@ -163,10 +117,9 @@ class ItemRecordStore(RecordStore):
     records that it stored. An append sequence is the item's sequence. A
     read of another scenario gives nothing.
 
-    The store differs from a record store in two ways. A retry of a record that ``prune_records`` deleted stores it
-    again, and ``trajectory`` gives the record alone.
+    A retry of a record that ``prune_records`` deleted stores it again.
 
-    Purpose: ``ItemRecordStorage`` gives one to each session.
+    Purpose: ``SQLiteScenarioStorage`` and ``PostgresScenarioStorage`` give one to each session.
     """
 
     def __init__(self, data: DataStore, owner: str, scenario: str, generation: str) -> None:
@@ -314,6 +267,22 @@ class ItemRecordStore(RecordStore):
             for item in self.page(scenario, after_sequence, limit, request_type)
         )
 
+    def trajectory(self, scenario: str, agent_record_id: str) -> tuple[str, ...]:
+        """The record IDs of the trajectory that the record ends, oldest first, from the data store's links
+        (``DataStore.record_links``): one read for each call on its path. A record without a message list is a
+        trajectory of one call; ``()`` for a record that the scenario does not store."""
+        if self.stored(scenario, agent_record_id) is None:
+            return ()
+        path: list[tuple[str, int]] = []
+        item_id: str | None = f"{scenario}/{agent_record_id}"
+        while item_id is not None:
+            link = self.data.record_links(self.owner, [item_id]).get(item_id)
+            if link is None:
+                break
+            path.append((item_id.removeprefix(f"{scenario}/"), link.entry_count))
+            item_id = link.parent
+        return trajectory_calls(path[::-1]) if path else (agent_record_id,)
+
     def loss(self, scenario: str) -> RecordLoss:
         return RecordLoss() if scenario != self.scenario else self.data.record_loss(self.owner, scenario)
 
@@ -321,123 +290,11 @@ class ItemRecordStore(RecordStore):
         """The data store outlives the session, so closing changes nothing."""
 
 
-class ItemRecordsScenarioStore(ScenarioStore):
-    """A scenario session whose records are its record items (``ItemRecordStore``); the rest is ``inner``'s."""
-
-    def __init__(self, inner: ScenarioStore, records: ItemRecordStore) -> None:
-        self._inner = inner
-        self._records = records
-
-    @property
-    def records(self) -> RecordStore:
-        return self._records
-
-    @property
-    def durable(self) -> bool:
-        return self._inner.durable
-
-    @property
-    def tasks(self) -> TaskStorage:
-        return self._inner.tasks
-
-    @property
-    def training_state(self) -> TrainingState:
-        return self._inner.training_state
-
-    @property
-    def evaluations(self) -> EvaluationStore:
-        return self._inner.evaluations
-
-    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
-        self._inner.use_snapshots(snapshots)
-
-    def history(self) -> tuple[CommitRecord, ...]:
-        return self._inner.history()
-
-    def training_run_position(self) -> tuple[int, int]:
-        return self._inner.training_run_position()
-
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
-        return self._inner.commit_step(expected_step=expected_step, commit=commit)
-
-    def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
-        return self._inner.recover(checkpoint=checkpoint)
-
-    def close(self) -> None:
-        self._inner.close()
-
-
-class ItemRecordStorage(ScenarioStorage):
-    """Storage whose sessions keep the records of their scenario as record items (RFC #1219).
-
-    Values: ``inner`` keeps everything else, and the records from before this storage. ``data`` is the data store,
-    and ``marks`` keeps how far each scenario's records in ``inner`` are copied. The first ``open`` of a scenario in
-    this process copies its records in ``inner`` after the mark (``copy_scenario_records``). A scenario without an
-    owner has the owner with its own name, as ``DataScenarioStorage`` gives it.
-
-    Purpose: deployment assembly wraps the scenario storage of each service in it, so control, the data service and
-    the inference service append records to the data store.
-    """
-
-    def __init__(self, inner: ScenarioStorage, data: DataStore, marks: Marks) -> None:
-        self.inner = inner
-        self.data = data
-        self.marks = marks
-        self.copied: set[str] = set()
-        self.copy_lock = Lock()
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
-        raise PluginConfigError(f"{cls.__name__} wraps another storage; deployment assembly applies it")
-
-    @property
-    def durable(self) -> bool:
-        return self.inner.durable
-
-    def read_settings(self, scenario: str) -> ScenarioSettings:
-        return self.inner.read_settings(scenario)
-
-    def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
-        self.inner.write_settings(scenario, settings)
-
-    def open(self, scenario: str) -> ScenarioStore:
-        session = self.inner.open(scenario)
-        try:
-            owner = self.inner.read_settings(scenario).owner or scenario
-            with self.copy_lock:
-                if scenario not in self.copied:
-                    copy_scenario_records(session.records, self.data, self.marks, owner, scenario)
-                    self.copied.add(scenario)
-            records = ItemRecordStore(self.data, owner, scenario, self.data.scenario_generation(owner, scenario))
-        except BaseException:
-            session.close()
-            raise
-        return ItemRecordsScenarioStore(session, records)
-
-    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
-        return self.inner.sample_store(scenario, session)
-
-    def archive(self, scenario: str) -> tuple[str, ...]:
-        with self.copy_lock:
-            self.copied.discard(scenario)
-        return self.inner.archive(scenario)
-
-    def prune(self, *, max_bytes: int) -> int:
-        return self.inner.prune(max_bytes=max_bytes)
-
-    def close(self) -> None:
-        self.inner.close()
-
-
 __all__ = [
     "RECORD_PAGE_SIZE",
-    "ItemRecordStorage",
     "ItemRecordStore",
-    "ItemRecordsScenarioStore",
-    "copy_records",
-    "copy_scenario_records",
-    "is_record_copy",
-    "record_copy_mark",
+    "old_record_copied",
+    "record_content",
     "record_item",
     "used_record",
     "used_records",

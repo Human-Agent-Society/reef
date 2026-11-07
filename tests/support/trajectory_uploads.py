@@ -22,7 +22,6 @@ from reef.sample2job import Sample2Job
 from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
-from reef.storage.record_items import ItemRecordStorage
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -145,9 +144,7 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     coordination = memory_coordination()
-    storage = ItemRecordStorage(
-        SQLiteScenarioStorage(tmp_path / "records", task_files=task_files), data, coordination.marks
-    )
+    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
         recipe,
         factory or InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
