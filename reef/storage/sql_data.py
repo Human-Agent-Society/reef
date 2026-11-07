@@ -710,8 +710,9 @@ class SQLDataStore(DataStore):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        group: tuple[str, str | None] | None = None,
     ) -> tuple[StoredItem, ...]:
-        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type)
+        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type, group=group)
         items = self.items_table
         # Without content, read only the columns of the metadata: content_json can be large.
         columns = (
@@ -720,6 +721,9 @@ class SQLDataStore(DataStore):
             else (items.c.sequence, items.c.owner, items.c.item_id, items.c.metadata_json, items.c.digest)
         )
         statement = select(*columns).where(*self.filters(owner, kind, scenario, origin, request_type, after))
+        if group is not None:
+            value = self.metadata_string(group[0])
+            statement = statement.where(value.is_(None) if group[1] is None else value == group[1])
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
