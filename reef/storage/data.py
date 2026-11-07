@@ -35,8 +35,9 @@ from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
-#: The metadata keys that Reef reads. ``kind``, ``owner`` and ``origin`` are set at creation and never change.
-FIXED_KEYS = ("kind", "owner", "origin")
+#: The metadata keys that Reef reads. ``kind``, ``owner``, ``origin`` and an artifact's ``serving_profile`` (RFC #1233)
+#: are set at creation and never change.
+FIXED_KEYS = ("kind", "owner", "origin", "serving_profile")
 #: The most items that one query returns.
 MAX_QUERY_LIMIT = 1000
 
@@ -108,7 +109,8 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
     defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
     ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
-    when a trainer's stage made it (``check_stage_origin``). Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
+    when a trainer's stage made it (``check_stage_origin``). Only an artifact may have ``serving_profile``, a non-empty
+    string (RFC #1233). Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
@@ -120,6 +122,9 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     created = copy.deepcopy(dict(metadata))
     created["owner"] = owner
     created["scenarios"] = check_scenarios(metadata.get("scenarios", {}), kind)
+    profile = metadata.get("serving_profile")
+    if profile is not None and (kind != "artifact" or not isinstance(profile, str) or not profile):
+        raise ValueError("metadata.serving_profile is a non-empty string of an artifact item")
     if kind == "record":
         created["origin"] = check_origin(metadata.get("origin"))
     elif kind == "artifact" and "origin" in metadata:
@@ -165,7 +170,8 @@ def merge_patch(target: Any, patch: Any) -> Any:
 def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     """``metadata`` with the JSON merge patch ``patch`` applied, or ``ValueError``.
 
-    The patch may not change ``kind``, ``owner`` or ``origin``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
+    The patch may not change ``kind``, ``owner``, ``origin`` or ``serving_profile``, or an ``artifact_id`` that the
+    item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
     that scenario's record store keeps the record.
     """

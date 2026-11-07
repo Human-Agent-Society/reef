@@ -128,11 +128,10 @@ methods. Each has a default for a handler or runtime without serving fields:
 A runtime that serves several models accepts `serving profiles
 <http-api.rst#serving-profiles>`__ with
 ``InferenceRuntime.check_serving_profile(profile, artifact)``. Control calls it
-before a new scenario's starting artifact or an import gets a profile. Raise
-``ValueError`` to refuse the profile; the default refuses every profile. The
-runtime reads the profile of an artifact that it activates with
-``reef.artifact.artifact.serving_profile_of``. None selects the deployment's
-model.
+before an artifact takes a profile from its item. Raise ``ValueError`` to refuse
+the profile; the default refuses every profile. The runtime reads the profile of
+an artifact that it activates with ``reef.artifact.artifact.serving_profile_of``.
+None selects the deployment's model.
 
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.

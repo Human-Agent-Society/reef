@@ -55,7 +55,8 @@ class ArtifactImports:
         serving_profile: str | None = None,
     ) -> dict[str, Any]:
         """Import the files ``uri`` names into ``component`` of ``scenario``, by reference or as a copy, as an artifact
-        that names ``serving_profile`` when it is not None (RFC #1233).
+        that names ``serving_profile``, the serving profile of the artifact item ``item_id`` (RFC #1233), when it is
+        not None.
 
         Return ``{scenario, component, artifact_id}``. The import's ``source`` is ``{uri,
         version}``, and also ``item``, ``item_id``, when the URI came from that artifact item, whose artifact has the
@@ -87,18 +88,13 @@ class ArtifactImports:
         }
 
     def import_item(
-        self,
-        dispatcher: Dispatcher,
-        scenario: str,
-        component: str | None,
-        item_id: str,
-        serving_profile: str | None = None,
+        self, dispatcher: Dispatcher, scenario: str, component: str | None, item_id: str
     ) -> dict[str, Any]:
         """Import the artifact item ``item_id`` of the owner of ``scenario`` into ``component``: the files that its
-        ``source_uri`` names, as ``import_source`` imports them, with the profile ``item_serving_profile`` gives.
+        ``source_uri`` names, as ``import_source`` imports them, with the item's serving profile.
 
-        Raise ``UnknownScenario`` for an unknown scenario; otherwise raise as ``item_serving_profile``,
-        ``item_source`` and ``import_source``.
+        Raise ``UnknownScenario`` for an unknown scenario; otherwise raise as ``item_source`` and
+        ``import_source``.
         """
         owner = dispatcher.scenario_owner(scenario)
         if owner is None:
@@ -112,20 +108,14 @@ class ArtifactImports:
             source_uri_of(item),
             item_id=item_id,
             artifact_id=artifact_id,
-            serving_profile=item_serving_profile(item, serving_profile),
+            serving_profile=item.metadata.get("serving_profile"),
         )
 
     def create_from_item(
-        self,
-        dispatcher: Dispatcher,
-        scenario: str,
-        owner: str,
-        component: str | None,
-        item_id: str,
-        serving_profile: str | None = None,
+        self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str
     ) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it: a new scenario's root snapshot holds
-        the artifact item ``item_id`` of ``owner`` in ``component``, with the profile ``item_serving_profile`` gives
+        the artifact item ``item_id`` of ``owner`` in ``component``, with the item's serving profile
         (``Dispatcher.create_scenario``).
 
         The item is read and its files opened first, so an item that cannot be read registers nothing. Raise as
@@ -134,9 +124,15 @@ class ArtifactImports:
         """
         item = artifact_item_of(dispatcher, owner, item_id)
         uri = source_uri_of(item)
-        profile = item_serving_profile(item, serving_profile)
-        start = ItemStart(item_id, uri, self.sources.open(uri), component, item_artifact_id(dispatcher, item))
-        return dispatcher.create_scenario(scenario, start, profile)
+        start = ItemStart(
+            item_id,
+            uri,
+            self.sources.open(uri),
+            component,
+            item_artifact_id(dispatcher, item),
+            item.metadata.get("serving_profile"),
+        )
+        return dispatcher.create_scenario(scenario, start)
 
 
 def item_source(dispatcher: Dispatcher, owner: str, item_id: str) -> str:
@@ -157,15 +153,6 @@ def artifact_item_of(dispatcher: Dispatcher, owner: str, item_id: str) -> Stored
     if item.kind != "artifact" or item.content is None:
         raise ValueError(f"item {item_id!r} is a {item.kind}, not an artifact")
     return item
-
-
-def item_serving_profile(item: StoredItem, requested: str | None) -> str | None:
-    """The serving profile of an artifact made from the artifact item ``item`` (RFC #1233): ``requested``, else the
-    item's own (``metadata.serving_profile``), else None. Raise ``ValueError`` when both name a profile and differ."""
-    own = item.metadata.get("serving_profile")
-    if own is not None and requested is not None and own != requested:
-        raise ValueError(f"artifact item {item.item_id!r} has serving profile {own!r}, not {requested!r}")
-    return requested if requested is not None else own
 
 
 def source_uri_of(item: StoredItem) -> str:

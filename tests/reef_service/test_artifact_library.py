@@ -258,65 +258,53 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
 
 
 @pytest.mark.integration
-def test_each_artifact_names_its_own_serving_profile_and_its_library_item_keeps_it(tmp_path: Path) -> None:
-    """RFC #1233: the runtime checks each profile, a scenario holds artifacts of several profiles, the library item
-    keeps the artifact's profile, and an import of the item cannot change it."""
-    profiled, other, plain = (
-        cell(tmp_path, "profiled", serves_profiles=True),
-        cell(tmp_path, "other", serves_profiles=True),
-        cell(tmp_path, "plain"),
-    )
+def test_an_artifact_takes_its_serving_profile_from_its_item_and_the_profile_never_changes(tmp_path: Path) -> None:
+    """RFC #1233: a client writes the profile when it creates an item, the runtime checks it when an artifact takes it,
+    and one scenario holds artifacts of several profiles."""
+    profiled, plain = cell(tmp_path, "profiled", serves_profiles=True), cell(tmp_path, "plain")
+
+    def profiled_item(item_id: str, profile: str) -> dict[str, Any]:
+        body = upload_item(item_id, weights(tmp_path / item_id, item_id.encode()))
+        body["items"][0]["metadata"]["serving_profile"] = profile
+        return body
 
     async def run() -> None:
         async with client_of(plain, tmp_path) as client:
+            for item_id, profile in (("qwen-base", "qwen@1"), ("muse-ft", "muse@1"), ("gpt-base", "gpt@1")):
+                assert (await client.post(DATA, json=profiled_item(item_id, profile))).status == 201
+            changed = await client.post(
+                f"{DATA}/metadata", json={"ids": ["qwen-base"], "patch": {"serving_profile": "x"}}
+            )
+            assert changed.status == 400 and "never changes" in await changed.text()
             refused = await client.post(
-                "/reef/scenarios", json={"name": "plain", "owner": "acme", "serving_profile": "qwen@1"}
+                "/reef/scenarios", json={"name": "plain", "owner": "acme", "artifact_id": "qwen-base"}
             )
             assert refused.status == 400 and "takes no serving profile" in await refused.text()
             assert not plain.has_scenario("plain")
         async with client_of(profiled, tmp_path) as client:
             body = {"name": "math", "owner": "acme"}
-            unknown = await client.post("/reef/scenarios", json={**body, "serving_profile": "gpt@1"})
+            unknown = await client.post("/reef/scenarios", json={**body, "artifact_id": "gpt-base"})
             assert unknown.status == 400 and "unknown serving profile" in await unknown.text()
             assert not profiled.has_scenario("math")
-            created = await client.post("/reef/scenarios", json={**body, "serving_profile": "qwen@1"})
+            created = await client.post("/reef/scenarios", json={**body, "artifact_id": "qwen-base"})
             assert created.status == 201, await created.text()
-            root = (await created.json())["artifact_id"]
-            assert (await library_item(client, f"math/{root}"))["metadata"]["serving_profile"] == "qwen@1"
-
-            source = weights(tmp_path / "muse", b"w9").as_uri()
-            muse = await client.post(
-                "/reef/scenarios/math/artifacts", json={"source": source, "serving_profile": "muse@1"}
-            )
+            muse = await client.post("/reef/scenarios/math/artifacts", json={"item": "muse-ft"})
             assert muse.status == 201, await muse.text()
-            muse_item = f"math/{(await muse.json())['artifact_id']}"
-            assert (await library_item(client, muse_item))["metadata"]["serving_profile"] == "muse@1"
-            plain_import = await (
-                await client.post(
-                    "/reef/scenarios/math/artifacts", json={"source": weights(tmp_path / "w", b"w").as_uri()}
-                )
-            ).json()
-            assert (
-                "serving_profile"
-                not in (await library_item(client, f"math/{plain_import['artifact_id']}"))["metadata"]
+            direct = await client.post(
+                "/reef/scenarios/math/artifacts", json={"source": weights(tmp_path / "direct", b"d").as_uri()}
             )
-        async with client_of(other, tmp_path) as client:
-            assert (await client.post("/reef/scenarios", json={"name": "other", "owner": "acme"})).status == 201
-            changed = await client.post(
-                "/reef/scenarios/other/artifacts", json={"item": muse_item, "serving_profile": "qwen@1"}
-            )
-            assert changed.status == 400 and "has serving profile 'muse@1'" in await changed.text()
-            kept = await client.post("/reef/scenarios/other/artifacts", json={"item": muse_item})
-            assert kept.status == 201, await kept.text()
-            scenario = other.registry.require("other")
-            _, snapshot = scenario.resolve_artifact((await kept.json())["artifact_id"])
-            assert serving_profile_of(snapshot) == "muse@1"
+            scenario = profiled.registry.require("math")
+            profiles = {
+                answer["artifact_id"]: serving_profile_of(scenario.resolve_artifact(answer["artifact_id"])[1])
+                for answer in [await created.json(), await muse.json(), await direct.json()]
+            }
+            assert sorted(profiles.values(), key=str) == [None, "muse@1", "qwen@1"]
 
     try:
         asyncio.run(run())
     finally:
-        for dispatcher in (profiled, other, plain):
-            dispatcher.close()
+        profiled.close()
+        plain.close()
 
 
 @pytest.mark.integration

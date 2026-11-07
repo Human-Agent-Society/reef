@@ -15,35 +15,25 @@ def register_artifact_import_routes(
     async def import_artifact(request: web.Request) -> web.Response:
         payload = await read_object(request)
         refused = web.HTTPBadRequest(
-            text='an import is the object {"source": "<uri>"} or {"item": "<artifact item ID>"}, with an optional '
-            '"serving_profile"'
+            text='an import is the object {"source": "<uri>"} or {"item": "<artifact item ID>"}'
         )
-        keys = set(payload) - {"serving_profile"}
-        if keys == {"source"}:
+        if set(payload) == {"source"}:
             key = "source"
-        elif keys == {"item"}:
+        elif set(payload) == {"item"}:
             key = "item"
         else:
             raise refused
-        value, profile = payload[key], payload.get("serving_profile")
+        value = payload[key]
         if not isinstance(value, str) or not value.strip():
             raise refused
-        if profile is not None and (not isinstance(profile, str) or not profile.strip()):
-            raise web.HTTPBadRequest(text="serving_profile must be a non-empty string")
-        profile = None if profile is None else profile.strip()
         scenario, component = request.match_info["scenario"], request.query.get("component")
         if key == "source":
             receipt = await asyncio.to_thread(
-                imports.import_source,
-                request_service.dispatcher,
-                scenario,
-                component,
-                value.strip(),
-                serving_profile=profile,
+                imports.import_source, request_service.dispatcher, scenario, component, value.strip()
             )
         else:
             receipt = await asyncio.to_thread(
-                imports.import_item, request_service.dispatcher, scenario, component, value, profile
+                imports.import_item, request_service.dispatcher, scenario, component, value
             )
         return web.json_response(receipt, status=201)
 

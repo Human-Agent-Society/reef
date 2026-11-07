@@ -153,7 +153,8 @@ class ItemStart:
     Values: ``item_id`` is the item's non-empty ID, and ``uri`` its non-empty ``source_uri``. ``files`` is the
     ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
     ``None`` for the scenario's one component. ``artifact_id`` is the item's artifact ID, which the root snapshot
-    keeps (RFC #1218), or ``None`` for a new one.
+    keeps (RFC #1218), or ``None`` for a new one. ``serving_profile`` is the item's serving profile (RFC #1233), which
+    the root's artifact keeps, or ``None``.
 
     Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
     ``ScenarioFactory.register`` checks it and writes it as the root snapshot.
@@ -164,6 +165,7 @@ class ItemStart:
     files: SourceFiles
     component: str | None = None
     artifact_id: str | None = None
+    serving_profile: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or not self.item_id or not isinstance(self.uri, str) or not self.uri:
@@ -273,14 +275,11 @@ class ScenarioFactory:
             self._backend_factory, RegistrationAwareRepositoryBackendFactory
         ) and self._backend_factory.has_registration(scenario)
 
-    def load_or_create(
-        self, scenario: str, start: ItemStart | None = None, serving_profile: str | None = None
-    ) -> Scenario:
+    def load_or_create(self, scenario: str, start: ItemStart | None = None) -> Scenario:
         """Recover the scenario ``scenario``, or create it when the backend has no registration of it.
 
         A new scenario gets its own root snapshot (``register``): the artifact item ``start``, or the recipe's
-        default start when ``start`` is ``None``, and the artifact that the root makes for it names
-        ``serving_profile``. An existing scenario ignores ``start`` and ``serving_profile``.
+        default start when ``start`` is ``None``. An existing scenario ignores ``start``.
         """
         backend = self._backend_factory(scenario)
         if self._storage.durable and not isinstance(backend, StagedSnapshotRepositoryBackend):
@@ -291,7 +290,7 @@ class ScenarioFactory:
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
         components = self._recipe.scenario_components(scenario)
         if registration is None:
-            self.register(scenario, backend, components, start, serving_profile)
+            self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
             # the durable registration instead of assuming this creation attempt won.
             metadata = backend.metadata()
@@ -307,12 +306,7 @@ class ScenarioFactory:
         )
 
     def register(
-        self,
-        scenario: str,
-        backend: RepositoryBackend,
-        components: ScenarioComponents,
-        start: ItemStart | None,
-        serving_profile: str | None = None,
+        self, scenario: str, backend: RepositoryBackend, components: ScenarioComponents, start: ItemStart | None
     ) -> None:
         """Write the root snapshot of the new scenario ``scenario`` and register it with ``backend``.
 
@@ -322,13 +316,13 @@ class ScenarioFactory:
         ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
         manifest of the components that the root makes. An item that the component's layout or admission check
         refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
-        start from (``Recipe.check_root_start``), and so does a ``serving_profile`` that ``profiled_artifact`` refuses. Nothing
-        is registered after a refusal.
+        start from (``Recipe.check_root_start``), and so does an item's serving profile that ``profiled_artifact``
+        refuses. Nothing is registered after a refusal.
         """
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
-            root, source = self.root_snapshot(components, start, Path(work), serving_profile)
+            root, source = self.root_snapshot(components, start, Path(work))
             if start is not None:
                 self._recipe.check_root_start(ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
@@ -344,13 +338,9 @@ class ScenarioFactory:
             backend.register(root, metadata=registration_metadata)
 
     def root_snapshot(
-        self, components: ScenarioComponents, start: ItemStart | None, work: Path, serving_profile: str | None = None
+        self, components: ScenarioComponents, start: ItemStart | None, work: Path
     ) -> tuple[Artifact, RootSource]:
-        """The unpublished root snapshot of a new scenario that ``components`` serves, under ``work``, and its source.
-
-        ``serving_profile`` goes to the artifact of the item's component, or with the default start to the artifact of
-        the component that the runtime loads (``profiled_artifact``).
-        """
+        """The unpublished root snapshot of a new scenario that ``components`` serves, under ``work``, and its source."""
         item: tuple[str, Artifact] | None = None
         if start is None:
             default = self._recipe.default_start()
@@ -362,7 +352,7 @@ class ScenarioFactory:
             stored = profiled_artifact(
                 self._recipe.runtime,
                 layout.stored(start.files, directory, artifact_id=start.artifact_id),
-                serving_profile,
+                start.serving_profile,
             )
             source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
             # The admission checks of an import: the snapshot's own with one component, else the component's here and
@@ -377,7 +367,7 @@ class ScenarioFactory:
         tree.mkdir()
         default.write(tree)
         if components.single:
-            return profiled_artifact(self._recipe.runtime, Artifact.local(tree), serving_profile), source
+            return Artifact.local(tree), source
         # Files outside every component directory, a model laid out at the root say, belong to no component.
         stray = sorted(
             entry.name for entry in tree.iterdir() if entry.name not in components.names or not entry.is_dir()
@@ -389,11 +379,6 @@ class ScenarioFactory:
             )
         artifacts = {name: Artifact.local(tree / name) for name in components.names}
         if item is None:
-            if serving_profile is not None:
-                loaded = components.loaded_component
-                if loaded is None:
-                    raise ValueError(f"no component of this scenario is served, so it takes no {serving_profile!r}")
-                artifacts[loaded] = profiled_artifact(self._recipe.runtime, artifacts[loaded], serving_profile)
             return compose_snapshot(artifacts, directory=work / "root"), source
         artifacts[item[0]] = item[1]
         root = compose_snapshot(artifacts, directory=work / "root")

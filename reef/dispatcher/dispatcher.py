@@ -299,23 +299,18 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def get_or_create_scenario(self, scenario: str, *, allow_implicit_creation: bool | None = None) -> Scenario | None:
         return self.registry.get_or_create(scenario, allow_implicit_creation=allow_implicit_creation)
 
-    def create_scenario(
-        self, scenario: str, start: ItemStart | None = None, serving_profile: str | None = None
-    ) -> tuple[Scenario, bool]:
+    def create_scenario(self, scenario: str, start: ItemStart | None = None) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it.
 
         A new scenario's root snapshot holds the artifact item ``start``, or the recipe's default start when
-        ``start`` is ``None``, and names ``serving_profile`` (``ScenarioFactory.load_or_create``); an existing
-        scenario ignores ``start`` and ``serving_profile``. The check
+        ``start`` is ``None`` (``ScenarioFactory.load_or_create``); an existing scenario ignores ``start``. The check
         and the creation hold the scenario's lock, so of several calls for one new name only one gets True. Raise as
         ``get_or_create_scenario`` does when the creation is refused, and ``ValueError`` when the item's layout or
-        admission check, or the runtime's profile check, refuses it; no scenario is registered then.
+        admission check refuses it; no scenario is registered then.
         """
         with self.registry.lock_for(scenario):
             created = not self.registry.has(scenario)
-            current = self.registry.get_or_create(
-                scenario, start, allow_implicit_creation=True, serving_profile=serving_profile
-            )
+            current = self.registry.get_or_create(scenario, start, allow_implicit_creation=True)
         if current is None:
             raise RuntimeError("scenario creation returned no scenario")
         return current, created

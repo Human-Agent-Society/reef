@@ -104,11 +104,11 @@ def register_scenario_writes(
 
     async def create_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        unknown = sorted(set(payload) - {"name", "owner", "artifact_id", "component", "serving_profile"})
+        unknown = sorted(set(payload) - {"name", "owner", "artifact_id", "component"})
         if unknown:
             raise web.HTTPBadRequest(
-                text=f"unknown keys {unknown}: a scenario is created from name, owner, artifact_id, component and "
-                "serving_profile; artifact_id names the artifact item of the owner that a new scenario starts from"
+                text=f"unknown keys {unknown}: a scenario is created from name, owner, artifact_id and component; "
+                "artifact_id names the artifact item of the owner that a new scenario starts from"
             )
         name = payload.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -118,28 +118,22 @@ def register_scenario_writes(
         if owner is not None:
             check_owner(owner)
         artifact_id, component = payload.get("artifact_id"), payload.get("component")
-        serving_profile = payload.get("serving_profile")
-        for key, value in (
-            ("artifact_id", artifact_id),
-            ("component", component),
-            ("serving_profile", serving_profile),
-        ):
+        for key, value in (("artifact_id", artifact_id), ("component", component)):
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise web.HTTPBadRequest(text=f"{key} must be a non-empty string")
         if component is not None and artifact_id is None:
             raise web.HTTPBadRequest(text="component names where artifact_id lands: give artifact_id too")
         dispatcher = request_service.dispatcher
         target = None if component is None else component.strip()
-        profile = None if serving_profile is None else serving_profile.strip()
         # An existing scenario keeps its root: creation is idempotent.
         item_id = artifact_id.strip() if isinstance(artifact_id, str) and not dispatcher.has_scenario(name) else None
         if item_id is not None:
             # The root snapshot holds the item, read from the owner whose data items the scenario uses (RFC #1028).
             scenario, created = await asyncio.to_thread(
-                imports.create_from_item, dispatcher, name, owner or name, target, item_id, profile
+                imports.create_from_item, dispatcher, name, owner or name, target, item_id
             )
         else:
-            scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name, None, profile)
+            scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name)
         if owner is not None:
             # The default owner is the scenario's own name. A new owner loads the scenario again.
             await asyncio.to_thread(dispatcher.set_scenario_owner, name, owner)
