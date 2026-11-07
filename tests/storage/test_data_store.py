@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import closing
 from dataclasses import replace
 
@@ -347,6 +348,32 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-3": RecordLink("coding/call-1", entries[3]),
         "coding/retry-2": RecordLink("coding/call-1", entries[2]),
     }
+
+
+def test_writes_of_one_scenario_wait_and_writes_of_another_do_not(postgres_config, tmp_path):
+    url, schema = postgres_config
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    with closing(task_files), closing(PostgresDataStore(url, task_files, schema=schema)) as store:
+        new = {"kind": "trajectory", "scenarios": {"s1": "train"}}
+        with ThreadPoolExecutor(2) as pool, store.transaction() as holder:
+            store.lock_scenarios(holder, "acme", ["s1"])
+            waits = pool.submit(store.create, "acme", [NewItem("a", ATIF, new)])
+            other = {**new, "scenarios": {"s2": "train"}}
+            assert pool.submit(store.create, "acme", [NewItem("b", ATIF, other)]).result(timeout=10)
+            assert pool.submit(store.create, "globex", [NewItem("c", ATIF, new)]).result(timeout=10)
+            with pytest.raises(FutureTimeoutError):
+                waits.result(timeout=0.5)
+        assert waits.result(timeout=10)
+
+
+def test_the_store_lists_the_scenarios_with_record_items(store):
+    assert store.scenarios_with_records("acme") == ()
+    store.create("acme", calls(1))
+    store.create("acme", [NewItem("t", ATIF, {"kind": "trajectory", "scenarios": {"other": "train"}})])
+    assert store.scenarios_with_records("acme") == ("coding",)
+    store.update("acme", ["coding/call-1"], {"scenarios": {"reader": "train"}})
+    assert store.scenarios_with_records("acme") == ("coding", "reader")
+    assert store.scenarios_with_records("globex") == ()
 
 
 def test_concurrent_updates_of_one_item_keep_every_use(open_durable_store):
