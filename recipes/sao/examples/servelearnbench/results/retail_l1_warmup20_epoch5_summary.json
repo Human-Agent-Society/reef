@@ -1,0 +1,215 @@
+{
+  "experiment": "retail-colocate-8b-b64-m8-warmup20-epoch5-20261030-v1",
+  "completed_date": "2026-10-31",
+  "runtime_commit": "fb5b52b01b3cf110dc195268cf996780ea475813",
+  "runtime_note": "Separate local colocate port plus experiment overlays; not the PR split stack or #1034.",
+  "benchmark_revision": "57aa919b5ae71d60c38a7ed559262447406f1e8b",
+  "results_jsonl_sha256": "cb120a1668820eadb8028508f2483299e0d570813fe7740354cefbe40d0700cd",
+  "curve_source": {
+    "provider": "wandb",
+    "run_id": "50e86bc24f040b5f649fb65691636145",
+    "state": "finished",
+    "export": "scan_history (unsampled)",
+    "matched_actor_updates": 70,
+    "normalization": "One train metrics row per committed release; actor_update is 1-based. Warmup is excluded from this axis."
+  },
+  "configuration": {
+    "epochs_per_window": 5,
+    "rollout_policy": "fresh_episode_per_epoch",
+    "seed": 42,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "max_tokens": 16384,
+    "global_batch_size": 64,
+    "micro_batch_size": 8,
+    "critic_only_batches": 20,
+    "warmup_policy": "reuse_first_batch",
+    "context_length": 40960,
+    "max_steps": 100,
+    "max_output_per_task": 256000,
+    "tool_budget": 50,
+    "model": "Qwen3-8B"
+  },
+  "training": {
+    "unique_tasks": 720,
+    "episodes": 3600,
+    "actor_updates": 70,
+    "critic_updates": 180,
+    "warmup_critic_updates": 40,
+    "actor_updates_per_window": [
+      10,
+      15,
+      15,
+      10,
+      10,
+      10
+    ]
+  },
+  "summary": {
+    "type": "summary",
+    "test_score": 49.21875,
+    "test_score_definition": "combined_test_mean",
+    "window_scores": {
+      "0": 54.54545454545455,
+      "1": 42.1875,
+      "2": 45.3125,
+      "3": 62.5,
+      "4": 53.125,
+      "5": 41.666666666666664
+    },
+    "category_scores": {
+      "hidden": {
+        "count": 240,
+        "score": 24.166666666666668
+      },
+      "fully_specified": {
+        "count": 144,
+        "score": 90.97222222222223
+      }
+    },
+    "window_category_scores": {
+      "0": {
+        "hidden": {
+          "count": 20,
+          "score": 20.0
+        },
+        "fully_specified": {
+          "count": 24,
+          "score": 83.33333333333333
+        }
+      },
+      "1": {
+        "hidden": {
+          "count": 40,
+          "score": 20.0
+        },
+        "fully_specified": {
+          "count": 24,
+          "score": 79.16666666666667
+        }
+      },
+      "2": {
+        "hidden": {
+          "count": 40,
+          "score": 20.0
+        },
+        "fully_specified": {
+          "count": 24,
+          "score": 87.5
+        }
+      },
+      "3": {
+        "hidden": {
+          "count": 40,
+          "score": 40.0
+        },
+        "fully_specified": {
+          "count": 24,
+          "score": 100.0
+        }
+      },
+      "4": {
+        "hidden": {
+          "count": 40,
+          "score": 25.0
+        },
+        "fully_specified": {
+          "count": 24,
+          "score": 100.0
+        }
+      },
+      "5": {
+        "hidden": {
+          "count": 60,
+          "score": 20.0
+        },
+        "fully_specified": {
+          "count": 24,
+          "score": 95.83333333333333
+        }
+      }
+    },
+    "windows": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "training_releases": 70,
+    "critic_only_batches": 20,
+    "actor_updates": 70,
+    "smoke": false,
+    "ending_counts": {
+      "serving": {
+        "finish": 3528,
+        "step_cap": 67,
+        "context_overflow": 5
+      },
+      "test": {
+        "finish": 383,
+        "step_cap": 1
+      }
+    },
+    "trained_tasks": 3600,
+    "unique_training_tasks": 720,
+    "epochs_per_window": 5,
+    "untrained_tail_tasks": 0,
+    "partial_batch_tasks": 1040
+  },
+  "comparisons": {
+    "bare": {
+      "successes": [
+        18,
+        22,
+        23,
+        30,
+        26,
+        25
+      ],
+      "tests": [
+        44,
+        64,
+        64,
+        64,
+        64,
+        84
+      ],
+      "total_successes": 144,
+      "hidden_successes": 47,
+      "fully_specified_successes": 97,
+      "source": "Previously reported baseline: PR #911 issuecomment-6478393787"
+    },
+    "warmup5_seed42": {
+      "successes": [
+        18,
+        26,
+        21,
+        36,
+        30,
+        30
+      ],
+      "total_successes": 161,
+      "epochs_per_window": 1
+    },
+    "warmup5_seed43": {
+      "successes": [
+        18,
+        21,
+        22,
+        33,
+        30,
+        31
+      ],
+      "total_successes": 155,
+      "epochs_per_window": 1
+    }
+  },
+  "limitations": [
+    "One new training seed and one baseline seed.",
+    "Warmup and training epochs both differ from the warmup=5 comparison.",
+    "Each window uses its own post-training checkpoint; no final-checkpoint retention test.",
+    "No critic-loss or intermediate warmup-fit series was present in the exported W&B history."
+  ]
+}
