@@ -13,16 +13,16 @@ from reef.inference.interfaces import InferenceStream
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, SSERelay
 from reef.service.lifecycle import ADMITTED_ROUTING, REQUEST_ACCEPTANCE
 from reef.service.request_service import RequestService
-from reef.service.routed_inference import RoutedAttempt
+from reef.service.routed_inference import RoutedAttempt, RoutedInference
 from reef.service.routes.payload import read_object
-from reef.service.routing import RoutingRequestError
+from reef.service.routing import RoutingAdapter, RoutingRequestError
 from reef.service.streaming import receipt_sse_events, stream_record
 
 logger = logging.getLogger(__name__)
 
 
 async def relay_routed_stream(
-    request: web.Request, service: RequestService, upstream: InferenceStream, pending: RoutedAttempt
+    request: web.Request, routed: RoutedInference, for_codex: bool, upstream: InferenceStream, pending: RoutedAttempt
 ) -> web.StreamResponse:
     """Relay an open provider SSE stream and store its attempt before sending its receipt.
 
@@ -50,7 +50,7 @@ async def relay_routed_stream(
         }
         response = web.StreamResponse(status=upstream.status, headers=headers)
         await response.prepare(request)
-        relay = SSERelay(request.path, response, for_codex=service.dispatcher.recipe.harness_adapter == "codex")
+        relay = SSERelay(request.path, response, for_codex=for_codex)
         async for chunk in upstream.chunks:
             body.extend(chunk)
             if await relay.feed(chunk):
@@ -65,7 +65,7 @@ async def relay_routed_stream(
         else:
             record_attempted = True
             captured = stream_record(upstream, bytes(body), complete=True)
-            item = await service.persist(asyncio.to_thread(service.routed.record_routed_stream, pending, captured))
+            item = await routed.persist(asyncio.to_thread(routed.record_routed_stream, pending, captured))
             for frame in receipt_sse_events(request.path, relay.chat_identity, relay.terminal, item.agent_record_id):
                 await response.write(frame)
     except ConnectionResetError as exc:
@@ -87,38 +87,47 @@ async def relay_routed_stream(
         finally:
             if not record_attempted:
                 captured = stream_record(upstream, bytes(body), complete=False, error=error)
-                await service.persist(asyncio.to_thread(service.routed.record_routed_stream, pending, captured))
+                await routed.persist(asyncio.to_thread(routed.record_routed_stream, pending, captured))
     return response
+
+
+async def serve_routed_chat(
+    request: web.Request, routing: RoutingAdapter | None, routed: RoutedInference, *, for_codex: bool
+) -> web.StreamResponse:
+    """Select a target under ``routing``, the policy that this request keeps, call it, and store each attempt."""
+    try:
+        if routing is None:
+            raise RoutingRequestError("routing is unavailable", code="routing_unpublished", status=503)
+        if request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true"):
+            raise RoutingRequestError("routed deployments do not serve rollout calls", code="unsupported_rollout")
+        scenario = routing.check_request(request.headers.items(), request.path)
+        client_payload = await read_object(request, strict=True)
+        decision = await routed.select_route(routing, scenario, client_payload)
+        handler = routing.handler_for(decision)
+    finally:
+        # The request has either failed or captured everything it needs from this routing policy.
+        acceptance = request.app.get(REQUEST_ACCEPTANCE)
+        task = asyncio.current_task()
+        if acceptance is not None and task is not None:
+            acceptance.release_selection(task)
+    payload = {**client_payload, "model": decision.target.provider_model}
+    if payload.get("stream") is True:
+        stream, pending = await routed.start_routed_stream(
+            request.headers, payload, request.path, handler, decision=decision
+        )
+        return await relay_routed_stream(request, routed, for_codex, stream, pending)
+    response, item = await routed.infer_routed(request.headers, payload, request.path, decision, handler)
+    return web.json_response(response, headers={RECORD_HEADER: item.agent_record_id})
 
 
 def register_routed_chat(app: web.Application, *, request_service: RequestService) -> None:
     async def chat(request: web.Request) -> web.StreamResponse:
-        # Before the upload: a managed deployment already captured its adapter when it admitted this request.
-        routing = request.get(ADMITTED_ROUTING, request_service.routing)
-        try:
-            if routing is None:
-                raise RoutingRequestError("routing is unavailable", code="routing_unpublished", status=503)
-            if request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true"):
-                raise RoutingRequestError("routed deployments do not serve rollout calls", code="unsupported_rollout")
-            scenario = routing.check_request(request.headers.items(), request.path)
-            client_payload = await read_object(request, strict=True)
-            decision = await request_service.routed.select_route(routing, scenario, client_payload)
-            handler = routing.handler_for(decision)
-        finally:
-            # The request has either failed or captured everything it needs from this routing policy.
-            acceptance = request.app.get(REQUEST_ACCEPTANCE)
-            task = asyncio.current_task()
-            if acceptance is not None and task is not None:
-                acceptance.release_selection(task)
-        payload = {**client_payload, "model": decision.target.provider_model}
-        if payload.get("stream") is True:
-            stream, pending = await request_service.routed.start_routed_stream(
-                request.headers, payload, request.path, handler, decision=decision
-            )
-            return await relay_routed_stream(request, request_service, stream, pending)
-        response, item = await request_service.routed.infer_routed(
-            request.headers, payload, request.path, decision, handler
+        return await serve_routed_chat(
+            request,
+            # Before the upload: a managed deployment already captured its adapter when it admitted this request.
+            request.get(ADMITTED_ROUTING, request_service.routing),
+            request_service.routed,
+            for_codex=request_service.dispatcher.recipe.harness_adapter == "codex",
         )
-        return web.json_response(response, headers={RECORD_HEADER: item.agent_record_id})
 
     app.router.add_post("/v1/chat/completions", chat)

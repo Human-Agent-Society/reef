@@ -1,4 +1,4 @@
-"""Inspect or clean an inactive managed routing deployment without touching providers."""
+"""Inspect or clean an inactive managed routing deployment, or render an external router's configuration."""
 
 from __future__ import annotations
 
@@ -15,14 +15,16 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.routing.containers import ContainerCommandError, DockerComposeRuntime
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
 from reef.service.deploy.routing.registry import DeploymentRegistry, RoutingOwnershipError
+from reef.service.deploy.routing.renderer import render_external
 from reef.service.deploy.service_config import service_config_from_mapping
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "cleanup", "validate"))
+    parser.add_argument("action", choices=("status", "cleanup", "validate", "render"))
     parser.add_argument("--deployment-id")
-    parser.add_argument("--config", help="Candidate Reef configuration for read-only validate.")
+    parser.add_argument("--config", help="Reef configuration for validate or render.")
+    parser.add_argument("--output", help="The file that render writes.")
     parser.add_argument("--timeout-seconds", type=float, default=10)
     parser.add_argument(
         "--acknowledge-unknown",
@@ -36,10 +38,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("acknowledge-unknown is only available with cleanup")
     if args.action == "validate" and not args.config:
         parser.error("validate requires --config")
-    if args.action != "validate" and (not args.deployment_id or args.config):
+    if (args.action == "render") != bool(args.output) or (args.action == "render" and not args.config):
+        parser.error("render requires --config and --output, and only render takes --output")
+    if args.action in ("status", "cleanup") and (not args.deployment_id or args.config):
         parser.error("status and cleanup require --deployment-id, without --config")
     runtime = DockerComposeRuntime()
     try:
+        if args.action == "render":
+            path = Path(args.config).expanduser().resolve()
+            resolved, _ = resolve_deployment_config(load_config(path, interpolate_env=False), None, path)
+            settings = service_config_from_mapping(resolved)
+            if settings.routing_manifest is None:
+                raise ValueError("render needs reef.routing_manifest")
+            snapshot = render_external(Path(settings.routing_manifest), Path(args.output), settings.routing_deployment)
+            print(json.dumps({"output": args.output, "snapshot_version": snapshot.version}))
+            return
         if args.action == "validate":
             # The same resolution as ``reef serve``: a public configuration file, its environment and defaults.
             path = Path(args.config).expanduser().resolve()
