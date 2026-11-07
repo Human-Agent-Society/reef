@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.adapters.parts import Format, TreeLayout, TreeLocation
+from reef.harness.adapters.parts import PLACEHOLDER, Format, TreeLayout, TreeLocation
 from reef.harness.tree.checks import (
     reject_inline_secret,
     reject_secret_shaped_text,
@@ -66,7 +66,7 @@ def validate_tree(tree: HarnessTree, descriptor: AdapterDescriptor) -> Validatio
     Each file must be a path of one of the adapter's parts and pass the checks of the part's format. The native
     files must reference only tools, skills, graphs and agents the tree
     holds, without delegation cycles, and a tree holds at most one native
-    loop. A tree with none of those problems must also render. The result
+    loop. A tree of an adapter with a ``program`` part holds its entry point, ``main``. A tree with none of those problems must also render. The result
     passes if and only if the tree can be evaluated, published and
     installed.
     """
@@ -92,6 +92,9 @@ def validate_tree(tree: HarnessTree, descriptor: AdapterDescriptor) -> Validatio
     loops = sorted(path for path in tree.files if format_of(layout, path) is Format.NATIVE_LOOP)
     if len(loops) > 1:
         problems.append(f"one native loop per tree: {', '.join(loops)}")
+    program = layout.parts.get("program")
+    if program is not None and program.path.replace(PLACEHOLDER, "main") not in tree.files:
+        problems.append(f"the tree needs {program.path.replace(PLACEHOLDER, 'main')}, the program's entry point")
     problems.extend(native_reference_problems(tree, layout, graphs, agents))
     if not problems:
         try:
@@ -125,6 +128,11 @@ def check_file(location: TreeLocation, text: str, descriptor: AdapterDescriptor)
     reject_secret_shaped_text(text, "the file")
     if format is Format.CODE:
         reject_unguarded_console_write(text, "the extension")
+    elif format is Format.PROGRAM:
+        try:
+            compile(text, f"{location.name}.py", "exec")
+        except (SyntaxError, ValueError) as error:
+            raise ValueError(f"the module does not compile: {error}") from error
     elif format in (Format.NATIVE_TOOL, Format.NATIVE_HOOK):
         # Every NAME the module assigns is the file's, so a file cannot pass for another tool or hook.
         declared_name(text, location.name)
