@@ -6,6 +6,7 @@ import asyncio
 import math
 import time
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar
@@ -14,12 +15,12 @@ from aiohttp import ClientError
 
 from reef.core.errors import ReefError, UnknownScenario, UpstreamStatusError, inference_aborted
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.values import JsonValue
 from reef.dispatcher import Dispatcher
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import stream_events
-from reef.observability.operations import OperationMeasurement
-from reef.scenario.scenario import Scenario
+from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.service.lifecycle import PendingWrites
 from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingScenario
 from reef.service.routing_preview import RoutingPreviewClient
@@ -97,27 +98,72 @@ class RoutedAttempt:
         return replace(self.item, payload={**payload, "metadata": metadata})
 
 
+@dataclass(frozen=True)
+class RoutedScenario:
+    """What one routed request reads of its Scenario when it starts.
+
+    Values: ``operations`` measures the request. ``serving_config`` is the override that each provider call of the
+    request carries. Purpose: ``RoutedRecords.open_scenario`` makes it; ``RoutedInference`` reads it.
+    """
+
+    operations: OperationMetrics
+    serving_config: Mapping[str, JsonValue]
+
+
+class RoutedRecords(ABC):
+    """Where routed requests read their Scenario and store their records.
+
+    ``DispatcherRecords`` serves a process that runs control. ``ReplicaRecords`` serves the inference service, which
+    has no dispatcher. Both operations can block, so ``RoutedInference`` calls them on a worker thread.
+    """
+
+    @abstractmethod
+    def open_scenario(self, name: str) -> RoutedScenario:
+        """The Scenario ``name``. Raise ``UnknownScenario`` when the deployment cannot serve it."""
+
+    @abstractmethod
+    def accept_record(self, item: AgentRecord) -> AgentRecord:
+        """Store ``item`` in its Scenario and return the stored record."""
+
+
+class DispatcherRecords(RoutedRecords):
+    """The Scenarios and records of ``dispatcher``, which also creates a Scenario that does not exist yet."""
+
+    def __init__(self, dispatcher: Dispatcher) -> None:
+        self.dispatcher = dispatcher
+
+    def open_scenario(self, name: str) -> RoutedScenario:
+        scenario = self.dispatcher.get_or_create_scenario(name)
+        if scenario is None:
+            raise UnknownScenario(f"unknown scenario {name!r}")
+        return RoutedScenario(scenario.operations, scenario.served_serving_config())
+
+    def accept_record(self, item: AgentRecord) -> AgentRecord:
+        return self.dispatcher.accept_record(item)
+
+
 class RoutedInference:
     """Routed calls of a record-only deployment.
 
-    The dispatcher owns Scenario records. Pins resolve locally; automatic requests use the preview client.
-    Managed children track submitted writes across cancellation. The retry policy bounds aborted buffered calls.
+    ``records`` owns Scenario records. Pins resolve locally; automatic requests use the preview client.
+    ``writes`` tracks submitted writes across cancellation when it is given. The retry policy bounds aborted
+    buffered calls.
     """
 
     def __init__(
         self,
-        dispatcher: Dispatcher,
+        records: RoutedRecords,
         preview: RoutingPreviewClient | None,
         retry: InferenceRetryPolicy,
         writes: PendingWrites | None,
     ) -> None:
-        self.dispatcher = dispatcher
+        self.records = records
         self.preview = preview
         self.retry = retry
         self.writes = writes
 
     async def persist(self, write: Awaitable[WriteResult]) -> WriteResult:
-        """Retain a managed child's submitted writes through request cancellation and drain."""
+        """Retain submitted writes through request cancellation and drain."""
         if self.writes is not None:
             return await self.writes.run(write)
         return await write
@@ -133,15 +179,14 @@ class RoutedInference:
             raise RuntimeError("routing has no Semantic Router preview client")
         return await self.preview.select(routing, scenario, payload)
 
-    async def scenario(self, headers: Mapping[str, str], decision: RoutingDecision) -> tuple[RequestHeaders, Scenario]:
+    async def scenario(
+        self, headers: Mapping[str, str], decision: RoutingDecision
+    ) -> tuple[RequestHeaders, RoutedScenario]:
         """Resolve the request's Scenario before its first provider call. Track implicit creation as a write."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         if parsed.scenario != decision.scenario:
             raise ValueError("a routed request's headers name another Scenario than its routing decision")
-        scenario = await self.persist(asyncio.to_thread(self.dispatcher.get_or_create_scenario, parsed.scenario))
-        if scenario is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        return parsed, scenario
+        return parsed, await self.persist(asyncio.to_thread(self.records.open_scenario, parsed.scenario))
 
     @staticmethod
     def attempt(
@@ -171,7 +216,7 @@ class RoutedInference:
         item = attempt.result(
             {"error_type": type(exc).__name__}, execution=execution, delivery="not_started", client_visible=False
         )
-        await self.persist(asyncio.to_thread(self.dispatcher.accept_record, item))
+        await self.persist(asyncio.to_thread(self.records.accept_record, item))
         # ServerTimeoutError is both a TimeoutError and a ClientError. Its timeout takes precedence.
         if isinstance(exc, TimeoutError):
             raise InferenceRetryTimeout("routed inference timed out") from exc
@@ -196,7 +241,7 @@ class RoutedInference:
         prior_ids: tuple[str, ...] = ()
         try:
             while True:
-                sent = handler.request_payload(payload, serving_config=scenario.served_serving_config())
+                sent = handler.request_payload(payload, serving_config=scenario.serving_config)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise InferenceRetryTimeout("routed inference retry deadline exceeded")
@@ -213,7 +258,7 @@ class RoutedInference:
                     delivery="not_started" if aborted else "unconfirmed",
                     client_visible=not aborted,
                 )
-                stored = await self.persist(asyncio.to_thread(self.dispatcher.accept_record, item))
+                stored = await self.persist(asyncio.to_thread(self.records.accept_record, item))
                 if not aborted:
                     succeeded = True
                     return dict(item.payload["response"]), stored
@@ -237,7 +282,7 @@ class RoutedInference:
         parsed, scenario = await self.scenario(headers, decision)
         measurement = scenario.operations.start("serve/request")
         try:
-            sent = handler.request_payload(payload, serving_config=scenario.served_serving_config())
+            sent = handler.request_payload(payload, serving_config=scenario.serving_config)
             attempt = self.attempt(parsed, sent, decision, uuid.uuid4().hex, (), measurement)
             stream = None
             try:
@@ -273,7 +318,7 @@ class RoutedInference:
                 delivery="unconfirmed" if complete else "incomplete",
                 client_visible=bool(body) or complete,
             )
-            stored = self.dispatcher.accept_record(item)
+            stored = self.records.accept_record(item)
             succeeded = complete
             return stored
         finally:

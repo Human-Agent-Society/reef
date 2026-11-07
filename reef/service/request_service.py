@@ -29,7 +29,12 @@ from reef.scenario.snapshot_files import component_files
 from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
 from reef.service.lifecycle import PendingWrites
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.routed_inference import InferenceRetryPolicy, InferenceRetryTimeout, RoutedInference
+from reef.service.routed_inference import (
+    DispatcherRecords,
+    InferenceRetryPolicy,
+    InferenceRetryTimeout,
+    RoutedInference,
+)
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import RoutingPreviewClient
 from reef.service.wire import (
@@ -118,7 +123,9 @@ class RequestService:
         self._dispatcher = dispatcher
         self.routing = routing
         self.preview = preview
-        self.routed = RoutedInference(dispatcher, preview, retry_policy or InferenceRetryPolicy(), writes)
+        self.routed = RoutedInference(
+            DispatcherRecords(dispatcher), preview, retry_policy or InferenceRetryPolicy(), writes
+        )
         self.inference_url = None if inference_url is None else inference_url.rstrip("/")
 
     @property

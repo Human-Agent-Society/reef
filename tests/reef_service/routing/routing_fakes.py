@@ -227,7 +227,8 @@ class FakeSemanticRouter:
     contains any of its keywords (``match: all``: every one), ignoring case unless ``case_sensitive``. A
     domain rule matches when ``predicted_domain``, which a test sets in place of a classifier, is one of its
     labels, ignoring case. ``reply_changes`` overwrites reply fields, so a test can send replies that Reef must
-    refuse.
+    refuse. ``/api/v1/config/hash`` reports ``runtime_hash`` under ``activation_status``, and ``/ready`` answers
+    200 exactly when ``is_ready``.
     """
 
     def __init__(self, snapshot: RoutingSnapshot, runtime_hash: str = ROUTER_HASH) -> None:
@@ -242,6 +243,20 @@ class FakeSemanticRouter:
         self.arrived = asyncio.Event()
         self.disconnected = asyncio.Event()
         self.predicted_domain: str | None = None
+        self.activation_status = "active"
+        self.is_ready = True
+
+    async def config_hash(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "active_runtime_hash": self.runtime_hash,
+                "generated_runtime_hash": self.runtime_hash,
+                "activation_status": self.activation_status,
+            }
+        )
+
+    async def ready(self, request: web.Request) -> web.Response:
+        return web.json_response({}, status=200 if self.is_ready else 503)
 
     def matches(self, rule: RoutingRule, text: str) -> bool:
         if rule.domains:
@@ -303,6 +318,8 @@ async def running_router(
     router = FakeSemanticRouter(snapshot, runtime_hash)
     app = web.Application(client_max_size=16 * 1024 * 1024)
     app.router.add_post("/api/v1/routing/preview", router.preview)
+    app.router.add_get("/api/v1/config/hash", router.config_hash)
+    app.router.add_get("/ready", router.ready)
     server = TestServer(app, host="127.0.0.1")
     await server.start_server()
     router.settings = PreviewSettings(f"http://127.0.0.1:{server.port}", SELECTION_TOKEN, timeout_seconds)

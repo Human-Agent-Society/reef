@@ -1,4 +1,4 @@
-"""Validated settings for the Semantic Router container that ``reef serve`` owns when routing is enabled."""
+"""Validated settings of the Semantic Router of a routed deployment."""
 
 from __future__ import annotations
 
@@ -12,10 +12,11 @@ from reef.core.config import config_arguments, config_option, parse_config_value
 
 @dataclass(frozen=True)
 class RoutingDeploymentSettings:
-    """The owned router container: identity, resources, preview limits and recovery policy.
+    """The router: who runs it, and its identity, resources, preview limits and recovery policy.
 
-    Values: ``deployment_id`` is None or 1 to 48 lowercase letters, digits or hyphens, starting with a letter
-    or digit. ``restart_policy`` is ``fail_stop`` or ``bounded``; ``max_restarts`` is an int ≥ 0, and ≥ 1
+    Values: ``lifecycle`` is ``managed`` or ``external``. ``deployment_id`` is None or 1 to 48 lowercase letters,
+    digits or hyphens, starting with a letter or digit. ``restart_policy`` is ``fail_stop`` or ``bounded``;
+    ``max_restarts`` is an int ≥ 0, and ≥ 1
     when bounded. ``restart_backoff_seconds`` is a non-empty tuple of finite numbers ≥ 0, in order, with
     repeats allowed. The ready, finalization and container stop timeouts and ``sr_cpus`` are finite and
     positive; ``drain_timeout_seconds`` is finite and ≥ 0. ``sr_management_port`` is an int from 1 to 65535,
@@ -25,8 +26,14 @@ class RoutingDeploymentSettings:
     the renderer read it. Recovery attempt ``n`` (from 1) waits ``restart_backoff_seconds[min(n - 1,
     len - 1)]``, so the last delay repeats. These settings apply only when ``reef.routing_manifest`` is set;
     ``require_identity`` then returns ``deployment_id`` or refuses a deployment without one.
+    With ``managed``, ``reef serve`` runs the container and reads every setting. With ``external``, another system
+    runs the router beside ``reef serve --component inference``, and only the port, preview and finalization
+    settings apply.
     """
 
+    lifecycle: str = config_option(
+        "managed", help="Who runs the router: managed (reef serve) or external (beside --component inference)."
+    )
     deployment_id: str | None = config_option(None, help="Stable local deployment identifier.")
     restart_policy: str = config_option("fail_stop", help="Failure policy: fail_stop or bounded.")
     max_restarts: int = config_option(2, help="Recovery attempts allowed during this explicit deployment.")
@@ -48,6 +55,8 @@ class RoutingDeploymentSettings:
     sr_memory_bytes: int = config_option(4 * 1024**3, help="Semantic Router container memory limit in bytes.")
 
     def __post_init__(self) -> None:
+        if self.lifecycle not in {"managed", "external"}:
+            raise ValueError("routing lifecycle must be managed or external")
         if self.deployment_id is not None and (
             not isinstance(self.deployment_id, str)
             or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", self.deployment_id) is None
