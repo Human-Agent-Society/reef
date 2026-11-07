@@ -828,6 +828,17 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "effective_serving_config": current.effective_serving_config(current.serving_config),
             }
 
+    def set_traffic_weights(self, scenario: str, weights: Mapping[str, int]) -> dict[str, Any]:
+        """Make ``weights`` the traffic split of an existing ``scenario``, and return them. The artifacts must serve
+        already. Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an artifact without a route.
+        """
+        if self.publisher is None:
+            raise ValueError("this service does not run control, so it cannot change a traffic split")
+        with self.registry.lock_for(scenario):
+            self.registry.require(scenario)
+            self.publisher.write_traffic_weights(scenario, weights)
+            return {"traffic_weights": dict(weights)}
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self.registry.stored_settings(scenario)
@@ -841,7 +852,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
         with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
         after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
-        a load does. ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
+        a load does. ``traffic_weights`` is the scenario's traffic split, ``{}`` without one. ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
         (``PipelineContext.job_parameters``), which a request's ``parameters`` merge into; a kind that the
         recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
         """
@@ -860,6 +871,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "effective_activation": self.registry.effective_activation(settings),
                 "serving_config": settings.serving_config.to_json(),
                 "effective_serving_config": effective_serving,
+                "traffic_weights": dict(self.coordination.served_models.read_traffic_weights(scenario)),
                 "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 
