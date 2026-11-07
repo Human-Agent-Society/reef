@@ -674,6 +674,10 @@ def test_query_and_count_keep_the_records_of_one_origin_and_request_type(store):
     first = store.read("acme", "coding/call-1").sequence
     assert ids(origin="coding", after=first) == ["coding/call-2", "coding/rep"]
     assert store.count("acme") == 5
+    newest = store.read("acme", "coding/rep").sequence
+    assert store.last_sequence("acme", kind="record", scenario="coding", origin="coding") == newest
+    assert store.last_sequence("acme", kind="record", origin="review") == store.read("acme", "review/other").sequence
+    assert store.last_sequence("globex") == 0
     with pytest.raises(ValueError, match="kind='record'"):
         store.query("acme", origin="coding")
     with pytest.raises(ValueError, match="request_type"):

@@ -177,14 +177,13 @@ class ItemStart:
 
 @dataclass(frozen=True)
 class RecoveredTrainerState:
-    """What one component's trainer recovers from its own commits: state, cursor, and consumed rows.
+    """What one component's trainer recovers from its own commits: state and consumed rows.
 
     ``committed_ids`` holds the IDs that its commits named. ``consumed_ids`` holds those and the records that
     its stored samples consumed.
     """
 
     algorithm_state: Mapping[str, Any] | None
-    high_water: tuple[int, int] | None
     consumed_ids: frozenset[str]
     committed_ids: frozenset[str]
 
@@ -231,7 +230,6 @@ def recovered_trainer_states(
         )
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
-            high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
             consumed_ids=stored | committed,
             committed_ids=committed,
         )
@@ -545,28 +543,14 @@ class ScenarioFactory:
                 experiment_observer=experiment_observer,
                 training_requests=None if self._training_requests is None else self._training_requests.of(name),
             )
-            # Replay retained, unconsumed rows behind each trainer's watermark
-            # before resuming its cursor. Retention may keep already-consumed
-            # rows for audit.
+            # Each trainer reads its records from the start again and skips the consumed ones. A commit's record
+            # progress is not a cursor here: it can name a sequence of a record store that came before the record
+            # items (RFC #1219).
             for component_trainer in trainers:
                 # Scenario() checked that every trainer names a component the scenario serves: each has a state.
                 recovered = recovered_states[component_trainer.component]
                 component_trainer.trainer.restore_committed_records(recovered.committed_ids)
-                if recovered.high_water is not None:
-                    scenario.replay_retained(
-                        up_to_sequence=recovered.high_water[0],
-                        consumed_ids=recovered.consumed_ids,
-                        component=component_trainer.component,
-                    )
-                    scenario.restore_record_progress(
-                        after_sequence=recovered.high_water[0],
-                        offset=recovered.high_water[1],
-                        component=component_trainer.component,
-                    )
-                elif recovered.consumed_ids:
-                    scenario.replay_retained(
-                        up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
-                    )
+                component_trainer.trainer.restore_consumed_records(recovered.consumed_ids)
             scenario.resume_training_starts()
             return scenario
         except BaseException:

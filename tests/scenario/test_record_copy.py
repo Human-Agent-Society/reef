@@ -40,10 +40,8 @@ def test_each_accepted_report_becomes_a_record_item(tmp_path: Path) -> None:
         assert record_item_ids(dispatcher, 2) == ["s/r1", "s/r2"]
         (item,) = dispatcher.data_store.query("s", kind="record", limit=1)
         assert item.scenarios == {"s": "train"}
-        deadline = time.monotonic() + 10
-        while dispatcher.coordination.marks.read(record_copy_mark("s")) < 2:
-            assert time.monotonic() < deadline, "the copy did not advance its mark"
-            time.sleep(0.02)
+        # A record is its record item when it arrives, so nothing is left to copy.
+        assert dispatcher.coordination.marks.read(record_copy_mark("s")) == 0
     finally:
         dispatcher.close()
 
@@ -79,11 +77,10 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
             assert current.store.records.get("t", "s/r1") is None, "t stores no copy"
             assert current.used_record("s/r1").payload == {"score": 1.0}
 
-        # A new process reads the item again, and skips a copy from before these reads.
+        # A new process reads the item again: no commit consumed it.
         dispatcher.registry.reload("t")
         with dispatcher.locked_scenario("t") as current:
-            current.store.records.append(AgentRecord("s/r1", "t", RequestType.REPORT, {"score": 1.0}, 1.0, (), None))
-            assert current.trainers[0].trainer.produce_samples().records_read == 1, "the copy, read once"
+            assert current.trainers[0].trainer.produce_samples().records_read == 1
 
         # Without the use, the read stops.
         dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": None}})
