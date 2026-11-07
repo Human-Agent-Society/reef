@@ -1,6 +1,6 @@
 """The AutoEnvScaling task generator: recorded coding sessions rebuilt as Harbor tasks, and a pass-rate band.
 
-``generate`` has the author rebuild the next ``count`` sessions of the sources file. Admission
+``generate`` has the Designer rebuild the next ``count`` sessions of the sources file. Admission
 (:func:`admitted_task`) holds each reply to the generator service's parser and authoring checks and appends a
 Dockerfile step that keeps the repository's history up to the base commit only. ``validate`` runs the task checks
 on a copy under the generator service's tasks root. With ``calibration`` on, the last check runs the current
@@ -19,6 +19,11 @@ passes too often, simpler for one it passes too rarely. A variant comes from the
 parent's split. Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, and each
 parent is varied once. The task checks run in ``validate``: Harbor's oracle and nop check, then the contamination
 check, the test review and the solver calibration when they are on.
+
+With ``seed_tasks_path`` an adaptive generation also takes seed tasks, Harbor tasks that reef wrote: its slots go to
+variants first, then to the seeds not used yet, then to sessions. A seed takes its slot as it is, with no Designer run.
+It runs the seed check and the contamination check, and a training seed outside the band becomes a parent whose
+variants have no session.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import json
 import logging
 import math
 import os
+import re
 import shlex
 import shutil
 import statistics
@@ -39,21 +45,6 @@ from typing import Any, Literal, Self
 
 from pydantic import TypeAdapter
 
-from recipes.beta.autoenvscaling.author import (
-    VARIANT_HARDER,
-    VARIANT_SIMPLER,
-    AgentAuthor,
-    AuthorError,
-    CandidateChecks,
-    PromptAuthor,
-    SourceError,
-    TaskAuthor,
-    TaskVariant,
-    VariantAuthor,
-    VariantDirection,
-    workspace_reply,
-)
-from recipes.beta.autoenvscaling.author_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.checks import (
     BAND_ABOVE,
     BAND_BELOW,
@@ -66,16 +57,33 @@ from recipes.beta.autoenvscaling.checks import (
     OracleCheck,
     PassRateBand,
     ReviewCheck,
+    SeedCheck,
     TaskCheck,
     band_place,
     check_mode,
     reference_instructions,
     validate_calibration,
 )
-from recipes.beta.autoenvscaling.claude_author import CLAUDE_HARNESS, TOKEN_PREFIX, ClaudeCodeAuthor, overrides_run
+from recipes.beta.autoenvscaling.claude_designer import CLAUDE_HARNESS, TOKEN_PREFIX, ClaudeCodeDesigner, overrides_run
+from recipes.beta.autoenvscaling.designer import (
+    VARIANT_HARDER,
+    VARIANT_SIMPLER,
+    AgentDesigner,
+    CandidateChecks,
+    DesignerOutage,
+    PromptDesigner,
+    SeedVariantDesigner,
+    SourceError,
+    TaskDesigner,
+    TaskVariant,
+    VariantDesigner,
+    VariantDirection,
+    workspace_reply,
+)
+from recipes.beta.autoenvscaling.designer_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
+from reef.core.tasks import HarborTask, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.sandbox.config import remote_executor
 from reef.execution.sandbox.process import SandboxUnavailable
@@ -108,12 +116,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_COUNT = 8
 DEFAULT_VARIANT_SHARE = 0.5
+# How many tasks of a generation are written at once; 1 writes them in turn.
+DEFAULT_CONCURRENCY = 1
 # The most parents an adaptive generator keeps; the oldest go first.
 MAX_PARENTS = 256
 FEEDBACK_FILE = "adaptive.json"
 PARENTS_DIR = "parents"
-# A variant takes no session from the walk, so its proposal has no walk position.
+# A variant or a seed takes no session from the walk, so its proposal has no walk position.
 VARIANT_POSITION = -1
+# A seed's one source record id: this prefix and the first SEED_ID_DIGITS hex digits of its digest.
+SEED_ID_PREFIX = "seed-"
+SEED_ID_DIGITS = 16
+SEED_RECORD_ID = re.compile(f"{re.escape(SEED_ID_PREFIX)}[0-9a-f]{{{SEED_ID_DIGITS}}}")
 DEFAULT_BAND_LOW = 0.25
 DEFAULT_BAND_HIGH = 0.75
 DEFAULT_BAND = PassRateBand(DEFAULT_BAND_LOW, DEFAULT_BAND_HIGH)
@@ -125,11 +139,11 @@ DEFAULT_AGENT_TOKEN_ENV = "REEF_TOKEN"
 # The cloud sandbox the agent runs in: a provider of reef.execution.sandbox.config.REMOTE_EXECUTORS.
 DEFAULT_AGENT_SANDBOX = "e2b"
 # The Designer: the coding agent, or the generator service's one-reply prompt Designer on the same sessions.
-AUTHORS = ("agent", "prompt")
-DEFAULT_AUTHOR = "agent"
-# The coding agent that is the agent author: Reefine's pi, or Claude Code signed in with its owner's OAuth token.
-AUTHOR_HARNESSES = ("pi", CLAUDE_HARNESS)
-DEFAULT_AUTHOR_HARNESS = "pi"
+DESIGNERS = ("agent", "prompt")
+DEFAULT_DESIGNER = "agent"
+# The coding agent that is the agent Designer: Reefine's pi, or Claude Code signed in with its owner's OAuth token.
+DESIGNER_HARNESSES = ("pi", CLAUDE_HARNESS)
+DEFAULT_DESIGNER_HARNESS = "pi"
 CLAUDE_KEYS = ("claude_model", "claude_token_env")
 DEFAULT_CLAUDE_MODEL = "opus"
 DEFAULT_CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -155,6 +169,13 @@ REPOSITORY_TASK_CONFIG: dict[str, dict[str, object]] = {
         "build_timeout_sec": 1200,
     },
 }
+#: The task.toml limits a variant keeps from its parent. A variant is harder or simpler by what it asks, not by more
+#: time or a larger machine, so its pass rate stays comparable with its parent's place in the band.
+PARENT_LIMITS: Mapping[str, tuple[str, ...]] = {
+    "agent": ("timeout_sec",),
+    "verifier": ("timeout_sec",),
+    "environment": ("cpus", "memory_mb", "storage_mb", "gpus"),
+}
 ERROR_CHARS = 3000
 #: A generator may hold several recipes' tasks; this suffix keeps this recipe's names apart from SPADE's
 #: ``harbor-<generation>-<index>``.
@@ -177,9 +198,9 @@ CURSOR_FILE = "cursor.json"
 OPEN_PREFIX = "open-"
 # Where a session that became no task in the band stopped; a task inside the band has no stage.
 STAGE_SOURCE = "source"  # the source holds no session, or its repository or base commit is not there
-STAGE_AUTHORING = "authoring"  # the author made no recorded call, or admission refused its task
-STAGE_OUTAGE = "outage"  # the author could not run; the generation ends here
-STAGE_CREDENTIAL = "credential"  # the author's task held its Claude Code token; the generation ends here
+STAGE_AUTHORING = "authoring"  # the Designer made no recorded call, or admission refused its task
+STAGE_OUTAGE = "outage"  # the Designer could not run; the generation ends here
+STAGE_CREDENTIAL = "credential"  # the Designer's task held its Claude Code token; the generation ends here
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
 STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate refused the task
 STAGE_CALIBRATION = "calibration"  # the solver's calibration rollouts put the task outside the band, or barely vary
@@ -192,11 +213,13 @@ CONFIG_KEYS = frozenset(
         "generator_url",
         "state_dir",
         "sources_path",
-        "author",
-        "author_harness",
+        "seed_tasks_path",
+        "designer",
+        "designer_harness",
         "claude_model",
         "claude_token_env",
         "count",
+        "concurrency",
         "band_low",
         "band_high",
         "max_checks",
@@ -226,31 +249,44 @@ CONFIG_KEYS = frozenset(
 )
 
 
-def admitted_task(reply: str, *, generation: int, index: int, record_id: str, checkout_path: str) -> HarborTask:
-    """A Designer's reply as a Harbor task: the one admission for every author's task and the agent's candidates.
+def with_parent_limits(task: HarborTask, parent: HarborTask) -> HarborTask:
+    """``task`` with ``parent``'s values of :data:`PARENT_LIMITS`; a limit the parent does not set stays as it is."""
+    config = {section: dict(values) for section, values in task.config.items()}
+    for section, keys in PARENT_LIMITS.items():
+        limits = parent.config.get(section, {})
+        for key in keys:
+            if key in limits:
+                config.setdefault(section, {})[key] = limits[key]
+    return replace(task, config=config)
+
+
+def admitted_task(reply: str, *, generation: int, index: int, record_id: str, checkout_path: str | None) -> HarborTask:
+    """A Designer's reply as a Harbor task: the one admission for every Designer's task and the agent's candidates.
 
     The reply goes through the generator service's parser and authoring checks, the rules a prompt Designer's
     reply is held to; a task they refuse raises ``ValueError`` (a
     :class:`~reef.record2sample.generator.designer.DesignerReplyError` from the parser). The Dockerfile gets
     :data:`HISTORY_STEP` for the repository at ``checkout_path`` as its last step. The step runs as root; a final
-    stage that switched to another user switches back after it.
+    stage that switched to another user switches back after it. A task with no repository (a ``checkout_path`` of
+    None: a variant of a seeded parent) gets no step, since its ``cd`` would fail the build.
     """
     harbor_reply = parse_harbor_reply(reply)
-    dockerfile = harbor_reply.environment["Dockerfile"]
-    user = None
-    for line in dockerfile_logical_lines(dockerfile):
-        keyword, _, argument = line.partition(" ")
-        if keyword.upper() == "FROM":
-            user = None
-        elif keyword.upper() == "USER":
-            user = argument.strip()
-    step = HISTORY_STEP.format(path=shlex.quote(checkout_path))
-    if user is not None and user.split(":")[0] not in ("root", "0"):
-        last_steps = f"USER root\n{step}\nUSER {user}"
-    else:
-        last_steps = step
-    environment = {**harbor_reply.environment, "Dockerfile": f"{dockerfile.rstrip()}\n{last_steps}\n"}
-    harbor_reply = replace(harbor_reply, environment=environment)
+    if checkout_path is not None:
+        dockerfile = harbor_reply.environment["Dockerfile"]
+        user = None
+        for line in dockerfile_logical_lines(dockerfile):
+            keyword, _, argument = line.partition(" ")
+            if keyword.upper() == "FROM":
+                user = None
+            elif keyword.upper() == "USER":
+                user = argument.strip()
+        step = HISTORY_STEP.format(path=shlex.quote(checkout_path))
+        if user is not None and user.split(":")[0] not in ("root", "0"):
+            last_steps = f"USER root\n{step}\nUSER {user}"
+        else:
+            last_steps = step
+        environment = {**harbor_reply.environment, "Dockerfile": f"{dockerfile.rstrip()}\n{last_steps}\n"}
+        harbor_reply = replace(harbor_reply, environment=environment)
     generated = GeneratedHarborTask(
         reply=harbor_reply, generation=generation, index=index, source_record_id=record_id, skill=TASK_NAME_SUFFIX
     )
@@ -268,6 +304,8 @@ class GeneratorChecks(CandidateChecks):
 
     With a ``reviewer``, a candidate that passes the oracle check also gets the test review, and the check passes
     only when the review finds nothing. A review that could not run says so and does not fail the check.
+    ``checkout_path`` is the repository's path in the environment, or None for a task with no repository, which
+    admission gives no history step.
     """
 
     def __init__(
@@ -278,7 +316,7 @@ class GeneratorChecks(CandidateChecks):
         generation: int,
         index: int,
         source_record_id: str,
-        checkout_path: str,
+        checkout_path: str | None,
         max_checks: int,
         reviewer: ReviewCheck | None = None,
     ) -> None:
@@ -375,7 +413,7 @@ class GeneratorChecks(CandidateChecks):
 
 
 class ProposalRefused(ValueError):
-    """A session became no task: ``stage`` says where it stopped; ``record_id`` is the author's last recorded call."""
+    """A session became no task: ``stage`` says where it stopped; ``record_id`` is the Designer's last recorded call."""
 
     def __init__(self, reason: str, *, stage: str, record_id: str = "") -> None:
         super().__init__(reason)
@@ -385,14 +423,25 @@ class ProposalRefused(ValueError):
 
 @dataclass(frozen=True)
 class GenerationCursor:
-    """Where the next generation starts: its number, and the walk's position of its first session.
+    """Where the next generation starts: its number, the walk's position of its first session, and its first seed.
 
     The position counts every session taken so far. The walk takes ``sources[position % len(sources)]``, so it
-    cycles through the sources file.
+    cycles through the sources file. ``next_seed`` counts the seed tasks taken so far, in directory-name order, by
+    generations that returned their tasks; a seed is taken once. Each field is a non-negative int.
     """
 
     next_generation: int = 0
     next_position: int = 0
+    next_seed: int = 0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("next_generation", self.next_generation),
+            ("next_position", self.next_position),
+            ("next_seed", self.next_seed),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"a cursor's {name} must be a non-negative int, not {value!r}")
 
 
 @dataclass(frozen=True)
@@ -401,13 +450,18 @@ class SessionProposal:
 
     Values: index is a non-negative integer; source_record_id is non-empty text.
     Position is a non-negative walk index or -1 exactly when parent_task and direction
-    identify a variant. Designer_record_id and refusal are text, empty when unavailable.
+    identify a variant, or seed_task alone identifies a seed; a seed is neither a variant nor a session proposal.
+    A session proposal has no parent_task, direction or seed_task. Seed_task is empty or a Harbor task name, and a
+    proposal with one has a seed id (``seed-`` and 16 hex digits) as its source_record_id. Designer_record_id and
+    refusal are text, empty when unavailable.
     Purpose: generate saves proposals; record_results updates them for the generation report.
-    ``task_name`` is a Harbor name or None, set once the author's task was admitted.
+    ``task_name`` is a Harbor name or None, set once the Designer's task was admitted.
     ``stage`` says where a session that became no task inside the band stopped (``STAGE_*``); it is empty for a task inside the band. ``designer_record_id`` is
-    the author's last recorded call, the one that wrote the task, or empty for an author that Reef records no call
+    the Designer's last recorded call, the one that wrote the task, or empty for a Designer that Reef records no call
     of (Claude Code; its task names the transcript instead). A variant has ``position`` -1, the name of the
     task it varies in ``parent_task`` and ``harder`` or ``simpler`` in ``direction``; both are empty otherwise.
+    A seed has ``position`` -1, its directory name in ``seed_task`` and its seed id in ``source_record_id``, and a
+    variant of a seeded parent names that seed in ``seed_task`` too; ``seed_task`` is empty otherwise.
     """
 
     index: int
@@ -419,6 +473,7 @@ class SessionProposal:
     refusal: str = ""
     parent_task: str = ""
     direction: VariantDirection | Literal[""] = ""
+    seed_task: str = ""
 
     def __post_init__(self) -> None:
         if type(self.index) is not int or self.index < 0 or type(self.position) is not int:
@@ -427,16 +482,32 @@ class SessionProposal:
             raise ValueError("a proposal needs a source_record_id")
         if not all(
             isinstance(value, str)
-            for value in (self.designer_record_id, self.refusal, self.parent_task, self.direction, self.stage)
+            for value in (
+                self.designer_record_id,
+                self.refusal,
+                self.parent_task,
+                self.direction,
+                self.stage,
+                self.seed_task,
+            )
         ):
-            raise ValueError("proposal record, refusal, variant and stage fields must be text")
-        if self.position == VARIANT_POSITION:
+            raise ValueError("proposal record, refusal, variant, seed and stage fields must be text")
+        if self.seed_task and (
+            not TASK_NAME_PATTERN.fullmatch(self.seed_task)
+            or ".." in self.seed_task
+            or not SEED_RECORD_ID.fullmatch(self.source_record_id)
+        ):
+            raise ValueError("a proposal's seed_task must be a task name, and its source_record_id the seed's id")
+        if self.position == VARIANT_POSITION and not self.parent_task and not self.direction:
+            if not self.seed_task:
+                raise ValueError("a proposal at position -1 needs a parent task and a direction, or a seed_task")
+        elif self.position == VARIANT_POSITION:
             if not TASK_NAME_PATTERN.fullmatch(self.parent_task) or ".." in self.parent_task:
                 raise ValueError("a variant proposal needs a parent task name")
             if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
                 raise ValueError("a variant proposal needs direction harder or simpler")
-        elif self.position < 0 or self.parent_task or self.direction:
-            raise ValueError("a session proposal needs a non-negative position and no variant fields")
+        elif self.position < 0 or self.parent_task or self.direction or self.seed_task:
+            raise ValueError("a session proposal needs a non-negative position and no variant or seed fields")
         if self.stage not in (
             "",
             STAGE_SOURCE,
@@ -485,16 +556,34 @@ OPEN_GENERATION = TypeAdapter(OpenGeneration)
 
 
 @dataclass(frozen=True)
+class TaskSlot:
+    """A slot of a generation whose task the Designer writes.
+
+    Values: ``proposal`` is the slot's proposal; ``source`` is the session the Designer reads, or None for a
+    variant of a seeded parent; ``variant`` is the parent it varies, or None for a task from a session.
+    Purpose: ``generate`` plans its slots, starts writing their tasks, and takes the tasks in slot order.
+    """
+
+    proposal: SessionProposal
+    source: SessionSource | None
+    variant: TaskVariant | None = None
+
+
+@dataclass(frozen=True)
 class ParentTask:
     """A training task retained for an adaptive generation to vary.
 
-    Values: ``name`` is the task's name (a Harbor task name) and ``source_record_id`` its session's record id.
+    Values: ``name`` is the task's name (a Harbor task name) and ``source_record_id`` its session's record id, or
+    for a task from a seed the seed's id (``seed-`` and 16 hex digits).
     ``source_record_id`` must be non-empty. ``generation`` is a non-negative integer;
     ``rollouts`` is a positive integer. Neither accepts bool. ``pass_rate`` is a non-boolean
     number in [0, 1], representing the mean rollout reward. ``direction`` is harder or simpler.
-    ``varied`` is a bool, true once a generation gave this parent a variant slot.
+    ``varied`` is a bool, true once a generation gave this parent a variant slot. ``seed_task`` is the Harbor task
+    name (the directory name) of the seed the task comes from, the seed itself or a variant of it; a parent with one
+    has the seed's id as its ``source_record_id``. It is empty for a task from a session.
     Purpose: ``record_results`` adds one per training task outside the band and keeps the task's files under
-    ``parents/<name>``; ``generate`` picks the newest unvaried parents for its variant slots.
+    ``parents/<name>``; ``generate`` picks the newest unvaried parents for its variant slots, and varies a parent
+    with a ``seed_task`` without a session.
     """
 
     name: str
@@ -504,6 +593,7 @@ class ParentTask:
     rollouts: int
     direction: VariantDirection
     varied: bool = False
+    seed_task: str = ""
 
     def __post_init__(self) -> None:
         # The name names the parent's directory, which a bounded list removes.
@@ -513,6 +603,15 @@ class ParentTask:
             raise ValueError(f"a parent's direction must be {VARIANT_HARDER} or {VARIANT_SIMPLER}")
         if not isinstance(self.source_record_id, str) or not self.source_record_id.strip():
             raise ValueError("a parent needs a non-empty source_record_id")
+        if not isinstance(self.seed_task, str) or (
+            self.seed_task
+            and (
+                not TASK_NAME_PATTERN.fullmatch(self.seed_task)
+                or ".." in self.seed_task
+                or not SEED_RECORD_ID.fullmatch(self.source_record_id)
+            )
+        ):
+            raise ValueError("a parent's seed_task must be empty or a task name, with the seed's id as its source")
         if type(self.varied) is not bool:
             raise ValueError("a parent's varied flag must be a bool")
         if (
@@ -571,36 +670,65 @@ def band_bound(value: object, label: str) -> float | None:
     return float(value)
 
 
-def task_author(
-    config: Mapping[str, Any], environ: Mapping[str, str], *, scenario: str, cache_dir: Path
-) -> TaskAuthor:
-    """The author the config names, its model calls recorded under ``scenario``: the coding agent, or with
-    ``author: prompt`` the one-reply prompt Designer on the agent's model settings.
+def seed_tasks(root: Path) -> tuple[HarborTask, ...]:
+    """The seed tasks in ``root``, in directory-name order: every directory in it that reef wrote as a Harbor task.
 
-    The agent is pi, or Claude Code with ``author_harness: claude-code`` (:func:`claude_code_author`). It runs in
+    A directory whose name starts with a dot (the task writer's staging directory) and a file (the converter's
+    ``conversion.json``) are no seeds. Raises ``ValueError`` when ``root`` is not a directory or holds no seed, and
+    names the first seed that cannot be read: a seed must carry reef's ``[metadata.reef]`` table and match its digest.
+    """
+    if not root.is_dir():
+        raise ValueError(f"seed_tasks_path {root} is not a directory")
+    seeds = []
+    for path in sorted(root.iterdir()):
+        if path.name.startswith(".") or not path.is_dir():
+            continue
+        try:
+            seeds.append(read_harbor_task(path))
+        except HarborTaskError as exc:
+            raise ValueError(f"the seed task {path.name} cannot be read: {exc}") from exc
+    if not seeds:
+        raise ValueError(f"seed_tasks_path {root} holds no seed task")
+    return tuple(seeds)
+
+
+def seed_record_id(seed: HarborTask) -> str:
+    """A seed's one source record id: no record names it, and it makes each seed a split group of its own."""
+    return f"{SEED_ID_PREFIX}{seed.digest[:SEED_ID_DIGITS]}"
+
+
+def task_designer(
+    config: Mapping[str, Any], environ: Mapping[str, str], *, scenario: str, cache_dir: Path
+) -> TaskDesigner:
+    """The Designer the config names, its model calls recorded under ``scenario``: the coding agent, or with
+    ``designer: prompt`` the one-reply prompt Designer on the agent's model settings.
+
+    The agent is pi, or Claude Code with ``designer_harness: claude-code`` (:func:`claude_code_designer`). It runs in
     the cloud sandbox ``agent_sandbox`` names (``e2b`` by default, or ``modal``), with that provider's options from
     ``agent_sandbox_options``. Credentials come from ``environ``: the Reef token from the variable
     ``agent_token_env`` names, and the sandbox provider's own (``E2B_API_KEY``, or Modal's token).
     """
-    kind = config.get("author", DEFAULT_AUTHOR)
-    if kind not in AUTHORS:
-        raise ValueError(f"author must be one of {AUTHORS}")
-    harness = config.get("author_harness", DEFAULT_AUTHOR_HARNESS)
-    if harness not in AUTHOR_HARNESSES:
-        raise ValueError(f"author_harness must be one of {AUTHOR_HARNESSES}")
+    kind = config.get("designer", DEFAULT_DESIGNER)
+    if kind not in DESIGNERS:
+        raise ValueError(f"designer must be one of {DESIGNERS}")
+    harness = config.get("designer_harness", DEFAULT_DESIGNER_HARNESS)
+    if harness not in DESIGNER_HARNESSES:
+        raise ValueError(f"designer_harness must be one of {DESIGNER_HARNESSES}")
     if harness != CLAUDE_HARNESS and any(key in config for key in CLAUDE_KEYS):
-        raise ValueError(f"{' and '.join(CLAUDE_KEYS)} need author_harness: {CLAUDE_HARNESS}")
+        raise ValueError(f"{' and '.join(CLAUDE_KEYS)} need designer_harness: {CLAUDE_HARNESS}")
     if harness == CLAUDE_HARNESS and kind == "prompt":
-        raise ValueError(f"author_harness: {CLAUDE_HARNESS} needs author: agent")
+        raise ValueError(f"designer_harness: {CLAUDE_HARNESS} needs designer: agent")
     model = str(config.get("agent_model", "") or "")
     reef_url = str(config.get("agent_reef_url", "") or "")
     if not model or not reef_url or "${" in reef_url:
-        raise ValueError("the author needs agent_model and agent_reef_url: the Designer's model and the Reef it calls")
+        raise ValueError(
+            "the Designer needs agent_model and agent_reef_url: the Designer's model and the Reef it calls"
+        )
     api = str(config.get("agent_api", DEFAULT_AGENT_API))
     token = environ.get(str(config.get("agent_token_env", DEFAULT_AGENT_TOKEN_ENV))) or None
     has_behaviour_rule = bool(config.get("behaviour_rule", True))
     if kind == "prompt":
-        return PromptAuthor(
+        return PromptDesigner(
             reef_url=reef_url,
             token=token,
             scenario=scenario,
@@ -619,7 +747,7 @@ def task_author(
     if timeout_seconds <= 0 or max_model_calls < 1:
         raise ValueError("agent_timeout_seconds and max_model_calls must be positive")
     if harness == CLAUDE_HARNESS:
-        return claude_code_author(
+        return claude_code_designer(
             config,
             environ,
             reef_url=reef_url,
@@ -630,7 +758,7 @@ def task_author(
             max_turns=max_model_calls,
             has_behaviour_rule=has_behaviour_rule,
         )
-    return AgentAuthor(
+    return AgentDesigner(
         reef_url=reef_url,
         token=token,
         scenario=scenario,
@@ -644,7 +772,7 @@ def task_author(
     )
 
 
-def claude_code_author(
+def claude_code_designer(
     config: Mapping[str, object],
     environ: Mapping[str, str],
     *,
@@ -655,8 +783,8 @@ def claude_code_author(
     timeout_seconds: float,
     max_turns: int,
     has_behaviour_rule: bool,
-) -> ClaudeCodeAuthor:
-    """Claude Code as the agent author, on ``claude_model``, signed in with the OAuth token in the variable
+) -> ClaudeCodeDesigner:
+    """Claude Code as the agent Designer, on ``claude_model``, signed in with the OAuth token in the variable
     ``claude_token_env`` names.
 
     Raises ``ValueError`` when that variable is unset or empty, or holds no Claude Code OAuth token, and when the
@@ -669,7 +797,7 @@ def claude_code_author(
         raise ValueError("claude_token_env must name an environment variable")
     claude_token = environ.get(token_env, "").strip()
     if not claude_token:
-        raise ValueError(f"author_harness: {CLAUDE_HARNESS} needs a Claude Code OAuth token in {token_env}")
+        raise ValueError(f"designer_harness: {CLAUDE_HARNESS} needs a Claude Code OAuth token in {token_env}")
     if not claude_token.startswith(TOKEN_PREFIX):
         raise ValueError(
             f"{token_env} must hold a Claude Code OAuth token, which starts with {TOKEN_PREFIX} "
@@ -684,7 +812,7 @@ def claude_code_author(
                 f"agent_sandbox_options.env_from must not forward {name} to Claude Code: it would win over the "
                 f"run's own setup or carry the token, which comes from {token_env} alone"
             )
-    return ClaudeCodeAuthor(
+    return ClaudeCodeDesigner(
         reef_url=reef_url,
         token=token,
         claude_token=claude_token,
@@ -698,9 +826,9 @@ def claude_code_author(
 
 
 def review_check(config: Mapping[str, Any], environ: Mapping[str, str], *, scenario: str) -> ReviewCheck | None:
-    """The test review the config's ``review`` mode asks for, on the author's Reef and dialect; none when off.
+    """The test review the config's ``review`` mode asks for, on the Designer's Reef and dialect; none when off.
 
-    The model is ``review_model``, else ``agent_model``. :func:`task_author` checked the shared settings.
+    The model is ``review_model``, else ``agent_model``. :func:`task_designer` checked the shared settings.
     """
     mode = check_mode(config.get("review", DEFAULT_REVIEW), "review")
     if mode == "off":
@@ -789,7 +917,7 @@ def contamination_check(config: Mapping[str, object]) -> ContaminationCheck | No
 
 
 class AutoEnvScalingGenerator(TaskGenerator):
-    """Recorded sessions rebuilt as Harbor tasks by the author, checked through the generator service, and banded
+    """Recorded sessions rebuilt as Harbor tasks by the Designer, checked through the generator service, and banded
     by the solver's pass rate.
 
     ``task_checks`` run in ``validate`` after Harbor's oracle and nop check, in order. The first refusing check
@@ -797,7 +925,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
     also reviews the tests. A review that only measures records its result in ``validate`` and nowhere else. A
     refusing calibration that finds the task outside the band gives it the stage ``calibration``.
 
-    Values: ``count`` and ``max_checks`` are positive. ``band`` is a PassRateBand, also used by
+    Values: ``count``, ``max_checks`` and ``concurrency`` are positive. ``band`` is a PassRateBand, also used by
     ``calibration`` when present. Checks run in order: oracle, task_checks, then calibration.
     ``calibration`` is a CalibrationCheck or None. ``cursor`` is the cursor
     saved under ``state_dir``, and ``generation`` is the generation that ``generate`` makes now. ``is_adaptive``
@@ -805,7 +933,11 @@ class AutoEnvScalingGenerator(TaskGenerator):
     ``variant_share`` of ``count`` rounded down after adding a 1e-9 slot tolerance.
     It is at least 1 when ``is_adaptive``. ``parents`` are the :class:`ParentTask` entries
     saved in ``adaptive.json``, in insertion order, with unique names and at most
-    MAX_PARENTS entries; empty unless ``is_adaptive``.
+    MAX_PARENTS entries; empty unless ``is_adaptive``. ``seeds`` are the seed
+    tasks in directory-name order, empty unless ``is_adaptive``; ``sources`` and ``seeds`` are not both empty.
+    ``seed_designer`` is ``designer`` when it is a :class:`SeedVariantDesigner`, or None; it is set when there are seeds
+    or a parent has a ``seed_task``. ``seed_checks`` is the :class:`SeedCheck`, then the contamination checks among
+    the given checks: the checks a seed runs.
     Purpose: the generated-task recipe builds it with ``from_config`` and calls ``generate``, ``validate`` and
     ``record_results`` in each round.
     """
@@ -815,7 +947,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         *,
         scenario: str,
         service: Generator,
-        author: TaskAuthor,
+        designer: TaskDesigner,
         sources: tuple[SessionSource, ...],
         state_dir: Path,
         count: int = DEFAULT_COUNT,
@@ -825,9 +957,17 @@ class AutoEnvScalingGenerator(TaskGenerator):
         task_checks: tuple[TaskCheck, ...] = (),
         is_adaptive: bool = False,
         variant_share: float = DEFAULT_VARIANT_SHARE,
+        seeds: tuple[HarborTask, ...] = (),
+        concurrency: int = DEFAULT_CONCURRENCY,
     ) -> None:
         if count < 1 or max_checks < 1:
             raise ValueError("count and max_checks must be positive")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise ValueError("concurrency must be a positive integer")
+        if seeds and not is_adaptive:
+            raise ValueError("seed tasks need adaptive: true")
+        if not sources and not seeds:
+            raise ValueError("the generator needs sessions in its sources file or seed tasks")
         if not 0 < variant_share <= 1:
             raise ValueError("variant_share must be in (0, 1]")
         # The tolerance keeps a share such as 0.29 of 100 slots at 29, not 28.
@@ -838,18 +978,28 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise ValueError("calibration and training must use the same pass-rate band")
         self.scenario = scenario
         self.service = service
-        self.author = author
-        if is_adaptive and not isinstance(author, VariantAuthor):
-            raise ValueError("adaptive generation needs a VariantAuthor")
-        self.variant_author = author if isinstance(author, VariantAuthor) else None
+        self.designer = designer
+        if is_adaptive and not isinstance(designer, VariantDesigner):
+            raise ValueError("adaptive generation needs a VariantDesigner")
+        self.variant_designer = designer if isinstance(designer, VariantDesigner) else None
+        if seeds and not isinstance(designer, SeedVariantDesigner):
+            raise ValueError("seed tasks need a SeedVariantDesigner")
+        self.seed_designer = designer if isinstance(designer, SeedVariantDesigner) else None
         self.sources = sources
         self.state_dir = state_dir
         self.count = count
+        self.concurrency = concurrency
         self.band = band
         self.max_checks = max_checks
         self.task_checks: tuple[TaskCheck, ...] = (OracleCheck(service), *task_checks)
         if calibration is not None:
             self.task_checks = (*self.task_checks, calibration)
+        self.seeds = seeds
+        # A seed has no reference solution and no session: its seed check, then the contamination check.
+        self.seed_checks: tuple[TaskCheck, ...] = (
+            SeedCheck(service),
+            *(check for check in task_checks if isinstance(check, ContaminationCheck)),
+        )
         # Only a refusing review may fail the agent's own check.
         self.tool_reviewer = next(
             (check for check in task_checks if isinstance(check, ReviewCheck) and check.is_refusing), None
@@ -874,6 +1024,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         )
         if len(self.parents) > MAX_PARENTS or len({parent.name for parent in self.parents}) != len(self.parents):
             raise ValueError(f"adaptive.json must hold at most {MAX_PARENTS} parents with unique names")
+        if self.seed_designer is None and any(parent.seed_task for parent in self.parents):
+            raise ValueError("adaptive.json holds seeded parents, which need a SeedVariantDesigner")
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
@@ -888,22 +1040,29 @@ class AutoEnvScalingGenerator(TaskGenerator):
             )
         state_dir = str(config.get("state_dir", "") or "")
         sources_path = str(config.get("sources_path", "") or "")
-        if not state_dir or not sources_path:
-            raise PluginConfigError("AutoEnvScalingGenerator needs a state_dir and a sources_path")
+        seed_tasks_path = config.get("seed_tasks_path")
+        if seed_tasks_path is not None and not (isinstance(seed_tasks_path, str) and seed_tasks_path.strip()):
+            raise PluginConfigError("AutoEnvScalingGenerator seed_tasks_path must be a directory path or null")
+        if not state_dir or not (sources_path or seed_tasks_path):
+            raise PluginConfigError(
+                "AutoEnvScalingGenerator needs a state_dir and a sources_path or a seed_tasks_path"
+            )
         is_adaptive = config.get("adaptive", False)
         if not isinstance(is_adaptive, bool):
             raise PluginConfigError("adaptive must be true or false")
         variant_share = config.get("variant_share", DEFAULT_VARIANT_SHARE)
         if isinstance(variant_share, bool) or not isinstance(variant_share, (int, float)):
             raise PluginConfigError("variant_share must be in (0, 1]")
-        if is_adaptive is True and config.get("author", DEFAULT_AUTHOR) != "agent":
-            raise PluginConfigError("AutoEnvScalingGenerator adaptive generation needs author: agent")
+        if is_adaptive is True and config.get("designer", DEFAULT_DESIGNER) != "agent":
+            raise PluginConfigError("AutoEnvScalingGenerator adaptive generation needs designer: agent")
         if "variant_share" in config and is_adaptive is not True:
             raise PluginConfigError("AutoEnvScalingGenerator variant_share needs adaptive: true")
+        if seed_tasks_path is not None and is_adaptive is not True:
+            raise PluginConfigError("AutoEnvScalingGenerator seed_tasks_path needs adaptive: true")
         # Each scenario keeps its own cursor, reports, runs and repository snapshots.
         scenario_dir = Path(state_dir) / scenario
         try:
-            author = task_author(config, environ, scenario=scenario, cache_dir=scenario_dir / "repositories")
+            designer = task_designer(config, environ, scenario=scenario, cache_dir=scenario_dir / "repositories")
             service = HttpGenerator(generator_url)
             band_low = band_bound(config.get("band_low", DEFAULT_BAND_LOW), "band_low")
             band_high = band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high")
@@ -916,8 +1075,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
             return cls(
                 scenario=scenario,
                 service=service,
-                author=author,
-                sources=load_sources(Path(sources_path)),
+                designer=designer,
+                sources=load_sources(Path(sources_path)) if sources_path else (),
                 state_dir=scenario_dir,
                 count=int(config.get("count", DEFAULT_COUNT)),
                 band=band,
@@ -926,16 +1085,22 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 task_checks=tuple(check for check in (contamination, review) if check is not None),
                 is_adaptive=is_adaptive,
                 variant_share=variant_share,
+                seeds=seed_tasks(Path(seed_tasks_path).expanduser()) if seed_tasks_path is not None else (),
+                concurrency=config.get("concurrency", DEFAULT_CONCURRENCY),
             )
         except (OSError, ValueError, SandboxUnavailable) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
 
     def save_cursor(self, cursor: GenerationCursor) -> None:
-        """Keep ``cursor`` in the state directory, replacing the file whole."""
+        """Keep ``cursor`` in the state directory, replacing the file whole; without seeds, and none taken, the file
+        holds no ``next_seed``."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self.state_dir / CURSOR_FILE
         partial = path.with_name(f"{CURSOR_FILE}.partial")
-        partial.write_text(json.dumps(asdict(cursor)) + "\n", encoding="utf-8")
+        document = asdict(cursor)
+        if not self.seeds and cursor.next_seed == 0:
+            document.pop("next_seed")
+        partial.write_text(json.dumps(document) + "\n", encoding="utf-8")
         os.replace(partial, path)
         self.cursor = cursor
 
@@ -947,21 +1112,26 @@ class AutoEnvScalingGenerator(TaskGenerator):
         partial.write_bytes(PARENTS.dump_json(self.parents))
         os.replace(partial, path)
 
-    def variants(self) -> list[tuple[ParentTask, SessionSource]]:
+    def variants(self) -> list[tuple[ParentTask, SessionSource | None]]:
         """The parents this generation varies, newest first, with their sessions; none unless adaptive.
 
         At most ``variant_slots``; a parent whose session left the sources file, or whose files are gone, is
-        skipped. They still occupy parent capacity until dropped as the oldest entries.
+        skipped. They still occupy parent capacity until dropped as the oldest entries. A seeded parent has no
+        session: it comes with None.
         """
         if not self.is_adaptive:
             return []
         sessions = {source.record_id: source for source in self.sources}
-        chosen: list[tuple[ParentTask, SessionSource]] = []
+        chosen: list[tuple[ParentTask, SessionSource | None]] = []
         for parent in sorted(self.parents, key=lambda parent: (-parent.generation, parent.name)):
             if len(chosen) >= self.variant_slots:
                 break
-            source = sessions.get(parent.source_record_id)
-            if parent.varied or source is None or not (self.state_dir / PARENTS_DIR / parent.name).is_dir():
+            source = None if parent.seed_task else sessions.get(parent.source_record_id)
+            if (
+                parent.varied
+                or (source is None and not parent.seed_task)
+                or not (self.state_dir / PARENTS_DIR / parent.name).is_dir()
+            ):
                 continue
             chosen.append((parent, source))
         return chosen
@@ -970,7 +1140,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """One generation: the next ``count`` sessions, each rebuilt and admitted; an outage ends it with what ran.
 
         The sources file says what the tasks are, so the request's description goes unused. A request that
-        carries source records is refused: this generator chooses its own sessions.
+        carries source records is refused: this generator chooses its own sessions. The slots go to variants first,
+        then to the seeds not taken yet (:meth:`seed_slot`), then to sessions; without sessions, the generation ends
+        when its variants and seeds run out. Up to ``concurrency`` tasks are written at once, started in slot order
+        (:meth:`slot_task`); the slots are still taken in order.
+
+        Raises :class:`DesignerOutage` when an outage leaves the generation with no task, after its report is saved:
+        the recipe tries the generation again, and a round whose generation runs out of attempts is not complete,
+        so a restart gives it back. An empty generation that ends would count as a complete round.
         """
         self.generation = self.cursor.next_generation
         # A generation number is used once, so no attempt meets the task names of an attempt a reload cancelled.
@@ -983,56 +1160,160 @@ class AutoEnvScalingGenerator(TaskGenerator):
         pending: dict[str, SessionProposal] = {}
         error = ""
         tasks: list[HarborTask] = []
+        slots = self.slots()
+        gate = asyncio.Semaphore(self.concurrency)
+        stopped = asyncio.Event()
+        writing = {
+            index: asyncio.ensure_future(self.slot_task(slot, gate, stopped))
+            for index, slot in enumerate(slots)
+            if isinstance(slot, TaskSlot)
+        }
+        next_seed = self.cursor.next_seed
+        ended_on_outage = False
+        try:
+            for index, slot in enumerate(slots):
+                if not isinstance(slot, TaskSlot):
+                    seeded, seed_proposal = self.seed_slot(slot, index)
+                    pending[seeded.name] = seed_proposal
+                    tasks.append(seeded)
+                    next_seed += 1
+                    continue
+                proposal = slot.proposal
+                is_outage = False
+                try:
+                    task = await writing[index]
+                except ProposalRefused as exc:
+                    refused.append(
+                        replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc))
+                    )
+                except DesignerOutage as exc:
+                    # An outage must not pass for the Designer's failure: it ends the generation, and the report names
+                    # it. So does a task that held the token, which may have left the sandbox.
+                    error = f"the Designer could not rebuild {proposal.source_record_id}: {exc}"
+                    is_outage = not isinstance(exc, CredentialHeld)
+                    ended_on_outage = is_outage
+                    stage = STAGE_OUTAGE if is_outage else STAGE_CREDENTIAL
+                    refused.append(replace(proposal, stage=stage, refusal=error))
+                else:
+                    pending[task.name] = replace(
+                        proposal,
+                        designer_record_id=str(task.metadata.get("designer_record_id", "")),
+                        task_name=task.name,
+                    )
+                    tasks.append(task)
+                # The session is taken; a restart continues with the next one. So is the parent, unless its Designer's
+                # run was cancelled or ended on an outage, neither of them the variant's failure: the parent keeps its
+                # slot for the next generation. Otherwise each parent gets one variant slot, whatever becomes of the
+                # variant.
+                if slot.variant is None:
+                    self.save_cursor(replace(self.cursor, next_position=proposal.position + 1))
+                elif not is_outage:
+                    parent_name = slot.variant.parent
+                    self.parents = [
+                        replace(kept, varied=kept.varied or kept.name == parent_name) for kept in self.parents
+                    ]
+                    self.save_parents()
+                if error:
+                    logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
+                    break
+        finally:
+            # The slots still being written after an outage, or in a cancelled generation, stop and take nothing.
+            for running in writing.values():
+                running.cancel()
+            await asyncio.gather(*writing.values(), return_exceptions=True)
+        self.save_open(request.generation, OpenGeneration(self.generation, tuple(refused), pending, error))
+        # The seeds are taken once the open generation holds them, so a restart continues with the next one. An
+        # attempt that raised or was cancelled returned no task, so it takes no seed: the retry uses them again.
+        if next_seed != self.cursor.next_seed:
+            self.save_cursor(replace(self.cursor, next_seed=next_seed))
+        if ended_on_outage and not tasks:
+            raise DesignerOutage(error)
+        return tuple(tasks)
+
+    def slots(self) -> list[TaskSlot | HarborTask]:
+        """The generation's slots in order: the variants, then the seeds not taken yet, then sessions from the walk.
+
+        A seed is the seed task itself, which no Designer writes. Sessions take the walk positions from the cursor's
+        on, so the slots of a generation that is taken in order take them in order.
+        """
+        slots: list[TaskSlot | HarborTask] = []
         variants = self.variants()
+        next_seed = self.cursor.next_seed
+        position = self.cursor.next_position
         for index in range(self.count):
-            variant: TaskVariant | None = None
             if index < len(variants):
                 parent, source = variants[index]
-                position = VARIANT_POSITION
                 variant = TaskVariant(
                     parent=parent.name,
                     parent_dir=self.state_dir / PARENTS_DIR / parent.name,
                     direction=parent.direction,
                     pass_rate=parent.pass_rate,
                     rollouts=parent.rollouts,
+                    seed_task=parent.seed_task,
                 )
                 proposal = SessionProposal(
-                    index, position, source.record_id, parent_task=parent.name, direction=parent.direction
+                    index,
+                    VARIANT_POSITION,
+                    parent.source_record_id,
+                    parent_task=parent.name,
+                    direction=parent.direction,
+                    seed_task=parent.seed_task,
                 )
-            else:
-                position = self.cursor.next_position
+                slots.append(TaskSlot(proposal, source, variant))
+            elif next_seed < len(self.seeds):
+                slots.append(self.seeds[next_seed])
+                next_seed += 1
+            elif self.sources:
                 source = self.sources[position % len(self.sources)]
-                proposal = SessionProposal(index, position, source.record_id)
-            try:
-                task = await self.rebuilt(source, index, variant=variant)
-            except ProposalRefused as exc:
-                refused.append(replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc)))
-            except AuthorError as exc:
-                # An outage must not pass for the author's failure: it ends the generation, and the report names it.
-                # So does a task that held the token, which may have left the sandbox.
-                error = f"the author could not rebuild {source.record_id}: {exc}"
-                stage = STAGE_CREDENTIAL if isinstance(exc, CredentialHeld) else STAGE_OUTAGE
-                refused.append(replace(proposal, stage=stage, refusal=error))
+                slots.append(TaskSlot(SessionProposal(index, position, source.record_id), source))
+                position += 1
             else:
-                pending[task.name] = replace(
-                    proposal, designer_record_id=str(task.metadata.get("designer_record_id", "")), task_name=task.name
-                )
-                tasks.append(task)
-            # The session or the parent is taken; a restart continues with the next one. A cancelled run takes
-            # none, so a parent whose variant was cancelled keeps its slot. Otherwise each parent gets one variant
-            # slot, whatever becomes of the variant.
-            if variant is None:
-                self.save_cursor(replace(self.cursor, next_position=position + 1))
-            else:
-                self.parents = [
-                    replace(kept, varied=kept.varied or kept.name == variant.parent) for kept in self.parents
-                ]
-                self.save_parents()
-            if error:
-                logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
+                # Without sessions, the generation ends when its variants and seeds run out.
                 break
-        self.save_open(request.generation, OpenGeneration(self.generation, tuple(refused), pending, error))
-        return tuple(tasks)
+        return slots
+
+    async def slot_task(self, slot: TaskSlot, gate: asyncio.Semaphore, stopped: asyncio.Event) -> HarborTask:
+        """The task of ``slot`` (:meth:`rebuilt`), once ``gate`` lets its writing start.
+
+        The gate lets the slots start in order. An outage or a cancellation sets ``stopped`` before the gate lets
+        the next slot in, so no slot starts after it: the slots after it end with :class:`DesignerOutage`, and
+        ``generate`` takes none of them.
+        """
+        async with gate:
+            if stopped.is_set():
+                raise DesignerOutage("the generation stopped before this slot started")
+            try:
+                return await self.rebuilt(
+                    slot.source,
+                    slot.proposal.index,
+                    variant=slot.variant,
+                    source_record_id=slot.proposal.source_record_id,
+                )
+            except (DesignerOutage, asyncio.CancelledError):
+                stopped.set()
+                raise
+
+    def seed_slot(self, seed: HarborTask, index: int) -> tuple[HarborTask, SessionProposal]:
+        """A seed in slot ``index``: the seed as it is, under the generation's task name, and its proposal.
+
+        No Designer runs. The task's source records are the seed's own, such as the session of a task from an earlier
+        run, then the seed's id (:func:`seed_record_id`), so the seed shares a split with each task of that session
+        and with its own variants. Its metadata names the seed's directory in ``seed_task`` and drops the
+        ``parent_task`` and ``variant`` of a seed that was a variant in an earlier run: they name that run's tasks.
+        ``validate`` runs the seed checks on it.
+        """
+        record_id = seed_record_id(seed)
+        metadata = {key: value for key, value in seed.metadata.items() if key not in ("parent_task", "variant")}
+        task = replace(
+            seed,
+            name=f"harbor-{self.generation:05d}-{index:03d}-{TASK_NAME_SUFFIX}",
+            metadata={**metadata, "seed_task": seed.name},
+            source_agent_record_ids=(
+                *(source for source in seed.source_agent_record_ids if source != record_id),
+                record_id,
+            ),
+        )
+        return task, SessionProposal(index, VARIANT_POSITION, record_id, task_name=task.name, seed_task=seed.name)
 
     def open_path(self, generation: int) -> Path:
         return self.state_dir / f"{OPEN_PREFIX}{generation:05d}.json"
@@ -1065,22 +1346,36 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 )
                 return
 
-    async def rebuilt(self, source: SessionSource, index: int, *, variant: TaskVariant | None = None) -> HarborTask:
-        """The author's task from one session, or a variant of a parent from it, admitted; its sources are the
-        author's last recorded call and the session, so a variant shares its parent's split. An author with no
+    async def rebuilt(
+        self,
+        source: SessionSource | None,
+        index: int,
+        *,
+        variant: TaskVariant | None = None,
+        source_record_id: str = "",
+    ) -> HarborTask:
+        """The Designer's task from one session, or a variant of a parent from it, admitted; its sources are the
+        Designer's last recorded call and the session, so a variant shares its parent's split. A Designer with no
         recorded call but a transcript (Claude Code) gives a task whose one source is the session, and whose
         metadata names the transcript under the state directory.
 
-        Raises :class:`ProposalRefused` when the session becomes no task, and ``AuthorError`` when the author
-        could not run.
+        A ``source`` of None is a ``variant`` of a seeded parent: ``source_record_id``, the seed's id, takes the
+        session's place among the sources, and the task has no repository and so no history step. Its metadata
+        names the seed in ``seed_task``, as each variant of a seeded parent does.
+
+        Raises ``ValueError`` for a None ``source`` without a ``variant`` and a ``source_record_id``,
+        :class:`ProposalRefused` when the session becomes no task, and ``DesignerOutage`` when the Designer could not run.
         """
+        if source is None and (variant is None or not source_record_id):
+            raise ValueError("a task without a session is a variant of a seeded parent, with the seed's id")
+        record_source = source_record_id if source is None else source.record_id
         checks = GeneratorChecks(
             self.service,
             asyncio.get_running_loop(),
             generation=self.generation,
             index=index,
-            source_record_id=source.record_id,
-            checkout_path=source.repository.path,
+            source_record_id=record_source,
+            checkout_path=None if source is None else source.repository.path,
             max_checks=self.max_checks,
             reviewer=self.tool_reviewer,
         )
@@ -1088,53 +1383,64 @@ class AutoEnvScalingGenerator(TaskGenerator):
         work_dir = self.state_dir / "runs" / f"{self.generation:05d}-{index:03d}"
         stop = threading.Event()
         try:
-            if variant is None:
-                authored = await asyncio.to_thread(self.author.author, source, work_dir, checks, tags=tags, stop=stop)
+            if source is None:
+                # The check above gave a task without a session a variant.
+                if self.seed_designer is None or variant is None:
+                    raise ValueError("a variant of a seeded parent needs a SeedVariantDesigner")
+                designed = await asyncio.to_thread(
+                    self.seed_designer.vary_seed, work_dir, checks, tags=tags, stop=stop, variant=variant
+                )
+            elif variant is None:
+                designed = await asyncio.to_thread(
+                    self.designer.design, source, work_dir, checks, tags=tags, stop=stop
+                )
             else:
-                if self.variant_author is None:
-                    raise ValueError("adaptive generation needs a VariantAuthor")
-                authored = await asyncio.to_thread(
-                    self.variant_author.vary, source, work_dir, checks, tags=tags, stop=stop, variant=variant
+                if self.variant_designer is None:
+                    raise ValueError("adaptive generation needs a VariantDesigner")
+                designed = await asyncio.to_thread(
+                    self.variant_designer.vary, source, work_dir, checks, tags=tags, stop=stop, variant=variant
                 )
         except asyncio.CancelledError:
             # The thread outlives the cancelled await; the stop signal ends the agent's run in it.
             stop.set()
             raise
         except SourceError as exc:
-            raise ProposalRefused(
-                f"the source {source.record_id} cannot be rebuilt: {exc}", stage=STAGE_SOURCE
-            ) from exc
+            raise ProposalRefused(f"the source {record_source} cannot be rebuilt: {exc}", stage=STAGE_SOURCE) from exc
         finally:
             # A check the agent left running finishes, and deletes its candidate, before the task is written.
             await asyncio.to_thread(checks.close)
-        if not authored.record_ids and not authored.transcript:
+        if not designed.record_ids and not designed.transcript:
             raise ProposalRefused("the Designer made no model call that Reef recorded", stage=STAGE_AUTHORING)
-        record_id = authored.record_ids[-1] if authored.record_ids else ""
+        record_id = designed.record_ids[-1] if designed.record_ids else ""
         try:
             task = admitted_task(
-                authored.reply,
+                designed.reply,
                 generation=self.generation,
                 index=index,
-                record_id=record_id or source.record_id,
-                checkout_path=source.repository.path,
+                record_id=record_id or record_source,
+                checkout_path=checks.checkout_path,
             )
         except (ValueError, HarborTaskError) as exc:
             raise ProposalRefused(
                 f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
             ) from exc
+        if variant is not None:
+            task = with_parent_limits(task, read_harbor_task(variant.parent_dir))
         lineage = {} if variant is None else {"parent_task": variant.parent, "variant": variant.direction}
+        if variant is not None and variant.seed_task:
+            lineage["seed_task"] = variant.seed_task
         if record_id:
             return replace(
                 task,
-                source_agent_record_ids=(record_id, source.record_id),
+                source_agent_record_ids=(record_id, record_source),
                 metadata={**task.metadata, "designer_record_id": record_id, **lineage},
             )
         designer = {
-            "designer_transcript": f"runs/{work_dir.name}/{authored.transcript}",
+            "designer_transcript": f"runs/{work_dir.name}/{designed.transcript}",
             "designer_harness": CLAUDE_HARNESS,
         }
         return replace(
-            task, source_agent_record_ids=(source.record_id,), metadata={**task.metadata, **designer, **lineage}
+            task, source_agent_record_ids=(record_source,), metadata={**task.metadata, **designer, **lineage}
         )
 
     async def validate(self, task: HarborTask) -> TaskValidationResult:
@@ -1142,7 +1448,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
         A refusing check that finds a defect, or cannot run, makes the task invalid, and the report keeps the two
         apart. An oracle check that cannot run raises: the generator service is not usable for the round. So does
-        a refusing calibration whose rollout request the generator service fails.
+        a refusing calibration whose rollout request the generator service fails. A seed (a task that names a
+        ``seed_task`` and no ``parent_task``) runs ``seed_checks`` in place of ``task_checks``: no review and no
+        calibration, which would keep out the seeds outside the band, the parents of the variants.
         """
         try:
             written = await self.service.write_task(task)
@@ -1152,8 +1460,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
         results: list[CheckResult] = []
         errors: tuple[str, ...] = ()
         stage = ""
+        is_seed = "seed_task" in task.metadata and "parent_task" not in task.metadata
         try:
-            for check in self.task_checks:
+            for check in self.seed_checks if is_seed else self.task_checks:
                 result = await check.run(task, written)
                 results.append(result)
                 if not check.is_refusing:
@@ -1187,7 +1496,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """Keep each training task outside the band as a parent, with its files; the oldest beyond the bound go.
 
         Only rolled out training tasks reach ``outcomes``: eval tasks and outages never become parents. A task
-        whose mean reward is outside [0, 1] has no pass rate to tell a variant, so it becomes no parent either.
+        whose mean reward is outside [0, 1] has no pass rate to tell a variant, so it becomes no parent either. A
+        parent keeps the ``seed_task`` its task names, so its variants need no session.
         """
         direction_by_place: dict[BandPlace, VariantDirection] = {
             BAND_ABOVE: VARIANT_HARDER,
@@ -1212,6 +1522,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 pass_rate=outcome.pass_rate,
                 rollouts=len(outcome.rollout_rewards),
                 direction=direction_by_place[outcome.band],
+                seed_task=str(ran[name].metadata.get("seed_task", "")),
             )
             write_harbor_task(ran[name], root)
             self.parents.append(parent)
@@ -1283,6 +1594,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
             # A calibration that is off leaves no trace in the report.
             **({} if self.calibration is None else {"calibration": self.calibration.settings()}),
             "next_position": self.cursor.next_position,
+            # Without seeds, the report has no seed fields.
+            **({"next_seed": self.cursor.next_seed} if self.seeds else {}),
             "proposals": [
                 {**proposal_document(proposal), "checks": checks_document(state, proposal.task_name)}
                 for proposal in proposals
@@ -1308,11 +1621,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
 
 def proposal_document(proposal: SessionProposal) -> dict[str, object]:
-    """A proposal as the report keeps it; a session rebuilt from scratch has no variant fields."""
+    """A proposal as the report keeps it; a session rebuilt from scratch has no variant fields, and a proposal with
+    no seed no ``seed_task``."""
     document = asdict(proposal)
     if not proposal.parent_task:
         document.pop("parent_task")
         document.pop("direction")
+    if not proposal.seed_task:
+        document.pop("seed_task")
     return document
 
 

@@ -247,6 +247,25 @@ class SlowGenerator(ScriptedGenerator):
         return await super().generate(request)
 
 
+class OverlapGenerator(ScriptedGenerator):
+    """A generator whose checks take a moment, and that counts the candidates it checks at once."""
+
+    def __init__(self, *args: Any, delay: float = 0.05, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.delay = delay
+        self.in_flight = 0
+        self.most_in_flight = 0
+
+    async def validate(self, task: HarborTask) -> TaskValidationResult:
+        self.in_flight += 1
+        self.most_in_flight = max(self.most_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay)
+            return await super().validate(task)
+        finally:
+            self.in_flight -= 1
+
+
 def generated(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
     """Tasks of one round."""
     return tuple(
@@ -509,7 +528,7 @@ def test_a_generation_past_its_deadline_is_skipped(tmp_path: Path) -> None:
 
 
 def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> HarborTask:
-    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
+    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the Designer's own record."""
     task = task_for(name, record_ids[0], port)
     metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
     return dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata)
@@ -523,7 +542,7 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
     task_generator = ScriptedGenerator([(follower, bridge, renamed)])
     pipeline, _ = rounds(tmp_path, task_generator)
     store = pipeline.record2sample.task_store
-    # The author's record is a source of a train task too; it must not join the follower to the train split.
+    # The Designer's record is a source of a train task too; it must not join the follower to the train split.
     earlier = (
         sourced("train-task", "designer-1", "train-source", port=9100, designer_record_id="designer-1"),
         sourced("eval-task", "eval-source", port=9101),
@@ -1124,6 +1143,96 @@ def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_
     assert handed_out_names(p) == ["harbor-00001-002", "harbor-00001-003"]
 
 
+def test_with_no_jobs_per_round_the_next_round_follows_the_last_while_few_tasks_wait(tmp_path: Path) -> None:
+    # Generation runs ahead of training: each round starts when the last one ends, while fewer than refill_tasks
+    # saved tasks wait to train, and no job end has to come first.
+    task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 2, 3), generated(2, 4, 5)])
+    p, _ = rounds(tmp_path, task_generator, rounds=3, jobs_per_round=0, refill_tasks=4)
+    looked(p)
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 2, "the second round followed the first with no job"
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 2, "four saved tasks wait, so the third round waits"
+    train_job(p)
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("concurrency", "most"), [(None, 1), (2, 2)])
+def test_a_generation_checks_up_to_validation_concurrency_candidates_at_once(
+    tmp_path: Path, concurrency: int | None, most: int
+) -> None:
+    task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)])
+    config = {} if concurrency is None else {"validation_concurrency": concurrency}
+    p, _ = rounds(tmp_path, task_generator, rounds=1, **config)
+    looked(p)
+    assert task_generator.most_in_flight == most
+    assert sorted(task_generator.validated) == [f"harbor-00000-00{index}" for index in range(4)]
+    assert p.status()["task_generation"]["completed"] == 1
+    assert p.status()["task_store"]["train"] == 4
+
+
+@pytest.mark.unit
+def test_a_generation_past_its_deadline_stops_the_checks_that_run(tmp_path: Path) -> None:
+    task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)], delay=0.3)
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, task_generator, worker=worker, validation_concurrency=2, generation_deadline_seconds=0.1)
+    p.ready(BATCH_SIZE)
+    (job,) = worker.waiting
+
+    async def generation_then_wait() -> None:
+        await p.record2sample.run(job)
+        # A check left running would end within this wait.
+        await asyncio.sleep(0.5)
+
+    asyncio.run(generation_then_wait())
+    assert task_generator.validated == [], "no check ran past the deadline"
+    assert task_generator.in_flight == 0
+    assert p.record2sample.task_store.generation(0).pending_indices == (0, 1, 2, 3)
+    p.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("generator_type", [ScriptedGenerator, OverlapGenerator])
+def test_after_a_check_that_raises_no_further_check_starts(
+    tmp_path: Path, generator_type: type[ScriptedGenerator]
+) -> None:
+    task_generator = generator_type([generated(0, 0, 1, 2)], failing="harbor-00000-000")
+    p, _ = rounds(tmp_path, task_generator, rounds=1, generation_attempts=1)
+    assert not looked(p)
+    assert "the checks could not run" in p.status()["task_generation"]["last_error"]
+    assert task_generator.validated == ["harbor-00000-000"]
+    assert p.record2sample.task_store.generation(0).pending_indices == (0, 1, 2)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("generator_type", [ScriptedGenerator, OverlapGenerator])
+def test_one_check_at_a_time_runs_in_candidate_order_with_copies_apart(
+    tmp_path: Path, generator_type: type[ScriptedGenerator]
+) -> None:
+    # The candidates are A, B, A, C; the first A is invalid, so its copy is checked again in its own turn.
+    task_generator = generator_type([generated(0, 0, 1, 0, 3)], invalid={"harbor-00000-000": "no tests"})
+    p, _ = rounds(tmp_path, task_generator, rounds=1)
+    looked(p)
+    assert task_generator.validated == ["harbor-00000-000", "harbor-00000-001", "harbor-00000-000", "harbor-00000-003"]
+
+
+@pytest.mark.unit
+def test_a_check_that_raises_ends_the_attempt_when_the_checks_that_run_with_it_end(tmp_path: Path) -> None:
+    task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)], failing="harbor-00000-000")
+    p, _ = rounds(tmp_path, task_generator, rounds=1, validation_concurrency=2, generation_attempts=1)
+    assert not looked(p), "a generation whose attempts ran out hands out none of its tasks"
+    assert "the checks could not run" in p.status()["task_generation"]["last_error"]
+    assert sorted(task_generator.validated) == ["harbor-00000-000", "harbor-00000-001"]
+    assert p.record2sample.task_store.generation(0).pending_indices == (
+        0,
+        2,
+        3,
+    ), "the check that ran saved its outcome"
+    assert task_generator.in_flight == 0
+
+
 def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedback(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     p, _ = rounds(tmp_path, task_generator, rounds=1)
@@ -1213,14 +1322,18 @@ def test_a_round_that_ran_out_of_attempts_is_retried_with_the_same_sessions(tmp_
     assert len(task_generator.requests) == 1
 
 
-def test_an_identical_candidate_in_the_same_generation_is_rejected_as_a_duplicate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_an_identical_candidate_in_the_same_generation_is_rejected_as_a_duplicate(
+    tmp_path: Path, concurrency: int
+) -> None:
     task = generated(0, 0)
-    task_generator = ScriptedGenerator([task + task])
-    p, _ = rounds(tmp_path, task_generator, rounds=1)
+    task_generator = OverlapGenerator([task + task])
+    p, _ = rounds(tmp_path, task_generator, rounds=1, validation_concurrency=concurrency)
     looked(p)
     state = p.record2sample.task_store.generation(0)
     assert state is not None and train_task_names(state) == ("harbor-00000-000",)
     assert state.candidates is not None and "is already published" in state.candidates[1].error
+    assert task_generator.validated == ["harbor-00000-000"], "the copy is refused without a check"
 
 
 def test_a_task_whose_submission_did_not_commit_is_handed_out_again_after_a_restart(tmp_path: Path) -> None:

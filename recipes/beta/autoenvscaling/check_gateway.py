@@ -1,4 +1,4 @@
-"""Loopback HTTP transport for an author's task checks and result polls."""
+"""Loopback HTTP transport for a Designer's task checks and result polls."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from reef.harness.gateway import AgentTool
 
 
 class CheckGateway:
-    """Serve an author's ``check`` tool on a token-prefixed loopback URL for one author run.
+    """Serve a Designer's ``check`` tool on a token-prefixed loopback URL for one Designer run.
 
-    Values: ``tools`` is the ``AgentTool`` named ``check`` (``author.AgentTools``), ``token`` is a random URL
+    Values: ``tools`` is the ``AgentTool`` named ``check`` (``designer.AgentTools``), ``token`` is a random URL
     token, and ``server`` is either None (stopped) or the running loopback HTTP server.
-    Purpose: ClaudeCodeAuthor starts the server for task_check.py and stops it
+    Purpose: ClaudeCodeDesigner starts the server for task_check.py and stops it
     after the run. Only POST /check reaches the tool, with the request body as its arguments: ``{}`` starts a
     check, and ``{"check_id": n}`` polls one; a ``check_id`` of no check of this run answers ``ran: false``. All
     other routes return 404. The gateway has no model binding,

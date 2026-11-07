@@ -753,7 +753,7 @@ A generation job runs no rollouts. It:
 1. Asks the generator for tasks with the configured ``description`` and the
    round's source sessions.
 2. Saves the candidates in the scenario's task store, then validates each
-   task with the generator.
+   task with the generator, ``validation_concurrency`` tasks at once.
 3. Publishes each valid task with its train/eval split. It runs no eval
    tasks.
 
@@ -827,7 +827,9 @@ last round is released at once.
 The first round starts when the pipeline first looks for job data. The next
 round starts after ``jobs_per_round`` jobs trained since the previous
 round started, and only while fewer than ``refill_tasks`` stored train tasks
-wait to train, so saved tasks train before more are generated. A task waits
+wait to train, so saved tasks train before more are generated. With
+``jobs_per_round`` 0, the next round starts when the previous one ends, so
+generation runs ahead of training until ``refill_tasks`` tasks wait. A task waits
 until a committed job trains it; a task in a running job does not wait. A
 round that made no train task and a failed task job are followed at once,
 because no job end comes from them. So is a state in which every train task
