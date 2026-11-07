@@ -290,10 +290,19 @@ def create_task_directories(
 
 
 def query_items(
-    data: DataAccess, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int, content: bool
+    data: DataAccess,
+    owner: str,
+    *,
+    kind: str | None,
+    scenario: str | None,
+    after: int,
+    limit: int,
+    content: bool,
+    group: tuple[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, each item with its
-    content when ``content`` (``item_json``), else without.
+    content when ``content`` (``item_json``), else without. ``group`` keeps only the items of one group
+    (``DataStore.query``).
 
     ``next`` is the ``after`` of the next page, or null after the last item.
     """
@@ -301,7 +310,7 @@ def query_items(
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
     checked_kind = None if kind is None else KINDS[kind]
     found = data.require_store().query(
-        owner, kind=checked_kind, scenario=scenario, after=after, limit=limit, content=content
+        owner, kind=checked_kind, scenario=scenario, after=after, limit=limit, content=content, group=group
     )
     return {
         "owner": owner,
