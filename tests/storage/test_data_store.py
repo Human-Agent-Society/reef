@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 
@@ -345,6 +347,23 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-3": RecordLink("coding/call-1", entries[3]),
         "coding/retry-2": RecordLink("coding/call-1", entries[2]),
     }
+
+
+def test_concurrent_updates_of_one_item_keep_every_use(open_durable_store):
+    writers = 8
+    with closing(open_durable_store()) as store:
+        for round_number in range(10):
+            item_id = f"trajectory-{round_number}"
+            store.create("acme", [NewItem(item_id, ATIF, {"kind": "trajectory"})])
+            barrier = threading.Barrier(writers)
+
+            def use(index: int, item_id: str = item_id, barrier: threading.Barrier = barrier) -> None:
+                barrier.wait()
+                store.update("acme", [item_id], {"scenarios": {f"scenario-{index}": "train"}})
+
+            with ThreadPoolExecutor(writers) as pool:
+                list(pool.map(use, range(writers)))
+            assert len(store.read("acme", item_id).metadata["scenarios"]) == writers
 
 
 @pytest.mark.parametrize(
