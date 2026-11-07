@@ -29,8 +29,6 @@ class TrainingRequestPayload(TypedDict):
 MAX_CLIENT_COMMANDS = 64
 #: At most this many bytes of JSON in a request's job parameters.
 MAX_PARAMETERS_BYTES = 16384
-#: At most this many samples in one request.
-MAX_REQUEST_SAMPLES = 10000
 CLIENT_WORD = re.compile(r"[A-Za-z0-9._+\- ()]{1,64}")
 COMMAND_NAME = re.compile(r"[A-Za-z0-9._+\-]{1,40}")
 
@@ -67,8 +65,8 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     absent requirements become an empty list, and an empty client or empty parameters are omitted.
     ``parameters`` is a JSON object with string keys, at most ``MAX_PARAMETERS_BYTES`` bytes of JSON: the
     parameters of the request's training job, merged into the recipe's (``Sample2Job.job_parameters``).
-    ``samples`` is a list of 1 to ``MAX_REQUEST_SAMPLES`` distinct non-empty sample IDs: the samples that the
-    request's job trains.
+    ``samples`` is a non-empty list of distinct non-empty sample IDs: the samples that the request's job trains. The
+    service's request size limit bounds its length.
     """
     fields: dict[str, str] = {}
     for key in ("text", "session", "artifact_id"):
@@ -105,11 +103,11 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
         samples = payload["samples"]
         if (
             not isinstance(samples, list)
-            or not 1 <= len(samples) <= MAX_REQUEST_SAMPLES
+            or not samples
             or any(not isinstance(sample_id, str) or not sample_id for sample_id in samples)
             or len(set(samples)) != len(samples)
         ):
-            raise ValueError(f"samples must be 1 to {MAX_REQUEST_SAMPLES} distinct non-empty sample IDs")
+            raise ValueError("samples must be a non-empty list of distinct non-empty sample IDs")
         normalized["samples"] = list(samples)
     return normalized
 
