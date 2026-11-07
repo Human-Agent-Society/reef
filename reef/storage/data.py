@@ -345,7 +345,7 @@ class DataStore(Plugin, ABC):
     * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``. A durable reader of record items keeps one cursor for each: a
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
-      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
+      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items, without content.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
     * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
       the record items that it made, and returns their number. It also ends the scenario's generation. The archive
@@ -924,7 +924,7 @@ class MemoryDataStore(DataStore):
         for item in updated:
             stored[item.item_id] = item
             self.write_uses(owner, item.item_id, item.scenarios)
-        return tuple(updated)
+        return tuple(replace(item, content=None) for item in updated)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
