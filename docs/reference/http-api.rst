@@ -725,6 +725,8 @@ its original content and digest when every other content field matches.
 The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
+The item of an artifact with a `serving profile <#serving-profiles>`__ also
+has ``serving_profile`` in its metadata.
 Its ``source_uri`` comes from the artifact backend: a backend
 that keeps releases where other deployments can read them, such as an object
 store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
@@ -733,7 +735,8 @@ backend gives none, so its items have a null ``source_uri``.
 To add files that you stored, such as an upload to an S3 prefix, create an
 item with ``POST /reef/namespaces/{owner}/data``, ``metadata`` ``{"kind":
 "artifact"}`` and no ``origin``. Its content needs a ``source_uri`` and a null
-``component``.
+``component``. Add ``serving_profile`` to the metadata to name the model of
+its files (`Serving profiles`_).
 
 To use an artifact item in a scenario, import it:
 ``POST /reef/scenarios/{scenario}/artifacts`` with ``{"item": "<id>"}``. The
@@ -1296,6 +1299,8 @@ names the keys that the route takes:
   <../user-guide/operate.rst#starting-artifacts>`__).
 - ``component``: the component that holds the item. Leave it out when the
   scenario has one component. It needs ``artifact_id``.
+
+The starting artifact takes the item's `serving profile <#serving-profiles>`__.
 
 Reef stores the starting artifacts and registers the scenario with their
 component mapping. With ``artifact_id``, Reef reads the item's files and checks
@@ -2052,6 +2057,27 @@ files, returns 404. ``?signed=1`` returns a `signed download URL
 <#signed-download-urls>`__ of the list or the file. The data service answers
 this route.
 
+Serving profiles
+~~~~~~~~~~~~~~~~
+
+A serving profile names the model that serves an artifact, such as
+``qwen3.8-27b@1`` (RFC #1233). It lets one deployment serve artifacts of
+several base models, also in one scenario. The deployment's inference runtime
+defines the profiles. An artifact without a profile is served with the
+deployment's model.
+
+You write a profile in one place: the ``serving_profile`` metadata of an
+`artifact item <#artifact-items>`__, when you create the item. It never
+changes after that. An artifact takes its profile from where its content came
+from, and keeps it:
+
+- A starting artifact or an import takes the profile of its item. The runtime
+  checks the profile then, and refuses an unknown one with 400. A runtime that
+  serves one model refuses every profile.
+- An artifact that training makes takes the profile of its training start.
+- The item that Reef makes for an artifact keeps the artifact's profile, so the
+  profile moves with the artifact to other scenarios.
+
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
 
@@ -2059,7 +2085,9 @@ Import an artifact
 artifact from the directory that a URI names. Leave out ``component`` when
 the scenario has one component. The body is ``{"source": "<uri>"}``, or
 ``{"item": "<id>"}`` for an `artifact item <#artifact-items>`__ of the
-scenario's owner, whose ``source_uri`` Reef reads. Reef checks the layout
+scenario's owner, whose ``source_uri`` Reef reads. The new artifact takes the
+item's `serving profile <#serving-profiles>`__; an import from ``source`` has
+none. Reef checks the layout
 below on the source, and then copies the directory from one of these URIs:
 
 - ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
