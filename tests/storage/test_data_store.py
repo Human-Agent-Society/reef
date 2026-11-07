@@ -693,6 +693,32 @@ def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable
     assert store.read("acme", "weights") == legacy
 
 
+def test_a_record_retry_with_a_new_time_matches_also_when_the_stored_digest_has_the_time(store):
+    (item,) = calls(1)
+    (created,) = store.create("acme", [item])
+    retry = NewItem(item.item_id, {**item.content, "created_at": item.content["created_at"] + 5}, item.metadata)
+    assert store.create("acme", [retry]) == (created,)
+
+    # Seed the digest of a row written before, which had created_at in it.
+    stored = store.read("acme", item.item_id)
+    legacy = replace(stored, digest=json_digest(stored.content))
+    if isinstance(store, MemoryDataStore):
+        store.items["acme"][item.item_id] = legacy
+    else:
+        table = store.items_table
+        with store.transaction() as connection:
+            connection.execute(
+                table.update()
+                .where(table.c.owner == "acme", table.c.item_id == item.item_id)
+                .values(digest=legacy.digest)
+            )
+    assert store.create("acme", [retry]) == (replace(legacy, content=None),)
+    changed = {**item.content, "references": ["other"]}
+    with pytest.raises(ItemConflict, match="other content"):
+        store.create("acme", [NewItem(item.item_id, changed, item.metadata)])
+    assert store.read("acme", item.item_id) == legacy
+
+
 def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):
     sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
     first = store.write_job_directory(JobData("s:data:1", (sample,)))
