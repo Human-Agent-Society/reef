@@ -78,9 +78,11 @@ def test_the_first_open_drops_the_old_record_tables_only_when_their_records_are_
         )
     with closing(SQLiteScenarioStorage(tmp_path)) as storage:
         storage.open("math").close()
-        with closing(SQLiteScenarioDatabase(scenario_file(tmp_path))) as database:
-            with database._transaction(write=False) as connection:
-                kept = set(inspect(connection).get_table_names()) & set(OLD_RECORD_TABLES)
+        with (
+            closing(SQLiteScenarioDatabase(scenario_file(tmp_path))) as database,
+            database._transaction(write=False) as connection,
+        ):
+            kept = set(inspect(connection).get_table_names()) & set(OLD_RECORD_TABLES)
         assert kept == (set() if copied else {"agent_record"})
         assert storage.read_settings("math").owner == "acme"
 
@@ -99,6 +101,7 @@ def legacy_database(path) -> None:
             """
         )
         connection.commit()
+
 
 class SwitchCursor:
     def __init__(self, row) -> None:
@@ -127,6 +130,7 @@ class SwitchReplies:
         if reply == "busy":
             raise OperationalError(statement, None, sqlite3.OperationalError("database is locked"))
         return SwitchCursor((reply,))
+
 
 @pytest.mark.unit
 def test_a_contended_journal_mode_switch_is_retried_until_the_database_is_wal(tmp_path, monkeypatch) -> None:
