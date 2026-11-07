@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from reef.core.errors import ReefError
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 
 
 class RecordConflict(ReefError):
@@ -33,16 +33,6 @@ class StoredRecord:
 
     sequence: int
     item: AgentRecord
-
-
-@dataclass(frozen=True)
-class RecordLoss:
-    """Durable capacity-eviction totals for one scenario's stored records."""
-
-    record_count: int = 0
-    body_bytes: int = 0
-    first_sequence: int = 0
-    last_sequence: int = 0
 
 
 @dataclass(frozen=True)
