@@ -208,6 +208,27 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
     assert len(steps) == 3
 
 
+def test_the_uv_kind_installs_the_pinned_uv_from_pypi_into_a_venv_of_its_own(tmp_path, monkeypatch) -> None:
+    descriptor = get_adapter("python")
+    prefix = tmp_path / "prefix"
+    steps: list[list[str]] = []
+
+    def record(command):
+        steps.append(list(command))
+        if "pip" in command:
+            _write_executable(
+                prefix / descriptor.install.binary_path, "#!/bin/sh\necho 'uv 0.13.4 (1a2b3c 2026-10-20)'\n"
+            )
+
+    monkeypatch.setattr("reef.harness.tasks.vendor_install._run", record)
+
+    assert resolve_binary(descriptor, prefix=prefix) == str(prefix / "venv/bin/uv")
+    assert steps == [
+        [sys.executable, "-m", "venv", str(prefix / "venv")],
+        [str(prefix / "venv/bin/python"), "-m", "pip", "install", "--quiet", "uv==0.13.4"],
+    ]
+
+
 # -- the backend's use of it ----------------------------------------------
 
 

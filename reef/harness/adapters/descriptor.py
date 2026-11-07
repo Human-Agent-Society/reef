@@ -240,9 +240,10 @@ class ConfigTarget:
 
 
 #: Vendor install kinds Reef can install for runs: an npm
-#: package at a version, or a git checkout at a ref installed editable into
-#: a venv (the channel of a Python agent that publishes no wheel).
-INSTALL_KINDS = ("npm", "git")
+#: package at a version, a git checkout at a ref installed editable into
+#: a venv (the channel of a Python agent that publishes no wheel), or uv at a
+#: version, which runs a Python program as the harness.
+INSTALL_KINDS = ("npm", "git", "uv")
 
 #: Install fields land inside generated shell text, so their charsets are
 #: pinned to what package registries actually use: names may add ``@`` and
