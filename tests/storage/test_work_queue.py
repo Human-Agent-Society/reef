@@ -10,7 +10,6 @@ import pytest
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.storage.control_lease import ControlLease
-from reef.storage.marks import Marks
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
@@ -24,7 +23,6 @@ from reef.storage.sql_coordination import (
     PostgresCoordinationDatabase,
     SQLControlLease,
     SQLiteCoordinationDatabase,
-    SQLMarks,
     SQLServedModels,
     SQLWorkQueue,
 )
@@ -36,7 +34,6 @@ class Coordination:
     queue: WorkQueue
     served: ServedModelsWriter
     lease: ControlLease
-    marks: Marks
 
 
 @pytest.fixture(params=["sqlite-memory", "sqlite", "postgres"])
@@ -56,7 +53,6 @@ def open_coordination(request, tmp_path):
             SQLWorkQueue(database, lease_seconds=lease_seconds, max_attempts=max_attempts),
             SQLServedModels(database, lease),
             lease,
-            SQLMarks(database),
         )
 
     yield opened
@@ -437,17 +433,17 @@ def test_a_served_artifact_is_reachable_and_names_one_model():
 
 
 @pytest.mark.unit
-def test_a_mark_reads_zero_until_it_advances_and_never_moves_back(open_coordination):
-    marks = open_coordination().marks
-    assert marks.read("record_copy:s") == 0
-    marks.advance("record_copy:s", 5)
-    marks.advance("record_copy:s", 3)
-    marks.advance("record_copy:t", 1)
-    assert (marks.read("record_copy:s"), marks.read("record_copy:t")) == (5, 1)
-    with pytest.raises(ValueError, match="non-negative"):
-        marks.advance("record_copy:s", -1)
-    with pytest.raises(ValueError, match="non-empty"):
-        marks.read("")
+def test_an_upgrade_deletes_the_record_copies_of_an_older_version(tmp_path):
+    database = SQLiteCoordinationDatabase(tmp_path / "c")
+    queue = SQLWorkQueue(database)
+    queue.request("data", "s", "record_copy", "record_copy:s", {})
+    kept = queue.request("data", "s", "artifact_copy", "artifact_copy:s", {})
+    database.close()
+    reopened = SQLiteCoordinationDatabase(tmp_path / "c")
+    try:
+        assert [item.id for item in SQLWorkQueue(reopened).items("data")] == [kept.id]
+    finally:
+        reopened.close()
 
 
 @pytest.mark.unit
