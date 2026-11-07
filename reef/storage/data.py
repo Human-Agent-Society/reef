@@ -321,6 +321,9 @@ class DataStore(Plugin, ABC):
       split changes get a new one. A trainer reads its scenario's items with
       it. With ``excluding_origin``, the record items that this scenario made are left out.
     * ``last_use_sequence(owner, scenario)`` returns the sequence of the newest use by ``scenario``, or 0.
+    * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``, also a deleted
+      one, because a record item keeps its origin. A durable reader of record items keeps one cursor for each: a
+      ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
@@ -412,6 +415,9 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def last_use_sequence(self, owner: str, scenario: str) -> int: ...
+
+    @abstractmethod
+    def scenarios_with_records(self, owner: str) -> tuple[str, ...]: ...
 
     @abstractmethod
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]: ...
@@ -700,6 +706,19 @@ class MemoryDataStore(DataStore):
         return tuple(
             (sequence, stored[item_id] if content else replace(stored[item_id], content=None))
             for sequence, item_id in used[:limit]
+        )
+
+    def scenarios_with_records(self, owner: str) -> tuple[str, ...]:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        return tuple(
+            sorted(
+                {
+                    use_scenario
+                    for (use_owner, item_id, use_scenario) in self.uses
+                    if use_owner == owner and stored[item_id].kind == "record"
+                }
+            )
         )
 
     def last_use_sequence(self, owner: str, scenario: str) -> int:
