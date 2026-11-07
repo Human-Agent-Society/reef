@@ -172,13 +172,34 @@ class TrajectoryRules(JsonItemRules):
 
 
 class RecordRules(JsonItemRules):
-    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``."""
+    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``.
+
+    Its digest is ``json_digest`` of the content without ``created_at``, as the record store's retry fingerprint,
+    so a client's retry with a new time matches. An item stored before had ``created_at`` in its digest, and it
+    matches the same content too.
+    """
 
     kind = "record"
+
+    def stored_digest(
+        self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
+    ) -> str:
+        if not isinstance(content, Mapping):
+            raise ValueError(f"record item {item_id!r} needs a JSON object as its content")
+        self.check_json(item_id, content, metadata)
+        return record_digest(content)
+
+    def matches_stored(self, content: object, digest: str) -> bool:
+        return isinstance(content, Mapping) and record_digest(content) == digest
 
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         origin = metadata["origin"]["scenario"]
         copied_record(item_id, content, origin, origin)
+
+
+def record_digest(content: Mapping[str, Any]) -> str:
+    """The digest of a record item's ``content``: ``json_digest`` without ``created_at``."""
+    return json_digest({key: value for key, value in content.items() if key != "created_at"})
 
 
 class ArtifactRules(JsonItemRules):
