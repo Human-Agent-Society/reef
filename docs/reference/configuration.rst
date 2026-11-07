@@ -1264,8 +1264,8 @@ downgrade without restoring a compatible backup.
 
    ``evaluation.agent_host`` : host.docker.internal
        the address at which a task's container reaches this host, for an evaluation on ``docker`` whose harness is an
-       artifact item. On ``modal``, the agent bridges the container to this host through SSH and needs no address;
-       the host needs the OpenSSH client. See `HTTP API <http-api.rst>`__.
+       artifact item. In a remote environment, the agent bridges the container to this host through Harbor's exec
+       and needs no address. See `HTTP API <http-api.rst>`__.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
