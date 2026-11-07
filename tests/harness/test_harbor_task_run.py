@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import Mapping
 from dataclasses import replace
@@ -18,10 +19,12 @@ from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import (
     CONTAINER_ROOT,
     AdapterAgent,
+    TreeAgent,
     adapter_agent_kwargs,
     can_run_in_task_container,
     run_harbor_task,
     task_agent_tools,
+    tree_agent,
 )
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.model_binding import ModelBinding
@@ -111,17 +114,25 @@ def test_only_an_adapter_with_an_npm_or_uv_install_and_a_text_prompt_plays_a_tas
 
 
 class RecordingEnvironment:
-    """A task container that keeps each command an agent runs in it, and holds no session directory."""
+    """A task container that keeps each command an agent runs in it and each file it uploads, and holds no session
+    directory. ``events`` is both, in order."""
 
     def __init__(self) -> None:
         self.commands: list[str] = []
+        self.uploads: dict[str, str] = {}
+        self.events: list[str] = []
+        self.stream_handle = SimpleNamespace(provider="modal")
 
     async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
         self.commands.append(command)
+        self.events.append(command)
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
     async def upload_dir(self, source, target) -> None:
         pass
+
+    async def upload_file(self, source, target) -> None:
+        self.uploads[target] = Path(source).read_text()
 
     async def is_dir(self, path) -> bool:
         return False
@@ -140,6 +151,64 @@ def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instructio
     assert 'agent="$HOME/.local/bin/uv"' in run
     assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
     assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
+
+
+def test_a_bridged_agent_relays_the_container_loopback_to_the_proxy_port_while_its_command_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events: list[str] = []
+    forwards: list[tuple[int, int]] = []
+
+    class Access:
+        @contextlib.asynccontextmanager
+        async def process(self, command, *, forward=None):
+            forwards.append(forward)
+            yield None
+
+    @contextlib.asynccontextmanager
+    async def connect_ssh(handle):
+        assert handle.provider == "modal"
+        yield Access()
+
+    class Pump:
+        def __init__(self, url: str, secret: str, port: int) -> None:
+            self.url, self.secret, self.port = url, secret, port
+
+        def start(self) -> None:
+            events.append(f"pump {self.url} -> {self.port}")
+
+        def stop(self) -> None:
+            events.append("pump stopped")
+
+    monkeypatch.setattr("reef.harness.harbor.agent.EnvironmentFactory.connect_ssh", connect_ssh)
+    monkeypatch.setattr("reef.harness.harbor.agent.TunnelPump", Pump)
+    python = get_adapter("python")
+    (tmp_path / "logs").mkdir()
+    kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+    agent = AdapterAgent(tmp_path / "logs", bridge_port=8901, **kwargs)
+    environment = RecordingEnvironment()
+    environment.events = events
+    asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
+
+    relay = next(command for command in environment.commands if "relay.py" in command)
+    assert "--port 8901 --tunnel-port 47811 --tunnel-host 127.0.0.1" in relay
+    assert environment.uploads["/tmp/reef-relay/relay.py"].startswith('"""The relay a remote sandbox')
+    (local, remote) = forwards[0]
+    assert remote == 47811
+    run = next(index for index, event in enumerate(events) if "run --script" in event)
+    assert events[run - 1] == f"pump http://127.0.0.1:{local} -> 8901", "the pump answers before the command runs"
+    assert events[run + 1] == "pump stopped"
+
+
+def test_a_tree_agent_bridges_the_port_of_its_loopback_binding(tmp_path: Path) -> None:
+    python = get_adapter("python")
+    (tmp_path / "tree" / "program").mkdir(parents=True)
+    (tmp_path / "tree" / "program" / "main.py").write_text("print('hi')\n")
+    spec = tree_agent(
+        python, api="openai", tree_dir=tmp_path / "tree", files_dir=tmp_path / "files", timeout=60.0, bridge=True
+    )
+    kwargs = {**spec["kwargs"], "model": "m", "base_url": "http://127.0.0.1:8901", "api_key": "reef"}
+    assert TreeAgent(tmp_path / "logs", **kwargs).bridge_port == 8901
 
 
 def test_a_container_reaches_a_loopback_model_route_at_the_agent_host() -> None:

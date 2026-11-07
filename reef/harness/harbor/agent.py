@@ -17,26 +17,33 @@ the adapter's ``install``, ``dirs``, ``run.task`` and ``sessions``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import secrets
 import shlex
 import shutil
+import socket
 import sys
 import tempfile
 import urllib.parse
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, override
 
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
+from harbor.environments.factory import EnvironmentFactory
 from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import TaskConfig
 
 from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
+from reef.execution.sandbox import relay as sandbox_relay
 from reef.execution.sandbox.environment import run_sync
 from reef.execution.sandbox.process import ProgramLaunchError
+from reef.execution.sandbox.remote import TunnelPump
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
@@ -55,6 +62,12 @@ SESSIONS_DIR = "sessions"
 CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv"})
 #: Where Astral's installer puts uv in a task's container, under the agent user's own home.
 CONTAINER_UV = "$HOME/.local/bin/uv"
+#: The remote environments in which a tree's container reaches the rollout's capture proxy through the bridge:
+#: Harbor gives SSH access to their sandboxes in stream mode (RFC #986).
+BRIDGE_ENVIRONMENTS = frozenset({"modal"})
+#: Where the bridge's relay lives in a task's container, and the loopback port on which it answers this host.
+RELAY_DIR = "/tmp/reef-relay"
+RELAY_TUNNEL_PORT = 47811
 
 
 def can_run_in_task_container(descriptor: AdapterDescriptor) -> bool:
@@ -82,7 +95,10 @@ class AdapterAgent(BaseInstalledAgent):
     ``writable_paths`` are directories under the root that the agent writes;
     ``sessions`` is the session directory under the root; ``files_dir`` is a
     local directory that holds the rendered tree as it lands under the root;
-    ``timeout_s`` bounds the command.
+    ``timeout_s`` bounds the command. ``bridge_port`` is the loopback port of
+    the rollout's capture proxy on this host when the container cannot reach
+    it: the agent then bridges the container's ``127.0.0.1:<bridge_port>`` to
+    it while the command runs (:meth:`bridged`).
     Purpose: :func:`run_harbor_task` names this class in the agent spec of a
     Harbor trial; Harbor builds it with these keyword arguments.
     """
@@ -101,12 +117,14 @@ class AdapterAgent(BaseInstalledAgent):
         files_dir: str,
         timeout_s: float,
         install_kind: str = "npm",
+        bridge_port: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, version=version, **kwargs)
         if install_kind not in CONTAINER_INSTALL_KINDS:
             raise ValueError(f"install kind {install_kind!r} cannot install in a task's container")
         self.install_kind = install_kind
+        self.bridge_port = bridge_port
         self.package = package
         self.binary = binary
         self.argv = tuple(argv)
@@ -137,11 +155,7 @@ class AdapterAgent(BaseInstalledAgent):
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
         if self.install_kind == "uv":
-            installer = f"https://astral.sh/uv/{shlex.quote(self._version)}/install.sh"
-            command = (
-                f'set -euo pipefail; curl -LsSf {installer} | env UV_INSTALL_DIR="$HOME/.local/bin" '
-                f'UV_NO_MODIFY_PATH=1 sh && "{CONTAINER_UV}" --version'
-            )
+            command = uv_install_command(str(self._version))
         else:
             command = (
                 f"set -euo pipefail; {nvm_node_install_snippet()} && "
@@ -171,7 +185,8 @@ class AdapterAgent(BaseInstalledAgent):
         else:
             find_agent = f'. "$HOME/.nvm/nvm.sh" && agent="$(command -v {shlex.quote(self.binary)})"'
         command = f'{find_agent} && env {assignments} "$agent" {arguments} </dev/null'
-        result = await environment.exec(command=command, timeout_sec=int(self.timeout_s))
+        async with self.bridged(environment):
+            result = await environment.exec(command=command, timeout_sec=int(self.timeout_s))
         (self.logs_dir / COMMAND_FILE).write_text(
             json.dumps({"exit_code": result.return_code, "stdout": result.stdout or "", "stderr": result.stderr or ""})
             + "\n",
@@ -181,17 +196,86 @@ class AdapterAgent(BaseInstalledAgent):
         if await environment.is_dir(sessions):
             await environment.download_dir(sessions, self.logs_dir / SESSIONS_DIR)
 
+    @contextlib.asynccontextmanager
+    async def bridged(self, environment: BaseEnvironment) -> AsyncIterator[None]:
+        """Bridge the container's ``127.0.0.1:<bridge_port>`` to the same port on this host for the time of the
+        block, or do nothing without a ``bridge_port``.
+
+        Reef's sandbox relay answers that port in the container and holds each call. Harbor's SSH access to the
+        sandbox forwards a local port to the relay's own loopback port, and a ``TunnelPump`` answers each call from
+        this host's port. Raise ``ProgramLaunchError`` when the relay does not answer.
+        """
+        if self.bridge_port is None:
+            yield
+            return
+        tunnel_port = RELAY_TUNNEL_PORT + 1 if self.bridge_port == RELAY_TUNNEL_PORT else RELAY_TUNNEL_PORT
+        secret = secrets.token_hex(16)
+        await self.exec_as_agent(environment, command=f"mkdir -p {RELAY_DIR} && chmod 700 {RELAY_DIR}")
+        await environment.upload_file(Path(sandbox_relay.__file__), f"{RELAY_DIR}/relay.py")
+        with tempfile.TemporaryDirectory(prefix="reef-relay-") as staging:
+            secret_file = Path(staging) / "secret"
+            secret_file.write_text(secret, encoding="utf-8")
+            await environment.upload_file(secret_file, f"{RELAY_DIR}/secret")
+        python = await self.relay_python(environment)
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"nohup {python} {RELAY_DIR}/relay.py --port {self.bridge_port} --tunnel-port {tunnel_port} "
+                f"--tunnel-host 127.0.0.1 --secret-file {RELAY_DIR}/secret >{RELAY_DIR}/relay.log 2>&1 &"
+            ),
+        )
+        local_port = free_port()
+        async with (
+            EnvironmentFactory.connect_ssh(environment.stream_handle) as access,
+            access.process("sleep infinity", forward=(local_port, tunnel_port)),
+        ):
+            pump = TunnelPump(f"http://127.0.0.1:{local_port}", secret, self.bridge_port)
+            await asyncio.to_thread(pump.start)
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(pump.stop)
+
+    async def relay_python(self, environment: BaseEnvironment) -> str:
+        """The command that runs the relay: the container's ``python3``, else a Python from uv, which the agent
+        installs at the python adapter's pin unless it is the agent's own install."""
+        if (await environment.exec(command="command -v python3")).return_code == 0:
+            return "python3"
+        if self.install_kind != "uv":
+            install = get_adapter("python").install
+            if install is None:
+                raise ProgramLaunchError("the python adapter declares no uv install for the bridge's relay")
+            await self.exec_as_agent(environment, command=uv_install_command(install.version))
+        return f'"{CONTAINER_UV}" run --no-project --python 3.12'
+
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
         """Keep Harbor's context as it is: Reef reads the session files, not Harbor's token counts."""
+
+
+def uv_install_command(version: str) -> str:
+    """The shell command that installs uv ``version`` with Astral's installer under the user's own home."""
+    installer = f"https://astral.sh/uv/{shlex.quote(version)}/install.sh"
+    return (
+        f'set -euo pipefail; curl -LsSf {installer} | env UV_INSTALL_DIR="$HOME/.local/bin" '
+        f'UV_NO_MODIFY_PATH=1 sh && "{CONTAINER_UV}" --version'
+    )
+
+
+def free_port() -> int:
+    """A loopback port of this host that no process listens on now."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 class TreeAgent(AdapterAgent):
     """An ``AdapterAgent`` that renders one harness tree for its model when Harbor builds it.
 
     Values: ``adapter`` names the adapter, and ``tree_dir`` is the directory of the tree. ``model``, ``base_url``,
-    ``api_key`` and ``api`` are the values of a ``ModelBinding``. ``files_dir`` receives the rendered tree. The other
-    values are ``AdapterAgent``'s.
+    ``api_key`` and ``api`` are the values of a ``ModelBinding``. ``files_dir`` receives the rendered tree. ``bridge``
+    bridges the container's loopback to ``base_url``, a loopback URL of this host, as ``AdapterAgent``'s
+    ``bridge_port``. The other values are ``AdapterAgent``'s.
     Purpose: ``tree_agent`` names this class. The runner fills the placeholders of the binding in the agent's
     configuration, and the tree stays in a directory so that the runner does not fill them in the tree's own text.
     """
@@ -207,12 +291,15 @@ class TreeAgent(AdapterAgent):
         api_key: str,
         api: str,
         files_dir: str,
+        bridge: bool = False,
         **kwargs: Any,
     ) -> None:
         descriptor = get_adapter(adapter)
         binding = ModelBinding(base_url, model, api_key, api)
         files = render_tree(HarnessTree.read(Path(tree_dir)), descriptor, binding.config_overlays(descriptor))
         write_rendered(descriptor, files, Path(files_dir), CONTAINER_ROOT)
+        if bridge:
+            kwargs["bridge_port"] = urllib.parse.urlparse(base_url).port
         super().__init__(logs_dir, files_dir=files_dir, **kwargs)
 
 
@@ -235,10 +322,17 @@ def adapter_agent_kwargs(
 
 
 def tree_agent(
-    descriptor: AdapterDescriptor, *, api: str, tree_dir: Path, files_dir: Path, timeout: float
+    descriptor: AdapterDescriptor,
+    *,
+    api: str,
+    tree_dir: Path,
+    files_dir: Path,
+    timeout: float,
+    bridge: bool = False,
 ) -> dict[str, object]:
     """The Harbor agent configuration that runs the tree in ``tree_dir``, with the placeholders of the model binding,
-    as ``TaskRolloutRunner``'s ``agent``. ``ValueError`` for an adapter that cannot run in a task's container."""
+    as ``TaskRolloutRunner``'s ``agent``. ``bridge`` bridges the container's loopback to the binding's loopback URL
+    (``TreeAgent``). ``ValueError`` for an adapter that cannot run in a task's container."""
     install = descriptor.install
     if install is None or not can_run_in_task_container(descriptor):
         raise ValueError(f"adapter {descriptor.name!r} cannot play a Harbor task directory in the task's container")
@@ -252,6 +346,7 @@ def tree_agent(
             "base_url": "{base_url}",
             "api_key": "{api_key}",
             "api": api,
+            "bridge": bridge,
         },
     }
 
