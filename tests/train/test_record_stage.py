@@ -757,7 +757,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
         root=STUB_ROOT,
     )
     if replay_before_commit:
-        trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
+        trainer.restore_consumed_records(frozenset())
     make_samples(trainer)
     result = trainer.advance_job()
     assert result is not None
@@ -784,7 +784,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
         job_loop=counting_jobs(),
         root=STUB_ROOT,
     )
-    restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
+    restored.restore_consumed_records(prepared.consumed_ids)
     records.append(report("later-report", "aborted"))
     make_samples(restored)
     assert restored.advance_job() is None

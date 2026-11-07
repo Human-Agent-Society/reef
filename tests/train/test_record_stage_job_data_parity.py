@@ -143,7 +143,6 @@ class StreamRun:
     serving_artifact_id: str | None = None
     records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
     consumed: set[str] = field(default_factory=set)
-    high_water: tuple[int, int] | None = None
     commits: list[dict[str, object]] = field(default_factory=list)
     training_requests: ScenarioTrainingRequests = field(
         default_factory=lambda: ScenarioTrainingRequests(memory_coordination().work_queue, "s")
@@ -164,12 +163,7 @@ class StreamRun:
         """Rebuild the trainer from durable state, in the order scenario recovery uses."""
         trainer.close()
         rebuilt = self.build()
-        if self.high_water is not None:
-            sequence, offset = self.high_water
-            rebuilt.replay_retained(up_to_sequence=sequence, consumed_ids=frozenset(self.consumed))
-            rebuilt.restore_record_progress(after_sequence=sequence, offset=offset)
-        elif self.consumed:
-            rebuilt.replay_retained(up_to_sequence=0, consumed_ids=frozenset(self.consumed))
+        rebuilt.restore_consumed_records(frozenset(self.consumed))
         return rebuilt
 
     def drain(self, trainer: Trainer) -> None:
@@ -185,7 +179,6 @@ class StreamRun:
             prepared = trainer.prepare_commit(result)
             trainer.settle_commit(prepared)
             self.consumed |= prepared.consumed_ids
-            self.high_water = (prepared.high_water_sequence, prepared.high_water_offset)
             if batch is None:
                 # The end of the batch's job: it consumes no batch, so the goldens list only the submissions.
                 continue

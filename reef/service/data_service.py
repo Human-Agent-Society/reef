@@ -5,7 +5,8 @@ the ``data`` queue, and no table that control alone writes. A ``DataWorker`` tak
 data service and runs each with the ``DataJob`` of its kind; the ``data_sync`` items are control's
 (``reef.dispatcher.data_sync_worker``).
 
-- ``record_copy``: copy the new records of one scenario to record items (``copy_scenario_records``).
+- ``record_copy``: nothing. Records are record items when they arrive (``ItemRecordStorage``); the job completes
+  the copy requests that an earlier version queued.
 - ``artifact_copy``: make the artifact items of one scenario's artifacts (``copy_scenario_artifacts``).
 - ``data_import`` and ``data_export``: the transfers of ``reef.service.data_transfer``.
 """
@@ -31,7 +32,6 @@ from reef.storage.data_queue import (
     DATA_QUEUE,
     RECORD_COPY_KIND,
 )
-from reef.storage.record_items import copy_scenario_records
 from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
 
@@ -89,22 +89,13 @@ class DataJob(ABC):
 
 
 class RecordCopy(DataJob):
-    """Copies the new records of the item's scenario to record items (``copy_scenario_records``): ``{pages}``."""
+    """Completes a copy request that an earlier version queued: records are record items when they arrive
+    (``ItemRecordStorage``), so it copies nothing: ``{pages: 0}``."""
 
     kind = RECORD_COPY_KIND
 
-    def __init__(self, dispatcher: Dispatcher) -> None:
-        self.dispatcher = dispatcher
-
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        dispatcher = self.dispatcher
-        pages = copy_scenario_records(
-            dispatcher.record_storage,
-            DataAccess.of(dispatcher).require_store(),
-            dispatcher.coordination.marks,
-            item.scenario,
-        )
-        return {"pages": pages}
+        return {"pages": 0}
 
 
 class ArtifactCopy(DataJob):
@@ -149,7 +140,7 @@ def data_jobs(dispatcher: Dispatcher, sources: ArtifactSources, writers: Archive
     """The jobs of the data service over ``dispatcher``'s data store: record and artifact copies, imports that
     ``sources`` read, and exports that ``writers`` write."""
     return (
-        RecordCopy(dispatcher),
+        RecordCopy(),
         ArtifactCopy(dispatcher),
         DataImport(dispatcher, sources),
         DataExport(dispatcher, writers),
