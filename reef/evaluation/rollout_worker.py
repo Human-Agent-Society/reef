@@ -32,7 +32,7 @@ from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.harness.adapters import get_adapter
-from reef.harness.harbor.agent import BRIDGE_ENVIRONMENTS, tree_agent
+from reef.harness.harbor.agent import tree_agent
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
@@ -332,7 +332,7 @@ class EvaluationRolloutWorker(QueueWorker):
         task_directory = self.endpoints.task_directory(rollout)
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
-        bridged = rollout.tree is not None and rollout.environment in BRIDGE_ENVIRONMENTS
+        bridged = rollout.tree is not None and rollout.environment != "docker"
         with (
             tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work,
             self.endpoints.open(rollout, served) as endpoint,
@@ -348,7 +348,6 @@ class EvaluationRolloutWorker(QueueWorker):
                 # A tree's agent on Docker runs in the task's container, which reaches the capture proxy at this address.
                 agent_host=None if rollout.tree is None or bridged else self.agent_host,
                 environment=rollout.environment,
-                stream=bridged,
                 is_reporting=False,
                 is_unrecorded=True,
                 concurrency=1,

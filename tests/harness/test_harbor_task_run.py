@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import base64
 import json
+import socket
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
 from harbor.models.agent.context import AgentContext
 
 from reef.evaluation.harness.evaluator import container_binding
@@ -153,51 +155,61 @@ def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instructio
     assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
 
 
-def test_a_bridged_agent_relays_the_container_loopback_to_the_proxy_port_while_its_command_runs(
-    tmp_path: Path, monkeypatch
-) -> None:
-    events: list[str] = []
-    forwards: list[tuple[int, int]] = []
+class BridgedContainer(RecordingEnvironment):
+    """A task container whose relay holds one model call: the bridge client's exchanges take it once, and the
+    container keeps each exchange's command and the answer that the next exchange gives back."""
 
-    class Access:
-        @contextlib.asynccontextmanager
-        async def process(self, command, *, forward=None):
-            forwards.append(forward)
-            yield None
+    def __init__(self, call: Mapping[str, object]) -> None:
+        super().__init__()
+        self.calls = [json.dumps(call)]
+        self.exchanges: list[str] = []
+        self.answered = asyncio.Event()
 
-    @contextlib.asynccontextmanager
-    async def connect_ssh(handle):
-        assert handle.provider == "modal"
-        yield Access()
+    async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+        await super().exec(command, user=user, env=env, cwd=cwd, timeout_sec=timeout_sec)
+        if "client.py" not in command or command.endswith(" ready"):
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+        self.exchanges.append(command)
+        if command.endswith(".json"):
+            self.answered.set()
+        await asyncio.sleep(0.01)
+        return SimpleNamespace(return_code=0, stdout=self.calls.pop() if self.calls else "", stderr="")
 
-    class Pump:
-        def __init__(self, url: str, secret: str, port: int) -> None:
-            self.url, self.secret, self.port = url, secret, port
 
-        def start(self) -> None:
-            events.append(f"pump {self.url} -> {self.port}")
+def test_a_bridged_agent_answers_the_relayed_calls_from_the_proxy_port_while_its_command_runs(tmp_path: Path) -> None:
+    async def model(request: web.Request) -> web.Response:
+        return web.json_response({"answer": (await request.json())["question"]}, headers={"X-Model": "m"})
 
-        def stop(self) -> None:
-            events.append("pump stopped")
+    async def run() -> BridgedContainer:
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", model)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        await web.SockSite(runner, listener).start()
+        body = base64.b64encode(json.dumps({"question": "42?"}).encode()).decode()
+        call = {"id": "c1", "method": "POST", "path": "/v1/chat/completions", "headers": {}, "body": body}
+        container = BridgedContainer(call)
+        python = get_adapter("python")
+        kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+        agent = AdapterAgent(tmp_path / "logs", bridge_port=port, **kwargs)
+        async with agent.bridged(container):
+            await asyncio.wait_for(container.answered.wait(), 10)
+        await runner.cleanup()
+        return container
 
-    monkeypatch.setattr("reef.harness.harbor.agent.EnvironmentFactory.connect_ssh", connect_ssh)
-    monkeypatch.setattr("reef.harness.harbor.agent.TunnelPump", Pump)
-    python = get_adapter("python")
     (tmp_path / "logs").mkdir()
-    kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
-    agent = AdapterAgent(tmp_path / "logs", bridge_port=8901, **kwargs)
-    environment = RecordingEnvironment()
-    environment.events = events
-    asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
-
-    relay = next(command for command in environment.commands if "relay.py" in command)
-    assert "--port 8901 --tunnel-port 47811 --tunnel-host 127.0.0.1" in relay
-    assert environment.uploads["/tmp/reef-relay/relay.py"].startswith('"""The relay a remote sandbox')
-    (local, remote) = forwards[0]
-    assert remote == 47811
-    run = next(index for index, event in enumerate(events) if "run --script" in event)
-    assert events[run - 1] == f"pump http://127.0.0.1:{local} -> 8901", "the pump answers before the command runs"
-    assert events[run + 1] == "pump stopped"
+    container = asyncio.run(run())
+    relay = next(command for command in container.commands if "relay.py" in command)
+    assert "--tunnel-port 47811 --tunnel-host 127.0.0.1" in relay
+    assert container.uploads["/tmp/reef-relay/relay.py"].startswith('"""The relay a remote sandbox')
+    piece = json.loads(container.uploads["/tmp/reef-relay/replies/c1.json"])
+    assert (piece["status"], piece["end"], piece["sequence"]) == (200, True, 0)
+    assert json.loads(base64.b64decode(piece["data"])) == {"answer": "42?"}
+    assert piece["headers"]["X-Model"] == "m"
+    assert any(command.endswith("c1 /tmp/reef-relay/replies/c1.json") for command in container.exchanges)
 
 
 def test_a_tree_agent_bridges_the_port_of_its_loopback_binding(tmp_path: Path) -> None:
