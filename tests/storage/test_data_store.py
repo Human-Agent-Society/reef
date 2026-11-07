@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import closing
@@ -369,6 +370,47 @@ def test_writes_of_one_scenario_wait_and_writes_of_another_do_not(postgres_confi
             with pytest.raises(FutureTimeoutError):
                 waits.result(timeout=0.5)
         assert waits.result(timeout=10)
+
+
+def test_creates_that_wait_for_one_scenario_share_a_transaction(postgres_config, tmp_path):
+    url, schema = postgres_config
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    with closing(task_files), closing(PostgresDataStore(url, task_files, schema=schema)) as store:
+        new = {"kind": "trajectory", "scenarios": {"s1": "train"}}
+        inserts = []
+
+        def listener(conn, cursor, statement, *_):
+            if statement.startswith("INSERT INTO") and "data_item " in statement:
+                inserts.append(statement)
+
+        def until(waiting_count):
+            deadline = time.monotonic() + 10
+            while len(store.waiting.get(("acme", frozenset({"s1"})), [None])) != waiting_count:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+
+        def held(*item_ids):
+            # The first create takes itself from the queue and waits for the lock; the others queue behind it.
+            with ThreadPoolExecutor(len(item_ids)) as pool, store.transaction() as holder:
+                store.lock_scenarios(holder, "acme", ["s1"])
+                futures = [pool.submit(store.create, "acme", [NewItem(item_ids[0], ATIF, new)])]
+                until(0)
+                for item_id in item_ids[1:]:
+                    content = {**ATIF, "agent": {"name": "other"}} if item_id == "a" else ATIF
+                    futures.append(pool.submit(store.create, "acme", [NewItem(item_id, content, new)]))
+                until(len(item_ids) - 1)
+            return futures
+
+        sqlalchemy.event.listen(store.engine, "before_cursor_execute", listener)
+        futures = held("a", "b", "c", "d")
+        assert [future.result(timeout=10)[0].item_id for future in futures] == ["a", "b", "c", "d"]
+        assert len(inserts) == 2
+        # A conflict in the shared transaction refuses only its own create.
+        futures = held("e", "f", "a", "g")
+        assert [future.exception(timeout=10) is None for future in futures] == [True, True, False, True]
+        assert isinstance(futures[2].exception(), ItemConflict)
+        assert {item.item_id for item in store.query("acme")} == set("abcdefg")
+        assert not store.waiting
 
 
 def test_the_store_lists_the_scenarios_with_record_items(store):
