@@ -469,11 +469,13 @@ class SQLDataStore(DataStore):
             # An ID that was stored before, or that a concurrent create stored first, keeps its row; another
             # digest there is a conflict, and the rollback removes the rows that this call inserted.
             rows = self.rows(connection, owner, item_ids)
-            stored = self.stored_items(connection, owner, [rows[item_id] for item_id in item_ids])
-            for stored_item, entry in zip(stored, prepared, strict=True):
-                if not item_digest_matches(stored_item, entry[2]):
-                    raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
-            return stored
+            digests = {entry[0].item_id: entry[2] for entry in prepared}
+            # Only another digest needs the stored content, which can be in S3 and this transaction holds its locks.
+            other = [rows[item_id] for item_id in item_ids if rows[item_id]["digest"] != digests[item_id]]
+            for stored_item in self.stored_items(connection, owner, other):
+                if not item_digest_matches(stored_item, digests[stored_item.item_id]):
+                    raise ItemConflict(f"item {stored_item.item_id!r} of {owner!r} is stored with other content")
+            return self.stored_items(connection, owner, [rows[item_id] for item_id in item_ids], content=False)
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
