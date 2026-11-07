@@ -463,21 +463,37 @@ class SQLDataStore(DataStore):
             statement = statement.order_by(self.items_table.c.item_id).with_for_update()
         return {row["item_id"]: row for row in connection.execute(statement).mappings()}
 
-    def write_scenarios(self, connection: Connection, owner: str, item_id: str, scenarios: Mapping[str, str]) -> None:
-        """Make the uses of ``item_id`` match ``scenarios``: an unchanged use keeps its row and sequence, and a new
-        use or a new split gets a new row."""
+    def write_scenarios(self, connection: Connection, owner: str, scenarios: Mapping[str, Mapping[str, str]]) -> None:
+        """Make the uses of each item ID in ``scenarios`` match its scenarios: an unchanged use keeps its row and
+        sequence, and a new use or a new split gets a new row. At most three statements read and write the uses."""
         uses = self.scenarios_table
-        mine = (uses.c.owner == owner, uses.c.item_id == item_id)
-        current = {
-            row.scenario: row.split for row in connection.execute(select(uses.c.scenario, uses.c.split).where(*mine))
-        }
-        ended = [scenario for scenario, split in current.items() if scenarios.get(scenario) != split]
+        current: dict[str, dict[str, str]] = {item_id: {} for item_id in scenarios}
+        for row in connection.execute(
+            select(uses.c.item_id, uses.c.scenario, uses.c.split).where(
+                uses.c.owner == owner, uses.c.item_id.in_(list(scenarios))
+            )
+        ):
+            current[row.item_id][row.scenario] = row.split
+        ended = [
+            {"row_item_id": item_id, "row_scenario": scenario}
+            for item_id, wanted in scenarios.items()
+            for scenario, split in current[item_id].items()
+            if wanted.get(scenario) != split
+        ]
         if ended:
-            connection.execute(delete(uses).where(*mine, uses.c.scenario.in_(ended)))
+            connection.execute(
+                delete(uses).where(
+                    uses.c.owner == owner,
+                    uses.c.item_id == bindparam("row_item_id"),
+                    uses.c.scenario == bindparam("row_scenario"),
+                ),
+                ended,
+            )
         begun = [
             {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
-            for scenario, split in scenarios.items()
-            if current.get(scenario) != split
+            for item_id, wanted in scenarios.items()
+            for scenario, split in wanted.items()
+            if current[item_id].get(scenario) != split
         ]
         if begun:
             connection.execute(insert(uses), begun)
@@ -831,15 +847,23 @@ class SQLDataStore(DataStore):
                 item_id: patched_metadata(json.loads(existing[item_id]["metadata_json"]), patch)
                 for item_id in unique_ids
             }
-            for item_id, metadata in patched.items():
-                connection.execute(
-                    update(self.items_table)
-                    .where(self.items_table.c.owner == owner, self.items_table.c.item_id == item_id)
-                    .values(metadata_json=canonical_json(metadata))
-                )
-                self.write_scenarios(connection, owner, item_id, metadata["scenarios"])
-            stored = self.rows(connection, owner, unique_ids)
-            return self.stored_items(connection, owner, [stored[item_id] for item_id in unique_ids])
+            items = self.items_table
+            connection.execute(
+                update(items)
+                .where(items.c.owner == owner, items.c.item_id == bindparam("row_item_id"))
+                .values(metadata_json=bindparam("metadata_json")),
+                [
+                    {"row_item_id": item_id, "metadata_json": canonical_json(metadata)}
+                    for item_id, metadata in patched.items()
+                ],
+            )
+            self.write_scenarios(
+                connection, owner, {item_id: metadata["scenarios"] for item_id, metadata in patched.items()}
+            )
+            return tuple(
+                StoredItem(existing[item_id]["sequence"], owner, item_id, metadata, existing[item_id]["digest"])
+                for item_id, metadata in patched.items()
+            )
 
     def scenario_generation(self, owner: str, scenario: str) -> str:
         check_owner(owner)
