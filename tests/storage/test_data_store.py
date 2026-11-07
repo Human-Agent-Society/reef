@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 import sqlalchemy
+import sqlalchemy.event
 from sqlalchemy import func, select
 from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
@@ -378,6 +379,34 @@ def test_the_store_lists_the_scenarios_with_record_items(store):
     store.update("acme", ["coding/call-1"], {"scenarios": {"reader": "train"}})
     assert store.scenarios_with_records("acme") == ("coding", "reader")
     assert store.scenarios_with_records("globex") == ()
+
+
+def test_a_create_of_many_records_takes_as_many_statements_as_a_create_of_one(open_durable_store):
+    statements = []
+
+    def counted(store, items):
+        statements.clear()
+
+        def listener(conn, cursor, statement, *_):
+            statements.append(statement)
+
+        sqlalchemy.event.listen(store.engine, "before_cursor_execute", listener)
+        try:
+            return store.create("acme", items)
+        finally:
+            sqlalchemy.event.remove(store.engine, "before_cursor_execute", listener)
+
+    with closing(open_durable_store()) as store:
+        store.create("acme", calls(1))
+        counted(store, calls(2))
+        one = len(statements)
+        # Each call continues the one before it, in this create too.
+        created = counted(store, calls(*range(3, 13)))
+        assert len(statements) == one
+        assert [item.sequence for item in created] == sorted(item.sequence for item in created)
+        links = store.record_links("acme", [item.item_id for item in created])
+        assert [links[item.item_id].parent for item in created] == [f"coding/call-{turn}" for turn in range(2, 12)]
+        assert [item.content for item in store.query("acme")] == [item.content for item in calls(*range(1, 13))]
 
 
 def test_concurrent_updates_of_one_item_keep_every_use(open_durable_store):
