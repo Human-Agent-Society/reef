@@ -17,6 +17,7 @@ import json
 import re
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -48,6 +49,10 @@ class ItemConflict(ReefError):
 
 class ItemNotFound(ReefError):
     """An item ID that the owner does not store."""
+
+
+class ScenarioArchived(ReefError):
+    """A write of record items for a generation of their scenario that is no longer current."""
 
 
 def check_owner(owner: object) -> str:
@@ -340,8 +345,12 @@ class DataStore(Plugin, ABC):
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
     * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
-      the record items that it made, and returns their number. The archive of a scenario calls it, so that a new
-      scenario with that name uses nothing. The items stay.
+      the record items that it made, and returns their number. It also ends the scenario's generation. The archive
+      of a scenario calls it, so that a new scenario with that name uses nothing. The items stay.
+    * ``scenario_generation(owner, scenario)`` returns the current generation of ``scenario``: an opaque string,
+      new when the scenario has none. A writer of the scenario's records reads it when it opens the scenario, and
+      gives it to ``create``. ``create(owner, items, generation=...)`` stores record items of one origin scenario
+      only while that generation is current; else it raises ``ScenarioArchived`` and stores nothing.
     * ``task_path(item)`` returns a local directory with the files of a task item.
     * ``record_links(owner, item_ids)`` maps each ID of ``item_ids`` that names a stored record item of ``owner``
       with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
@@ -398,7 +407,12 @@ class DataStore(Plugin, ABC):
         """
 
     @abstractmethod
-    def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]: ...
+    def create(
+        self, owner: str, items: Sequence[NewItem], *, generation: str | None = None
+    ) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def scenario_generation(self, owner: str, scenario: str) -> str: ...
 
     @abstractmethod
     def read(self, owner: str, item_id: str) -> StoredItem | None: ...
@@ -596,6 +610,21 @@ def check_filters(
         raise ValueError("after must be a non-negative int")
 
 
+def generation_origin(
+    prepared: Sequence[tuple[NewItem, Mapping[str, Any], str]], generation: str | None
+) -> str | None:
+    """The origin scenario whose ``generation`` a ``create`` of ``prepared`` checks, or None without a generation.
+
+    Raise ``ValueError`` unless every item is a record item of one origin scenario.
+    """
+    if generation is None:
+        return None
+    origins = {metadata["origin"]["scenario"] for _, metadata, _ in prepared if metadata["kind"] == "record"}
+    if len(origins) != 1 or any(metadata["kind"] != "record" for _, metadata, _ in prepared):
+        raise ValueError("a create with a generation writes record items of one origin scenario")
+    return origins.pop()
+
+
 def item_digest_matches(item: StoredItem, digest: str) -> bool:
     """Whether the stored ``item`` has the content of a create with ``digest``.
 
@@ -650,6 +679,7 @@ class MemoryDataStore(DataStore):
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
         self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
+        self.generations: dict[tuple[str, str], str] = {}
         self.next_sequence = 1
 
     def take_sequence(self) -> int:
@@ -689,8 +719,11 @@ class MemoryDataStore(DataStore):
     def delete_job_directory_record(self, key: str) -> None:
         self.job_directory_uses.pop(key, None)
 
-    def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]:
+    def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
+        origin = generation_origin(prepared, generation)
+        if origin is not None and self.generations.get((owner, origin)) != generation:
+            raise ScenarioArchived(f"generation {generation!r} of {origin!r} is no longer current")
         stored = self.items.setdefault(owner, {})
         for entry in prepared:
             existing = stored.get(entry[0].item_id)
@@ -865,7 +898,13 @@ class MemoryDataStore(DataStore):
             scenarios = {name: split for name, split in item.scenarios.items() if name != scenario}
             stored[item.item_id] = replace(item, metadata={**item.metadata, "scenarios": scenarios})
             self.write_uses(owner, item.item_id, scenarios)
+        self.generations.pop((owner, scenario), None)
         return len(used)
+
+    def scenario_generation(self, owner: str, scenario: str) -> str:
+        check_owner(owner)
+        check_owner(scenario)
+        return self.generations.setdefault((owner, scenario), uuid.uuid4().hex)
 
     def task_path(self, item: StoredItem) -> Path:
         if item.kind != "task":
