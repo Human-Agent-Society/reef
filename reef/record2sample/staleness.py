@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from reef.core.job_data import Sample, TrajectorySample
 
@@ -39,14 +39,25 @@ class ServedArtifacts:
 
     Values: ``artifact_ids`` is a finite list of artifact IDs with no two neighbors equal; the last one is the
     artifact that the scenario serves now. ``observe`` appends an artifact that differs from the last one, and
-    ``restore`` replaces the list.
+    ``restore`` replaces the list. ``beside_artifact_ids`` is the set of artifacts that the scenario serves beside its
+    active selection, and ``restore_beside`` replaces it. These artifacts answer requests now, also when they were
+    never active.
     Purpose: the pipeline keeps one. The scenario restores it from its commit history before each job's selection, so
     a reload or a restart keeps the artifacts served before it. The pipeline gives ``artifact_ids`` to
-    ``Record2Sample.is_stale``.
+    ``Record2Sample.is_stale``, for a sample that ``served_beside`` does not accept.
     """
 
     def __init__(self) -> None:
         self.artifact_ids: list[str] = []
+        self.beside_artifact_ids: frozenset[str] = frozenset()
+
+    def restore_beside(self, artifact_ids: Iterable[str]) -> None:
+        self.beside_artifact_ids = frozenset(artifact_ids)
+
+    def served_beside(self, samples: Sequence[Sample]) -> bool:
+        """Whether an artifact produced ``samples`` and every such artifact is in ``beside_artifact_ids``."""
+        produced = producing_artifact_ids(samples)
+        return bool(produced) and produced <= self.beside_artifact_ids
 
     def observe(self, artifact_id: str) -> None:
         """Add the artifact that the scenario serves now, if it changed."""
