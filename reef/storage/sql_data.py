@@ -371,13 +371,17 @@ class SQLDataStore(DataStore):
             )
         return tuple(items)
 
-    def rows(self, connection: Connection, owner: str, item_ids: Sequence[str]) -> dict[str, RowMapping]:
-        found = connection.execute(
-            select(self.items_table).where(
-                self.items_table.c.owner == owner, self.items_table.c.item_id.in_(list(item_ids))
-            )
-        ).mappings()
-        return {row["item_id"]: row for row in found}
+    def rows(
+        self, connection: Connection, owner: str, item_ids: Sequence[str], *, lock: bool = False
+    ) -> dict[str, RowMapping]:
+        """The rows of ``item_ids`` by item ID. With ``lock``, the transaction holds them until it ends, in item ID
+        order, so that two transactions that lock the same rows do not deadlock."""
+        statement = select(self.items_table).where(
+            self.items_table.c.owner == owner, self.items_table.c.item_id.in_(list(item_ids))
+        )
+        if lock:
+            statement = statement.order_by(self.items_table.c.item_id).with_for_update()
+        return {row["item_id"]: row for row in connection.execute(statement).mappings()}
 
     def write_scenarios(self, connection: Connection, owner: str, item_id: str, scenarios: Mapping[str, str]) -> None:
         """Make the uses of ``item_id`` match ``scenarios``: an unchanged use keeps its row and sequence, and a new
@@ -525,7 +529,8 @@ class SQLDataStore(DataStore):
         check_owner(owner)
         unique_ids = list(dict.fromkeys(item_ids))
         with self.transaction() as connection:
-            existing = self.rows(connection, owner, unique_ids)
+            # A patch merges into the whole metadata, so a concurrent patch must read after this one commits.
+            existing = self.rows(connection, owner, unique_ids, lock=True)
             missing = [item_id for item_id in unique_ids if item_id not in existing]
             if missing:
                 raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")
