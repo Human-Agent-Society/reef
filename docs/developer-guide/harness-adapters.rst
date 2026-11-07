@@ -602,7 +602,8 @@ graphs and loops alike.
 
 Tools run in the loop process under the ``local`` executor. Under
 ``sandbox``, each call runs in a bubblewrap child that grants only the
-declared capabilities. Hooks and loop code always run in the loop process.
+declared capabilities. On macOS, Seatbelt profiles do not nest, so each call
+runs under the run's profile. Hooks and loop code always run in the loop process.
 
 Trajectory
 ~~~~~~~~~~

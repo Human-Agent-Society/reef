@@ -4,6 +4,8 @@ and the fail-fast contract when a required sandbox cannot isolate."""
 from __future__ import annotations
 
 import os
+import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +14,7 @@ import pytest
 
 import reef
 from reef.core.errors import ReefError
-from reef.execution.sandbox.config import build_executor
+from reef.execution.sandbox.config import build_executor, host_sandbox_kind
 from reef.execution.sandbox.process import (
     LocalExecutor,
     ProgramLaunchError,
@@ -21,6 +23,7 @@ from reef.execution.sandbox.process import (
     SandboxLimits,
     SandboxUnavailable,
 )
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 
 
 def _script(tmp_path: Path, body: str, name: str = "prog") -> Path:
@@ -123,6 +126,7 @@ def test_build_executor_rejects_an_unknown_kind() -> None:
 
 
 def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(SandboxUnavailable, match="bubblewrap"):
         SandboxExecutor().preflight()
@@ -238,6 +242,7 @@ def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_
 
 
 def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     _probe_result(monkeypatch, 0)
     executor = build_executor(
@@ -254,6 +259,7 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
 def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path: Path) -> None:
     from reef.execution.sandbox.process import ISOLATION_ENV
 
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     executor = build_executor(
         {"executor": "sandbox", "sandbox": {"env_from": ["REMOTE_KEY"]}},
@@ -276,3 +282,131 @@ def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path
 def test_sandbox_refuses_invalid_env_from(names) -> None:
     with pytest.raises(ReefError, match="env_from must be a list"):
         build_executor({"executor": "sandbox", "sandbox": {"env_from": names}})
+
+
+@pytest.mark.parametrize(("platform", "kind"), [("darwin", "seatbelt"), ("linux", "bwrap")])
+def test_host_sandbox_kind_follows_the_platform(platform: str, kind: str) -> None:
+    assert host_sandbox_kind(platform) == kind
+
+
+def test_build_executor_selects_seatbelt_on_macos(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "seatbelt")
+    monkeypatch.setattr(SeatbeltExecutor, "preflight", lambda self: None)
+    executor = build_executor(
+        {"executor": "sandbox", "sandbox": {"egress_hosts": ["127.0.0.1:8000"], "limits": {"cpu_seconds": 30}}}
+    )
+    assert isinstance(executor, SeatbeltExecutor)
+    assert executor.egress_hosts == ("127.0.0.1:8000",)
+    assert executor.limits == SandboxLimits(cpu_seconds=30)
+
+
+def test_seatbelt_preflight_fails_fast_without_sandbox_exec(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.seatbelt.shutil.which", lambda name: None)
+    with pytest.raises(SandboxUnavailable, match="requires sandbox-exec"):
+        SeatbeltExecutor().preflight()
+
+
+def test_seatbelt_preflight_refuses_a_memory_limit(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.seatbelt.shutil.which", lambda name: "/usr/bin/sandbox-exec")
+    with pytest.raises(SandboxUnavailable, match="memory_bytes"):
+        SeatbeltExecutor(limits=SandboxLimits(memory_bytes=1 << 30)).preflight()
+
+
+def test_seatbelt_passes_paths_as_parameters_not_profile_text(tmp_path: Path) -> None:
+    quoted = tmp_path / 'a "quoted" dir'
+    workspace = quoted / "workspace"
+    workspace.mkdir(parents=True)
+    argv = SeatbeltExecutor().seatbelt_argv(["true"], root=quoted, workspace=workspace, temporary=tmp_path)
+    assert argv[:2] == ["sandbox-exec", "-p"]
+    assert '"quoted"' not in argv[2]
+    assert f"-DWRITE_0={workspace.resolve()}" in argv
+    assert "(deny network*)" in argv[2]
+
+
+macos_only = pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("sandbox-exec"), reason="needs macOS")
+
+
+def _seatbelt(**options) -> SeatbeltExecutor:
+    """A Seatbelt executor that can also read this interpreter, which tests run as the program."""
+    base = (*SeatbeltExecutor().base_paths, sys.prefix, sys.base_prefix, str(Path(sys.executable).resolve().parent))
+    return SeatbeltExecutor(base_paths=base, **options)
+
+
+@macos_only
+def test_seatbelt_confines_reads_and_writes_to_the_run(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    workspace = root / "workspace"
+    inputs = workspace / "inputs"
+    inputs.mkdir(parents=True)
+    (inputs / "given.txt").write_text("given")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    probe = f"""
+import os, pathlib
+def attempt(action):
+    try:
+        action()
+        return "allowed"
+    except OSError:
+        return "denied"
+print(attempt(lambda: pathlib.Path("made.txt").write_text("x")))
+print(attempt(lambda: pathlib.Path("inputs/given.txt").write_text("changed")))
+print(attempt(lambda: pathlib.Path({str(root / "root.txt")!r}).write_text("x")))
+print(attempt(lambda: pathlib.Path({str(outside / "secret.txt")!r}).read_text()))
+print(attempt(lambda: pathlib.Path(os.environ["TMPDIR"], "scratch").write_text("x")))
+print(os.environ["REEF_NATIVE_ENFORCE"], os.environ["REEF_SANDBOX_ISOLATION"], "LEAK" in os.environ)
+"""
+    outcome = _seatbelt().launch(
+        [sys.executable, "-c", probe],
+        root=root,
+        workspace=workspace,
+        env={},
+        timeout=60,
+        readonly_paths=(inputs,),
+    )
+    assert outcome.exit_code == 0, outcome.stderr
+    assert outcome.stdout.split("\n")[:6] == [
+        "allowed",
+        "denied",
+        "denied",
+        "denied",
+        "allowed",
+        "none seatbelt False",
+    ]
+
+
+def _listener() -> tuple[socket.socket, int]:
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    return server, server.getsockname()[1]
+
+
+@macos_only
+@pytest.mark.parametrize("network", ["default", "isolated"])
+def test_seatbelt_network_reaches_only_forwarded_loopback_ports(tmp_path: Path, network: str) -> None:
+    allowed, allowed_port = _listener()
+    blocked, blocked_port = _listener()
+    probe = f"""
+import socket
+for port in ({allowed_port}, {blocked_port}):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=3).close()
+        print("open")
+    except OSError:
+        print("closed")
+"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = _seatbelt(network=network, forward_ports=(allowed_port,))
+    try:
+        outcome = executor.launch(
+            [sys.executable, "-c", probe], root=tmp_path, workspace=workspace, env={}, timeout=60
+        )
+    finally:
+        allowed.close()
+        blocked.close()
+    assert outcome.exit_code == 0, outcome.stderr
+    expected = ["open", "closed"] if network == "isolated" else ["closed", "closed"]
+    assert outcome.stdout.split() == expected
