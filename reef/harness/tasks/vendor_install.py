@@ -174,7 +174,18 @@ def _install(install: InstallSpec, prefix: Path) -> None:
     if install.kind == "git":
         _install_git(install, prefix)
         return
+    if install.kind == "uv":
+        _install_uv(install, prefix)
+        return
     _run(["npm", "install", "--prefix", str(prefix), f"{install.package}@{install.version}"])
+
+
+def _install_uv(install: InstallSpec, prefix: Path) -> None:
+    """uv from PyPI at the pinned version, in a venv of its own that the interpreter running Reef builds."""
+    venv = prefix / "venv"
+    shutil.rmtree(venv, ignore_errors=True)
+    _run([sys.executable, "-m", "venv", str(venv)])
+    _run([str(venv / "bin" / "python"), "-m", "pip", "install", "--quiet", f"{install.package}=={install.version}"])
 
 
 def _install_git(install: InstallSpec, prefix: Path) -> None:
