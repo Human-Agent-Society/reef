@@ -208,8 +208,8 @@ class StoredItem:
     Values: ``sequence`` is a positive int, the position of the item in the order the store received its items.
     ``owner`` and ``item_id`` identify the item; no two items of one owner have the same ``item_id``.
     ``metadata`` passes ``created_metadata`` for ``owner``, and its ``kind`` is the item's kind. ``digest`` is the
-    SHA-256 of the content: ``json_digest`` of the JSON content, or the task file store's digest of a task
-    directory. A trajectory, a record or an artifact has its JSON ``content``, except in the result of a ``query``
+    SHA-256 of the content: ``json_digest`` of the JSON content, without ``created_at`` for a record
+    (``record_digest``), or the task file store's digest of a task directory. A trajectory, a record or an artifact has its JSON ``content``, except in the result of a ``query``
     without content. A task has no ``content``: the task file store
     keeps its directory under ``digest``, in the owner's partition (``task_partition``).
 
