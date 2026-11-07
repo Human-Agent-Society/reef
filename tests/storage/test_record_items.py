@@ -11,7 +11,7 @@ from reef.storage import record_items
 from reef.storage.data import ItemConflict, MemoryDataStore, NewItem
 from reef.storage.data_sync import release_items
 from reef.storage.item_kinds import copied_record
-from reef.storage.record_items import copy_records, record_item, sync_scenario_records
+from reef.storage.record_items import copy_records, record_item, used_record, used_records
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -98,7 +98,7 @@ def test_a_copy_in_another_scenario_names_the_copies_of_its_references():
             copied_record(item_id, content, "math", "code")
 
 
-def test_another_scenario_of_the_owner_holds_copies_that_get_no_items_and_stay(tmp_path):
+def test_another_scenario_of_the_owner_reads_the_records_it_uses_and_stores_no_copy(tmp_path):
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = MemoryDataStore(task_files)
     with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage:
@@ -108,18 +108,25 @@ def test_another_scenario_of_the_owner_holds_copies_that_get_no_items_and_stay(t
             copy_records(session.records, data, "acme", "math", 0)
         data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": "train"}})
         with closing(storage.open("code")) as session:
-            assert sync_scenario_records(session.records, data, "acme", "code") == ("math/i1", "math/r1")
-            assert sync_scenario_records(session.records, data, "acme", "code") == (), "a sync again adds nothing"
-            assert session.records.get("code", "math/r1").references == ("math/i1",)
-            assert copy_records(session.records, data, "acme", "code", 0) == 2
+            cursor, records = used_records(data, "acme", "code")
+            assert [item.agent_record_id for item in records] == ["math/i1", "math/r1"]
+            assert records[1].references == ("math/i1",) and records[1].scenario == "code"
+            assert used_records(data, "acme", "code", after_sequence=cursor) == (cursor, ()), "nothing new"
+            assert used_record(data, "acme", "code", "math/r1").references == ("math/i1",)
+            assert session.records.get("code", "math/r1") is None, "the scenario stores no copy"
+            assert copy_records(session.records, data, "acme", "code", 0) == 0
             assert [item.item_id for item in data.query("acme")] == ["math/i1", "math/r1"]
 
-            # The origin keeps its record items; another scenario can drop them, and its copies stay.
+            # A scenario does not read its own items as records of another scenario.
+            assert used_records(data, "acme", "math")[1] == ()
+            assert used_record(data, "acme", "math", "math/i1") is None
+
+            # The origin keeps its record items. Another scenario can drop them, and the read stops at once.
             with pytest.raises(ValueError, match="stays in 'math'"):
                 data.update("acme", ["math/r1"], {"scenarios": {"math": None}})
             data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": None}})
-            assert sync_scenario_records(session.records, data, "acme", "code") == ()
-            assert session.records.get("code", "math/i1") is not None
+            assert used_records(data, "acme", "code")[1] == ()
+            assert used_record(data, "acme", "code", "math/i1") is None
 
 
 def test_an_archive_releases_the_items_of_the_scenario_but_not_the_records_it_made(tmp_path):

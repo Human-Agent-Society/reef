@@ -50,7 +50,7 @@ from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
-from reef.storage.record_items import request_record_copy, sync_scenario_records
+from reef.storage.record_items import request_record_copy
 from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -760,14 +760,15 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                     self.apply_sync(current, owner)
 
     def apply_sync(self, current: Scenario, owner: str) -> None:
-        """Copy the record items of ``owner`` that the loaded scenario ``current`` now uses into its record store,
-        and wake its workers, which read the items that the write changed. The caller holds the scenario's lock."""
+        """Wake the workers of the loaded scenario ``current``, which read the items that the write changed, and the
+        samples service, which reads the record items that it uses. The caller holds the scenario's lock."""
         if self.data_store is None:
             raise ReefError("this dispatcher has no data store")
-        if sync_scenario_records(current.store.records, self.data_store, owner, current.name):
-            self.process_accepted_records(current)
-        else:
-            self.local_workers.wake(current)
+        self.request_samples(current)
+        self.local_workers.wake(current)
+        for component_trainer in current.trainers:
+            if not component_trainer.trainer.trains:
+                component_trainer.trainer.read_new_records()
 
     def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
         """The next automatic job of the trainer of ``component`` (the only one when None): its mode and samples."""

@@ -319,7 +319,8 @@ class DataStore(Plugin, ABC):
       ``content`` is None, and the store does not read it. Each use of an item by a scenario
       has its own sequence, which increases across the store: a new use, also of an older item, and a use whose
       split changes get a new one. A trainer reads its scenario's items with
-      it.
+      it. With ``excluding_origin``, the record items that this scenario made are left out.
+    * ``last_use_sequence(owner, scenario)`` returns the sequence of the newest use by ``scenario``, or 0.
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
@@ -406,7 +407,11 @@ class DataStore(Plugin, ABC):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        excluding_origin: str | None = None,
     ) -> tuple[tuple[int, StoredItem], ...]: ...
+
+    @abstractmethod
+    def last_use_sequence(self, owner: str, scenario: str) -> int: ...
 
     @abstractmethod
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]: ...
@@ -679,17 +684,32 @@ class MemoryDataStore(DataStore):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        excluding_origin: str | None = None,
     ) -> tuple[tuple[int, StoredItem], ...]:
         check_query(owner, None, scenario, after, limit)
         stored = self.items.get(owner, {})
         used = sorted(
             (sequence, item_id)
             for (use_owner, item_id, use_scenario), (_, sequence) in self.uses.items()
-            if use_owner == owner and use_scenario == scenario and sequence > after and stored[item_id].kind in kinds
+            if use_owner == owner
+            and use_scenario == scenario
+            and sequence > after
+            and stored[item_id].kind in kinds
+            and (excluding_origin is None or not item_id.startswith(f"{excluding_origin}/"))
         )
         return tuple(
             (sequence, stored[item_id] if content else replace(stored[item_id], content=None))
             for sequence, item_id in used[:limit]
+        )
+
+    def last_use_sequence(self, owner: str, scenario: str) -> int:
+        return max(
+            (
+                sequence
+                for (use_owner, _, use_scenario), (_, sequence) in self.uses.items()
+                if use_owner == owner and use_scenario == scenario
+            ),
+            default=0,
         )
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
