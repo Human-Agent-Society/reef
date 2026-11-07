@@ -21,7 +21,7 @@ import tempfile
 import time
 import uuid
 from abc import abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -194,15 +194,26 @@ def canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def scenarios_of(metadata: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The scenarios whose order a write of items with ``metadata`` changes: those that use them, and the origin of a
+    record item, whose trajectory nodes it changes."""
+    names: set[str] = set()
+    for value in metadata:
+        names.update(value.get("scenarios", {}))
+        if value["kind"] == "record":
+            names.add(value["origin"]["scenario"])
+    return names
+
+
 class SQLDataStore(DataStore):
     """A data store in the tables of ``data_tables``.
 
     A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``insert_new_item``
-    (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_creates``. Every
+    (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``. Every
     operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
-    ``ItemConflict``, never in a failed insert. ``create`` and ``delete`` both take ``lock_creates``, since they
-    change the trajectory nodes of an owner. ``segments`` is None, or the segment store that keeps the content of
+    ``ItemConflict``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for the
+    scenarios that they give a use or whose trajectory nodes they change. ``segments`` is None, or the segment store that keeps the content of
     trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
     the job data directories: ``job_directories`` when given, else ``segments``, else a local segment store in a new
     temporary directory, which only this process reads. ``job_directory_ttl_seconds`` is how long the store keeps a
@@ -256,8 +267,9 @@ class SQLDataStore(DataStore):
         first wins, and the caller compares digests after the insert.
         """
 
-    def lock_creates(self, connection: Connection) -> None:
-        """Serialize ``create`` with every other ``create`` of the store, until the transaction ends.
+    def lock_scenarios(self, connection: Connection, owner: str, scenarios: Iterable[str]) -> None:
+        """Serialize the writes that name each of ``scenarios`` of ``owner``, until the transaction ends. Take the locks
+        in sorted order, so that writers do not deadlock.
 
         Sequence order is then commit order, so a reader that pages with ``after`` misses no item. The default
         does nothing, for a store whose transactions already run one at a time.
@@ -423,7 +435,7 @@ class SQLDataStore(DataStore):
                 lines = self.write_segment(partition, [text for _, text in new])
                 places = {item_id: line for (item_id, _), line in zip(new, lines, strict=True)}
         with self.transaction() as connection:
-            self.lock_creates(connection)
+            self.lock_scenarios(connection, owner, scenarios_of(metadata for _, metadata, _ in prepared))
             for item, metadata, digest in prepared:
                 content = dict(item.content) if isinstance(item.content, Mapping) else None
                 place = places.get(item.item_id)
@@ -528,6 +540,19 @@ class SQLDataStore(DataStore):
             stored = self.stored_items(connection, owner, found, content=content)
         return tuple((int(row["use_sequence"]), item) for row, item in zip(found, stored, strict=True))
 
+    def scenarios_with_records(self, owner: str) -> tuple[str, ...]:
+        check_owner(owner)
+        items, uses = self.items_table, self.scenarios_table
+        statement = (
+            select(uses.c.scenario)
+            .join(items, (uses.c.owner == items.c.owner) & (uses.c.item_id == items.c.item_id))
+            .where(uses.c.owner == owner, items.c.kind == "record")
+            .distinct()
+            .order_by(uses.c.scenario)
+        )
+        with self.transaction(read_only=True) as connection:
+            return tuple(connection.execute(statement).scalars())
+
     def last_use_sequence(self, owner: str, scenario: str) -> int:
         check_owner(owner)
         uses = self.scenarios_table
@@ -540,7 +565,8 @@ class SQLDataStore(DataStore):
         unique_ids = list(dict.fromkeys(item_ids))
         with self.transaction() as connection:
             # A new use gets its sequence here, so that a reader's cursor of use sequences misses none (RFC #1219).
-            self.lock_creates(connection)
+            scenarios = patch.get("scenarios") if isinstance(patch, Mapping) else None
+            self.lock_scenarios(connection, owner, scenarios if isinstance(scenarios, Mapping) else ())
             # A patch merges into the whole metadata, so a concurrent patch must read after this one commits.
             existing = self.rows(connection, owner, unique_ids, lock=True)
             missing = [item_id for item_id in unique_ids if item_id not in existing]
@@ -563,10 +589,10 @@ class SQLDataStore(DataStore):
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
         with self.transaction() as connection:
-            self.lock_creates(connection)
             row = self.rows(connection, owner, [item_id]).get(item_id)
             if row is None:
                 return False
+            self.lock_scenarios(connection, owner, scenarios_of([json.loads(row["metadata_json"])]))
             connection.execute(
                 delete(self.scenarios_table).where(
                     self.scenarios_table.c.owner == owner, self.scenarios_table.c.item_id == item_id
@@ -869,9 +895,6 @@ class PostgresDataStore(SQLDataStore):
         except ModuleNotFoundError:
             raise ReefError("the PostgreSQL data store requires the reef-infra[postgres] extra") from None
         key = int.from_bytes(hashlib.sha256(f"reef-data-schema:{schema}".encode()).digest()[:8], "big", signed=True)
-        self.create_lock_key = int.from_bytes(
-            hashlib.sha256(f"reef-data-create:{schema}".encode()).digest()[:8], "big", signed=True
-        )
         self.schema = schema
         with self.engine.begin() as connection:
             # Serialize the check-then-create of the schema across deployments that start together.
@@ -942,10 +965,15 @@ class PostgresDataStore(SQLDataStore):
                     connection.execute(select(func.pg_advisory_unlock(key)))
                     connection.commit()
 
-    def lock_creates(self, connection: Connection) -> None:
-        # Identity values are given at insert time, not at commit time. One lock per schema makes the two orders
-        # the same, also across deployments that share the schema.
-        connection.execute(select(func.pg_advisory_xact_lock(self.create_lock_key)))
+    def lock_scenarios(self, connection: Connection, owner: str, scenarios: Iterable[str]) -> None:
+        # Identity values are given at insert time, not at commit time. A lock per scenario makes the two orders the
+        # same within the scenario, also across deployments that share the schema. A commit makes its rows visible
+        # before it releases the lock, so a reader of one scenario misses none. A sequence means nothing across
+        # scenarios, so no reader may keep one cursor over several (RFC #1219).
+        for scenario in sorted(set(scenarios)):
+            name = f"reef-data-use:{self.schema}:{owner}:{scenario}"
+            key = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big", signed=True)
+            connection.execute(select(func.pg_advisory_xact_lock(key)))
 
     def close(self) -> None:
         if self.engine is not None:
