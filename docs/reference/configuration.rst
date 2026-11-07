@@ -73,8 +73,9 @@ Recipe, without a training runtime or a specialized recipe. It records
 inference and feedback; it does not train the routed models.
 
 Start this deployment with ``reef serve``. Its controller starts the managed
-HTTP service and SR together; ``reef serve --component`` refuses a routing
-manifest. If a provider aborts a buffered request, Reef retries the same
+HTTP service and SR together; ``reef serve --component`` refuses a managed
+routing manifest. To run each service in its own process, see `External router
+lifecycle`_. If a provider aborts a buffered request, Reef retries the same
 selected target with the backoff set by ``inference.retry-initial-s`` and
 ``inference.retry-max-s``. ``inference.retry-timeout-s`` bounds these retries
 and defaults to ``inference.timeout-s``.
@@ -168,6 +169,9 @@ through ``--reef.routing-deployment``.
    * - Setting
      - Default
      - Meaning
+   * - lifecycle
+     - managed
+     - ``managed``: this section. ``external``: see `External router lifecycle`_.
    * - deployment_id
      - required with routing_manifest
      - 1-48 lowercase letters, digits or hyphens; must start with a letter or digit.
@@ -287,6 +291,75 @@ was interrupted, its outstanding operation ID blocks the next start. Cleanup
 preserves this marker until the operator establishes that the daemon operation
 has finished and explicitly acknowledges it. See the tutorial for status,
 cleanup and configuration replacement commands.
+
+External router lifecycle
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use ``reef.routing_deployment.lifecycle: external`` when each Reef service runs
+in its own process and another system runs SR, for example Kubernetes. Reef then
+needs no Docker, and each replica of the ``inference`` service uses one SR on its
+own loopback. Every service can read the same configuration, because the other
+services ignore the manifest. ``reef serve`` without ``--component`` refuses this
+lifecycle.
+
+.. code-block:: yaml
+
+   reef:
+     routing_manifest: /etc/reef/manifest.yaml
+     routing_deployment:
+       lifecycle: external
+       sr_management_port: 50053
+   recipe:
+     implementation: recipe
+   inference:
+     # The launcher needs a reachable default; routed requests use the manifest's targets.
+     upstream_url: http://127.0.0.1:8101
+     upstream_model: code-student
+
+To start a replica:
+
+1. Set ``REEF_SR_MANAGEMENT_TOKEN`` and ``REEF_SR_SELECTION_TOKEN`` to two
+   different secrets, for both SR and the replica.
+2. Write SR's configuration, before SR starts:
+
+   .. code-block:: bash
+
+      python -m reef.service.deploy.routing.cli render \
+        --config /etc/reef/reef.yaml --output /app/config/config.yaml
+
+3. Run SR with ``/app/config/config.yaml`` as its argument, in the replica's
+   network namespace. SR listens on ``127.0.0.1:<sr_management_port>``. The render
+   step writes the file with mode 0600, so run SR as the user that wrote it.
+4. Run ``reef serve --component inference``. Clients reach it on ``reef.host``.
+
+Use ``GET /readyz`` as the replica's readiness check. It needs no token. It
+answers 200 after SR reports its generated runtime as active and ready, every
+enabled target lists its model, and one preview per Scenario passes. It answers
+503 otherwise, including for requests of Scenarios outside the manifest. The
+replica reads SR every five seconds and checks a new runtime hash in the same way
+before requests use it.
+
+This lifecycle differs from ``managed``:
+
+* **Policy updates.** The replica reads the manifest once and has no ``SIGHUP``
+  update. To change the policy, replace the replicas. During a rollout, two policies can
+  serve at the same time. Each record's ``snapshot_version`` shows which one
+  served it.
+* **Scope.** A manifest Scenario's ``POST /v1/chat/completions`` follows the
+  routing rules. Every other Scenario and route keeps the ordinary ``inference``
+  behavior. Clients must call the ``inference`` service, because the other
+  services do not route.
+* **Stopping.** On SIGTERM the replica stops accepting connections and waits up to
+  60 seconds for requests. It then cancels the rest, and waits
+  ``finalization_timeout_seconds`` for their records. Give the process more time
+  than this before it is killed.
+* **Your responsibilities.** Reef does not start, restart or stop SR, and it does
+  not check the image's revision label. Pin an image built from the commit in
+  ``third_party/semantic-router``.
+
+Only ``sr_management_port``, ``selection_timeout_seconds``,
+``preview_max_concurrency`` and ``finalization_timeout_seconds`` apply. Set SR's CPU
+and memory limits where you run it.
 
 Configuration file layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~

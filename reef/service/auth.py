@@ -263,9 +263,9 @@ def create_authentication_middleware(
 
     @web.middleware
     async def authenticate(request: web.Request, handler):
-        # /healthz stays reachable without credentials: liveness probes (the
+        # /healthz and /readyz stay reachable without credentials: probes (the
         # bundled configs' ready checks, orchestrators) cannot authenticate.
-        if accepted and request.path != "/healthz" and not _authorized(request):
+        if accepted and request.path not in ("/healthz", "/readyz") and not _authorized(request):
             raise web.HTTPUnauthorized(text="invalid service token")
         return await handler(request)
 
