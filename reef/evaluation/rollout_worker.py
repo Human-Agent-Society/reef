@@ -32,7 +32,7 @@ from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.harness.adapters import get_adapter
-from reef.harness.harbor.agent import tree_agent
+from reef.harness.harbor.agent import BRIDGE_ENVIRONMENTS, tree_agent
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
@@ -101,8 +101,9 @@ class TreeHarness:
         """The harness side of the policy: the adapter, with the tree rendered with no model binding."""
         return PolicyHarness(self.adapter, render_tree(HarnessTree(self.files), get_adapter(self.adapter)))
 
-    def agent(self, directory: Path) -> Mapping[str, object]:
-        """The Harbor agent configuration that runs the tree, with its files under ``directory``."""
+    def agent(self, directory: Path, *, bridge: bool = False) -> Mapping[str, object]:
+        """The Harbor agent configuration that runs the tree, with its files under ``directory``. ``bridge``
+        bridges the task container's loopback to the rollout's capture proxy (``tree_agent``)."""
         tree_dir = directory / "tree"
         HarnessTree(self.files).write(tree_dir)
         return tree_agent(
@@ -111,6 +112,7 @@ class TreeHarness:
             tree_dir=tree_dir,
             files_dir=directory / "rendered",
             timeout=TREE_AGENT_TIMEOUT_S,
+            bridge=bridge,
         )
 
     def to_json(self) -> dict[str, JsonValue]:
@@ -329,6 +331,8 @@ class EvaluationRolloutWorker(QueueWorker):
         """Run ``rollout`` once, when its candidate is ready, and return its score."""
         task_directory = self.endpoints.task_directory(rollout)
         served = self.served_candidate(rollout, lease_lost)
+        # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
+        bridged = rollout.tree is not None and rollout.environment in BRIDGE_ENVIRONMENTS
         with (
             tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work,
             self.endpoints.open(rollout, served) as endpoint,
@@ -340,10 +344,11 @@ class EvaluationRolloutWorker(QueueWorker):
                 model_adapter=rollout.model.adapter,
                 token=endpoint.token,
                 work_dir=Path(work),
-                agent=rollout.tree.agent(Path(work)) if rollout.tree is not None else rollout.agent,
-                # A tree's agent runs in the task's container, which reaches the capture proxy at this address.
-                agent_host=None if rollout.tree is None else self.agent_host,
+                agent=rollout.tree.agent(Path(work), bridge=bridged) if rollout.tree is not None else rollout.agent,
+                # A tree's agent on Docker runs in the task's container, which reaches the capture proxy at this address.
+                agent_host=None if rollout.tree is None or bridged else self.agent_host,
                 environment=rollout.environment,
+                stream=bridged,
                 is_reporting=False,
                 is_unrecorded=True,
                 concurrency=1,

@@ -10,7 +10,7 @@ import tarfile
 import time
 import urllib.request
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -293,12 +293,15 @@ class TreeCallingLab(TaskLab):
     def __init__(self, logs: Path) -> None:
         self.logs = logs
         self.rendered: dict[str, str] = {}
+        self.overrides: Mapping[str, object] = {}
+        self.agent: TreeAgent | None = None
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         import_path = str(agent["import_path"])
         assert import_path == "reef.harness.harbor.agent:TreeAgent"
         kwargs = cast(dict[str, Any], agent["kwargs"])
-        TreeAgent(self.logs, **kwargs)
+        self.overrides = overrides
+        self.agent = TreeAgent(self.logs, **kwargs)
         files = Path(kwargs["files_dir"])
         self.rendered = {str(path.relative_to(files)): path.read_text() for path in files.rglob("*") if path.is_file()}
         body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "solve"}]}).encode()
@@ -385,6 +388,29 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
 
 
 @pytest.mark.integration
+def test_a_tree_on_modal_runs_in_stream_mode_and_bridges_its_container_to_the_proxy(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    lab = TreeCallingLab(tmp_path / "logs")
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
+            body = {"artifact_id": artifact_id, "harness": {"item": item_id}, "environment": "modal"}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+            assert answer["state"] == "finished", answer
+
+    asyncio.run(run())
+    assert lab.overrides["environment"] == {"type": "modal", "stream": True}
+    assert lab.agent is not None and lab.agent.bridge_port is not None
+    assert f"http://127.0.0.1:{lab.agent.bridge_port}" in "".join(lab.rendered.values())
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize(
     ("options", "reason"),
     [
@@ -394,6 +420,7 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
         ({"adapter": "missing"}, "unknown harness adapter"),
         ({"adapter": "hermes"}, "cannot run in a task's container"),
         ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
+        ({"environment": "e2b"}, "Harbor gives no SSH access to its sandboxes"),
     ],
 )
 def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
@@ -407,7 +434,12 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
             artifact_id = await created(client, tmp_path, "add")
             await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
             uri = options.pop("uri", harness_tree(tmp_path / "tree"))
-            body = {"artifact_id": artifact_id, "harness": {"item": tree_item(dispatcher, uri, **options)}}
+            environment = options.pop("environment", "docker")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"item": tree_item(dispatcher, uri, **options)},
+                "environment": environment,
+            }
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 400 and reason in await response.text()
 
