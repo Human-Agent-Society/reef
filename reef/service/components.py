@@ -57,6 +57,7 @@ from reef.service.web import service_application
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
+from reef.storage.record_items import ItemRecordStorage
 from reef.storage.tasks import TaskFileStore
 from reef.train.job_queue import TrainingJobWorker
 
@@ -88,8 +89,11 @@ class InferenceApp(ComponentApp):
         coordination = open_service_coordination(settings)
         try:
             backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
-            storage, _ = open_scenario_storage(settings)
-            # Records that this service appends are traced as the records that control appends are.
+            storage, task_files = open_scenario_storage(settings)
+            # Records that this service appends are record items (RFC #1219), traced as the records that control
+            # appends are.
+            data_store = build_data_store(settings, task_files)
+            storage = ItemRecordStorage(storage, data_store, coordination.marks)
             record_observer = build_record_observer(settings.tracing_config, environ=environ)
             if record_observer is not None:
                 storage = ObservedScenarioStorage(storage, record_observer)
@@ -119,6 +123,7 @@ class InferenceApp(ComponentApp):
                     environ,
                 )
             except BaseException:
+                data_store.close()
                 storage.close()
                 coordination.close()
                 close_runtimes(recipe.job_components(), runtime)
@@ -138,6 +143,8 @@ class InferenceApp(ComponentApp):
         async def close_inference(app: web.Application) -> None:
             if worker is not None:
                 await asyncio.to_thread(worker.stop)
+            # The data store shares the storage's task file store, so it closes first.
+            data_store.close()
             storage.close()
             coordination.close()
             close_runtimes(recipe.job_components(), runtime)

@@ -290,8 +290,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     records.close()
     records = SQLiteRecordStore(path)
     recovered = build(backend, store=records)
-    recovered.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
-    recovered.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+    recovered.restore_consumed_records(prepared.consumed_ids)
     make_samples(recovered)
     assert recovered.advance_job() is not None
     assert [batch.request_id for batch in backend.batches] == ["committed", "pending"]

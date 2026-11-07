@@ -332,6 +332,8 @@ class DataStore(Plugin, ABC):
       store does not read it.
     * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
       with these filters and no limit gives.
+    * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,
+      or 0 when there is none.
     * ``scenario_items(owner, scenario, kinds, after, limit)`` returns the items of ``kinds`` of ``owner`` that
       ``scenario`` uses, with content, each with the sequence of its use, in the order of those sequences: the uses
       after ``after``, at most ``limit``. The store reads no item of another kind; without ``content``, each item's
@@ -460,6 +462,17 @@ class DataStore(Plugin, ABC):
         origin: str | None = None,
         request_type: str | None = None,
         after: int = 0,
+    ) -> int: ...
+
+    @abstractmethod
+    def last_sequence(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
     ) -> int: ...
 
     @abstractmethod
@@ -806,6 +819,20 @@ class MemoryDataStore(DataStore):
     ) -> int:
         check_filters(owner, kind, scenario, origin, request_type, after)
         return sum(1 for _ in self.matching(owner, kind, scenario, origin, request_type, after))
+
+    def last_sequence(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+    ) -> int:
+        check_filters(owner, kind, scenario, origin, request_type, 0)
+        return max(
+            (item.sequence for item in self.matching(owner, kind, scenario, origin, request_type, 0)), default=0
+        )
 
     def matching(
         self,
