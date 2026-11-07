@@ -292,8 +292,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     This is the Harbor agent runner of ``RolloutRunner``. It runs the harness ``harness``, the Harbor agent with
     no plugin, and the model ``policy_model``, which ``reef_url`` serves: ``model``, with the LoRA adapter
     ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
-    ``concurrency`` rollouts at a time. ``stream`` runs each trial in Harbor's stream mode, which gives the agent
-    SSH access to its sandbox, for an agent that bridges its container to the capture proxy.
+    ``concurrency`` rollouts at a time.
     """
 
     def __init__(
@@ -308,7 +307,6 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         agent: Mapping[str, object] | None = None,
         agent_host: str | None = None,
         environment: str = "docker",
-        stream: bool = False,
         labels: Mapping[str, str] | None = None,
         extra_instruction_paths: Sequence[Path] = (),
         is_reporting: bool = True,
@@ -343,7 +341,6 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             raise TaskRolloutError("agent must carry a Harbor agent name or an import_path")
         self.agent_host = agent_host
         self.environment = environment
-        self.stream = stream
         self.labels = checked_labels(dict(labels or {}))
         for path in extra_instruction_paths:
             if not Path(path).is_file():
@@ -472,8 +469,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         try:
             base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
-            environment: dict[str, object] = {"type": self.environment, **({"stream": True} if self.stream else {})}
-            overrides: dict[str, object] = {"environment": environment}
+            overrides: dict[str, object] = {"environment": {"type": self.environment}}
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)
