@@ -438,14 +438,21 @@ class DataStore(Plugin, ABC):
     def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]: ...
 
     def groups(
-        self, owner: str, *, kind: ItemKind, key: str, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        *,
+        kind: ItemKind,
+        key: str,
+        scenario: str | None = None,
+        before: int | None = None,
+        limit: int = MAX_QUERY_LIMIT,
     ) -> tuple[ItemGroup, ...]:
-        """The groups of the items of ``owner`` and ``kind`` by ``key``. The default reads every page of ``query``
-        without content; a store can read the groups at once."""
-        check_groups(owner, kind, key, before, limit)
+        """The groups of the items of ``owner`` and ``kind`` by ``key``, only of the items that ``scenario`` uses if it
+        is given. The default reads every page of ``query`` without content; a store can read the groups at once."""
+        check_groups(owner, kind, key, scenario, before, limit)
         found: dict[str | None, ItemGroup] = {}
         after = 0
-        while page := self.query(owner, kind=kind, after=after, content=False):
+        while page := self.query(owner, kind=kind, scenario=scenario, after=after, content=False):
             for item in page:
                 value = item.metadata.get(key)
                 value = value if isinstance(value, str) else None
@@ -512,9 +519,9 @@ class DataStore(Plugin, ABC):
         """Release the store's resources. A second call does nothing."""
 
 
-def check_groups(owner: str, kind: object, key: object, before: object, limit: object) -> None:
+def check_groups(owner: str, kind: object, key: object, scenario: object, before: object, limit: object) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.groups`` are valid."""
-    check_query(owner, kind, None, 0, limit)
+    check_query(owner, kind, scenario, 0, limit)
     if kind is None:
         raise ValueError("groups need a kind")
     if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
