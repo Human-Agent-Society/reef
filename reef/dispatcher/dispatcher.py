@@ -621,14 +621,15 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         *,
         source: Mapping[str, str],
         directory: Path,
+        artifact_id: str | None = None,
     ) -> ComponentArtifact:
-        """Publish ``files`` as a new artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
+        """Publish ``files`` as an artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
 
         Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
         """
         with self.registry.lock_for(scenario):
             imported = self.registry.require(scenario).import_artifact(
-                files, component, source=source, directory=directory
+                files, component, source=source, directory=directory, artifact_id=artifact_id
             )
         self.request_artifact_copy(scenario)
         return imported

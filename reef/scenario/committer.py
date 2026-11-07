@@ -570,7 +570,13 @@ class ScenarioCommitter:
             return selected
 
     def import_artifact(
-        self, files: SourceFiles, component: str | None, *, source: Mapping[str, str], directory: Path
+        self,
+        files: SourceFiles,
+        component: str | None,
+        *,
+        source: Mapping[str, str],
+        directory: Path,
+        artifact_id: str | None = None,
     ) -> ComponentArtifact:
         """Publish ``files``, which an import's URI names, as a new artifact of ``component``; return it.
 
@@ -580,7 +586,10 @@ class ScenarioCommitter:
         the check can ask a remote service (``ArtifactLayout.stored``). The snapshot's
         own admission check runs on what is stored, as at a training
         publication. The imported artifact receives an independent ID,
-        including when its bytes match an existing artifact. The snapshot binds the artifact as ``component`` and every other
+        including when its bytes match an existing artifact, unless
+        ``artifact_id`` names the artifact of an artifact item (RFC #1218): it
+        keeps that ID, and when ``component`` lists that ID already, this call
+        returns it and reads nothing. The snapshot binds the artifact as ``component`` and every other
         component as the active selection binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
         the next step with ``source``, the ``{"uri", "version"}`` that the
@@ -592,9 +601,14 @@ class ScenarioCommitter:
         training result waits for its commit. Nothing changes then.
         """
         component, layout = self.import_target(component)
+        if artifact_id is not None:
+            with self._publication_lock:
+                listed = self.snapshot_queries.artifacts(self._step, self.component_names())
+            if any((row["artifact_id"], row["component"]) == (artifact_id, component) for row in listed):
+                return ComponentArtifact(component, artifact_id)
         components = self._binding.components
         spec = components.components[component]
-        imported = layout.stored(files, directory)
+        imported = layout.stored(files, directory, artifact_id=artifact_id)
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1

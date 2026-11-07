@@ -21,7 +21,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
-from reef.service.data_service import DataWorker, data_jobs
+from reef.service.data_service import DataWorker, copy_scenario_artifacts, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_coordination import memory_coordination
@@ -125,22 +125,34 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             refused = await client.delete(f"{DATA}/{item_id}")
             assert refused.status == 400 and "still exists" in await refused.text()
 
-            # A scenario of the owner in the other Cell imports the item: a copy of the same content, which names
-            # the item.
+            # A scenario of the owner in the other Cell imports the item: the same artifact, under the same ID, and
+            # the library keeps one item of it (RFC #1218).
             into = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
             assert into.status == 201, await into.text()
             receipt = await into.json()
-            copied = await library_item(client, f"other/{receipt['artifact_id']}")
-            assert "content_id" not in copied["content"]
+            assert receipt["artifact_id"] == imported["artifact_id"]
             listed = (await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]
             assert listed[0]["source"] == {"uri": content["source_uri"], "version": "", "item": item_id}
-            # The import is an artifact of "other", so it enters the library too.
-            await library_item(client, f"other/{receipt['artifact_id']}")
+            again = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
+            assert (await again.json())["artifact_id"] == imported["artifact_id"]
+            assert len((await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]) == len(
+                listed
+            )
+            assert copy_scenario_artifacts(second, "other") == 0
+            missing = await client.get(f"{DATA}/other/{receipt['artifact_id']}")
+            assert missing.status == 404
 
             # A client adds files that it stored as an item of its own, imports it, and deletes it.
             body = upload_item("upload-1", weights(tmp_path / "upload", b"w10"))
             assert (await client.post(DATA, json=body)).status == 201
-            assert (await other_cell.post("/reef/scenarios/other/artifacts", json={"item": "upload-1"})).status == 201
+            first_use = await (
+                await other_cell.post("/reef/scenarios/other/artifacts", json={"item": "upload-1"})
+            ).json()
+            # An upload gets one ID at its first use, and it keeps it.
+            stored = await (await client.get(f"{DATA}/upload-1")).json()
+            assert stored["metadata"]["artifact_id"] == first_use["artifact_id"]
+            patch = {"ids": ["upload-1"], "patch": {"artifact_id": "artifact:other"}}
+            assert (await client.post(f"{DATA}/metadata", json=patch)).status == 400
             assert (await client.delete(f"{DATA}/upload-1")).status == 200
 
             # A scenario uses an artifact item by importing it, not through metadata.scenarios.
@@ -195,6 +207,8 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert created.status == 201, await created.text()
                 answer = await created.json()
                 started = answer["artifact_id"]
+                if name == "from-scenario":
+                    assert started == imported["artifact_id"]
                 assert answer == {
                     "scenario": name,
                     "owner": "acme",

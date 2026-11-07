@@ -736,10 +736,13 @@ item with ``POST /reef/namespaces/{owner}/data``, ``metadata`` ``{"kind":
 To use an artifact item in a scenario, import it:
 ``POST /reef/scenarios/{scenario}/artifacts`` with ``{"item": "<id>"}``. The
 scenario must belong to the item's owner. Reef reads the item's
-``source_uri`` and imports the files as a new artifact of the scenario; the
-import's ``source`` names the item. An item without a ``source_uri`` returns
-400. A new scenario can also start from an artifact item: see `Create a
-scenario`_.
+``source_uri`` and imports the files into the scenario; the import's ``source``
+names the item. The artifact keeps its ID, so the ID names one artifact in each
+scenario that uses it, and the library keeps one item of it. A second import of
+the item returns that artifact, and it reads nothing. An upload gets its ID at
+its first use, in ``metadata.artifact_id``, which never changes after that. An
+item without a ``source_uri`` returns 400. A new scenario can also start from
+an artifact item: see `Create a scenario`_.
 
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
