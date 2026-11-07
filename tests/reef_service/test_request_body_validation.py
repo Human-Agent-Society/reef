@@ -156,7 +156,8 @@ def test_create_and_update_refuse_the_retired_release_id_and_model_keys() -> Non
             update = await client.post("/reef/scenarios/s/update", json={"model": None})
             assert (
                 update.status == 400
-                and "training_mode, artifact_evaluation, activation or serving_config" in await update.text()
+                and "training_mode, artifact_evaluation, activation, serving_config or traffic_weights"
+                in await update.text()
             )
 
     asyncio.run(run())

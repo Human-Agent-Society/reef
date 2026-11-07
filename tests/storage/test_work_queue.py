@@ -510,11 +510,19 @@ def test_withdrawal_removes_routes_and_cannot_be_undone_by_a_running_start(open_
     )
     assert table.read_serving_config("s") == {"temperature": 0.3}
     assert table.changed_sequence() > before
+    with pytest.raises(ValueError, match="b, c"):
+        table.write_traffic_weights("s", {"a": 50, "b": 25, "c": 25}, control_lease_number=lease.number)
+    assert table.read_traffic_weights("s") == {}
+    before_weights = table.changed_sequence()
+    table.write_traffic_weights("s", {"active": 100, "absent": 0}, control_lease_number=lease.number)
+    assert table.read_traffic_weights("s") == {"active": 100, "absent": 0}
+    assert table.changed_sequence() > before_weights
     table.request("s", {"artifact_id": "b"}, control_lease_number=lease.number, now=3)
     running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=4)
     withdrawn = table.request("s", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=5)
     assert withdrawn.state == "finished" and withdrawn.payload == {}
     assert table.read_scenario("s") == {} and table.read_serving_config("s") == {}
+    assert table.read_traffic_weights("s") == {}
     assert table.due_stops(14) == ()
     assert table.due_stops(15) == (ScheduledStop(served, 15),)
     table.complete_request(
