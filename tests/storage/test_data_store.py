@@ -104,6 +104,15 @@ def test_a_read_of_many_items_gives_each_known_one_once_in_the_order_asked(store
     assert store.read_many("acme", []) == ()
 
 
+def test_only_the_create_that_stores_an_item_marks_it_inserted(store):
+    (first,) = store.create("acme", [trajectory("t1")])
+    assert first.inserted
+    again, second = store.create("acme", [trajectory("t1"), trajectory("t2")])
+    assert (again.inserted, second.inserted) == (False, True)
+    assert again == first
+    assert not store.read("acme", "t1").inserted
+
+
 def test_the_same_content_again_changes_nothing_and_other_content_is_a_conflict_that_stores_nothing(store):
     (first,) = store.create("acme", [trajectory("t1", "one")])
     assert store.create("acme", [trajectory("t1", "one")]) == (first,)
@@ -431,6 +440,9 @@ def test_creates_that_wait_for_one_scenario_share_a_transaction(postgres_config,
         assert [future.exception(timeout=10) is None for future in futures] == [True, True, False, True]
         assert isinstance(futures[2].exception(), ItemConflict)
         assert {item.item_id for item in store.query("acme")} == set("abcdefg")
+        # Two creates of one ID in one transaction: only the first stores it.
+        futures = held("h", "i", "i")
+        assert sorted(future.result(timeout=10)[0].inserted for future in futures[1:]) == [False, True]
         assert not store.waiting
 
 
