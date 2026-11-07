@@ -18,7 +18,7 @@ import re
 import tempfile
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
@@ -319,9 +319,13 @@ class DataStore(Plugin, ABC):
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
-      ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
-      are given. Without ``content``, each item's ``content`` is None, and the store does not read it.
+    * ``query(owner, kind, scenario, origin, request_type, after, limit, content)`` returns the items of ``owner``
+      with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when
+      those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those of
+      ``request_type``; they need ``kind="record"``. Without ``content``, each item's ``content`` is None, and the
+      store does not read it.
+    * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
+      with these filters and no limit gives.
     * ``scenario_items(owner, scenario, kinds, after, limit)`` returns the items of ``kinds`` of ``owner`` that
       ``scenario`` uses, with content, each with the sequence of its use, in the order of those sequences: the uses
       after ``after``, at most ``limit``. The store reads no item of another kind; without ``content``, each item's
@@ -412,10 +416,24 @@ class DataStore(Plugin, ABC):
         *,
         kind: ItemKind | None = None,
         scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
     ) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def count(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+        after: int = 0,
+    ) -> int: ...
 
     @abstractmethod
     def scenario_items(
@@ -544,17 +562,38 @@ def check_groups(owner: str, kind: object, key: object, scenario: object, before
         raise ValueError("before must be a positive int")
 
 
-def check_query(owner: str, kind: object, scenario: object, after: object, limit: object) -> None:
+def check_query(
+    owner: str,
+    kind: object,
+    scenario: object,
+    after: object,
+    limit: object,
+    *,
+    origin: object = None,
+    request_type: object = None,
+) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
+    check_filters(owner, kind, scenario, origin, request_type, after)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
+        raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
+
+
+def check_filters(
+    owner: str, kind: object, scenario: object, origin: object, request_type: object, after: object
+) -> None:
+    """Raise ``ValueError`` unless the filters of ``DataStore.query`` and ``DataStore.count`` are valid."""
     check_owner(owner)
     if kind is not None and kind not in ITEM_KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
-    if scenario is not None:
-        check_owner(scenario)
+    for name in (scenario, origin):
+        if name is not None:
+            check_owner(name)
+    if (origin is not None or request_type is not None) and kind != "record":
+        raise ValueError("origin and request_type filter record items: give kind='record'")
+    if request_type is not None and request_type not in tuple(RequestType):
+        raise ValueError(f"request_type must be one of {', '.join(RequestType)}, got {request_type!r}")
     if isinstance(after, bool) or not isinstance(after, int) or after < 0:
         raise ValueError("after must be a non-negative int")
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
-        raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
 
 
 def item_digest_matches(item: StoredItem, digest: str) -> bool:
@@ -696,22 +735,50 @@ class MemoryDataStore(DataStore):
         *,
         kind: ItemKind | None = None,
         scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
     ) -> tuple[StoredItem, ...]:
-        check_query(owner, kind, scenario, after, limit)
+        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type)
         matched = sorted(
-            (
-                item
-                for item in self.items.get(owner, {}).values()
-                if item.sequence > after
-                and (kind is None or item.kind == kind)
-                and (scenario is None or scenario in item.scenarios)
-            ),
-            key=lambda item: item.sequence,
+            self.matching(owner, kind, scenario, origin, request_type, after), key=lambda item: item.sequence
         )
         return tuple(item if content else replace(item, content=None) for item in matched[:limit])
+
+    def count(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+        after: int = 0,
+    ) -> int:
+        check_filters(owner, kind, scenario, origin, request_type, after)
+        return sum(1 for _ in self.matching(owner, kind, scenario, origin, request_type, after))
+
+    def matching(
+        self,
+        owner: str,
+        kind: ItemKind | None,
+        scenario: str | None,
+        origin: str | None,
+        request_type: str | None,
+        after: int,
+    ) -> Iterator[StoredItem]:
+        """The items of ``owner`` that the filters of ``query`` keep, in no order."""
+        for item in self.items.get(owner, {}).values():
+            if (
+                item.sequence > after
+                and (kind is None or item.kind == kind)
+                and (scenario is None or scenario in item.scenarios)
+                and (origin is None or item.metadata["origin"]["scenario"] == origin)
+                and (request_type is None or (item.content or {}).get("request_type") == request_type)
+            ):
+                yield item
 
     def scenario_items(
         self,
