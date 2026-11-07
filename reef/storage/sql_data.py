@@ -563,9 +563,11 @@ class SQLDataStore(DataStore):
         prepared = [entry for pending in batch for entry in pending.prepared]
         values: dict[str, dict[str, Any]] = {}
         calls: dict[str, NewNode] = {}
+        first: dict[str, PendingCreate] = {}
         for pending in batch:
             for item_id, value in pending.values.items():
                 values.setdefault(item_id, value)
+                first.setdefault(item_id, pending)
             for item_id, call in pending.calls.items():
                 calls.setdefault(item_id, call)
         with self.transaction() as connection:
@@ -619,6 +621,7 @@ class SQLDataStore(DataStore):
                             metadata_of[item.item_id],
                             values[item.item_id]["digest"],
                             None,
+                            inserted=first[item.item_id] is pending,
                         )
                     )
                     for item, _, _ in pending.prepared
