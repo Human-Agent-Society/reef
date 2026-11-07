@@ -6,6 +6,7 @@ import hashlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import inspect
@@ -63,18 +64,25 @@ def scenario_file(directory, scenario: str = "math"):
     return directory / f"{hashlib.sha256(scenario.encode()).hexdigest()}.sqlite3"
 
 
-@pytest.mark.parametrize("copied", [True, False], ids=["copied", "not-copied"])
-def test_the_first_open_drops_the_old_record_tables_only_when_their_records_are_record_items(tmp_path, copied):
+@pytest.mark.parametrize(
+    ("newest", "stored", "copied"),
+    [("old-2", "math", True), ("old-2", None, False), ("code/r9", "code", True)],
+    ids=["copied", "not-copied", "copy-of-another-scenario"],
+)
+def test_the_first_open_drops_the_old_record_tables_only_when_their_records_are_record_items(
+    tmp_path, newest, stored, copied
+):
     with closing(SQLiteScenarioStorage(tmp_path)) as storage:
         storage.write_settings("math", ScenarioSettings(owner="acme"))
-        if copied:
-            storage.data.create("acme", [record_item(report("old-2"))])
+        if stored is not None:
+            stored_id = newest.split("/")[-1]
+            storage.data.create("acme", [record_item(replace(report(stored_id), scenario=stored))])
     legacy_database(scenario_file(tmp_path))
     with closing(sqlite3.connect(scenario_file(tmp_path))) as connection, connection:
         connection.executemany(
             "INSERT INTO agent_record (agent_record_id, scenario, request_type, payload_json, created_at, "
             "references_json) VALUES (?, 'math', 'report', '{}', 1.0, '[]')",
-            [("old-1",), ("old-2",)],
+            [("old-1",), (newest,)],
         )
     with closing(SQLiteScenarioStorage(tmp_path)) as storage:
         storage.open("math").close()

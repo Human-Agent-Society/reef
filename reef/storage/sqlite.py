@@ -31,7 +31,7 @@ from reef.storage.migrations import (
     migrate_scenario_settings,
     migrate_training_samples,
 )
-from reef.storage.record_items import ItemRecordStore
+from reef.storage.record_items import ItemRecordStore, old_record_copied
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import SQLiteDataStore
@@ -198,7 +198,7 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
             newest = connection.exec_driver_sql(
                 "SELECT agent_record_id FROM agent_record ORDER BY sequence DESC LIMIT 1"
             ).scalar_one_or_none()
-            if newest is not None and data.read(owner, f"{scenario}/{newest}") is None:
+            if newest is not None and not old_record_copied(data, owner, scenario, newest):
                 return False
             for table in OLD_RECORD_TABLES:
                 connection.exec_driver_sql(f"DROP TABLE IF EXISTS {table}")

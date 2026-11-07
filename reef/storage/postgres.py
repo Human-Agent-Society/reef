@@ -49,7 +49,7 @@ from reef.storage.migrations import (
     migrate_scenario_settings,
     migrate_training_samples,
 )
-from reef.storage.record_items import ItemRecordStore
+from reef.storage.record_items import ItemRecordStore, old_record_copied
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import PostgresDataStore
@@ -243,7 +243,7 @@ class PostgresRecordDatabase:
             behind = sum(
                 1
                 for scenario, record_id, owner in newest
-                if data.read(json.loads(owner) if owner else scenario, f"{scenario}/{record_id}") is None
+                if not old_record_copied(data, json.loads(owner) if owner else scenario, scenario, record_id)
             )
             if behind:
                 return behind

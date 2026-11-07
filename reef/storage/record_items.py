@@ -68,6 +68,16 @@ def origin_of(item: StoredItem) -> str:
     return item.metadata["origin"]["scenario"]
 
 
+def old_record_copied(data: DataStore, owner: str, scenario: str, record_id: str) -> bool:
+    """Whether the record ``record_id`` of the old record store of ``scenario`` is in ``data``: as its own record item,
+    or, for a copy of another scenario's record item from before RFC #1219, as that item."""
+    for item_id in (f"{scenario}/{record_id}", record_id):
+        item = data.read(owner, item_id)
+        if item is not None and item.kind == "record":
+            return True
+    return False
+
+
 def used_records(
     data: DataStore, owner: str, scenario: str, *, after_sequence: int = 0, limit: int = RECORD_PAGE_SIZE
 ) -> tuple[int, tuple[AgentRecord, ...]]:
@@ -283,6 +293,7 @@ class ItemRecordStore(RecordStore):
 __all__ = [
     "RECORD_PAGE_SIZE",
     "ItemRecordStore",
+    "old_record_copied",
     "record_content",
     "record_item",
     "used_record",
