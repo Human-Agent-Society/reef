@@ -1,9 +1,8 @@
 """The data sync: a data write tells each scenario that its items name (RFC #1028, RFC #1140).
 
-A scenario's trainers read its training samples from the data store (``reef.storage.samples``), so a write needs no
-copy of them. Control still runs a sync of each scenario that a write touched: it appends to the scenario's record
-store the record items of another scenario that it now uses (``reef.storage.record_items.sync_scenario_records``),
-and it wakes the scenario's trainers, which read the new and changed items. The data service writes the data store;
+A scenario's trainers read its training samples, and the record items of other scenarios that it uses, from the data
+store (``reef.storage.samples``), so a write needs no copy of them. Control still runs a sync of each scenario that a
+write touched: it wakes the scenario's trainers and its samples service, which read the new and changed items. The data service writes the data store;
 after each write it asks control for the sync with a ``data_sync`` item in control's sync queue
 (``request_data_sync``).
 """

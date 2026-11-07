@@ -14,29 +14,23 @@ when it takes a ``record_copy`` item from the ``data`` queue, which control adds
 (``request_record_copy``). The mark ``record_copy:<s>`` keeps how far the records of ``s`` are copied: each record
 of ``s`` with a sequence at most the mark that ``record_item`` gives an item has that item in the store of ``o``.
 
-Another scenario ``t`` of ``o`` uses a record item ``i`` whose ``scenarios`` names ``t`` through a copy in its own
-record store: ``copied_record(i, t)``, with the record ID ``i.item_id``. Each reference ``x`` of ``i`` becomes
-``<origin>/x``, the ID of the copy of that inference. ``sync_scenario_records`` appends the copies that ``t`` does not
-hold yet. A record store keeps what it holds, so a copy stays in ``t`` when ``i`` leaves ``t``: the removal stops
-copies that are not made yet, and not a copy that ``t`` holds. The copy of a record is not data that ``t`` made,
-so it has no record item of its own.
+Another scenario ``t`` of ``o`` uses a record item ``i`` whose ``scenarios`` names ``t``. A trainer of ``t`` reads it from
+the data store as ``copied_record(i, t)``, with the record ID ``i.item_id``, and each reference ``x`` of ``i`` becomes
+``<origin>/x`` (``used_records``). Nothing is stored in ``t``, so when ``i`` leaves ``t``, the read stops
+giving it (RFC #1219). A record store from before this can still hold such a copy. It stays, it has no record item of
+its own, and a read skips the item.
 """
 
 from __future__ import annotations
-
-import logging
 
 from reef.core.records_types import AgentRecord
 from reef.storage.data import DataStore, NewItem, StoredItem
 from reef.storage.data_queue import DATA_QUEUE, RECORD_COPY_KIND
 from reef.storage.item_kinds import copied_record
 from reef.storage.marks import Marks
-from reef.storage.records import RecordConflict, RecordStore
+from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.work_queue import WorkItem, WorkQueue
-
-logger = logging.getLogger(__name__)
-
 
 #: The most records that one ``copy_records`` call reads.
 RECORD_PAGE_SIZE = 256
@@ -136,32 +130,34 @@ def copy_scenario_records(storage: ScenarioStorage, data: DataStore, marks: Mark
         store.close()
 
 
-def sync_scenario_records(records: RecordStore, data: DataStore, owner: str, scenario: str) -> tuple[str, ...]:
-    """Append to ``records``, the record store of ``scenario``, the copy of each record item that it uses.
+def used_records(
+    data: DataStore, owner: str, scenario: str, *, after_sequence: int = 0, limit: int = RECORD_PAGE_SIZE
+) -> tuple[int, tuple[AgentRecord, ...]]:
+    """The next record items of ``owner`` that another scenario made and that ``scenario`` uses, read as records of
+    ``scenario`` (``copied_record``), with the cursor of the next call. The cursor is a use sequence. It moves past the
+    scenario's own record items too, so a later call does not read them again."""
+    newest = data.last_use_sequence(owner, scenario)
+    uses = data.scenario_items(
+        owner, scenario, kinds=("record",), after=after_sequence, limit=limit, excluding_origin=scenario
+    )
+    records = tuple(read_as(item, scenario) for _, item in uses)
+    if len(uses) == limit:
+        return uses[-1][0], records
+    return max(newest, uses[-1][0] if uses else after_sequence), records
 
-    The record items are those of ``owner`` whose ``scenarios`` names ``scenario`` and that another scenario made,
-    in arrival order. A copy that ``records`` holds already changes nothing. A copy that ``records`` holds with
-    other content stays, and the sync logs it: the item was deleted and made again. Return the IDs of the copies
-    that the sync appended.
-    """
-    added: list[str] = []
-    after = 0
-    while page := data.query(owner, kind="record", scenario=scenario, after=after):
-        after = page[-1].sequence
-        for item in page:
-            if item.content is None or origin_of(item) == scenario:
-                continue
-            copy = copied_record(item.item_id, item.content, origin_of(item), scenario)
-            try:
-                appended = records.append_result(copy)
-            except RecordConflict:
-                logger.warning(
-                    "scenario %r keeps its copy of record item %r, which now has other content", scenario, item.item_id
-                )
-                continue
-            if appended.inserted:
-                added.append(item.item_id)
-    return tuple(added)
+
+def used_record(data: DataStore, owner: str, scenario: str, record_id: str) -> AgentRecord | None:
+    """The record ``record_id`` when it names a record item of another scenario that ``scenario`` uses, else None."""
+    item = data.read(owner, record_id)
+    if item is None or item.kind != "record" or scenario not in item.scenarios or origin_of(item) == scenario:
+        return None
+    return read_as(item, scenario)
+
+
+def read_as(item: StoredItem, scenario: str) -> AgentRecord:
+    if item.content is None:
+        raise ValueError(f"record item {item.item_id!r} was read without its content")
+    return copied_record(item.item_id, item.content, origin_of(item), scenario)
 
 
 __all__ = [
@@ -172,5 +168,6 @@ __all__ = [
     "record_copy_mark",
     "record_item",
     "request_record_copy",
-    "sync_scenario_records",
+    "used_record",
+    "used_records",
 ]
