@@ -436,34 +436,35 @@ class SQLDataStore(DataStore):
             if new:
                 lines = self.write_segment(partition, [text for _, text in new])
                 places = {item_id: line for (item_id, _), line in zip(new, lines, strict=True)}
+        # The rows, and the hashes of each call's messages, need no lock: they depend on the items alone.
+        values: dict[str, dict[str, Any]] = {}
+        calls: dict[str, tuple[str, Mapping[str, Any], Any]] = {}
+        for item, metadata, digest in prepared:
+            if item.item_id in values:
+                continue
+            content = dict(item.content) if isinstance(item.content, Mapping) else None
+            place = places.get(item.item_id)
+            payload = content["payload"] if content is not None and metadata["kind"] == "record" else None
+            key = None if payload is None else call_key(payload)
+            shape = None if payload is None else call_shape(payload)
+            if content is not None and shape is not None:
+                content["payload"] = {}
+            if payload is not None and key is not None:
+                calls[item.item_id] = (metadata["origin"]["scenario"], payload, key)
+            values[item.item_id] = {
+                "owner": owner,
+                "item_id": item.item_id,
+                "kind": metadata["kind"],
+                "digest": digest,
+                "metadata_json": canonical_json(metadata),
+                "content_json": None if content is None or place is not None else canonical_json(content),
+                "message_field": None if shape is None else shape.message_field,
+                "segment_id": None if place is None else place.segment_id,
+                "segment_offset": None if place is None else place.offset,
+                "segment_length": None if place is None else place.length,
+            }
         with self.transaction() as connection:
             self.lock_scenarios(connection, owner, scenarios_of(metadata for _, metadata, _ in prepared))
-            values: dict[str, dict[str, Any]] = {}
-            calls: dict[str, tuple[str, Mapping[str, Any], Any]] = {}
-            for item, metadata, digest in prepared:
-                if item.item_id in values:
-                    continue
-                content = dict(item.content) if isinstance(item.content, Mapping) else None
-                place = places.get(item.item_id)
-                payload = content["payload"] if content is not None and metadata["kind"] == "record" else None
-                key = None if payload is None else call_key(payload)
-                shape = None if payload is None else call_shape(payload)
-                if content is not None and shape is not None:
-                    content["payload"] = {}
-                if payload is not None and key is not None:
-                    calls[item.item_id] = (metadata["origin"]["scenario"], payload, key)
-                values[item.item_id] = {
-                    "owner": owner,
-                    "item_id": item.item_id,
-                    "kind": metadata["kind"],
-                    "digest": digest,
-                    "metadata_json": canonical_json(metadata),
-                    "content_json": None if content is None or place is not None else canonical_json(content),
-                    "message_field": None if shape is None else shape.message_field,
-                    "segment_id": None if place is None else place.segment_id,
-                    "segment_offset": None if place is None else place.offset,
-                    "segment_length": None if place is None else place.length,
-                }
             sequences = self.insert_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
             uses = [
