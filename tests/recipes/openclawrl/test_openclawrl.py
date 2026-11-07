@@ -8,6 +8,7 @@ import time
 import pytest
 from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, job_sized_stages, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
@@ -22,7 +23,6 @@ from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -325,7 +325,7 @@ def test_recipe_serves_loaded_weights_and_builds_a_trainer() -> None:
     recipe = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=job_sized_stages(OpenClawRLRecipe.pipeline_spec()))
     components = recipe.build_components("s")
     assert components.loaded_component == "weights"
-    trainer = recipe.build("s", SQLiteRecordStore(), root=STUB_ROOT)
+    trainer = recipe.build("s", memory_records("s"), root=STUB_ROOT)
     assert trainer.job_loop is not None
     assert trainer.pipeline.context.job_parameters["trajectory"]["objective"] == "openclawrl"
     trainer.close()

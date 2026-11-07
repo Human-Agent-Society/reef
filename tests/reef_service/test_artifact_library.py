@@ -68,7 +68,7 @@ def cell(tmp_path: Path, name: str, *, serves_profiles: bool = False) -> Dispatc
         runtime.inference = ProfileInference(runtime.restore_order)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
-    storage = SQLiteScenarioStorage(root / "records", task_files=task_files)
+    storage = SQLiteScenarioStorage(root / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
         UriBackend.factory(directory=root / "repository"),

@@ -83,7 +83,7 @@ def check_deployment(settings: ServiceConfig) -> list[str]:
     backend_factory = build_artifact_backend(settings)
     if not isinstance(backend_factory, EnumerableRepositoryBackendFactory):
         raise DeployConfigError(f"{type(backend_factory).__name__} cannot list its scenarios")
-    storage, _ = open_scenario_storage(settings)
+    storage, data = open_scenario_storage(settings)
     problems = []
     try:
         for name in backend_factory.list_registrations():
@@ -103,6 +103,8 @@ def check_deployment(settings: ServiceConfig) -> list[str]:
             finally:
                 store.close()
     finally:
+        # The data store shares the storage's task file store, so it closes first.
+        data.close()
         storage.close()
     return problems
 

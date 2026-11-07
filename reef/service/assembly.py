@@ -57,7 +57,6 @@ from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.record_items import ItemRecordStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.segments import LocalSegmentStore, SegmentStore
@@ -384,29 +383,38 @@ def build_task_files(settings: ServiceConfig) -> TaskFileStore:
     return TaskFileStore.referenced_class(reference).from_config(reference.config, directory=task_file_directory)
 
 
-def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, TaskFileStore]:
-    """The deployment's scenario storage (``storage.record_backend``) and its task file store, which it owns."""
+def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, DataStore]:
+    """The deployment's scenario storage (``storage.record_backend``), which owns the task file store, and the data
+    store (``build_data_store``), which keeps the scenarios' records. The caller closes the data store before the
+    storage, because the data store shares the task file store."""
     record_directory = Path(settings.agent_record_dir)
     task_files = build_task_files(settings)
+    data: DataStore | None = None
     try:
+        data = build_data_store(settings, task_files)
         if settings.record_backend == "postgres":
             storage: ScenarioStorage = PostgresScenarioStorage(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 record_directory,
                 schema=settings.record_database_schema,
                 task_files=task_files,
+                data=data,
             )
         elif settings.record_backend == "sqlite":
-            storage = SQLiteScenarioStorage(record_directory, task_files=task_files)
+            storage = SQLiteScenarioStorage(record_directory, task_files=task_files, data=data)
         else:
             reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
             storage_class = ScenarioStorage.referenced_class(reference)
-            storage = storage_class.from_config(reference.config, directory=record_directory, task_files=task_files)
+            storage = storage_class.from_config(
+                reference.config, directory=record_directory, task_files=task_files, data=data
+            )
     except BaseException:
         # The storage owns the task file store after it exists. Until then, this code closes it.
+        if data is not None:
+            data.close()
         task_files.close()
         raise
-    return storage, task_files
+    return storage, data
 
 
 def build_artifact_backend(settings: ServiceConfig) -> ConfigurableRepositoryBackendFactory:
@@ -472,10 +480,7 @@ def build_dispatcher(
     data_store: DataStore | None = None
     dispatcher: Dispatcher | None = None
     try:
-        scenario_storage, task_files = open_scenario_storage(settings)
-        data_store = build_data_store(settings, task_files)
-        # Each scenario's records are record items (RFC #1219).
-        scenario_storage = ItemRecordStorage(scenario_storage, data_store, coordination.marks)
+        scenario_storage, data_store = open_scenario_storage(settings)
         task_import = (
             TaskImport(Path(settings.task_import_manifest), Path(settings.task_import_tasks_root))
             if settings.task_import_manifest is not None and settings.task_import_tasks_root is not None

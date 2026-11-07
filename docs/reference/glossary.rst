@@ -26,7 +26,7 @@ Agent record
 
 One stored exchange, either an inference call or a report, with its id, scenario,
 request type, payload, and, for inference, the snapshot that served it.
-The record store lives under ``agent_record_dir``.
+A record is a record item of the scenario's owner in the data store (RFC #1219).
 
 Receipt
 -------

@@ -253,7 +253,7 @@ def test_a_start_drops_the_published_tasks_of_the_older_schema(open_durable_stor
         store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
         published = store.publish_task(generation=0, index=0, split="train")
         schema = store.tables.candidates.schema
-        with store.records._transaction(write=True) as connection:
+        with store.database._transaction(write=True) as connection:
             Table("published_task", MetaData(schema=schema), Column("task_name", Text, primary_key=True)).create(
                 connection
             )
@@ -261,7 +261,7 @@ def test_a_start_drops_the_published_tasks_of_the_older_schema(open_durable_stor
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         store = session.tasks.open("tasks")
         assert store.tasks() == (published,)
-        with store.records._transaction(write=False) as connection:
+        with store.database._transaction(write=False) as connection:
             assert not inspect(connection).has_table("published_task", schema=schema)
 
 

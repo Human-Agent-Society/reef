@@ -11,20 +11,20 @@ or artifact identifier used for serving).
 
 ``RecordStore`` defines record append, replay, and audit
 operations. It does not know about scenario lifecycle, commits, artifact
-publication, or training. ``SQLiteRecordStore`` and ``PostgresRecordStore``
-share SQL record operations while supplying their own database connections,
-schemas, and transactions.
+publication, or training. A scenario's records are record items of its owner in
+the data store (RFC #1219): ``ItemRecordStore`` gives the records of one scenario
+over the data store, and each storage session has one.
 
-Consumption does not delete a record: reads include every retained body,
+Consumption does not delete a record: reads include every retained record,
 whether a trainer consumed it or not. Each trainer keeps its own consumption
-in its commits (see `Commit ordering`_). Retention evicts the oldest record
-bodies only when the deployment-wide byte budget is full. It keeps the retry
-hashes, so a retry with different content still conflicts, and it keeps the
-commit metadata.
+in its commits (see `Commit ordering`_). Retention deletes the oldest record
+items only when the deployment-wide byte budget is full
+(``DataStore.prune_records``), and it keeps the commit metadata. A retry of a
+deleted record stores it again.
 
-With a database path configured, the SQLite store uses WAL journalling and
-synchronous = FULL. The default in-memory database is for tests and does not
-survive a restart.
+With a database path configured, the SQLite scenario database uses WAL
+journalling and synchronous = FULL. The default in-memory database is for tests
+and does not survive a restart.
 
 The snapshot chain
 ------------------

@@ -11,13 +11,14 @@ import asyncio
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.records import memory_records
 
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
 from reef.storage.records import RecordConflict
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 HEADERS = {"x-reef-scenario": "idempotency"}
 
@@ -83,7 +84,7 @@ def test_report_rejects_non_string_agent_record_id_without_storing() -> None:
 
 @pytest.mark.unit
 def test_store_dedups_identical_content_across_timestamps() -> None:
-    store = SQLiteRecordStore()
+    store = memory_records("s")
     payload = {"score": 1.0}
     first = AgentRecord.create(
         scenario="s", request_type=RequestType.REPORT, payload=payload, agent_record_id="fixed", created_at=1.0

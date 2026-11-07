@@ -2,219 +2,23 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import time
-from collections import defaultdict
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import (
-    Column,
-    LargeBinary,
-    MetaData,
-    Table,
-    Text,
-    bindparam,
-    cast,
-    func,
-    inspect,
-    literal,
-    select,
-    tuple_,
-    update,
-)
+from sqlalchemy import Column, MetaData, Table, Text, bindparam, func, inspect, literal, select, tuple_, update
 from sqlalchemy.engine import Connection
 
 from reef.core.atif_payloads import call_shape, canonical_json
-from reef.core.trajectory_index import call_key, sha256_text
-from reef.storage.commits import read_consumed_ids
-from reef.storage.sql_records import SEGMENT_COLUMNS, ScopedTable, SQLRecordStore, TrajectoryNodes
+from reef.core.trajectory_index import call_key
+from reef.storage.sql_records import SEGMENT_COLUMNS, ScopedTable, TrajectoryNodes
 from reef.storage.work_queue import FINAL_STATES
 
 logger = logging.getLogger(__name__)
 
 #: The rows that one page of ``migrate_data_request_types`` reads.
 MIGRATION_BATCH_SIZE = 1000
-
-
-def migrate_record_storage(connection: Connection, records: Table, consumption: Table) -> None:
-    """Upgrade in the caller's schema transaction, paging IDs without loading bodies.
-
-    Old retired rows become consumption receipts. Original bodies remain readable;
-    deleting them is exclusively a capacity decision after this migration.
-    """
-    schema = records.schema
-    inspector = inspect(connection)
-    columns = {column["name"] for column in inspector.get_columns(records.name, schema=schema)}
-    operations = Operations(MigrationContext.configure(connection))
-    if "body_bytes" not in columns:
-        operations.add_column(
-            records.name,
-            Column("body_bytes", records.c.body_bytes.type, nullable=False, server_default="0"),
-            schema=schema,
-        )
-        connection.execute(
-            records.update().values(
-                body_bytes=func.length(cast(records.c.payload_json, LargeBinary))
-                + func.length(cast(records.c.references_json, LargeBinary))
-                + func.coalesce(func.length(cast(records.c.artifact_json, LargeBinary)), 0)
-            )
-        )
-
-    def _insert(
-        scenario: str,
-        receipt_id: str,
-        ids: frozenset[str],
-        metadata: dict[str, object],
-        recorded_at: float,
-        storage_id: str | None,
-    ) -> None:
-        encoded_ids = json.dumps(sorted(ids), ensure_ascii=False, separators=(",", ":"))
-        row: dict[str, object] = {
-            "scenario": scenario,
-            "receipt_id": receipt_id,
-            "consumed_ids_json": encoded_ids,
-            "consumed_ids_sha256": hashlib.sha256(encoded_ids.encode()).hexdigest(),
-            "metadata_json": json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-            "recorded_at": recorded_at,
-        }
-        if storage_id is not None:
-            row["storage_id"] = storage_id
-        connection.execute(consumption.insert().values(row))
-
-    if inspector.has_table("compaction_receipts", schema=schema):
-        legacy = Table("compaction_receipts", MetaData(), schema=schema, autoload_with=connection)
-        offset = 0
-        while True:
-            rows = (
-                connection.execute(select(legacy).order_by(*legacy.primary_key).offset(offset).limit(256))
-                .mappings()
-                .all()
-            )
-            if not rows:
-                break
-            for row in rows:
-                metadata = json.loads(row["metadata_json"])
-                ids = read_consumed_ids(
-                    {
-                        "consumed_ids": metadata.pop("consumed_ids", []),
-                        "compacted_ids": json.loads(row["compacted_ids_json"]),
-                    },
-                    context="legacy receipt",
-                )
-                _insert(
-                    row["scenario"],
-                    "legacy:" + row["receipt_id"],
-                    ids,
-                    metadata,
-                    row["recorded_at"],
-                    row.get("storage_id"),
-                )
-            offset += len(rows)
-        legacy.drop(connection)
-
-    if "compacted_at" in columns:
-        legacy_records = Table(records.name, MetaData(), schema=schema, autoload_with=connection)
-        after_sequence = 0
-        while True:
-            selected = [legacy_records.c.sequence, legacy_records.c.scenario, legacy_records.c.agent_record_id]
-            if "storage_id" in legacy_records.c:
-                selected.append(legacy_records.c.storage_id)
-            rows = (
-                connection.execute(
-                    select(*selected)
-                    .where(legacy_records.c.compacted_at.is_not(None), legacy_records.c.sequence > after_sequence)
-                    .order_by(legacy_records.c.sequence)
-                    .limit(256)
-                )
-                .mappings()
-                .all()
-            )
-            if not rows:
-                break
-            groups: dict[tuple[str | None, str], set[str]] = defaultdict(set)
-            for row in rows:
-                groups[(row.get("storage_id"), row["scenario"])].add(row["agent_record_id"])
-            after_sequence = rows[-1]["sequence"]
-            for (storage_id, scenario), record_ids in groups.items():
-                _insert(scenario, f"retired:{after_sequence}", frozenset(record_ids), {}, time.time(), storage_id)
-        for index in inspector.get_indexes(records.name, schema=schema):
-            # Includes the old partial indexes whose predicate references this column.
-            index_name = index["name"]
-            if index_name is not None and (
-                "compacted_at" in index["column_names"] or index_name.startswith("agent_record_active_")
-            ):
-                operations.drop_index(index_name, table_name=records.name, schema=schema)
-        operations.drop_column(records.name, "compacted_at", schema=schema)
-
-
-def migrate_record_trajectories(connection: Connection, records: Table, nodes: Table) -> None:
-    """Give each stored record with a message list its trajectory node, in ``nodes`` (RFC #1054).
-
-    Run in the caller's schema transaction, after ``migrate_record_storage`` and after ``create_all`` made ``nodes``.
-    A record table that has ``message_field`` is left unchanged. Otherwise add ``message_field`` and
-    ``payload_sha256``, then rewrite each record whose payload has a message list, oldest first and 256 at a time,
-    as an append writes it: the record's node keeps the payload as ATIF, with the entries after its parent's, and
-    the row keeps the payload's hash. Its ``body_bytes`` counts the new row. Each node goes into the namespace of its
-    record's store generation (``storage_id``), or of the database when the table has no such column.
-
-    Training requests are no longer records (``reef.train.training_requests``): the migration deletes the rows of
-    request type ``train``. A commit that consumed one records it in ``metrics["training_request"]``; a request
-    that no commit consumed is gone, and its client files it again.
-    """
-    columns = {column["name"] for column in inspect(connection).get_columns(records.name, schema=records.schema)}
-    if "message_field" in columns:
-        return
-    deleted = connection.execute(records.delete().where(records.c.request_type == "train")).rowcount
-    if deleted:
-        logger.warning(
-            "deleted %d training request record(s) of %s: requests now live in the training request queue",
-            deleted,
-            records.fullname,
-        )
-    operations = Operations(MigrationContext.configure(connection))
-    for name in ("message_field", "payload_sha256"):
-        operations.add_column(records.name, Column(name, records.c[name].type, nullable=True), schema=records.schema)
-    scope_names = ("storage_id",) if "storage_id" in records.c else ()
-    after_sequence = 0
-    while True:
-        rows = (
-            connection.execute(
-                select(records).where(records.c.sequence > after_sequence).order_by(records.c.sequence).limit(256)
-            )
-            .mappings()
-            .all()
-        )
-        if not rows:
-            return
-        after_sequence = rows[-1]["sequence"]
-        for row in rows:
-            payload = json.loads(row["payload_json"])
-            key = call_key(payload)
-            shape = call_shape(payload)
-            if key is None or shape is None:
-                continue
-            encoded = SQLRecordStore.row_content(row)._replace(
-                payload_json="{}",
-                message_field=shape.message_field,
-                payload_sha256=sha256_text(canonical_json(payload)),
-            )
-            connection.execute(
-                update(records)
-                .where(records.c.sequence == row["sequence"])
-                .values(
-                    payload_json=encoded.payload_json,
-                    message_field=encoded.message_field,
-                    payload_sha256=encoded.payload_sha256,
-                    body_bytes=encoded.body_bytes,
-                )
-            )
-            scope = {name: str(row[name]) for name in scope_names}
-            TrajectoryNodes(ScopedTable(nodes, scope)).add(
-                connection, int(row["sequence"]), row["scenario"], row["agent_record_id"], payload, key
-            )
 
 
 def migrate_data_segments(connection: Connection, items: Table, nodes: Table) -> None:

@@ -150,7 +150,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         each scenario on demand and leaves the jobs to control.
 
         ``data_store``: the deployment's data store (RFC #1028). Each scenario's records are record items in it
-        (``ItemRecordStorage``). Control runs the ``data_sync`` items that the data service adds after its writes
+        (``ItemRecordStore``). Control runs the ``data_sync`` items that the data service adds after its writes
         (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
         which owns the task file store that the data store shares.
         """
@@ -325,14 +325,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         return self.registry.list()
 
     def prune_record_archives(self, retention: RecordRetention) -> int:
-        """Apply deployment-wide retention without racing scenario file moves, to the record stores and to the
-        record items of the data store (``DataStore.prune_records``). Return the number of records that the record
-        stores deleted."""
+        """Apply deployment-wide retention to the record items of the data store (``DataStore.prune_records``)
+        without racing scenario file moves; return the number of record items that it deleted."""
         with self.record_retention_lock:
-            pruned = self.storage.prune(max_bytes=retention.max_bytes)
-            if self.data_store is not None:
-                self.data_store.prune_records(retention.max_bytes)
-            return pruned
+            return 0 if self.data_store is None else self.data_store.prune_records(retention.max_bytes)
 
     def delete_scenario(self, scenario: str) -> dict[str, Any]:
         """Remove a scenario from this deployment and move its own state aside.
