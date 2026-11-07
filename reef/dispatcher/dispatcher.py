@@ -326,9 +326,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         return self.registry.list()
 
     def prune_record_archives(self, retention: RecordRetention) -> int:
-        """Apply deployment-wide retention without racing scenario file moves."""
+        """Apply deployment-wide retention without racing scenario file moves, to the record stores and to the
+        record items of the data store (``DataStore.prune_records``). Return the number of records that the record
+        stores deleted."""
         with self.record_retention_lock:
-            return self.storage.prune(max_bytes=retention.max_bytes)
+            pruned = self.storage.prune(max_bytes=retention.max_bytes)
+            if self.data_store is not None:
+                self.data_store.prune_records(retention.max_bytes)
+            return pruned
 
     def delete_scenario(self, scenario: str) -> dict[str, Any]:
         """Remove a scenario from this deployment and move its own state aside.

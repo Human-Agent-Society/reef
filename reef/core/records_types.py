@@ -15,6 +15,16 @@ from enum import StrEnum
 from typing import Any
 
 
+@dataclass(frozen=True)
+class RecordLoss:
+    """Durable capacity-eviction totals for one scenario's stored records or record items."""
+
+    record_count: int = 0
+    body_bytes: int = 0
+    first_sequence: int = 0
+    last_sequence: int = 0
+
+
 class RequestType(StrEnum):
     INFERENCE = "inference"
     REPORT = "report"
