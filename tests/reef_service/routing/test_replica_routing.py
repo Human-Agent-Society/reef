@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -38,7 +38,8 @@ from reef.service.deploy.routing.renderer import MANAGEMENT_TOKEN_ENV, SELECTION
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import RoutingSnapshot
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql_data import SQLiteDataStore
+from reef.storage.tasks import LocalTaskFileStore
 
 ENVIRONMENT = {MANAGEMENT_TOKEN_ENV: "management-test-token", SELECTION_TOKEN_ENV: SELECTION_TOKEN}
 CHAT = {"model": "auto", "messages": [{"role": "user", "content": "hello"}]}
@@ -59,14 +60,12 @@ def external_settings(tmp_path: Path, manifest: Path | None, port: int = 50053) 
 
 
 def stored_records(tmp_path: Path, scenario: str = "coding") -> list[dict[str, object]]:
-    """The payloads of the INFERENCE records that the replica stored for ``scenario``."""
-    storage = SQLiteScenarioStorage(tmp_path / "records")
-    store = storage.open(scenario)
-    try:
-        return [dict(item.payload) for item in store.records.replay(scenario)]
-    finally:
-        store.close()
-        storage.close()
+    """The payloads of the INFERENCE records that the replica stored for ``scenario``: its record items, in the data
+    store that assembly opens in the record directory."""
+    task_files = LocalTaskFileStore(tmp_path / "unused-task-files")
+    with closing(task_files), closing(SQLiteDataStore(tmp_path / "records" / "data", task_files)) as data:
+        items = data.query(scenario, kind="record", scenario=scenario, origin=scenario, request_type="inference")
+        return [dict(item.content["payload"]) for item in items]
 
 
 async def provider_chat(request: web.Request) -> web.StreamResponse:

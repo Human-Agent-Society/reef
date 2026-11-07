@@ -51,7 +51,6 @@ from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
-from reef.storage.record_items import request_record_copy
 from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -150,9 +149,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
         each scenario on demand and leaves the jobs to control.
 
-        ``data_store``: the deployment's data store (RFC #1028). Control asks the data service to copy each
-        scenario's new records into it (``request_record_copy``), and runs the ``data_sync`` items that the data
-        service adds after its writes (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
+        ``data_store``: the deployment's data store (RFC #1028). Each scenario's records are record items in it
+        (``ItemRecordStorage``). Control runs the ``data_sync`` items that the data service adds after its writes
+        (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
         which owns the task file store that the data store shares.
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
@@ -382,7 +381,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return
         self.scenario_committed(instance)
         self.local_workers.resume(instance)
-        self.request_record_copy(instance.name)
         if any(component_trainer.trainer.holds_untrained_records() for component_trainer in instance.trainers):
             self.local_workers.wake(instance)
 
@@ -741,9 +739,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.storage.write_settings(scenario, replace(settings, owner=owner))
         self.registry.reload(scenario)
         # A copy that ran before, such as the one that the creation commit asked for, filled the default owner's
-        # store; the new owner's store gets the scenario's artifacts and records too.
+        # store; the new owner's store gets the scenario's artifacts too.
         self.request_artifact_copy(scenario)
-        self.request_record_copy(scenario)
 
     def check_use(
         self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
@@ -877,8 +874,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return () if samples is None else samples.imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
-        """Start consumption only after the accepted records are durable, and copy them to record items."""
-        self.request_record_copy(current.name)
+        """Start consumption only after the accepted records are durable."""
         # Every component's trainer sees the record. The samples service makes the samples of a trainer that
         # trains, and its worker builds jobs from them. A trainer that trains nothing only advances its record
         # cursor, here.
@@ -918,14 +914,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if self.data_store is not None:
             request_artifact_copy(self.queue, scenario)
 
-    def request_record_copy(self, scenario: str) -> None:
-        """Ask the data service to copy the new records of ``scenario`` to record items, when there is a data store."""
-        if self.data_store is not None:
-            request_record_copy(self.queue, scenario)
-
     def records_added(self, current: Scenario) -> None:
-        """Another process appended records to ``current``: ask for their samples and copy them to record items."""
-        self.request_record_copy(current.name)
+        """Another process appended records to ``current``: ask for their samples."""
         self.request_samples(current)
 
     def samples_added(self, scenario: str) -> None:

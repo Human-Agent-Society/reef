@@ -597,9 +597,9 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
 def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     """Consumed rows must never be trained twice, even when they survive compaction.
 
-    The protect-all pipeline keeps every row physically present, so recovery
-    without the history's high-water mark would page from sequence 0, push again
-    the consumed pair, and train it again.
+    The protect-all pipeline keeps every row physically present, and recovery
+    reads from sequence 0, so it must skip the consumed pair that the history
+    names, or the pair would train again.
     """
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
@@ -624,7 +624,6 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     second_component = RecordingComponent(tmp_path / "second")
     second = build(second_component)
     recovered = second.get_or_create_scenario("math")
-    assert recovered.trainer.data_offset == 2  # resumed at the committed watermark
 
     train_pair(second, 2)
     # The only newly trained batch is the genuinely new pair; i1 never retrains.
@@ -664,8 +663,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
 
     second_component = RecordingComponent()
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    recovered = second.get_or_create_scenario("math")
-    assert recovered.trainer.data_offset == 3  # resumed at the committed watermark
+    second.get_or_create_scenario("math")
     assert served_artifact_id(second) == base_artifact_id
 
     second.accept_record(sft_report("r2", "i2"))
@@ -1278,7 +1276,5 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     assert recovered.scenario_step == 2
     assert recovered.trainer.state == ended.algorithm_state
     assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
-    # Record progress resumes at the committed watermark, not sequence 0.
-    assert recovered.trainer.data_offset == 2
     first.close()
     second.close()

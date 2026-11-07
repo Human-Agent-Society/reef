@@ -577,8 +577,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     recovered_state = first.algorithm_state_dict()
     second = preparing_trainer(records, pipeline_factory=pipeline, algorithm_state=recovered_state, samples=samples)
 
-    second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
-    second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
+    second.restore_consumed_records(prepared.consumed_ids)
     assert second.state == recovered_state
     make_samples(second)
     second_result = second.advance_job()
@@ -631,8 +630,7 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
             algorithm_state=first_state,
             samples=sample_store(storage, "math", second_session).for_trainer(""),
         )
-        second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
-        second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
+        second.restore_consumed_records(prepared.consumed_ids)
         assert second.state == first_state
         make_samples(second)
         second_result = second.advance_job()
@@ -790,8 +788,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         assert "Skipping report r2" in caplog.text
     with SQLiteRecordStore(database) as records:
         resumed = preparing_trainer(records, algorithm_state=ended_state)
-        resumed.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
-        resumed.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
+        resumed.restore_consumed_records(prepared.consumed_ids)
         make_samples(resumed)
         assert resumed.advance_job() is None
         assert resumed.pipeline_status()["evicted_record_count"] == 1

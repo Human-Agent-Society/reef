@@ -53,7 +53,8 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
     """The copy in ``scenario`` of the record item ``item_id`` with ``content``, made in the scenario ``origin``.
 
     The copy has the record ID ``item_id``, and the request type, payload, time and release of ``content``. Each
-    reference ``x`` becomes ``<origin>/x``, and so does each entry of a ``references`` list in the payload. Raise
+    reference ``x`` becomes ``<origin>/x``, and so does each entry of a ``references`` list in the payload. In
+    ``origin`` itself, the record keeps its own ID and references: it is the record that ``record_item`` stored. Raise
     ``ValueError`` unless ``content`` has the keys ``RECORD_CONTENT_KEYS`` with the types that ``record_item``
     gives them, for an inference or a report, and ``item_id`` is ``<origin>/<agent_record_id>``.
     """
@@ -71,12 +72,13 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
         raise ValueError("a record item's created_at is a number")
     if not isinstance(references, list) or not all(isinstance(reference, str) for reference in references):
         raise ValueError("a record item's references is a list of strings")
-    copied = tuple(f"{origin}/{reference}" for reference in references)
+    own = scenario == origin
+    copied = tuple(references if own else (f"{origin}/{reference}" for reference in references))
     payload = dict(payload)
-    if isinstance(payload.get("references"), list):
+    if not own and isinstance(payload.get("references"), list):
         payload["references"] = [f"{origin}/{reference}" for reference in payload["references"]]
     return AgentRecord(
-        agent_record_id=item_id,
+        agent_record_id=record_id if own else item_id,
         scenario=scenario,
         request_type=RequestType(request_type),
         payload=payload,
