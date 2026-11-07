@@ -211,9 +211,11 @@ def node_texts(line: str) -> tuple[str, str | None, str]:
 
 @dataclass(frozen=True)
 class NewNode:
-    """The node of one record to add: its sequence, scenario and record ID, and its payload with that payload's key.
+    """The node of one record to add: its sequence, scenario and record ID, and its payload with that payload's key,
+    shape and ``call_json`` (``node_call_json``).
 
-    Purpose: a store gives these to ``TrajectoryNodes.add_many`` when it writes records.
+    Purpose: a store gives these to ``TrajectoryNodes.add_many`` when it writes records. All but the sequence
+    depend on the record alone, so a store can make them before it takes a lock.
     """
 
     node_sequence: int
@@ -221,6 +223,14 @@ class NewNode:
     agent_record_id: str
     payload: Mapping[str, Any]
     key: CallKey
+    shape: CallShape
+    call_json: str
+
+
+def node_call_json(payload: Mapping[str, Any], shape: CallShape) -> str:
+    """The ``call_json`` of the node of ``payload``: its reply entries and call fields."""
+    reply, call = atif_reply(payload, shape)
+    return canonical_json({"reply": reply, "call": call})
 
 
 @dataclass(frozen=True)
@@ -275,7 +285,13 @@ class TrajectoryNodes:
         resends, then the newest. The node converts only the request values after its parent's to ATIF. A node
         without a parent keeps the shape and the tools.
         """
-        self.add_many(connection, [NewNode(node_sequence, scenario, agent_record_id, payload, key)])
+        shape = call_shape(payload)
+        if shape is None:
+            raise ValueError(f"record {agent_record_id!r} has no message list, so it has no trajectory node")
+        self.add_many(
+            connection,
+            [NewNode(node_sequence, scenario, agent_record_id, payload, key, shape, node_call_json(payload, shape))],
+        )
 
     def add_many(self, connection: Connection, new_nodes: Sequence[NewNode]) -> None:
         """Add ``new_nodes``, in sequence order, with a number of statements that does not grow with their count.
@@ -309,9 +325,7 @@ class TrajectoryNodes:
         values: list[dict[str, Any]] = []
         children: dict[int, int] = {}
         for node in new_nodes:
-            shape = call_shape(node.payload)
-            if shape is None:
-                raise ValueError(f"record {node.agent_record_id!r} has no message list, so it has no trajectory node")
+            shape = node.shape
             parent = best_parent(
                 node.key,
                 (found for prefix in node.key.prefix_sha256 for found in candidates.get((node.scenario, prefix), ())),
@@ -322,8 +336,6 @@ class TrajectoryNodes:
             if parent is None:
                 agent = atif_agent(node.payload["tools"], shape.provider) if shape.has_tools else None
                 shape_json = canonical_json({"shape": shape.as_json(), "agent": agent})
-            reply, call = atif_reply(node.payload, shape)
-            call_json = canonical_json({"reply": reply, "call": call})
             values.append(
                 {
                     **self.nodes.scope,
@@ -337,8 +349,8 @@ class TrajectoryNodes:
                     "reply_sha256": node.key.reply_sha256,
                     "entries_json": entries_json,
                     "shape_json": shape_json,
-                    "call_json": call_json,
-                    "body_bytes": len((entries_json + (shape_json or "") + call_json).encode("utf-8")),
+                    "call_json": node.call_json,
+                    "body_bytes": len((entries_json + (shape_json or "") + node.call_json).encode("utf-8")),
                     "record_count": 1,
                 }
             )

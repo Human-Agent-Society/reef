@@ -23,9 +23,9 @@ import uuid
 from abc import abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import RLock
+from threading import Event, Lock, RLock
 from typing import Any, Self
 
 from sqlalchemy import (
@@ -100,6 +100,7 @@ from reef.storage.sql_records import (
     ScopedTable,
     TrajectoryNodes,
     batches,
+    node_call_json,
     node_line,
     row_line,
     trajectory_node_table,
@@ -112,6 +113,8 @@ PACK_BYTES = 64 * 2**20
 #: The age in seconds after which ``maintain`` deletes a segment that no row uses. A new segment has no rows
 #: until the transaction that writes them commits.
 UNUSED_SEGMENT_SECONDS = 24 * 3600
+#: The most items that one transaction of a group commit writes.
+GROUP_COMMIT_ITEMS = 200
 
 
 def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table]:
@@ -206,15 +209,29 @@ def scenarios_of(metadata: Iterable[Mapping[str, Any]]) -> set[str]:
     return names
 
 
+@dataclass
+class PendingCreate:
+    """A ``create`` call whose rows are ready, and that waits for a transaction that writes them."""
+
+    prepared: list[tuple[NewItem, dict[str, Any], str]]
+    values: dict[str, dict[str, Any]]
+    calls: dict[str, NewNode]
+    done: Event = field(default_factory=Event)
+    lead: bool = False
+    outcome: tuple[StoredItem, ...] | Exception | None = None
+
+
 class SQLDataStore(DataStore):
     """A data store in the tables of ``data_tables``.
 
-    A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``insert_new_item``
+    A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``insert_new_items``
     (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``. Every
     operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
     ``ItemConflict``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for the
-    scenarios that they give a use or whose trajectory nodes they change. ``segments`` is None, or the segment store that keeps the content of
+    scenarios that they give a use or whose trajectory nodes they change. Concurrent creates of one owner and one
+    set of scenarios in this process share one transaction (a group commit), because only one of them can hold
+    the lock at a time. ``segments`` is None, or the segment store that keeps the content of
     trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
     the job data directories: ``job_directories`` when given, else ``segments``, else a local segment store in a new
     temporary directory, which only this process reads. ``job_directory_ttl_seconds`` is how long the store keeps a
@@ -236,6 +253,8 @@ class SQLDataStore(DataStore):
             job_directories or segments or LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-directories-")))
         )
         self.job_directory_ttl_seconds = job_directory_ttl_seconds
+        self.group_lock = Lock()
+        self.waiting: dict[tuple[str, frozenset[str]], list[PendingCreate]] = {}
 
     def record_job_directory_use(self, key: str, time: float) -> None:
         table = self.job_directory_table
@@ -436,9 +455,9 @@ class SQLDataStore(DataStore):
             if new:
                 lines = self.write_segment(partition, [text for _, text in new])
                 places = {item_id: line for (item_id, _), line in zip(new, lines, strict=True)}
-        # The rows, and the hashes of each call's messages, need no lock: they depend on the items alone.
+        # The rows and the nodes, but for their sequences, need no lock: they depend on the items alone.
         values: dict[str, dict[str, Any]] = {}
-        calls: dict[str, tuple[str, Mapping[str, Any], Any]] = {}
+        calls: dict[str, NewNode] = {}
         for item, metadata, digest in prepared:
             if item.item_id in values:
                 continue
@@ -449,8 +468,16 @@ class SQLDataStore(DataStore):
             shape = None if payload is None else call_shape(payload)
             if content is not None and shape is not None:
                 content["payload"] = {}
-            if payload is not None and key is not None:
-                calls[item.item_id] = (metadata["origin"]["scenario"], payload, key)
+            if payload is not None and key is not None and shape is not None:
+                calls[item.item_id] = NewNode(
+                    0,
+                    metadata["origin"]["scenario"],
+                    item.item_id,
+                    payload,
+                    key,
+                    shape,
+                    node_call_json(payload, shape),
+                )
             values[item.item_id] = {
                 "owner": owner,
                 "item_id": item.item_id,
@@ -463,6 +490,69 @@ class SQLDataStore(DataStore):
                 "segment_offset": None if place is None else place.offset,
                 "segment_length": None if place is None else place.length,
             }
+        pending = PendingCreate(prepared, values, calls)
+        group = (owner, frozenset(scenarios_of(metadata for _, metadata, _ in prepared)))
+        with self.group_lock:
+            pending.lead = group not in self.waiting
+            self.waiting.setdefault(group, []).append(pending)
+        if not pending.lead:
+            pending.done.wait()
+        if pending.lead:
+            self.commit_group(group)
+        if isinstance(pending.outcome, Exception):
+            raise pending.outcome
+        if pending.outcome is None:
+            raise ReefError("the transaction of this create stopped before it wrote the items")
+        return pending.outcome
+
+    def commit_group(self, group: tuple[str, frozenset[str]]) -> None:
+        """Write the first waiting creates of ``group``, up to ``GROUP_COMMIT_ITEMS`` items, in one transaction, and
+        give the lead to the next waiting create. When the transaction fails, write each create alone, so that one
+        create's ``ItemConflict`` does not refuse the others."""
+        owner = group[0]
+        with self.group_lock:
+            waiting = self.waiting[group]
+            batch = [waiting.pop(0)]
+            count = len(batch[0].prepared)
+            while waiting and count + len(waiting[0].prepared) <= GROUP_COMMIT_ITEMS:
+                count += len(waiting[0].prepared)
+                batch.append(waiting.pop(0))
+        try:
+            try:
+                for pending, outcome in zip(batch, self.commit_creates(owner, batch), strict=True):
+                    pending.outcome = outcome
+            except Exception as error:
+                if len(batch) == 1:
+                    batch[0].outcome = error
+                else:
+                    for pending in batch:
+                        try:
+                            pending.outcome = self.commit_creates(owner, [pending])[0]
+                        except Exception as alone:
+                            pending.outcome = alone
+        finally:
+            with self.group_lock:
+                if waiting:
+                    waiting[0].lead = True
+                    waiting[0].done.set()
+                else:
+                    self.waiting.pop(group)
+            for pending in batch:
+                pending.done.set()
+
+    def commit_creates(self, owner: str, batch: Sequence[PendingCreate]) -> list[tuple[StoredItem, ...]]:
+        """Write the rows of the creates ``batch`` of ``owner`` in one transaction, and return the items of each.
+
+        An ID in two creates gets the row of the first; another digest in the later one is an ``ItemConflict``.
+        """
+        prepared = [entry for pending in batch for entry in pending.prepared]
+        values: dict[str, dict[str, Any]] = {}
+        calls: dict[str, NewNode] = {}
+        for pending in batch:
+            for item_id, value in pending.values.items():
+                values.setdefault(item_id, value)
+            for item_id, call in pending.calls.items():
+                calls.setdefault(item_id, call)
         with self.transaction() as connection:
             self.lock_scenarios(connection, owner, scenarios_of(metadata for _, metadata, _ in prepared))
             sequences = self.insert_new_items(connection, list(values.values()))
@@ -477,7 +567,7 @@ class SQLDataStore(DataStore):
             self.trajectory_nodes(owner).add_many(
                 connection,
                 [
-                    NewNode(sequence, calls[item_id][0], item_id, calls[item_id][1], calls[item_id][2])
+                    replace(calls[item_id], node_sequence=sequence)
                     for item_id, sequence in sorted(sequences.items(), key=lambda pair: pair[1])
                     if item_id in calls
                 ],
@@ -502,16 +592,24 @@ class SQLDataStore(DataStore):
             for item, _, digest in prepared:
                 if item.item_id in sequences and digest != values[item.item_id]["digest"]:
                     raise ItemConflict(f"item {item.item_id!r} of {owner!r} is stored with other content")
-            return tuple(
-                (
-                    stored[item_id]
-                    if item_id in stored
-                    else StoredItem(
-                        sequences[item_id], owner, item_id, metadata_of[item_id], values[item_id]["digest"], None
+            return [
+                tuple(
+                    (
+                        stored[item.item_id]
+                        if item.item_id in stored
+                        else StoredItem(
+                            sequences[item.item_id],
+                            owner,
+                            item.item_id,
+                            metadata_of[item.item_id],
+                            values[item.item_id]["digest"],
+                            None,
+                        )
                     )
+                    for item, _, _ in pending.prepared
                 )
-                for item_id in item_ids
-            )
+                for pending in batch
+            ]
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
