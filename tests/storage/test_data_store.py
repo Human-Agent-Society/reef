@@ -22,7 +22,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
-from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink
+from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
 from reef.storage.record_items import record_item
@@ -463,6 +463,29 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
     assert store.scenarios_with_records("acme") == ("review",)
     assert store.remove_scenario("acme", "coding") == 0
     assert store.remove_scenario("globex", "review") == 0
+
+
+def test_a_write_of_an_ended_generation_stores_nothing(store):
+    generation = store.scenario_generation("acme", "coding")
+    assert store.scenario_generation("acme", "coding") == generation
+    assert store.scenario_generation("globex", "coding") != generation
+    first, second = calls(1, 2)
+    assert store.create("acme", [first], generation=generation)[0].inserted
+    with pytest.raises(ScenarioArchived, match="no longer current"):
+        store.create("acme", [second], generation="other")
+
+    store.remove_scenario("acme", "coding")
+    with pytest.raises(ScenarioArchived):
+        store.create("acme", [second], generation=generation)
+    assert store.read("acme", second.item_id) is None
+    renewed = store.scenario_generation("acme", "coding")
+    assert renewed != generation
+    assert store.create("acme", [second], generation=renewed)[0].inserted
+
+    review = record_item(conversation("other", 1, scenario="review"))
+    for items in ([trajectory("t1")], [first, review]):
+        with pytest.raises(ValueError, match="one origin scenario"):
+            store.create("acme", items, generation=renewed)
 
 
 def test_the_store_lists_the_scenarios_with_record_items(store):
