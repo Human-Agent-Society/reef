@@ -83,10 +83,11 @@ def open_durable_store(request, tmp_path):
 def test_created_items_keep_their_content_and_arrival_order(store):
     first, second = store.create("acme", [trajectory("t1", "one"), trajectory("t2", "two", note="kept")])
     assert first.sequence < second.sequence
-    assert first.content["steps"][0]["message"] == "one"
-    assert first.digest == json_digest(first.content)
+    assert first.content is None and second.content is None, "a create reads no content back"
+    assert store.read("acme", "t1").content["steps"][0]["message"] == "one"
+    assert first.digest == json_digest(store.read("acme", "t1").content)
     assert second.metadata == {"kind": "trajectory", "owner": "acme", "scenarios": {}, "note": "kept"}
-    assert store.read("acme", "t2") == second
+    assert replace(store.read("acme", "t2"), content=None) == second
     assert [item.item_id for item in store.query("acme")] == ["t1", "t2"]
     assert [item.item_id for item in store.query("acme", after=first.sequence)] == ["t2"]
     assert [item.item_id for item in store.query("acme", limit=1)] == ["t1"]
@@ -297,13 +298,16 @@ def calls(*turns: int) -> list[NewItem]:
 
 def test_record_items_that_share_messages_read_back_exactly(store):
     items = calls(1, 2, 3)
-    created = store.create("acme", items)
-    assert [canonical_json(item.content) for item in created] == [canonical_json(item.content) for item in items]
+    store.create("acme", items)
+    assert [canonical_json(item.content) for item in store.query("acme")] == [
+        canonical_json(item.content) for item in items
+    ]
     assert [item.content for item in store.query("acme", kind="record")] == [item.content for item in items]
     assert store.read("acme", "coding/call-2").content == items[1].content
     assert store.delete("acme", "coding/call-2")
     assert [item.content for item in store.query("acme")] == [items[0].content, items[2].content]
-    assert store.create("acme", [items[1]])[0].content == items[1].content
+    store.create("acme", [items[1]])
+    assert store.read("acme", "coding/call-2").content == items[1].content
 
 
 def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancestors(store):
@@ -574,7 +578,7 @@ def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable
     legacy_content = {**content, "content_id": "old-checksum"}
     item = NewItem("weights", legacy_content, {"kind": "artifact"})
     (created,) = store.create("acme", [item])
-    assert created.content == content
+    assert store.read("acme", "weights").content == content
     assert created.digest == json_digest(content)
     assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (created,)
 
@@ -590,8 +594,8 @@ def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable
                 .where(table.c.owner == "acme", table.c.item_id == "weights")
                 .values(content_json=canonical_json(legacy_content), digest=legacy.digest)
             )
-    assert store.create("acme", [item]) == (legacy,)
-    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (legacy,)
+    assert store.create("acme", [item]) == (replace(legacy, content=None),)
+    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (replace(legacy, content=None),)
     with pytest.raises(ItemConflict, match="other content"):
         store.create("acme", [NewItem("weights", {**content, "source_uri": "s3://other/weights"}, item.metadata)])
     assert store.read("acme", "weights") == legacy
