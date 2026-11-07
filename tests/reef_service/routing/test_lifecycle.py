@@ -65,8 +65,8 @@ from reef.service.lifecycle import (
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingSnapshot
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.records import AppendResult, RecordConflict
-from reef.storage.sqlite import SQLiteRecordStore
 
 pytestmark = pytest.mark.unit
 
@@ -313,7 +313,7 @@ def test_a_record_failure_after_stream_headers_never_writes_a_second_response(
     """Error translation maps the first two to 400 and 409 inside admission; the third is unmapped."""
     appends: list[str] = []
 
-    def fail_append(store: SQLiteRecordStore, item: AgentRecord) -> AppendResult:
+    def fail_append(store: ItemRecordStore, item: AgentRecord) -> AppendResult:
         appends.append(item.agent_record_id)
         raise failure("injected record failure")
 
@@ -347,7 +347,7 @@ def test_a_record_failure_after_stream_headers_never_writes_a_second_response(
             acceptance = app[REQUEST_ACCEPTANCE]
             acceptance.control(command("open"))
             server = await stack.enter_async_context(TestServer(app))
-            monkeypatch.setattr(SQLiteRecordStore, "append_result", fail_append)
+            monkeypatch.setattr(ItemRecordStore, "append_result", fail_append)
             payload = json.dumps({"model": "student", "messages": [{"role": "user", "content": "x"}], "stream": True})
             headers = {
                 "Host": f"{server.host}:{server.port}",

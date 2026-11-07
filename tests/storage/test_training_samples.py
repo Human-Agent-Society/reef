@@ -293,14 +293,14 @@ def test_a_start_drops_the_sample_store_and_the_train_counts_of_its_stage_sample
         session.commit_step(expected_step=0, commit=training_commit(1, *consumed, component="a"))
         state = session.training_state
         schema = state.counts.table.schema
-        with state.records._transaction(write=True) as connection:
+        with state.database._transaction(write=True) as connection:
             storage_id = state.counts.scope.get("storage_id")
             legacy_sample_tables(connection, schema, storage_id)
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
         assert state.train_counts(["upload", "a:r1:0"]) == {"upload": {"a": 1}}
-        with state.records._transaction(write=False) as connection:
+        with state.database._transaction(write=False) as connection:
             assert not inspect(connection).has_table("training_sample", schema=schema)
             assert not inspect(connection).has_table("sample_record", schema=schema)
 
@@ -309,7 +309,7 @@ def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_stora
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
         schema = state.counts.table.schema
-        with state.records._transaction(write=True) as connection:
+        with state.database._transaction(write=True) as connection:
             legacy = Table(
                 "manual_buffer",
                 MetaData(schema=schema),
@@ -321,6 +321,6 @@ def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_stora
     with (
         closing(open_durable_storage()) as storage,
         closing(storage.open("math")) as session,
-        session.training_state.records._transaction(write=False) as connection,
+        session.training_state.database._transaction(write=False) as connection,
     ):
         assert not inspect(connection).has_table("manual_buffer", schema=schema)

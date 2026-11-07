@@ -433,7 +433,7 @@ callers remain compatible with existing adapters.
 Storage implementations explicitly subclass ``RecordStore``,
 ``ScenarioStore``, and ``ScenarioStorage`` and override their abstract
 methods and properties. Incomplete subclasses cannot be instantiated. The
-bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
+bundled ``ItemRecordStore``, ``CommitHistoryScenarioStore``, and
 ``SQLiteScenarioStorage`` inherit those bases, respectively.
 
 .. code:: python
@@ -514,10 +514,9 @@ scenario package depends only on storage contracts. The storage contract is:
    * - ``write_settings(scenario, settings)``
      - Replace the settings durably. The caller serializes writers of one scenario.
    * - ``archive(scenario)``
-     - Retire the scenario's records, commits, tasks and settings, so a
-       recreated scenario starts empty; return the archive locations.
-   * - ``prune(max_bytes=...)``
-     - Evict the oldest record bodies over the byte budget.
+     - Retire the scenario's commits, tasks and settings, and remove the
+       scenario from the uses of its owner's items, so a recreated scenario
+       starts empty; return the archive locations.
    * - ``close()``
      - Release shared resources; repeated calls are safe.
 
@@ -599,10 +598,10 @@ reconciliation. See `Commit ordering
 provide distributed leases or authorize multiple active training writers.
 
 The storage service exposes ``durable``, ``open(scenario)``, ``archive(scenario)``,
-``prune(max_bytes=...)``, and ``close()``. Archive retires that scenario's
-stored state so its name can be reused; prune applies retained-body limits to
-active and archived state. Custom backends implement those operations instead
-of exposing local file paths. Each opened session belongs to its scenario and
+and ``close()``. Archive retires that scenario's stored state so its name can be
+reused. Custom backends implement those operations instead
+of exposing local file paths. ``from_config`` takes the deployment's data store,
+which keeps each scenario's records as record items. Each opened session belongs to its scenario and
 closes after its trainer, including on construction or recovery failure. The
 dispatcher closes its storage service on shutdown. Application assembly should use
 the scenario storage service; direct record store construction is described below.
@@ -1028,92 +1027,39 @@ Record storage and audit
 or concrete storage adapters. Both ``reef.RecordStore`` and
 ``reef.storage.records.RecordStore`` refer to this abstract base.
 
-``reef.storage.sql_records.SQLRecordStore`` implements the shared SQLAlchemy
-Core record operations. ``reef.storage.sqlite.SQLiteRecordStore`` inherits
-those operations and supplies SQLite connection setup, schema migration,
-transactions, and dialect behavior. When opening older SQLite schemas, the
-adapter uses Alembic's operations API to add missing columns on its connection.
-Retention query logic is shared in the SQL module; the SQLite adapter owns
-database-file discovery and maintenance connections.
+``reef.storage.record_items.ItemRecordStore`` is the ``RecordStore`` of one
+scenario over the data store (RFC #1219). It appends each record as its record
+item with the scenario's generation, and reads the record items that the
+scenario made, in item sequence order. ``SQLiteScenarioStorage`` and
+``PostgresScenarioStorage`` give one to each session. Both take a data store
+(``data=``); without one, the SQLite storage keeps its records in
+``<directory>/data``, and the PostgreSQL storage in the schema
+``<schema>_data``. Deployment assembly gives them the deployment's data store.
 
-``reef.storage.postgres.PostgresRecordStore`` inherits those same operations.
-It supplies PostgreSQL schema types, pooled transactions, and conflict insertion
-through psycopg 3. Install ``reef-infra[postgres]`` to enable the driver. The
-``RecordTables.scope`` mapping isolates named stores in shared SQL tables;
-SQLite leaves it empty because each store owns a database. Custom SQL adapters
-must also supply ``RecordTables.eviction`` with scope/scenario keys and the
-``record_count``, ``body_bytes``, ``first_sequence`` and ``last_sequence`` columns.
-These totals are updated atomically with capacity deletion and retry hashes.
-The records table also has ``message_field`` and ``payload_sha256`` columns,
-and ``RecordTables.nodes`` holds the trajectory node of each record with a
-message list (``messages``, or ``input`` for responses). Define it with
-``trajectory_node_table(metadata, name, *scope_columns)``. The node keeps the
-record's payload as ATIF (``reef.core.atif_payloads``): each request message as
-ATIF steps and observation results, ``tools`` as the agent's
-``tool_definitions``, and the reply as an agent step. Provider fields that ATIF
-cannot hold, such as ``cache_control``, stay in ``extra.reef``. A node links the
-record to the earlier record of its scenario with the same API format and
-``tools`` whose messages are the longest prefix of its own; among equal
-prefixes, it prefers the record whose reply the new messages resend. Other tools
-start another trajectory. The node keeps only the messages after its parent's,
-and the root node of a trajectory keeps its tools. The record row keeps only the
-payload's hash. Reads render the provider payload back exactly. A node stays
-while a stored record needs its messages.
-``RecordTables.settings`` holds the store's settings as ``name`` and
-``value_json`` rows under the scope keys; ``SQLRecordStore.read_settings()`` and
-``write_settings(settings)`` read and replace them.
+``reef.storage.sql_records.SQLScenarioDatabase`` is the database of one
+scenario's state: its settings, and the transactions of its task, sample,
+evaluation and commit stores. ``reef.storage.sqlite.SQLiteScenarioDatabase`` and
+``reef.storage.postgres.PostgresScenarioDatabase`` supply the connections,
+schemas and conflict insertion. Install ``reef-infra[postgres]`` to enable the
+PostgreSQL driver.
 
-.. code-block:: python
-
-   import os
-   from contextlib import closing
-   from reef.storage.postgres import PostgresRecordStore
-
-   with closing(PostgresRecordStore(
-       os.environ["REEF_RECORD_DATABASE_URL"],
-       schema="reef_records",
-       name="my-record-store",
-   )) as records:
-       rows = records.replay("my-scenario")
-
-The URL constructor owns its pool. To share a pool across sessions, construct
-``PostgresRecordDatabase(url, schema=...)`` and pass that object instead of a URL;
-close sessions before closing the database. Both close operations are idempotent.
-``PostgresScenarioStorage(url, directory, schema=...)`` keeps records, commits
-(the ``scenario_commit`` table) and settings (the ``scenario_setting`` table) in
-the schema. It uses ``directory`` only to import the model configuration
-files of earlier versions on start. Pass it through
-``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
-continues to depend only on the abstract store contracts. Deployment configuration
-selects this storage service with ``storage.record_backend: postgres``; see
+``PostgresScenarioStorage(url, directory, schema=...)`` keeps commits (the
+``scenario_commit`` table) and settings (the ``scenario_setting`` table) in the
+schema. Pass it through ``Dispatcher(..., scenario_storage=...)`` for embedded
+use. Scenario code continues to depend only on the abstract store contracts.
+Deployment configuration selects this storage service with
+``storage.record_backend: postgres``; see
 `Choose the storage backend <../user-guide/operate.rst#choose-the-storage-backend>`__
 for connection and storage setup.
 
-Writes lock their store generation before allocating append sequences and hold
-the lock through commit. Reads use a consistent transaction snapshot. PostgreSQL
-receipt keys hash large consumed ID sets, with complete canonical content checked
-by the shared SQL layer. PostgreSQL timestamps use double precision, and sequences
-use 64-bit identities. Retention applies the same byte-budget policy to
-all bodies across active and archived generations in the deployment schema.
-
-Existing SQLite and PostgreSQL stores link their records when they first open;
-the upgrade rewrites the records that have a message list, oldest first. Direct
-callers must replace
-``RecordStore(path)`` with ``SQLiteRecordStore(path)``; the abstract base cannot
-be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
-
-.. code:: python
-
-   from pathlib import Path
-
-   from reef.storage.sqlite import SQLiteRecordStore
-
-   with SQLiteRecordStore(Path(".reef/records.sqlite3")) as records:
-       retained = records.audit_page("math")
-
-``RecordRetention`` in ``reef.storage.records`` holds and validates the
-``max_bytes`` capacity budget. Store factories apply capacity limits through
-``prune`` independently of record consumption.
+A database of a version before RFC #1219 keeps its records in the tables
+``agent_record``, ``record_node``, ``consumed_agent_record``,
+``record_consumption`` and ``record_eviction``. That version copied each record
+to its record item at the first open of its scenario. The storage drops these
+tables when the record item of the newest record of each active scenario is in
+the data store: the PostgreSQL storage when it starts, the SQLite storage at the
+first open of each scenario. Otherwise it keeps them and logs a warning: run
+Reef 83a6f3ab once to copy the records.
 
 Training commits persist consumption progress without changing record
 visibility or deleting bodies. Record-to-sample stages expose
@@ -1122,9 +1068,6 @@ service calls for memory management. Storage controls capacity
 independently of these buffers.
 
 ``get``, ``replay``, ``replay_page``, and ``count`` read all retained records.
-A one-time upgrade converts older retirement markers and receipts into
-consumption records. It preserves original bodies, drops the old schema,
-and keeps consumption metadata out of record reads.
 
 .. list-table::
    :header-rows: 1
@@ -1139,17 +1082,17 @@ and keeps consumption metadata out of record reads.
        consumed bodies. Advance the cursor using the last entry's ``sequence``.
    * - ``loss(scenario)``
      - Durable ``RecordLoss`` totals: ``record_count``, ``body_bytes``,
-       ``first_sequence`` and ``last_sequence`` for capacity-evicted bodies.
-       ``body_bytes`` counts the record rows and the trajectory nodes that the
-       evictions freed. Counts include consumed and unconsumed records.
+       ``first_sequence`` and ``last_sequence`` of the record items that
+       retention deleted (``DataStore.record_loss``). Counts include consumed
+       and unconsumed records.
    * - ``trajectory(scenario, agent_record_id)``
      - The record IDs of the trajectory that the record ends, oldest first: the
        earlier calls with the same API format and tools whose messages the
        record's messages extend, one per prefix, and then the record. A retry
-       with the same messages replaces the call that it retries. An ID can name
-       a record that capacity eviction deleted. A record without a message list,
-       or a store that keeps no trajectories, gives a trajectory of one call;
-       ``()`` for a record that is not stored.
+       with the same messages replaces the call that it retries. A call that
+       retention deleted is left out. A record without a message list, or a
+       store that keeps no trajectories, gives a trajectory of one call; ``()``
+       for a record that is not stored.
 
 ``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
 Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
@@ -1166,53 +1109,27 @@ For example, inspect one trace without making it available to training again:
        payload = entry.item.payload
        references = entry.item.references
 
-With the default SQLite storage service, the HTTP service runs background retention at
-startup and every 60 seconds.
-It evicts oldest bodies only when their total exceeds a shared 20 GiB budget
-across scenario databases in ``agent_record_dir``,
-including ``archived/``. The budget measures UTF-8 JSON payloads, references,
-and artifact references. Limits are configurable in `Configuration <configuration.rst>`__.
+The HTTP service runs background retention at startup and every 60 seconds. It
+deletes the oldest record items, across owners, only when they hold more than a
+shared 20 GiB budget (``DataStore.prune_records``). The budget counts each record
+item's row and the trajectory nodes that only it needs. Limits are configurable
+in `Configuration <configuration.rst>`__.
 
 For embedded Python deployments, use
 ``dispatcher.prune_record_archives(RecordRetention(max_bytes=20 * 1024**3))``
-with ``RecordRetention`` imported from ``reef.storage.records``. This runs one sweep
-through the configured storage service and serializes it with scenario archival.
-Standalone ``SQLiteRecordStore`` and ``Dispatcher`` construction do not start a
-maintenance task. ``create_app(dispatcher, ...)`` requires an existing dispatcher
-and accepts ``record_retention=RecordRetention(...)`` to enable service maintenance.
-It closes the dispatcher on cleanup only when ``close_dispatcher=True``.
-The deployment assembly selects the storage backend and passes the dispatcher
-to the HTTP app; ``create_app`` never creates a default backend.
+with ``RecordRetention`` imported from ``reef.storage.records``. This runs one
+sweep over the dispatcher's data store and serializes it with scenario archival.
+``Dispatcher`` construction does not start a maintenance task.
+``create_app(dispatcher, ...)`` requires an existing dispatcher and accepts
+``record_retention=RecordRetention(...)`` to enable service maintenance. It
+closes the dispatcher on cleanup only when ``close_dispatcher=True``. The
+deployment assembly selects the storage backend and passes the dispatcher to the
+HTTP app; ``create_app`` never creates a default backend.
 
-The former ``RecordRetention.prune(directory)`` method has been removed: the
-retention value no longer opens databases or accepts a filesystem path. Use
-``dispatcher.prune_record_archives(retention)`` for a running dispatcher. For
-standalone SQLite maintenance, pass the directory to the storage service:
-
-.. code:: python
-
-   from pathlib import Path
-
-   from reef.storage.records import RecordRetention
-   from reef.storage.sqlite import SQLiteScenarioStorage
-
-   retention = RecordRetention(max_bytes=20 * 1024**3)
-   storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
-   try:
-       purged = storage.prune(max_bytes=retention.max_bytes)
-   finally:
-       storage.close()
-
-The caller must serialize standalone maintenance with any scenario file moves.
-
-Capacity eviction includes active records and logs warnings with counts, byte
-sizes and sequence ranges. Retry hashes and commit/receipt metadata survive,
-so identical retries still deduplicate and conflicting content still fails.
-SQLite deletes commit in batches of 256; PostgreSQL serializes a sweep with
-writers in one transaction. Concurrent writes can exceed the budget between
-sweeps. SQLite reuses freed pages without shrinking its file. Indexes and other
-metadata also require disk space. HTTP audit routes remain a separate integration. See
-`Configuration <configuration.rst>`__ for migration and rollback constraints.
+Retention logs nothing per record. A trainer reports the loss of its scenario in
+its metrics and status. Concurrent writes can exceed the budget between sweeps.
+Indexes and other metadata also require disk space. HTTP audit routes remain a
+separate integration.
 
 Pipeline stages
 ---------------

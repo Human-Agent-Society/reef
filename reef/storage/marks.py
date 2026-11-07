@@ -19,8 +19,8 @@ class Marks(ABC):
     ``advance(name, value)`` sets the mark to the larger of its value and ``value``, so a mark never decreases and
     an advance that runs twice changes nothing.
 
-    Purpose: the data service keeps the record copy position of each scenario (``record_copy:<scenario>``), which
-    only it writes.
+    Purpose: a service keeps a durable position in the coordination store. The record copy of a version before
+    RFC #1219 kept the mark ``record_copy:<scenario>``; nothing in Reef writes a mark now.
     """
 
     @abstractmethod

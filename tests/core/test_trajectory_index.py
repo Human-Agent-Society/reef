@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import replace
 
 import pytest
@@ -9,7 +10,9 @@ from tests.support.conversations import conversation, turn
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectory_index import CallKey, TrajectoryIndex, call_key, sha256_text, trajectory_calls
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.record_items import record_item
+from reef.storage.sql_data import SQLiteDataStore
+from reef.storage.tasks import LocalTaskFileStore
 
 SYSTEM = {"role": "system", "content": "be brief"}
 USER = {"role": "user", "content": "海 🐟"}
@@ -77,16 +80,27 @@ def calls() -> list[AgentRecord]:
     ]
 
 
-def test_the_index_links_the_calls_as_the_record_store_does(tmp_path) -> None:
+def stored_trajectory(data: SQLiteDataStore, record_id: str) -> tuple[str, ...]:
+    """The record IDs of the trajectory that the record item of ``record_id`` ends, from the data store's links."""
+    path: list[tuple[str, int]] = []
+    item_id: str | None = f"math/{record_id}"
+    while item_id is not None:
+        link = data.record_links("math", [item_id])[item_id]
+        path.append((item_id.removeprefix("math/"), link.entry_count))
+        item_id = link.parent
+    return trajectory_calls(path[::-1])
+
+
+def test_the_index_links_the_calls_as_the_data_store_does(tmp_path) -> None:
     index = TrajectoryIndex()
-    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
+    with closing(LocalTaskFileStore(None)) as task_files, closing(SQLiteDataStore(None, task_files)) as data:
         for call in calls():
             index.add(call)
-            records.append(call)
+            data.create("math", [record_item(call)])
         for call in calls():
             if call.agent_record_id == "plain":
                 continue
-            assert index.trajectory(call.agent_record_id) == records.trajectory("math", call.agent_record_id)
+            assert index.trajectory(call.agent_record_id) == stored_trajectory(data, call.agent_record_id)
     assert index.trajectory("later") == ("retry", "later")
     assert index.trajectory("call-3") == ("call-1", "call-2", "call-3")
     assert index.trajectory("plain") == ("plain",)

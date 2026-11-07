@@ -70,8 +70,8 @@ def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_
         storage.archive("math")
         with pytest.raises(RuntimeError, match="archived"):
             store.history()
-        with pytest.raises(RuntimeError, match="archived"):
-            store.records.count("math")
+        # The records are record items, and the archive removed the scenario's uses of them.
+        assert store.records.count("math") == 0
         store.close()
 
 
@@ -89,7 +89,8 @@ def test_archive_retires_settings_with_records_and_commits(open_storage):
 def test_reading_settings_of_an_unknown_scenario_creates_nothing(tmp_path):
     storage = SQLiteScenarioStorage(tmp_path)
     assert storage.read_settings("math") == ScenarioSettings()
-    assert list(tmp_path.iterdir()) == []
+    # Only the storage's own data store is there.
+    assert [path.name for path in tmp_path.iterdir()] == ["data"]
 
 
 @pytest.mark.parametrize("value", [["not", "an", "object"], 3])
@@ -136,7 +137,7 @@ def test_postgres_upgrade_from_version_15_drops_a_stored_model_setting(postgres_
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
         storage.write_settings("math", ScenarioSettings(training_mode="manual"))
     with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        settings = database.tables.settings
+        settings = database.settings_table
         storage_id = database.active_storage_id("math")
         with database.transaction() as connection:
             # Write the row that version 15 kept for a scenario's model override.
@@ -150,8 +151,8 @@ def test_postgres_upgrade_from_version_15_drops_a_stored_model_setting(postgres_
             version = settings.metadata.tables[f"{schema}.schema_version"]
             connection.execute(version.update().values(version=15))
     with closing(PostgresRecordDatabase(url, schema=schema)) as database, database.transaction() as connection:
-        names = connection.execute(select(database.tables.settings.c.name)).scalars().all()
-        version = database.tables.settings.metadata.tables[f"{schema}.schema_version"]
+        names = connection.execute(select(database.settings_table.c.name)).scalars().all()
+        version = database.settings_table.metadata.tables[f"{schema}.schema_version"]
         assert connection.execute(select(version.c.version)).scalar_one() == POSTGRES_SCHEMA_VERSION
     assert names == ["training_mode"]
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:

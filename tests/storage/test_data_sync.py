@@ -35,8 +35,8 @@ class Stores:
 @pytest.fixture
 def stores(tmp_path) -> Iterator[Stores]:
     task_files = LocalTaskFileStore(tmp_path / "task-files")
-    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files)
     data = SQLiteDataStore(tmp_path / "data", task_files)
+    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data)
     try:
         yield Stores(storage, data)
     finally:

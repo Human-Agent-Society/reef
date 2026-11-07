@@ -97,7 +97,6 @@ from reef.storage.migrations import (
     migrate_data_trajectories,
     migrate_data_uses,
 )
-from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
     SEGMENT_COLUMNS,
@@ -111,7 +110,7 @@ from reef.storage.sql_records import (
     row_line,
     trajectory_node_table,
 )
-from reef.storage.sqlite import enable_wal
+from reef.storage.sql_setup import enable_wal, postgres_url, validate_postgres_schema
 from reef.storage.tasks import TaskFileStore
 
 #: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.

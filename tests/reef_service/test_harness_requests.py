@@ -13,6 +13,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher, seed_root
 from tests.support.harness_steps import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
+from tests.support.records import memory_records
 from tests.support.samples_service import make_samples
 
 from reef.core.plugins import PluginReference
@@ -22,7 +23,6 @@ from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
 from reef.scenario import Scenario
 from reef.service.app import create_app
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState
@@ -462,7 +462,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
     for index, (method, expected) in enumerate(((adding, merged), (keeping, REQUIRES))):
         (tmp_path / str(index)).mkdir()
         recipe = manual_recipe(tmp_path / str(index), method)
-        records = SQLiteRecordStore()
+        records = memory_records("agents")
         trainer = recipe.build(
             "agents",
             records,

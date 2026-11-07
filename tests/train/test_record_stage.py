@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import data_storage, made_task, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
@@ -38,7 +39,6 @@ from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
@@ -252,7 +252,7 @@ def test_the_pipeline_adds_its_stages_background_work_and_status_and_closes_them
 
 @pytest.mark.unit
 def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_released() -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("s")
     for record in (inference("i1"), inference("drop-1"), report("r1", "i1")):
         records.append(record)
     trainer = Trainer.build(
@@ -276,7 +276,7 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
 
 @pytest.mark.unit
 def test_the_trainer_reports_the_stages_background_work() -> None:
-    trainer = Trainer.build("s", SQLiteRecordStore(), pipeline_factory=RecordingPipeline)
+    trainer = Trainer.build("s", memory_records("s"), pipeline_factory=RecordingPipeline)
     processor = trainer.pipeline
     assert isinstance(processor, RecordingPipeline)
     assert not trainer.pipeline.background_jobs_running()
@@ -384,7 +384,7 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
 
 @pytest.mark.unit
 def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("s")
     records.append(inference("i1"))
     trainer = Trainer.build(
         "s",
@@ -727,7 +727,7 @@ def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train() -> 
 def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     replay_before_commit: bool, references: tuple[str, ...], legacy_stripped: bool
 ) -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("s")
     aborted = inference("aborted")
     aborted = replace(
         aborted,

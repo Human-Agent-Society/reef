@@ -1806,9 +1806,9 @@ conflict rather than overwriting. Reef keeps track of consumed records so
 retried reports and late reports whose references already trained are not
 counted twice.
 
-Training records remain readable after consumption. Storage evicts the oldest
-bodies only when the shared capacity budget is exceeded (20 GiB by default),
-with warnings and durable loss totals. Audit endpoints expose retained requests,
+Training records remain readable after consumption. Retention deletes the oldest
+record items only when the shared capacity budget is exceeded (20 GiB by
+default), and keeps durable loss totals. Audit endpoints expose retained requests,
 responses and references. Per-step ``consumed_ids`` records processed
 inputs, including intentional skips, rather than proving a model update.
 See `Configuration <configuration.rst>`__ and `Python API <python-api.rst>`__.
