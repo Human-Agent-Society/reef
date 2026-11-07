@@ -182,7 +182,7 @@ def test_a_scenario_reads_and_retries_its_records_as_record_items(item_records):
     assert item_records.get_for_audit("math", "report").item == report
     assert item_records.get("math", "missing") is None
     assert item_records.get("code", "first") is None and item_records.replay("code") == ()
-    assert item_records.last_sequence("math") > 0
+    assert item_records.last_sequence("math") == item_records.get_for_audit("math", "report").sequence
 
 
 def test_a_batch_of_records_stores_all_or_none_and_a_repeat_is_a_retry(item_records):

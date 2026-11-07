@@ -724,6 +724,21 @@ class SQLDataStore(DataStore):
         with self.transaction(read_only=True) as connection:
             return int(connection.execute(statement).scalar_one())
 
+    def last_sequence(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+    ) -> int:
+        check_filters(owner, kind, scenario, origin, request_type, 0)
+        newest = func.coalesce(func.max(self.items_table.c.sequence), 0)
+        statement = select(newest).where(*self.filters(owner, kind, scenario, origin, request_type, 0))
+        with self.transaction(read_only=True) as connection:
+            return int(connection.execute(statement).scalar_one())
+
     def filters(
         self,
         owner: str,

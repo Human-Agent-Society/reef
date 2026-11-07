@@ -159,9 +159,8 @@ class ItemRecordStore(RecordStore):
     Values: ``data`` is the data store, ``owner`` the scenario's owner, ``scenario`` the scenario and ``generation``
     its generation (``DataStore.scenario_generation``) when the session opened. A record of the scenario is its
     record item ``record_item(r)``. The store reads the record items that the scenario made and still uses, as the
-    records that it stored (``copied_record`` in the origin itself). An append sequence is the item's sequence.
-    ``last_sequence`` is the scenario's newest use sequence, which grows with each record that it gets. A read of
-    another scenario gives nothing.
+    records that it stored (``copied_record`` in the origin itself). An append sequence is the item's sequence. A
+    read of another scenario gives nothing.
 
     The store differs from a record store in two ways. A retry of a record that ``prune_records`` deleted stores it
     again, and ``trajectory`` gives the record alone.
@@ -285,7 +284,9 @@ class ItemRecordStore(RecordStore):
         )
 
     def last_sequence(self, scenario: str) -> int:
-        return 0 if scenario != self.scenario else self.data.last_use_sequence(self.owner, scenario)
+        if scenario != self.scenario:
+            return 0
+        return self.data.last_sequence(self.owner, kind="record", scenario=scenario, origin=scenario)
 
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         stored = self.stored(scenario, agent_record_id)
