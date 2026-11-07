@@ -99,7 +99,7 @@ Both ways feed the same training step (4 to 8).
      - the eval split of the uploaded tasks
    * - Agents
      - ``claude``, ``pi``, ``opencode``, ``codex`` (the adapters with a plugin)
-     - every adapter with an npm ``install``
+     - every adapter with an npm or uv ``install``
    * - Recipes
      - ACE, ReasoningBank, GEPA (AIME example)
      - GEPA with ``TrainTaskJobData``
@@ -368,14 +368,14 @@ Task directories
 
 A Harbor task directory holds an instruction, an environment and tests. Reef
 runs each one in its own container: Harbor starts it, Reef installs the
-adapter's pinned agent with npm and copies in the rendered tree, the agent
+adapter's pinned agent with npm (uv for ``python``) and copies in the rendered tree, the agent
 plays the instruction, and the tests' reward is the score
 (``VerifierRewardScorer``). The image needs glibc.
 
 The agent reaches Reef at ``evolution.evaluation.agent_host`` (default
 ``host.docker.internal``) in place of a loopback address. On Linux, set it
 to an address the container reaches, such as the Docker bridge gateway.
-Startup refuses task directories when the adapter has no npm ``install``,
+Startup refuses task directories when the adapter has no npm or uv ``install``,
 when the executor is not ``local``, or with ``collect_failures``. An offline
 run's evaluation tasks must be directories too.
 

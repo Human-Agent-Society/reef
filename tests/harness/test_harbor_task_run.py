@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from harbor.models.agent.context import AgentContext
 
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
 from reef.harness.adapters import get_adapter
-from reef.harness.harbor.agent import CONTAINER_ROOT, can_run_in_task_container, run_harbor_task, task_agent_tools
+from reef.harness.harbor.agent import (
+    CONTAINER_ROOT,
+    AdapterAgent,
+    adapter_agent_kwargs,
+    can_run_in_task_container,
+    run_harbor_task,
+    task_agent_tools,
+)
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError
@@ -85,8 +95,12 @@ def test_a_trial_that_never_ran_the_agent_is_a_failed_trial_with_its_error(tmp_p
     assert failed_trial_error(result.trajectory) == "the image did not build"
 
 
-def test_only_an_adapter_with_an_npm_install_and_a_text_prompt_plays_a_task_in_a_container(tmp_path: Path) -> None:
-    assert all(can_run_in_task_container(get_adapter(name)) for name in ("claude", "pi", "opencode", "codex"))
+def test_only_an_adapter_with_an_npm_or_uv_install_and_a_text_prompt_plays_a_task_in_a_container(
+    tmp_path: Path,
+) -> None:
+    assert all(
+        can_run_in_task_container(get_adapter(name)) for name in ("claude", "pi", "opencode", "codex", "python")
+    )
     # An adapter whose own command takes the task directory runs it itself; hermes installs from git.
     assert not can_run_in_task_container(replace(get_adapter("pi"), takes_task_directory=True))
     assert not can_run_in_task_container(get_adapter("hermes"))
@@ -94,6 +108,38 @@ def test_only_an_adapter_with_an_npm_install_and_a_text_prompt_plays_a_task_in_a
         run_harbor_task(get_adapter("hermes"), {}, str(harbor_task(tmp_path)))
     with pytest.raises(TaskRunError, match="is not a Harbor task directory"):
         run_harbor_task(get_adapter("pi"), {}, str(tmp_path / "missing"))
+
+
+class RecordingEnvironment:
+    """A task container that keeps each command an agent runs in it, and holds no session directory."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+        self.commands.append(command)
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def upload_dir(self, source, target) -> None:
+        pass
+
+    async def is_dir(self, path) -> bool:
+        return False
+
+
+def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instruction(tmp_path: Path) -> None:
+    python = get_adapter("python")
+    (tmp_path / "logs").mkdir()
+    agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0))
+    environment = RecordingEnvironment()
+    asyncio.run(agent.install(environment))
+    asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
+
+    install, run = environment.commands[1], environment.commands[-1]
+    assert f"curl -LsSf https://astral.sh/uv/{python.install.version}/install.sh" in install
+    assert 'agent="$HOME/.local/bin/uv"' in run
+    assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
+    assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
 
 
 def test_a_container_reaches_a_loopback_model_route_at_the_agent_host() -> None:

@@ -298,6 +298,16 @@ class OpencodeSessionReader(TrajectoryReader):
         )
 
 
+@register_trajectory_reader
+class PythonSessionReader(TrajectoryReader):
+    """Read the session tree of a python adapter's program: every ``*.jsonl`` under ``path``, one event per line."""
+
+    format = "python-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return _read_jsonl_tree(path, "python session")
+
+
 # The readers reef.harness exports as functions.
 read_pi_session = PiSessionReader()
 read_opencode_session = OpencodeSessionReader()

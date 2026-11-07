@@ -1,0 +1,40 @@
+# A Python program as the harness (RFC #1238): the tree is the program, and it owns its loop and every model call.
+#
+# One run is one `uv run --script program/main.py <task>`. The program reads the model binding from
+# program/model.json, which Reef renders for each run: the served tree never holds it. The program declares
+# its own dependencies in its inline script metadata (PEP 723), and uv installs them and a Python for the run.
+# It may write its own session log as JSONL under REEF_PROGRAM_SESSION_DIR.
+name: python
+binary: uv
+# uv from PyPI at the pinned version. A task's container gets the same version from Astral's installer.
+install:
+  kind: uv
+  package: uv
+  version: "0.13.4"
+  binary_path: "venv/bin/uv"
+# What Reef may evolve: the program's modules. A program is code, so a change always waits for a person.
+evolve:
+  program: program/{name}.py
+dirs:
+  program/sessions: REEF_PROGRAM_SESSION_DIR
+sessions: {format: python-jsonl, path: program/sessions}
+# The served model reaches the program through this file only. base_url ends in /v1, as an OpenAI client takes it.
+model:
+  openai:
+    - target: model
+      data:
+        api: openai
+        base_url: "{base_url}/v1"
+        api_key: "{api_key}"
+        model: "{model}"
+run:
+  task:
+    argv: ["run", "--script", "{root}/program/main.py", "{task}"]
+# The program's own settings (primary), which a tree's config/primary.json sets, and the model binding (model).
+config:
+  primary:
+    path: "program/config.json"
+    defaults: {}
+  model:
+    path: "program/model.json"
+    defaults: {}

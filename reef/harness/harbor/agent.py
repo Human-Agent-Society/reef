@@ -52,13 +52,15 @@ COMMAND_FILE = "command.json"
 #: The directory under the agent's log directory that receives the agent's session files.
 SESSIONS_DIR = "sessions"
 #: The install kinds an agent can have in a task's container.
-CONTAINER_INSTALL_KINDS = frozenset({"npm"})
+CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv"})
+#: Where Astral's installer puts uv in a task's container, under the agent user's own home.
+CONTAINER_UV = "$HOME/.local/bin/uv"
 
 
 def can_run_in_task_container(descriptor: AdapterDescriptor) -> bool:
     """Whether ``descriptor``'s agent can play a Harbor task directory in the task's container.
 
-    The agent needs an install that works in any glibc container (npm), and
+    The agent needs an install that works in any glibc container (npm or uv), and
     its command must take the task as text: an adapter whose ``{task}`` is
     the task directory runs the task through its own runner.
     """
@@ -72,7 +74,8 @@ def can_run_in_task_container(descriptor: AdapterDescriptor) -> bool:
 class AdapterAgent(BaseInstalledAgent):
     """A Harbor agent that runs one Reef adapter's binary in a task's container.
 
-    Values: ``package`` and ``version`` name the npm package to install;
+    Values: ``package`` and ``version`` name the package to install, and
+    ``install_kind`` its channel: ``npm``, or ``uv`` for uv itself;
     ``binary`` is the command the package installs; ``argv`` is the adapter's
     ``run.task`` argument template, with ``{task}`` slots; ``env`` is the
     run environment, already pointed at ``CONTAINER_ROOT``;
@@ -97,9 +100,13 @@ class AdapterAgent(BaseInstalledAgent):
         sessions: str,
         files_dir: str,
         timeout_s: float,
+        install_kind: str = "npm",
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, version=version, **kwargs)
+        if install_kind not in CONTAINER_INSTALL_KINDS:
+            raise ValueError(f"install kind {install_kind!r} cannot install in a task's container")
+        self.install_kind = install_kind
         self.package = package
         self.binary = binary
         self.argv = tuple(argv)
@@ -116,24 +123,32 @@ class AdapterAgent(BaseInstalledAgent):
 
     @override
     def get_version_command(self) -> str | None:
+        if self.install_kind == "uv":
+            return f'"{CONTAINER_UV}" --version'
         return f". ~/.nvm/nvm.sh; {shlex.quote(self.binary)} --version"
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        # nvm needs curl; a task image without it gets it from apt, as Harbor's own npm agents do.
+        # nvm and Astral's installer need curl; a task image without it gets it from apt, as Harbor's own npm
+        # agents do.
         await self.exec_as_root(
             environment,
             command="command -v curl >/dev/null || (apt-get update && apt-get install -y curl)",
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
-        await self.exec_as_agent(
-            environment,
-            command=(
+        if self.install_kind == "uv":
+            installer = f"https://astral.sh/uv/{shlex.quote(self._version)}/install.sh"
+            command = (
+                f'set -euo pipefail; curl -LsSf {installer} | env UV_INSTALL_DIR="$HOME/.local/bin" '
+                f'UV_NO_MODIFY_PATH=1 sh && "{CONTAINER_UV}" --version'
+            )
+        else:
+            command = (
                 f"set -euo pipefail; {nvm_node_install_snippet()} && "
                 f"npm install -g {shlex.quote(f'{self.package}@{self._version}')} && "
                 f"command -v {shlex.quote(self.binary)}"
-            ),
-        )
+            )
+        await self.exec_as_agent(environment, command=command)
 
     @override
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
@@ -146,11 +161,16 @@ class AdapterAgent(BaseInstalledAgent):
             shlex.quote(token.replace("{root}", CONTAINER_ROOT).replace("{task}", instruction)) for token in self.argv
         )
         assignments = " ".join(shlex.quote(f"{name}={value}") for name, value in self.env.items())
-        # nvm loads from the user's own home before the run environment moves HOME to the root.
-        command = (
-            f'. "$HOME/.nvm/nvm.sh" && agent="$(command -v {shlex.quote(self.binary)})" && '
-            f'env {assignments} "$agent" {arguments} </dev/null'
-        )
+        # The agent resolves from the user's own home before the run environment moves HOME to the root. uv keeps
+        # its cache and Pythons there too, so the program's dependencies install once per container.
+        if self.install_kind == "uv":
+            find_agent = (
+                f'agent="{CONTAINER_UV}" && export UV_CACHE_DIR="$HOME/.cache/uv" '
+                'UV_PYTHON_INSTALL_DIR="$HOME/.local/share/uv/python"'
+            )
+        else:
+            find_agent = f'. "$HOME/.nvm/nvm.sh" && agent="$(command -v {shlex.quote(self.binary)})"'
+        command = f'{find_agent} && env {assignments} "$agent" {arguments} </dev/null'
         result = await environment.exec(command=command, timeout_sec=int(self.timeout_s))
         (self.logs_dir / COMMAND_FILE).write_text(
             json.dumps({"exit_code": result.return_code, "stdout": result.stdout or "", "stderr": result.stderr or ""})
@@ -201,6 +221,7 @@ def adapter_agent_kwargs(
 ) -> dict[str, object]:
     """The keyword arguments of an ``AdapterAgent`` for ``descriptor``, whose install is ``install``."""
     return {
+        "install_kind": install.kind,
         "package": install.package,
         "version": install.version,
         "binary": descriptor.binary,
