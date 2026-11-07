@@ -319,7 +319,7 @@ class Scenario:
                 self._committer.step, served_component, self._committer.component_names()
             )
             if history:
-                trainer.restore_served_artifacts(history)
+                trainer.restore_served_artifacts(history, self.served_beside())
         # Only a job's submission needs the start, and it reads the commit history.
         train_from_artifact_id = (
             self.artifact_status()[component_trainer.component]["training_start"] if trainer.job_due() else None
