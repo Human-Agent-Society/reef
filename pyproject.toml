@@ -26,8 +26,9 @@ dependencies = [
     "alembic>=1.13,<2",
     "huggingface_hub",
     # Harbor's environment contract backs reef.execution.sandbox; task directory rollouts, the task player and the
-    # generator service play Harbor tasks with reef-eval.
-    "harbor>=0.20,<0.26",
+    # generator service play Harbor tasks with reef-eval. 0.24 gives SSH access to a sandbox in stream mode, which
+    # bridges a harness tree's container to its capture proxy (RFC #986).
+    "harbor>=0.24,<0.26",
     "pyyaml",
     "reef-client>=0.4.0",
     "reef-eval>=0.1.1",
