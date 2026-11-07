@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from tests.support.chat_templates import CharTemplate
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from recipes.sdpo import SDPOJobData, SDPORecipe, SDPOReport, SDPOSamples
@@ -23,7 +24,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.plugins import PluginConfigError
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -113,7 +113,7 @@ def test_the_trainer_refuses_job_samples_above_one_grid() -> None:
     def build(job_samples: int) -> Trainer:
         return Trainer.build(
             "science",
-            SQLiteRecordStore(),
+            memory_records("science"),
             pipeline_factory=lambda context: processor(groups_per_step=2, job_samples=job_samples),
             root=STUB_ROOT,
         )

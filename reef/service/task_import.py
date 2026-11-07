@@ -86,10 +86,10 @@ class DataScenarioStorage(ScenarioStorage):
 
     ``sample_store`` gives the items of the owner that the scenario uses.
 
-    If a step raises, ``open`` closes the session and raises. ``archive`` also
-    removes the scenario from the ``scenarios`` of its owner's items, also of
-    the record items that it made (``DataStore.remove_scenario``), before the
-    archive of ``inner``.
+    If a step raises, ``open`` closes the session and raises. ``archive`` is
+    ``inner``'s, which removes the scenario from the ``scenarios`` of its
+    owner's items, also of the record items that it made
+    (``DataStore.remove_scenario``).
 
     Purpose: deployment assembly wraps the scenario storage in it. The
     scenario factory opens each scenario's session through it.
@@ -101,7 +101,9 @@ class DataScenarioStorage(ScenarioStorage):
         self.task_import = task_import
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         raise PluginConfigError(f"{cls.__name__} wraps another storage; deployment assembly applies it")
 
     @property
@@ -134,13 +136,7 @@ class DataScenarioStorage(ScenarioStorage):
         return None if owner is None else SampleStore(self.data, owner, scenario, session.training_state)
 
     def archive(self, scenario: str) -> tuple[str, ...]:
-        owner = self.inner.read_settings(scenario).owner
-        if owner is not None:
-            self.data.remove_scenario(owner, scenario)
         return self.inner.archive(scenario)
-
-    def prune(self, *, max_bytes: int) -> int:
-        return self.inner.prune(max_bytes=max_bytes)
 
     def close(self) -> None:
         self.inner.close()

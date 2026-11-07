@@ -9,11 +9,11 @@ import pytest
 from tests.support.conversations import conversation
 
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage import record_items
-from reef.storage.data import ItemConflict, MemoryDataStore, NewItem, ScenarioArchived
+from reef.storage.data import MemoryDataStore, ScenarioArchived
 from reef.storage.item_kinds import copied_record
-from reef.storage.record_items import ItemRecordStore, copy_records, record_item, used_record, used_records
+from reef.storage.record_items import ItemRecordStore, record_item, used_record, used_records
 from reef.storage.records import AppendResult, RecordConflict
+from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
@@ -55,28 +55,6 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
     }
 
 
-def test_a_copy_makes_one_page_of_items_and_is_safe_to_repeat(tmp_path, monkeypatch):
-    monkeypatch.setattr(record_items, "RECORD_PAGE_SIZE", 2)
-    task_files = LocalTaskFileStore(tmp_path / "task-files")
-    data = MemoryDataStore(task_files)
-    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage, closing(storage.open("math")) as session:
-        for appended in (record("r1", score=1.0), record("r2", score=0.0), record("r3", score=0.5)):
-            session.records.append(appended)
-        assert copy_records(session.records, data, "acme", "math", 0) == 2
-        assert copy_records(session.records, data, "acme", "math", 2) == 3
-        assert copy_records(session.records, data, "acme", "math", 3) == 3
-        assert [item.item_id for item in data.query("acme")] == ["math/r1", "math/r2", "math/r3"]
-        assert copy_records(session.records, data, "acme", "math", 0) == 2, "a copy again changes nothing"
-        assert len(data.query("acme")) == 3
-
-        # A client item with a record item's ID and other content stops the copy.
-        data.delete("acme", "math/r1")
-        other = record_item(record("r1", score=0.5))
-        data.create("acme", [NewItem("math/r1", other.content, other.metadata)])
-        with pytest.raises(ItemConflict):
-            copy_records(session.records, data, "acme", "math", 0)
-
-
 def test_a_copy_in_another_scenario_names_the_copies_of_its_references():
     inference = record_item(record("i1", RequestType.INFERENCE, tokens=[1]))
     report = record_item(
@@ -104,11 +82,12 @@ def test_a_copy_in_another_scenario_names_the_copies_of_its_references():
 def test_another_scenario_of_the_owner_reads_the_records_it_uses_and_stores_no_copy(tmp_path):
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = MemoryDataStore(task_files)
-    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage:
+    with closing(SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data)) as storage:
+        for scenario in ("math", "code"):
+            storage.write_settings(scenario, ScenarioSettings(owner="acme"))
         with closing(storage.open("math")) as session:
             session.records.append(record("i1", RequestType.INFERENCE, tokens=[1]))
             session.records.append(record("r1", score=1.0, references=["i1"]))
-            copy_records(session.records, data, "acme", "math", 0)
         data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": "train"}})
         with closing(storage.open("code")) as session:
             cursor, records = used_records(data, "acme", "code")
@@ -117,7 +96,6 @@ def test_another_scenario_of_the_owner_reads_the_records_it_uses_and_stores_no_c
             assert used_records(data, "acme", "code", after_sequence=cursor) == (cursor, ()), "nothing new"
             assert used_record(data, "acme", "code", "math/r1").references == ("math/i1",)
             assert session.records.get("code", "math/r1") is None, "the scenario stores no copy"
-            assert copy_records(session.records, data, "acme", "code", 0) == 0
             assert [item.item_id for item in data.query("acme")] == ["math/i1", "math/r1"]
 
             # A scenario does not read its own items as records of another scenario.

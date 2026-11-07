@@ -23,6 +23,7 @@ from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 from tests.support.harness_service import backend_step, seed_root
 from tests.support.harness_steps import COMPONENT, TreeArtifacts, harness_backend
+from tests.support.records import memory_records
 
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.activation import AlwaysActivate
@@ -41,7 +42,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.commits import CommitRecord
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteScenarioDatabase
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
@@ -286,7 +287,7 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
         "openai",
     )
     assert list(built.model_bindings()) == ["served"]
-    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
+    trainer = built.build("demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built))
     assert isinstance(trainer, Trainer)
     # serve.yaml sets no job_samples, so each report is one step.
     assert trainer.job_samples == 1
@@ -359,7 +360,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.training_mode == "auto" and type(built.method).__name__ == "RulesMethod"
-    records = SQLiteRecordStore()
+    records = memory_records("demo")
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
     trainer = replace(built, evolution=local).build(
         "demo", records, artifacts=artifacts_for(built), root=seed_root(built)
@@ -599,7 +600,7 @@ def write_commits(directory: Path, *commits: dict) -> None:
             commit = {**commit, "snapshot": {"kind": "snapshot", **commit["snapshot"]}}
         stored.append({**base, **commit})
     database = directory / "x.sqlite3"
-    SQLiteRecordStore(database).close()
+    SQLiteScenarioDatabase(database).close()
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("DELETE FROM scenario_commit")
         connection.executemany(

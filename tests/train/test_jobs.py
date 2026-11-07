@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import open_sample_store
 from tests.support.samples_service import make_samples
@@ -25,7 +26,7 @@ from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.data import NewItem
 from reef.storage.job_data import read_job_data
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.record_items import ItemRecordStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
@@ -244,9 +245,9 @@ def test_a_checkpoint_publication_refuses_a_training_metric_that_it_would_overwr
         loop.publish(JobLoopState("fake:base"), reserved)
 
 
-def scored_records() -> SQLiteRecordStore:
+def scored_records() -> ItemRecordStore:
     """A record store with one inference and its report: one ready batch for the threshold pipeline."""
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     records.append(
         AgentRecord.create(
             scenario="math",
@@ -300,7 +301,7 @@ def test_start_from_is_refused_without_a_change_when_the_trainer_cannot_start(co
     assert component.cancelled == []
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("/start", RunningJob("job-1"))
     # A trainer that trains nothing has no start to set.
-    observer = Trainer.build("math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline)
+    observer = Trainer.build("math", memory_records("math"), pipeline_factory=threshold_pipeline)
     with pytest.raises(TrainingStartRefused, match="trains nothing"):
         observer.start_from(Artifact.local(Path("/releases/old")))
 

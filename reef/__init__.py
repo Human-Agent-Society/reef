@@ -50,7 +50,6 @@ __all__ = [
     "EvaluationResult",
     "InferenceRuntime",
     "MadeArtifact",
-    "PostgresRecordStore",
     "Recipe",
     "RecipeConfigError",
     "RecordStore",
@@ -61,7 +60,6 @@ __all__ = [
     "ReportValidationError",
     "RequestHeaders",
     "RequestType",
-    "SQLiteRecordStore",
     "Sample2Job",
     "Scenario",
     "SelectionDecision",
@@ -74,16 +72,3 @@ __all__ = [
     "build_default_dispatcher",
     "parse_request_headers",
 ]
-
-
-def __getattr__(name: str) -> type:
-    # Preserve convenient root imports without loading databases for interface users.
-    if name == "SQLiteRecordStore":
-        from reef.storage.sqlite import SQLiteRecordStore
-
-        return SQLiteRecordStore
-    if name == "PostgresRecordStore":
-        from reef.storage.postgres import PostgresRecordStore
-
-        return PostgresRecordStore
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -57,7 +57,6 @@ from reef.service.web import service_application
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
-from reef.storage.record_items import ItemRecordStorage
 from reef.storage.tasks import TaskFileStore
 from reef.train.job_queue import TrainingJobWorker
 
@@ -89,11 +88,9 @@ class InferenceApp(ComponentApp):
         coordination = open_service_coordination(settings)
         try:
             backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
-            storage, task_files = open_scenario_storage(settings)
             # Records that this service appends are record items (RFC #1219), traced as the records that control
             # appends are.
-            data_store = build_data_store(settings, task_files)
-            storage = ItemRecordStorage(storage, data_store, coordination.marks)
+            storage, data_store = open_scenario_storage(settings)
             record_observer = build_record_observer(settings.tracing_config, environ=environ)
             if record_observer is not None:
                 storage = ObservedScenarioStorage(storage, record_observer)

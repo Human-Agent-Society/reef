@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 from tests.support._threshold_processor import ThresholdJobData
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core import AgentRecord, RequestType
 from reef.evaluation import UpdateCandidate
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import JobData, PipelineContext, PreparedStep, Trainer, TrainingCommit, TrainingPipeline
 from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
@@ -104,7 +104,7 @@ def test_custom_pipelines_default_to_releasing_no_records() -> None:
 @pytest.mark.unit
 def test_trainer_dispatches_only_required_data_types() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     trainer = Trainer.build(
         "math",
         records,
@@ -136,7 +136,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
 @pytest.mark.unit
 def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     trainer = Trainer.build(
         "math",
         records,
@@ -164,7 +164,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
 
 @pytest.mark.unit
 def test_a_job_without_a_checkpoint_ends_without_an_artifact() -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     records.append(
         AgentRecord.create(
             scenario="math",
@@ -196,7 +196,7 @@ def test_a_job_without_a_checkpoint_ends_without_an_artifact() -> None:
 @pytest.mark.unit
 def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
 
     def fail_commit(result: TrainingCommit) -> None:
         events.append("commit")
@@ -229,7 +229,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
 @pytest.mark.unit
 def test_trainer_reads_only_new_records() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     report = AgentRecord.create(
         scenario="math", request_type=RequestType.REPORT, payload={"score": 1}, agent_record_id="report"
     )

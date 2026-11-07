@@ -15,13 +15,15 @@ from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.storage.commits import CommitRecord
+from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
 from reef.storage.samples import TrainerSamples, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import TaskFileStore, TaskStorage
+from reef.storage.tasks import LocalTaskFileStore, TaskFileStore, TaskStorage
 from reef.train.backend import ComponentArtifacts
 from reef.train.component import ScenarioRoot
 from reef.train.trainer import Trainer
@@ -83,17 +85,18 @@ class OpaqueStore(ScenarioStore):
 class OpaqueStorage(ScenarioStorage):
     """The adapter owns its directory; Dispatcher sees only domain operations."""
 
-    def __init__(self, directory: Path, *, fail_recovery: bool = False):
-        self._inner: ScenarioStorage = SQLiteScenarioStorage(directory)
+    def __init__(self, directory: Path, *, fail_recovery: bool = False, data: DataStore | None = None):
+        self._inner: ScenarioStorage = SQLiteScenarioStorage(directory, data=data)
         self._fail_recovery = fail_recovery
         self.sessions: list[OpaqueStore] = []
         self.events: list[tuple[str, str]] = []
-        self.prune_calls: list[int] = []
         self.close_count = 0
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> OpaqueStorage:
-        return cls(directory)
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> OpaqueStorage:
+        return cls(directory, data=data)
 
     @property
     def durable(self) -> bool:
@@ -115,10 +118,6 @@ class OpaqueStorage(ScenarioStorage):
         self.events.append(("archive", scenario))
         self._inner.archive(scenario)
         return (f"archive://{scenario}",)
-
-    def prune(self, *, max_bytes: int) -> int:
-        self.prune_calls.append(max_bytes)
-        return self._inner.prune(max_bytes=max_bytes)
 
     def close(self) -> None:
         self.close_count += 1
@@ -224,10 +223,15 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         reopened.close()
 
 
-def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_path: Path) -> None:
-    factory = OpaqueStorage(tmp_path / "private-store")
+def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(tmp_path: Path) -> None:
+    data = SQLiteDataStore(tmp_path / "data", LocalTaskFileStore(None))
+    factory = OpaqueStorage(tmp_path / "private-store", data=data)
     dispatcher = Dispatcher(
-        Recipe(), backend_factory(tmp_path), scenario_storage=factory, coordination=memory_coordination()
+        Recipe(),
+        backend_factory(tmp_path),
+        scenario_storage=factory,
+        data_store=data,
+        coordination=memory_coordination(),
     )
     try:
         math = dispatcher.get_or_create_scenario("math")
@@ -240,7 +244,6 @@ def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_pa
         code.records.append(trace("other", "code"))
         retention = RecordRetention(max_bytes=1)
         assert dispatcher.prune_record_archives(retention) == 2
-        assert factory.prune_calls == [retention.max_bytes]
         assert dispatcher.read_record("math", "first") is None
         assert dispatcher.read_record("code", "other") is None
 

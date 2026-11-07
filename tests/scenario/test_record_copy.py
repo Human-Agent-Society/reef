@@ -1,18 +1,14 @@
-"""The record copy (RFC #1028): the data service copies a scenario's records into the data store, in pages."""
+"""A scenario's records are record items in the data store (RFC #1028, RFC #1219)."""
 
 from __future__ import annotations
 
 import time
-from contextlib import closing
 from pathlib import Path
 
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.storage import record_items
-from reef.storage.record_items import record_copy_mark
-from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def report(record_id: str) -> AgentRecord:
@@ -40,21 +36,6 @@ def test_each_accepted_report_becomes_a_record_item(tmp_path: Path) -> None:
         assert record_item_ids(dispatcher, 2) == ["s/r1", "s/r2"]
         (item,) = dispatcher.data_store.query("s", kind="record", limit=1)
         assert item.scenarios == {"s": "train"}
-        # A record is its record item when it arrives, so nothing is left to copy.
-        assert dispatcher.coordination.marks.read(record_copy_mark("s")) == 0
-    finally:
-        dispatcher.close()
-
-
-def test_the_first_load_moves_the_old_records_in_pages(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(record_items, "RECORD_PAGE_SIZE", 2)
-    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage, closing(storage.open("s")) as session:
-        for index in range(5):
-            session.records.append(report(f"r{index}"))
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
-    try:
-        dispatcher.get_or_create_scenario("s")
-        assert record_item_ids(dispatcher, 5) == [f"s/r{index}" for index in range(5)]
     finally:
         dispatcher.close()
 

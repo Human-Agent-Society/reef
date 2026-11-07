@@ -1206,7 +1206,7 @@ persistent.
        seconds that the data store keeps a job data directory that no training job used; a job of the same samples uses the directory again (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__)
 
    ``storage.agent-record-retention-max-bytes`` : 21474836480
-       20 GiB shared across all record bodies, including unconsumed records
+       20 GiB shared across all record items of the data store, including unconsumed records
 
 .. warning::
 

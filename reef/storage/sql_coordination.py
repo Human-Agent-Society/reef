@@ -63,7 +63,6 @@ from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.marks import Marks, check_mark_name
 from reef.storage.migrations import migrate_training_request_items, migrate_work_item_columns
-from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
@@ -73,7 +72,7 @@ from reef.storage.served_models import (
     ControlLeaseConflict,
     ServedModelsWriter,
 )
-from reef.storage.sqlite import enable_wal
+from reef.storage.sql_setup import enable_wal, postgres_url, validate_postgres_schema
 from reef.storage.work_queue import (
     FINAL_STATES,
     HELD_STATES,

@@ -1,7 +1,7 @@
 """The commit history in the record database of a scenario, for each SQL backend.
 
-The commit table is in the same database as the records and the samples. Each
-operation uses one transaction of the record store. An append also counts the
+The commit table is in the same database as the samples. Each
+operation uses one transaction of the scenario database. An append also counts the
 samples that the commit consumed in the same transaction. The adapters build
 the table with :func:`commit_table` and supply their namespace.
 """
@@ -19,7 +19,7 @@ from sqlalchemy.engine import Connection
 from reef.storage.commit_history import CommitHistory, same_commit
 from reef.storage.commits import CommitHistoryError, CommitRecord, encode_commit
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
-from reef.storage.sql_records import ScopedTable, SQLRecordStore
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
 def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -49,7 +49,7 @@ def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
 class SQLCommitHistory(CommitHistory):
     """The commits of one scenario generation, as the rows of its namespace in the commit table.
 
-    Values: ``record_store`` is the open record store whose transactions the
+    Values: ``database`` is the open scenario database whose transactions the
     history uses. ``table`` is the commit table and the namespace of this
     generation. ``train_counts`` is the train count table
     (``sample_train_count_table``) in the same namespace. ``label`` names the table for error messages, and ``durable``
@@ -66,10 +66,10 @@ class SQLCommitHistory(CommitHistory):
     append of a commit that is already stored changes nothing, so a retry
     counts no sample twice.
 
-    Purpose: a SQL record store makes it in ``commit_history()``.
+    Purpose: a SQL scenario database makes it in ``commit_history()``.
     ``CommitHistoryScenarioStore`` reads and appends through it.
 
-    ``locked`` holds one write transaction of the record store: ``BEGIN
+    ``locked`` holds one write transaction of the scenario database: ``BEGIN
     IMMEDIATE`` in SQLite, the row lock on the store generation in PostgreSQL.
     The reads and appends of the locking thread use that transaction, so an
     append is durable when the locked block ends, and an exception in the
@@ -81,14 +81,14 @@ class SQLCommitHistory(CommitHistory):
 
     def __init__(
         self,
-        record_store: SQLRecordStore,
+        database: SQLScenarioDatabase,
         table: ScopedTable,
         train_counts: ScopedTable,
         *,
         label: str,
         durable: bool,
     ) -> None:
-        self.record_store = record_store
+        self.database = database
         self.table = table
         self.train_counts = train_counts
         self._label = label
@@ -109,7 +109,7 @@ class SQLCommitHistory(CommitHistory):
     def locked(self) -> Iterator[None]:
         with self._lock:
             try:
-                with self.record_store._transaction(write=True) as connection:
+                with self.database._transaction(write=True) as connection:
                     self._connection = connection
                     try:
                         yield
@@ -146,7 +146,7 @@ class SQLCommitHistory(CommitHistory):
             if sample_ids:
                 counts = self.train_counts.table
                 component = record.component or ""
-                self.record_store._insert_if_absent(
+                self.database._insert_if_absent(
                     connection,
                     counts,
                     [
@@ -169,7 +169,7 @@ class SQLCommitHistory(CommitHistory):
         if self._connection is not None:
             yield self._connection
             return
-        with self.record_store._transaction(write=write) as connection:
+        with self.database._transaction(write=write) as connection:
             yield connection
 
     def _read(self, connection: Connection) -> tuple[CommitRecord, ...]:
