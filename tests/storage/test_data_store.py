@@ -588,6 +588,43 @@ def test_an_upgrade_links_the_stored_record_items(open_durable_store):
         assert node_counts(store) == (3, 5)
 
 
+def test_query_and_count_keep_the_records_of_one_origin_and_request_type(store):
+    report = AgentRecord.create(
+        scenario="coding", request_type=RequestType.REPORT, payload={"score": 1.0}, agent_record_id="rep"
+    )
+    other = record_item(conversation("other", 1, scenario="review"))
+    store.create("acme", [*calls(1, 2), record_item(report), other, trajectory("t1", scenarios={"coding": "train"})])
+    store.update("acme", [other.item_id], {"scenarios": {"coding": "train"}})
+
+    def ids(**filters):
+        found = [item.item_id for item in store.query("acme", kind="record", scenario="coding", **filters)]
+        assert store.count("acme", kind="record", scenario="coding", **filters) == len(found)
+        return found
+
+    assert ids() == ["coding/call-1", "coding/call-2", "coding/rep", "review/other"]
+    assert ids(origin="coding") == ["coding/call-1", "coding/call-2", "coding/rep"]
+    assert ids(origin="coding", request_type="report") == ["coding/rep"]
+    assert ids(request_type="inference") == ["coding/call-1", "coding/call-2", "review/other"]
+    first = store.read("acme", "coding/call-1").sequence
+    assert ids(origin="coding", after=first) == ["coding/call-2", "coding/rep"]
+    assert store.count("acme") == 5
+    with pytest.raises(ValueError, match="kind='record'"):
+        store.query("acme", origin="coding")
+    with pytest.raises(ValueError, match="request_type"):
+        store.count("acme", kind="record", request_type="training")
+
+
+def test_an_upgrade_fills_the_request_type_of_the_stored_record_items(open_durable_store):
+    with closing(open_durable_store()) as store:
+        store.create("acme", calls(1, 2))
+        table = store.items_table
+        with store.transaction() as connection:
+            connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN request_type")
+    with closing(open_durable_store()) as store:
+        assert store.count("acme", kind="record", request_type="inference") == 2
+        assert store.count("acme", kind="record", request_type="report") == 0
+
+
 def test_items_survive_a_restart(open_durable_store):
     with closing(open_durable_store()) as first:
         first.create("acme", [trajectory("t1", scenarios={"coding": "train"})])

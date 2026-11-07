@@ -78,6 +78,7 @@ from reef.storage.data import (
     NewItem,
     RecordLink,
     StoredItem,
+    check_filters,
     check_groups,
     check_owner,
     check_query,
@@ -88,6 +89,7 @@ from reef.storage.data import (
 from reef.storage.item_kinds import task_partition
 from reef.storage.migrations import (
     migrate_data_indexes,
+    migrate_data_request_types,
     migrate_data_segments,
     migrate_data_trajectories,
     migrate_data_uses,
@@ -126,7 +128,8 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
     new row (``DataStore.scenario_items``). ``content_json`` is the canonical JSON of a trajectory's or a
     record's content, and NULL for a task. ``message_field`` names the message list of a record payload that the
     item's trajectory node keeps (``call_shape``); the content then holds an empty payload. It is NULL for an
-    item without one. ``metadata_json`` is the item's metadata. ``data_record_node`` is the node table of ``TrajectoryNodes``,
+    item without one. ``request_type`` is a record's request type, from its content, and NULL for another kind.
+    ``metadata_json`` is the item's metadata. ``data_record_node`` is the node table of ``TrajectoryNodes``,
     scoped by ``owner``; a node's sequence is its item's, and its scenario the item's origin.
 
     The ``SEGMENT_COLUMNS`` of ``data_item`` and ``data_record_node`` are NULL, or the segment line that holds the
@@ -150,6 +153,7 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("metadata_json", Text, nullable=False),
         Column("content_json", Text, nullable=True),
         Column("message_field", Text, nullable=True),
+        Column("request_type", String(16), nullable=True),
         Column("segment_id", Text, nullable=True),
         Column("segment_offset", BigInteger, nullable=True),
         Column("segment_length", BigInteger, nullable=True),
@@ -494,6 +498,9 @@ class SQLDataStore(DataStore):
                 "metadata_json": canonical_json(metadata),
                 "content_json": None if content is None or place is not None else canonical_json(content),
                 "message_field": None if shape is None else shape.message_field,
+                "request_type": (
+                    content["request_type"] if content is not None and metadata["kind"] == "record" else None
+                ),
                 "segment_id": None if place is None else place.segment_id,
                 "segment_offset": None if place is None else place.offset,
                 "segment_length": None if place is None else place.length,
@@ -637,11 +644,13 @@ class SQLDataStore(DataStore):
         *,
         kind: ItemKind | None = None,
         scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
     ) -> tuple[StoredItem, ...]:
-        check_query(owner, kind, scenario, after, limit)
+        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type)
         items = self.items_table
         # Without content, read only the columns of the metadata: content_json can be large.
         columns = (
@@ -649,13 +658,46 @@ class SQLDataStore(DataStore):
             if content
             else (items.c.sequence, items.c.owner, items.c.item_id, items.c.metadata_json, items.c.digest)
         )
-        statement = select(*columns).where(items.c.owner == owner, items.c.sequence > after)
-        if kind is not None:
-            statement = statement.where(items.c.kind == kind)
-        statement = statement.where(*self.used_by(owner, items, scenario))
+        statement = select(*columns).where(*self.filters(owner, kind, scenario, origin, request_type, after))
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
+
+    def count(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+        after: int = 0,
+    ) -> int:
+        check_filters(owner, kind, scenario, origin, request_type, after)
+        statement = select(func.count()).where(*self.filters(owner, kind, scenario, origin, request_type, after))
+        with self.transaction(read_only=True) as connection:
+            return int(connection.execute(statement).scalar_one())
+
+    def filters(
+        self,
+        owner: str,
+        kind: ItemKind | None,
+        scenario: str | None,
+        origin: str | None,
+        request_type: str | None,
+        after: int,
+    ) -> list[ColumnElement[bool]]:
+        """The conditions on the rows of ``data_item`` that the filters of ``query`` give. The ID of a record item
+        starts with the scenario that made it (``record_item``)."""
+        items = self.items_table
+        conditions = [items.c.owner == owner, items.c.sequence > after, *self.used_by(owner, items, scenario)]
+        if kind is not None:
+            conditions.append(items.c.kind == kind)
+        if origin is not None:
+            conditions.append(items.c.item_id.startswith(f"{origin}/", autoescape=True))
+        if request_type is not None:
+            conditions.append(items.c.request_type == request_type)
+        return conditions
 
     def used_by(self, owner: str, items: Table, scenario: str | None) -> tuple[ColumnElement[bool], ...]:
         """The condition that ``scenario`` uses the item of the row of ``items``, or none without a scenario."""
@@ -992,6 +1034,7 @@ class SQLiteDataStore(SQLDataStore):
             self.connection.exec_driver_sql("BEGIN IMMEDIATE")
             metadata.create_all(self.connection)
             migrate_data_segments(self.connection, self.items_table, self.nodes_table)
+            migrate_data_request_types(self.connection, self.items_table)
             migrate_data_uses(self.connection, self.items_table, self.scenarios_table)
             migrate_data_indexes(self.connection, self.items_table)
             migrate_data_trajectories(self.connection, self.items_table, self.nodes_table)
@@ -1087,6 +1130,7 @@ class PostgresDataStore(SQLDataStore):
             connection.execute(CreateSchema(schema, if_not_exists=True))
             metadata.create_all(connection)
             migrate_data_segments(connection, self.items_table, self.nodes_table)
+            migrate_data_request_types(connection, self.items_table)
             migrate_data_uses(connection, self.items_table, self.scenarios_table)
             migrate_data_indexes(connection, self.items_table)
             migrate_data_trajectories(connection, self.items_table, self.nodes_table)
