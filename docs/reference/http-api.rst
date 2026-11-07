@@ -237,7 +237,11 @@ When `Scenario routing <configuration.rst#scenario-routing-between-students-and-
 is enabled, clients send ``POST /v1/chat/completions`` directly to Reef with a
 service token. Only the base record-only Recipe is supported. A routed Reef
 serves only this route, ``POST /reef/report`` and ``GET /healthz``; other
-routes return 404. Calls with ``x-reef-rollout: 1`` or ``true`` return 400
+routes return 404. With the `external router lifecycle
+<configuration.rst#external-router-lifecycle>`__, the ``inference`` service
+applies this section to the manifest's Scenarios only, and also serves
+``GET /readyz``. Send ``POST /reef/report`` to the ``control`` service there.
+Calls with ``x-reef-rollout: 1`` or ``true`` return 400
 (``unsupported_rollout``). Rollout calls remain available when routing is disabled.
 
 .. list-table:: Client fields
