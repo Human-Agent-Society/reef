@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.core.errors import ReefError
@@ -27,7 +27,11 @@ from reef.harness.tree.checks import clip_record_value
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import component_files
 from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
+from reef.service.lifecycle import PendingWrites
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
+from reef.service.routed_inference import InferenceRetryPolicy, InferenceRetryTimeout, RoutedInference
+from reef.service.routing import RoutingAdapter
+from reef.service.routing_preview import RoutingPreviewClient
 from reef.service.wire import (
     SCENARIO_HEADER,
     ReportPayload,
@@ -42,6 +46,7 @@ from reef.train.harness_backend.records import read_step_records
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
+WriteResult = TypeVar("WriteResult")
 
 
 def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
@@ -100,13 +105,29 @@ class RequestService:
     address that the client gave.
     """
 
-    def __init__(self, dispatcher: Dispatcher, *, inference_url: str | None = None) -> None:
+    def __init__(
+        self,
+        dispatcher: Dispatcher,
+        *,
+        inference_url: str | None = None,
+        routing: RoutingAdapter | None = None,
+        writes: PendingWrites | None = None,
+        preview: RoutingPreviewClient | None = None,
+        retry_policy: InferenceRetryPolicy | None = None,
+    ) -> None:
         self._dispatcher = dispatcher
+        self.routing = routing
+        self.preview = preview
+        self.routed = RoutedInference(dispatcher, preview, retry_policy or InferenceRetryPolicy(), writes)
         self.inference_url = None if inference_url is None else inference_url.rstrip("/")
 
     @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
+
+    async def persist(self, write: Awaitable[WriteResult]) -> WriteResult:
+        """Retain a managed child's submitted writes through request cancellation and drain."""
+        return await self.routed.persist(write)
 
     def accept_request(
         self, headers: Mapping[str, str], payload: Mapping[str, Any], *, request_id: str | None = None
@@ -606,6 +627,8 @@ class RequestService:
 
 
 __all__ = [
+    "InferenceRetryPolicy",
+    "InferenceRetryTimeout",
     "RequestService",
     "normalize_request_payload",
     "page_headers",

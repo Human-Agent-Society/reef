@@ -60,7 +60,7 @@ class Scenario:
         #: no request.
         self.training_requests = training_requests
         self.operations = OperationMetrics(
-            ("ingest/write",),
+            ("ingest/write", "serve/request"),
             counters=(
                 "ingest/accepted_total",
                 "ingest/duplicates_total",

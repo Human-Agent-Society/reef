@@ -47,6 +47,10 @@ class RequestHeadersFactory(ABC):
     def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
         """Return identity and authentication headers for the selected route."""
 
+    def external_headers(self, path: str) -> Mapping[str, str]:
+        """Headers for an external model call with no Reef artifact identity."""
+        return {}
+
 
 def artifact_identity_headers(artifact: InferenceArtifact) -> dict[str, str]:
     """Reef identity headers for one selected, optionally materialized artifact."""
@@ -79,7 +83,10 @@ class ProviderRequestHeaders(RequestHeadersFactory):
         self._api_key = api_key
 
     def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
-        return {**artifact_identity_headers(artifact), **provider_headers(path, self._api_key)}
+        return {**artifact_identity_headers(artifact), **self.external_headers(path)}
+
+    def external_headers(self, path: str) -> Mapping[str, str]:
+        return provider_headers(path, self._api_key)
 
 
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
@@ -95,6 +102,12 @@ class HttpInferenceHandler(InferenceHandler):
 
     RequestHeadersFactory implementations provide artifact identity, provider
     authentication, or deployment-specific headers.
+
+    ``inference`` returns the provider's JSON object. A provider status of 400 or more raises
+    ``UpstreamStatusError`` with that status; a successful status whose body is not one JSON object raises
+    it with status 502, since the provider failed and not the caller. ``inference_stream`` owns its
+    provider session until it returns: on any failure or cancellation before then it closes the session
+    and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close`` releases it.
     """
 
     def __init__(
@@ -124,19 +137,32 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def _post_arguments(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_arguments(
+        self, artifact: InferenceArtifact | None, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         """Keyword arguments of one ``session.post`` call."""
+        headers = (
+            self._request_headers.external_headers(path)
+            if artifact is None
+            else self._request_headers.headers(artifact, path)
+        )
         return {
             "url": f"{self._upstream_url}{path}",
             "json": payload,
-            "headers": dict(self._request_headers.headers(artifact, path)),
+            "headers": dict(headers),
         }
 
     def _status_error(self, status: int, body: str) -> UpstreamStatusError:
         return UpstreamStatusError(f"{self._error_label} returned {status}: {body[:400]}", status=status)
 
     async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        from aiohttp import ClientSession, ClientTimeout
+        return await self.post_json(path, payload, artifact=artifact)
+
+    async def post_json(
+        self, path: str, payload: dict[str, Any], *, artifact: InferenceArtifact | None = None
+    ) -> dict[str, Any]:
+        """POST to the provider. External models omit the Reef artifact."""
+        from aiohttp import ClientSession, ClientTimeout, ContentTypeError
 
         async with (
             ClientSession(timeout=ClientTimeout(total=self._timeout_s)) as session,
@@ -144,21 +170,32 @@ class HttpInferenceHandler(InferenceHandler):
         ):
             if response.status >= 400:
                 raise self._status_error(response.status, await response.text())
-            value = await response.json()
+            try:
+                value = await response.json()
+            except (ContentTypeError, ValueError) as exc:
+                # A successful status with an unreadable body is the provider's failure, not the caller's.
+                raise UpstreamStatusError(f"{self._error_label} returned a body that is not JSON", status=502) from exc
         if not isinstance(value, dict):
-            raise TypeError(f"{self._error_label} response must be a JSON object")
+            raise UpstreamStatusError(f"{self._error_label} response must be a JSON object", status=502)
         return value
 
     async def inference_stream(
         self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
     ) -> InferenceStream:
+        return await self.post_stream(path, payload, artifact=artifact)
+
+    async def post_stream(
+        self, path: str, payload: dict[str, Any], *, artifact: InferenceArtifact | None = None
+    ) -> InferenceStream:
+        """Open the provider stream. Its owner closes it after consuming or cancelling it."""
         from aiohttp import ClientSession, ClientTimeout
 
         # The session outlives this call: the stream owns it until closed.
         session = ClientSession(timeout=ClientTimeout(total=self._timeout_s), auto_decompress=False)
         try:
             response = await session.post(**self._post_arguments(artifact, path, payload))
-        except Exception:
+        except BaseException:
+            # Cancelled while waiting for the provider's headers, too: nothing else owns this session yet.
             await session.close()
             raise
 

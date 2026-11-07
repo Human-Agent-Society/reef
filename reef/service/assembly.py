@@ -46,7 +46,11 @@ from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.harness_imports import HarnessSyncWorker
+from reef.service.lifecycle import LifecycleSettings
 from reef.service.request_service import RequestService
+from reef.service.routed_inference import InferenceRetryPolicy
+from reef.service.routing import RoutingAdapter
+from reef.service.routing_preview import PreviewSettings
 from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
@@ -571,6 +575,7 @@ def build_app(
     *,
     environ: Mapping[str, str] | None = None,
     inference_handler: InferenceHandler | None = None,
+    lifecycle: LifecycleSettings | None = None,
     components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
 ) -> web.Application:
     """Build the complete HTTP service from settings: dispatcher, retention, retries, tokens and cleanup.
@@ -581,10 +586,41 @@ def build_app(
     An embedding application adds its middleware and routes to the returned
     app before startup and reaches the dispatcher with ``get_dispatcher(app)``.
 
+    With ``reef.routing_manifest``, ``lifecycle`` is required: ``reef serve`` starts this service as the
+    closed child of a managed routing deployment and hands it the router's selection credential.
+
     ``components`` names the services that this process runs besides ``control``. With ``evaluation``, this
     process's evaluation workers serve each candidate themselves; without it, the evaluation service runs in another
     process.
     """
+    routing = None
+    preview = None
+    retry_policy = None
+    if settings.routing_manifest is not None:
+        if lifecycle is None or not lifecycle.selection_token or not lifecycle.control_socket:
+            raise ValueError(
+                "reef.routing_manifest runs only as a managed routing deployment started by reef serve, which "
+                "supplies the Semantic Router selection credential and control socket"
+            )
+        policy = settings.routing_deployment
+        if settings.port == policy.sr_management_port:
+            raise ValueError("reef.port must differ from routing sr_management_port")
+        routing = RoutingAdapter.from_manifest(
+            settings.routing_manifest,
+            router_config_hash=lifecycle.router_config_hash or None,
+            environ=environ,
+            timeout_s=settings.inference_timeout_s,
+        )
+        preview = PreviewSettings(
+            f"http://127.0.0.1:{policy.sr_management_port}",
+            lifecycle.selection_token,
+            policy.selection_timeout_seconds,
+        )
+        retry_policy = InferenceRetryPolicy(
+            initial_s=settings.inference_retry_initial_s,
+            max_s=settings.inference_retry_max_s,
+            timeout_s=settings.inference_retry_timeout_s,
+        )
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     # A composite's model calls come back to this service, which answers only once the app listens: its local
     # cycles wait for that, so a harness job started by the preload never fails its calls into a skip.
@@ -615,6 +651,10 @@ def build_app(
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
+            routing=routing,
+            lifecycle=lifecycle,
+            preview=preview,
+            inference_retry_policy=retry_policy,
             evaluations=evaluations,
             artifact_imports=ArtifactImports(
                 ArtifactSources.from_setting(settings.artifact_sources),
