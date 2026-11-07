@@ -7,7 +7,7 @@ import logging
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Column, MetaData, Table, Text, bindparam, func, inspect, literal, select, tuple_, update
+from sqlalchemy import Column, MetaData, Table, Text, bindparam, delete, func, inspect, literal, select, tuple_, update
 from sqlalchemy.engine import Connection
 
 from reef.core.atif_payloads import call_shape, canonical_json
@@ -190,6 +190,16 @@ def migrate_work_item_columns(connection: Connection, work_items: Table) -> None
             .where(work_items.c.state.in_(sorted(FINAL_STATES)))
             .values(ended_at=work_items.c.changed_at)
         )
+
+
+def remove_record_copies(connection: Connection, work_items: Table) -> None:
+    """Delete the ``record_copy`` items of an older version, which no worker takes (RFC #1219), and the
+    ``coordination_mark`` table, which kept how far each copy came.
+
+    Run in the caller's schema transaction, after ``create_all``.
+    """
+    connection.execute(delete(work_items).where(work_items.c.kind == "record_copy"))
+    Table("coordination_mark", MetaData(), schema=work_items.schema).drop(connection, checkfirst=True)
 
 
 def migrate_training_request_items(connection: Connection, work_items: Table) -> None:
