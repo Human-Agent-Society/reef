@@ -79,8 +79,8 @@ class ArtifactLayout(ABC):
 
     ``stored(files, directory)`` checks ``files``, then stores them in the empty directory ``directory``:
     ``files.reference`` when the source keeps the files fixed and ``resolves_references`` is true (RFC #995), else
-    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, with a new artifact ID
-    (``Artifact.local``).
+    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, with the ID
+    ``artifact_id`` or a new one (``Artifact.local``).
 
     Purpose: a recipe binds it on ``ComponentSpec.layout``. The committer stores an import with it, and the
     scenario factory stores the artifact item that a new scenario starts from.
@@ -93,14 +93,14 @@ class ArtifactLayout(ABC):
     def resolves_references(self) -> bool:
         return False
 
-    def stored(self, files: SourceFiles, directory: Path) -> Artifact:
+    def stored(self, files: SourceFiles, directory: Path, *, artifact_id: str | None = None) -> Artifact:
         self.check(files)
         if files.reference is None or not self.resolves_references:
             files.copy_into(directory)
         else:
             for path, data in files.reference.items():
                 (directory / path).write_bytes(data)
-        return Artifact.local(directory)
+        return Artifact.local(directory, artifact_id=artifact_id)
 
 
 @dataclass(frozen=True)

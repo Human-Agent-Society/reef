@@ -1,7 +1,8 @@
 """Transport-independent handling of artifact imports (RFC #980, RFC #995).
 
 A client imports one artifact into one component of a scenario by naming its directory with a URI, or by naming an
-artifact item of the scenario's owner, whose ``source_uri`` names the directory (``reef.storage.artifact_items``). A source reader
+artifact item of the scenario's owner, whose ``source_uri`` names the directory (``reef.storage.artifact_items``). An
+artifact from an item keeps its one artifact ID in each scenario (RFC #1218). A source reader
 (``ArtifactSources``) opens the files there, and the dispatcher checks them against the component's layout and
 stores a copy, or a reference to a revision that cannot change, in a temporary directory under
 ``ArtifactImports.work_dir`` before it publishes it (``Dispatcher.import_artifact``). A new scenario can also start
@@ -13,6 +14,7 @@ factory checks it and writes it as the new scenario's root snapshot. No aiohttp 
 from __future__ import annotations
 
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from reef.dispatcher import Dispatcher
 from reef.scenario.factory import ItemStart
 from reef.scenario.scenario import Scenario
 from reef.service.data import DataAccess
-from reef.storage.data import ItemNotFound
+from reef.storage.data import ItemNotFound, StoredItem
 
 
 @dataclass(frozen=True)
@@ -42,12 +44,20 @@ class ArtifactImports:
     work_dir: Path
 
     def import_source(
-        self, dispatcher: Dispatcher, scenario: str, component: str | None, uri: str, *, item_id: str | None = None
+        self,
+        dispatcher: Dispatcher,
+        scenario: str,
+        component: str | None,
+        uri: str,
+        *,
+        item_id: str | None = None,
+        artifact_id: str | None = None,
     ) -> dict[str, Any]:
         """Import the files ``uri`` names into ``component`` of ``scenario``, by reference or as a copy.
 
         Return ``{scenario, component, artifact_id}``. The import's ``source`` is ``{uri,
-        version}``, and also ``item``, ``item_id``, when the URI came from that artifact item. Before any file is
+        version}``, and also ``item``, ``item_id``, when the URI came from that artifact item, whose artifact has the
+        ID ``artifact_id``. Before any file is
         read, raise ``UnknownScenario`` for an unknown scenario and ``ValueError`` for a component that cannot take
         the import (``Dispatcher.import_target``). The layout check then runs on the source, before anything is
         copied; otherwise raise as ``ArtifactSources.open`` and ``Dispatcher.import_artifact`` do.
@@ -59,7 +69,9 @@ class ArtifactImports:
             source["item"] = item_id
         self.work_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="import-", dir=self.work_dir) as work:
-            imported = dispatcher.import_artifact(scenario, files, component, source=source, directory=Path(work))
+            imported = dispatcher.import_artifact(
+                scenario, files, component, source=source, directory=Path(work), artifact_id=artifact_id
+            )
         return {
             "scenario": scenario,
             "component": imported.component,
@@ -78,8 +90,11 @@ class ArtifactImports:
         owner = dispatcher.scenario_owner(scenario)
         if owner is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
-        uri = item_source(dispatcher, owner, item_id)
-        return self.import_source(dispatcher, scenario, component, uri, item_id=item_id)
+        item = artifact_item_of(dispatcher, owner, item_id)
+        artifact_id = item_artifact_id(dispatcher, item)
+        return self.import_source(
+            dispatcher, scenario, component, source_uri_of(item), item_id=item_id, artifact_id=artifact_id
+        )
 
     def create_from_item(
         self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str
@@ -91,26 +106,55 @@ class ArtifactImports:
         ``item_source`` and ``ArtifactSources.open`` do, and as ``Dispatcher.create_scenario`` does for an item that
         the component's layout or admission check refuses.
         """
-        uri = item_source(dispatcher, owner, item_id)
-        start = ItemStart(item_id, uri, self.sources.open(uri), component)
+        item = artifact_item_of(dispatcher, owner, item_id)
+        uri = source_uri_of(item)
+        start = ItemStart(item_id, uri, self.sources.open(uri), component, item_artifact_id(dispatcher, item))
         return dispatcher.create_scenario(scenario, start)
 
 
 def item_source(dispatcher: Dispatcher, owner: str, item_id: str) -> str:
-    """The ``source_uri`` of the artifact item ``item_id`` of ``owner``.
+    """The ``source_uri`` of the artifact item ``item_id`` of ``owner``; raise as ``artifact_item_of`` and
+    ``source_uri_of``."""
+    return source_uri_of(artifact_item_of(dispatcher, owner, item_id))
+
+
+def artifact_item_of(dispatcher: Dispatcher, owner: str, item_id: str) -> StoredItem:
+    """The artifact item ``item_id`` of ``owner``.
 
     Raise ``NoDataStore`` without a data store, ``ItemNotFound`` for an item that the owner does not store, and
-    ``ValueError`` for an item that is not an artifact or that has no ``source_uri``.
+    ``ValueError`` for an item that is not an artifact.
     """
     item = DataAccess.of(dispatcher).require_store().read(owner, item_id)
     if item is None:
         raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
     if item.kind != "artifact" or item.content is None:
         raise ValueError(f"item {item_id!r} is a {item.kind}, not an artifact")
-    uri = item.content["source_uri"]
+    return item
+
+
+def source_uri_of(item: StoredItem) -> str:
+    """The ``source_uri`` of the artifact item ``item``; ``ValueError`` when it has none."""
+    uri = (item.content or {}).get("source_uri")
     if uri is None:
-        raise ValueError(f"artifact item {item_id!r} has no source_uri: its repository gives no URI to import from")
+        raise ValueError(
+            f"artifact item {item.item_id!r} has no source_uri: its repository gives no URI to import from"
+        )
     return str(uri)
+
+
+def item_artifact_id(dispatcher: Dispatcher, item: StoredItem) -> str:
+    """The one artifact ID of the artifact item ``item``: its origin's, or the ID in its metadata. An upload gets its
+    ID here at its first use. ``patched_metadata`` refuses a second ID, so concurrent first uses end with one."""
+    origin = item.metadata.get("origin")
+    found = origin["artifact_id"] if origin else item.metadata.get("artifact_id")
+    if found:
+        return str(found)
+    store = DataAccess.of(dispatcher).require_store()
+    try:
+        (updated,) = store.update(item.owner, [item.item_id], {"artifact_id": f"artifact:{uuid.uuid4().hex}"})
+    except ValueError:
+        return str(artifact_item_of(dispatcher, item.owner, item.item_id).metadata["artifact_id"])
+    return str(updated.metadata["artifact_id"])
 
 
 __all__ = ["ArtifactImports", "item_source"]
