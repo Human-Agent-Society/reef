@@ -17,8 +17,8 @@ class EndpointsRuntime(InferenceProxyRuntime):
             url: InferenceProxyRuntime(base_url=url, api_key="engine-key").inference_handler for url in urls
         }
 
-    def handler_for(self, url: str) -> InferenceHandler | None:
-        return self.handlers.get(url)
+    def handler_for(self, served: ServedArtifact) -> InferenceHandler | None:
+        return self.handlers.get(served.url)
 
 
 def test_each_url_that_the_runtime_serves_uses_its_handler_and_other_urls_a_proxy() -> None:
@@ -36,5 +36,5 @@ def test_each_url_that_the_runtime_serves_uses_its_handler_and_other_urls_a_prox
 
 def test_by_default_only_the_base_url_uses_the_runtime_handler() -> None:
     runtime = InferenceProxyRuntime(base_url="https://engine.example/base", inference_timeout_s=5)
-    assert runtime.handler_for("https://engine.example/base") is not None
-    assert runtime.handler_for("https://engine.example/other") is None
+    assert runtime.handler_for(ServedArtifact("a1", "https://engine.example/base", "model")) is not None
+    assert runtime.handler_for(ServedArtifact("a1", "https://engine.example/other", "model")) is None

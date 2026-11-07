@@ -59,7 +59,7 @@ class ArtifactEndpoint:
                 handler = self.runtime.inference_handler
             else:
                 # A runtime that started the engine in another process has no handler of its own here.
-                reached = self.runtime.handler_for(self.served.url)
+                reached = self.runtime.handler_for(self.served)
                 if reached is None:
                     raise ValueError(f"the runtime has no handler for {self.served.url}")
                 # The candidate samples with the deployment's values, as a client's call to a served artifact does.

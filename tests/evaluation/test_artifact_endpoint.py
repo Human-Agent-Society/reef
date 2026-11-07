@@ -85,7 +85,7 @@ class StartedElsewhereRuntime(Runtime):
     def inference_handler(self) -> InferenceHandler:
         raise RuntimeError("no engine serves yet")
 
-    def handler_for(self, url: str) -> InferenceHandler | None:
+    def handler_for(self, served: ServedArtifact) -> InferenceHandler | None:
         return self.engine
 
 

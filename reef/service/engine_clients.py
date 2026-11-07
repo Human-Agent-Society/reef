@@ -2,7 +2,7 @@
 
 ``DeploymentEngineClients`` holds the deployment's serving runtime. It changes no engine.
 A row at a URL that the runtime serves uses the runtime's own handler for
-that URL (``InferenceRuntime.handler_for``), with its dialect and its credentials. A row at another URL uses a
+that row (``InferenceRuntime.handler_for``), with its dialect and its credentials. A row at another URL uses a
 provider proxy with the deployment's provider key.
 """
 
@@ -31,7 +31,7 @@ class DeploymentEngineClients(EngineClients):
 
     def handler(self, served: ServedArtifact) -> InferenceHandler:
         if self.runtime is not None:
-            own = self.runtime.handler_for(served.url)
+            own = self.runtime.handler_for(served)
             if own is not None:
                 return own
         found = self.proxies.get(served.url)

@@ -333,16 +333,17 @@ class InferenceRuntime(ABC):
     def inference_handler(self) -> InferenceHandler:
         """The inference request handler owned by this runtime."""
 
-    def handler_for(self, url: str) -> InferenceHandler | None:
-        """The handler of the engine at ``url`` that this runtime serves, for a process that did not open the
-        runtime, or None when the runtime serves nothing at ``url``.
+    def handler_for(self, served: ServedArtifact) -> InferenceHandler | None:
+        """The handler of the engine that serves ``served`` for this runtime, for a process that did not open the
+        runtime, or None when the runtime serves nothing at ``served.url``.
 
-        A separate inference service calls it for the URL of each ``served_models`` row, and reaches a URL with no
-        handler as a plain proxy. The default gives ``inference_handler`` for ``base_url`` and None for any other
-        URL. A runtime that serves artifacts at several URLs, or whose engines need credentials or retries that a
-        plain proxy does not send, gives a handler for each of them.
+        A separate inference service calls it for each ``served_models`` row, and reaches a row with no handler as a
+        plain proxy. The default gives ``inference_handler`` for ``base_url`` and None for any other URL. A runtime
+        that serves artifacts at several URLs, or whose engines need credentials, retries or request values that a
+        plain proxy does not send, gives a handler for each of them. ``served.model_name`` names the model that the
+        engine serves, so a runtime that serves several models (RFC #1233) can give each its own request values.
         """
-        return self.inference_handler if url == self.base_url else None
+        return self.inference_handler if served.url == self.base_url else None
 
     @abstractmethod
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
