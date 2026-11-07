@@ -77,11 +77,13 @@ from reef.storage.data import (
     ItemNotFound,
     NewItem,
     RecordLink,
+    ScenarioArchived,
     StoredItem,
     check_filters,
     check_groups,
     check_owner,
     check_query,
+    generation_origin,
     item_digest_matches,
     patched_metadata,
     prepared_items,
@@ -119,9 +121,10 @@ UNUSED_SEGMENT_SECONDS = 24 * 3600
 GROUP_COMMIT_ITEMS = 200
 
 
-def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table]:
-    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment`` and ``data_job_directory`` in
-    ``metadata``. ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
+def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table, Table]:
+    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment``, ``data_job_directory`` and
+    ``data_scenario`` in ``metadata``. ``data_scenario`` has the current generation of each scenario of an owner
+    (``DataStore.scenario_generation``). ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
 
     ``sequence`` orders the items as they arrived. ``data_item_scenario`` has one row per use of an item by a
     scenario, with its split; its own ``sequence`` orders the uses as they began, and a use whose split changes is a
@@ -195,7 +198,15 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("key", String(64), primary_key=True),
         Column("last_used_at", Float, nullable=False),
     )
-    return items, scenarios, nodes, segments, job_directories
+    generations = Table(
+        "data_scenario",
+        metadata,
+        Column("owner", Text, nullable=False),
+        Column("scenario", Text, nullable=False),
+        Column("generation", String(32), nullable=False),
+        PrimaryKeyConstraint("owner", "scenario"),
+    )
+    return items, scenarios, nodes, segments, job_directories, generations
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -220,6 +231,7 @@ class PendingCreate:
     prepared: list[tuple[NewItem, dict[str, Any], str]]
     values: dict[str, dict[str, Any]]
     calls: dict[str, NewNode]
+    generation: tuple[str, str] | None
     done: Event = field(default_factory=Event)
     lead: bool = False
     outcome: tuple[StoredItem, ...] | Exception | None = None
@@ -244,13 +256,20 @@ class SQLDataStore(DataStore):
 
     def __init__(
         self,
-        tables: tuple[Table, Table, Table, Table, Table],
+        tables: tuple[Table, Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
         job_directories: SegmentStore | None = None,
         job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS,
     ) -> None:
-        self.items_table, self.scenarios_table, self.nodes_table, self.segment_table, self.job_directory_table = tables
+        (
+            self.items_table,
+            self.scenarios_table,
+            self.nodes_table,
+            self.segment_table,
+            self.job_directory_table,
+            self.generations_table,
+        ) = tables
         self.task_files = task_files
         self.segments = segments
         self.job_directories = (
@@ -447,10 +466,11 @@ class SQLDataStore(DataStore):
         if begun:
             connection.execute(insert(uses), begun)
 
-    def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]:
+    def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
         if not prepared:
             return ()
+        origin = generation_origin(prepared, generation)
         item_ids = [entry[0].item_id for entry in prepared]
         places: dict[str, SegmentLine] = {}
         partition = self.partition(owner)
@@ -505,7 +525,7 @@ class SQLDataStore(DataStore):
                 "segment_offset": None if place is None else place.offset,
                 "segment_length": None if place is None else place.length,
             }
-        pending = PendingCreate(prepared, values, calls)
+        pending = PendingCreate(prepared, values, calls, None if origin is None else (origin, str(generation)))
         group = (owner, frozenset(scenarios_of(metadata for _, metadata, _ in prepared)))
         with self.group_lock:
             pending.lead = group not in self.waiting
@@ -572,6 +592,12 @@ class SQLDataStore(DataStore):
                 calls.setdefault(item_id, call)
         with self.transaction() as connection:
             self.lock_scenarios(connection, owner, scenarios_of(metadata for _, metadata, _ in prepared))
+            # The archive ends a generation under the same lock, so no write of an ended generation commits.
+            checked = {pending.generation for pending in batch if pending.generation is not None}
+            current = {origin: self.current_generation(connection, owner, origin) for origin, _ in checked}
+            for origin, generation in checked:
+                if current[origin] != generation:
+                    raise ScenarioArchived(f"generation {generation!r} of {origin!r} is no longer current")
             sequences = self.insert_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
             uses = [
@@ -784,11 +810,36 @@ class SQLDataStore(DataStore):
             stored = self.rows(connection, owner, unique_ids)
             return self.stored_items(connection, owner, [stored[item_id] for item_id in unique_ids])
 
+    def scenario_generation(self, owner: str, scenario: str) -> str:
+        check_owner(owner)
+        check_owner(scenario)
+        with self.transaction() as connection:
+            self.lock_scenarios(connection, owner, [scenario])
+            current = self.current_generation(connection, owner, scenario)
+            if current is not None:
+                return current
+            generation = uuid.uuid4().hex
+            connection.execute(
+                insert(self.generations_table).values(owner=owner, scenario=scenario, generation=generation)
+            )
+            return generation
+
+    def current_generation(self, connection: Connection, owner: str, scenario: str) -> str | None:
+        """The current generation of ``scenario`` of ``owner``, or None when it has none."""
+        generations = self.generations_table
+        return connection.execute(
+            select(generations.c.generation).where(generations.c.owner == owner, generations.c.scenario == scenario)
+        ).scalar_one_or_none()
+
     def remove_scenario(self, owner: str, scenario: str) -> int:
         check_owner(owner)
         items, uses = self.items_table, self.scenarios_table
         with self.transaction() as connection:
             self.lock_scenarios(connection, owner, [scenario])
+            generations = self.generations_table
+            connection.execute(
+                delete(generations).where(generations.c.owner == owner, generations.c.scenario == scenario)
+            )
             # The rows stay locked, so that a concurrent patch of another scenario reads after this one commits.
             rows = connection.execute(
                 select(items.c.item_id, items.c.metadata_json)
