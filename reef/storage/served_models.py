@@ -56,6 +56,10 @@ class ServedModels(ABC):
         published request carried, and ``{}`` before one or after a withdrawal."""
 
     @abstractmethod
+    def read_traffic_weights(self, scenario: str) -> Mapping[str, int]:
+        """The weight of each artifact in ``scenario``'s traffic split, and ``{}`` without a split."""
+
+    @abstractmethod
     def changed_sequence(self) -> int:
         """The number of changes so far; it increases at each write, removal and stop change."""
 
@@ -79,6 +83,14 @@ class ServedModelsWriter(ServedModels):
     @abstractmethod
     def write(self, key: ScenarioModel, served: ServedArtifact, *, control_lease_number: int) -> None:
         """Make ``served`` the row of ``key``."""
+
+    @abstractmethod
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
+        """Make ``weights`` the traffic split of ``scenario``. Empty ``weights`` remove the split.
+
+        Raise ``ValueError`` without a change when an artifact with a weight above 0 has no route. A withdrawal of the
+        scenario also removes the split.
+        """
 
     @abstractmethod
     def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:

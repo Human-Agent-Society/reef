@@ -162,6 +162,7 @@ tests/reef_service/test_sse_streams.py
 tests/reef_service/test_startup_diagnostics.py
 tests/reef_service/test_step_record_history.py
 tests/reef_service/test_train_admission.py
+tests/reef_service/test_traffic_weights.py
 tests/reef_service/test_training_backends.py
 tests/reef_service/test_training_server.py
 tests/reef_service/test_training_startup.py
