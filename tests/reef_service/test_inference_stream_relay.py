@@ -19,14 +19,15 @@ from typing import Any
 
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from reef.artifact.artifact import Artifact
 from reef.core import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
-from reef.inference.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
+from reef.inference.interfaces import FixedEngineClients, InferenceArtifact, InferenceHandler, InferenceStream
 from reef.service.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
 from reef.service.streaming import frame_for_codex
+from reef.service.wire import parse_request_headers
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -232,5 +233,48 @@ def test_non_codex_deployment_reads_the_raw_item(tmp_path: Path) -> None:
         # Reef's record and the client both see the raw stream.
         (recorded,) = recorded_responses(storage)
         assert "openrouter:web_search" in recorded["body"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("bad headers"), ConnectionResetError("reset"), asyncio.CancelledError()]
+)
+def test_stream_setup_failure_closes_the_provider_and_records_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    async def run() -> None:
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        handler = ScriptedStreamHandler()
+        served = ServedArtifact("artifact-1", "http://engine.invalid", "test-model")
+        replica = InferenceReplica(
+            ServedModelsCache(memory_coordination().served_models), storage, FixedEngineClients(handler)
+        )
+        request = make_mocked_request("POST", "/v1/responses", headers={"x-reef-scenario": "reef-codex"})
+        parsed = parse_request_headers(request.headers, RequestType.INFERENCE)
+        stream = await handler.inference_stream(InferenceArtifact(served.artifact_id), request.path, {})
+
+        async def open_stream(*args: object) -> InferenceStream:
+            return stream
+
+        def fail_response(**kwargs: object) -> web.StreamResponse:
+            raise failure
+
+        close_count = 0
+
+        async def close() -> None:
+            nonlocal close_count
+            close_count += 1
+
+        monkeypatch.setattr(handler, "inference_stream", open_stream)
+        monkeypatch.setattr(stream, "close", close)
+        monkeypatch.setattr(web, "StreamResponse", fail_response)
+        with pytest.raises(type(failure)) as raised:
+            await replica.relay_stream(request, request.path, parsed, {}, served, record=True)
+        assert raised.value is failure
+        assert close_count == 1
+        [recorded] = recorded_responses(storage)
+        assert recorded["complete"] is False
 
     asyncio.run(run())

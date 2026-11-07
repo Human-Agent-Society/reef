@@ -277,11 +277,13 @@ def build_component_app(
 ) -> web.Application:
     """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
 
-    Raise ``ValueError`` for an unknown service.
+    Raise ``ValueError`` for an unknown service or a managed routing manifest, which requires the orchestrator.
     """
     builder = COMPONENT_APPS.get(component)
     if builder is None:
         raise ValueError(f"unknown service {component!r}; the services are {SERVICE_COMPONENTS}")
+    if settings.routing_manifest is not None:
+        raise ValueError("managed routing requires reef serve without --component")
     return builder.build(settings, os.environ if environ is None else environ)
 
 

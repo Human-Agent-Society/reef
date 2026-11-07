@@ -51,6 +51,7 @@ tests/harness/test_tree_checks.py
 tests/inference/test_adapter_names.py
 tests/inference/test_adapter_residency.py
 tests/inference/test_health_monitor.py
+tests/inference/test_http.py
 tests/inference/test_inference_admission.py
 tests/inference/test_inference_control.py
 tests/inference/test_inference_recovery.py
@@ -95,6 +96,19 @@ tests/reef_recipe/test_recipe_config_fields.py
 tests/reef_recipe/test_recipe_runtime_model.py
 tests/reef_recipe/test_reef_interface_inheritance.py
 tests/reef_recipe/test_reef_recipes.py
+tests/reef_service/routing/test_containers.py
+tests/reef_service/routing/test_deployment_controller.py
+tests/reef_service/routing/test_direct_routing.py
+tests/reef_service/routing/test_lifecycle.py
+tests/reef_service/routing/test_lifecycle_boundaries.py
+tests/reef_service/routing/test_lifecycle_orchestration.py
+tests/reef_service/routing/test_lifecycle_transport_boundaries.py
+tests/reef_service/routing/test_policy.py
+tests/reef_service/routing/test_reef_lifecycle_client.py
+tests/reef_service/routing/test_routing.py
+tests/reef_service/routing/test_routing_deployment.py
+tests/reef_service/routing/test_routing_preview.py
+tests/reef_service/routing/test_routing_service.py
 tests/reef_service/test_artifact_versions.py
 tests/reef_service/test_async_pipeline_core.py
 tests/reef_service/test_auth.py

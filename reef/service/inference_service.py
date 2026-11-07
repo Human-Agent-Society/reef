@@ -430,19 +430,20 @@ class InferenceReplica:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
-        headers = {
-            key: value
-            for key, value in upstream.headers.items()
-            if key.lower() not in (RECORD_HEADER, ARTIFACT_HEADER, "content-length", "transfer-encoding")
-        }
-        headers[ARTIFACT_HEADER] = served.artifact_id
-        content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
-        response = web.StreamResponse(status=upstream.status, headers=headers)
         body = bytearray()
         complete = False
         error: str | None = None
         recorded = False
+        response: web.StreamResponse | None = None
         try:
+            headers = {
+                key: value
+                for key, value in upstream.headers.items()
+                if key.lower() not in (RECORD_HEADER, ARTIFACT_HEADER, "content-length", "transfer-encoding")
+            }
+            headers[ARTIFACT_HEADER] = served.artifact_id
+            content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
+            response = web.StreamResponse(status=upstream.status, headers=headers)
             await response.prepare(request)
             if "text/event-stream" in content_type.lower():
                 relay = SSERelay(path, response, for_codex=self.for_codex)
@@ -481,6 +482,8 @@ class InferenceReplica:
                 if not complete:
                     error = INFERENCE_ABORT_ERROR
         except ConnectionResetError:
+            if response is None:
+                raise
             error = "the client disconnected"
         finally:
             await upstream.close()
