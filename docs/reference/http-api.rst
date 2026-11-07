@@ -2061,10 +2061,15 @@ Serving profiles
 ~~~~~~~~~~~~~~~~
 
 A serving profile names the model that serves an artifact, such as
-``qwen3.8-27b@1`` (RFC #1233). It lets one deployment serve artifacts of
+``qwen3.8-27b`` (RFC #1233). It lets one deployment serve artifacts of
 several base models, also in one scenario. The deployment's inference runtime
 defines the profiles. An artifact without a profile is served with the
 deployment's model.
+
+Because an artifact never changes its profile, a profile names the base model,
+not a version of how it is served. A runtime that changes its serving settings
+for a model keeps the profile name, so that every artifact of that model gets
+the new settings.
 
 You write a profile in one place: the ``serving_profile`` metadata of an
 `artifact item <#artifact-items>`__, when you create the item. It never
