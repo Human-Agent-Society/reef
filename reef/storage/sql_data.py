@@ -66,6 +66,7 @@ from reef.core.atif_payloads import call_shape, provider_payload
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
+from reef.core.records_types import RecordLoss
 from reef.core.trajectory_index import call_key
 from reef.storage.data import (
     JOB_DIRECTORY_TTL_SECONDS,
@@ -100,6 +101,7 @@ from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
     SEGMENT_COLUMNS,
+    EvictionSizes,
     NewNode,
     ScopedTable,
     TrajectoryNodes,
@@ -117,14 +119,17 @@ PACK_BYTES = 64 * 2**20
 #: The age in seconds after which ``maintain`` deletes a segment that no row uses. A new segment has no rows
 #: until the transaction that writes them commits.
 UNUSED_SEGMENT_SECONDS = 24 * 3600
+#: The record items that one page of ``prune_records`` reads.
+PRUNE_PAGE_SIZE = 256
 #: The most items that one transaction of a group commit writes.
 GROUP_COMMIT_ITEMS = 200
 
 
-def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table, Table]:
-    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment``, ``data_job_directory`` and
-    ``data_scenario`` in ``metadata``. ``data_scenario`` has the current generation of each scenario of an owner
-    (``DataStore.scenario_generation``). ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
+def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table, Table, Table]:
+    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment``, ``data_job_directory``,
+    ``data_scenario`` and ``data_record_loss`` in ``metadata``. ``data_scenario`` has the current generation of each
+    scenario of an owner (``DataStore.scenario_generation``). ``data_record_loss`` has the ``RecordLoss`` of each
+    origin scenario of an owner whose record items ``prune_records`` deleted. ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
 
     ``sequence`` orders the items as they arrived. ``data_item_scenario`` has one row per use of an item by a
     scenario, with its split; its own ``sequence`` orders the uses as they began, and a use whose split changes is a
@@ -206,7 +211,18 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("generation", String(32), nullable=False),
         PrimaryKeyConstraint("owner", "scenario"),
     )
-    return items, scenarios, nodes, segments, job_directories, generations
+    losses = Table(
+        "data_record_loss",
+        metadata,
+        Column("owner", Text, nullable=False),
+        Column("scenario", Text, nullable=False),
+        Column("record_count", BigInteger, nullable=False),
+        Column("body_bytes", BigInteger, nullable=False),
+        Column("first_sequence", BigInteger, nullable=False),
+        Column("last_sequence", BigInteger, nullable=False),
+        PrimaryKeyConstraint("owner", "scenario"),
+    )
+    return items, scenarios, nodes, segments, job_directories, generations, losses
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -256,7 +272,7 @@ class SQLDataStore(DataStore):
 
     def __init__(
         self,
-        tables: tuple[Table, Table, Table, Table, Table, Table],
+        tables: tuple[Table, Table, Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
         job_directories: SegmentStore | None = None,
@@ -269,6 +285,7 @@ class SQLDataStore(DataStore):
             self.segment_table,
             self.job_directory_table,
             self.generations_table,
+            self.losses_table,
         ) = tables
         self.task_files = task_files
         self.segments = segments
@@ -823,6 +840,121 @@ class SQLDataStore(DataStore):
                 insert(self.generations_table).values(owner=owner, scenario=scenario, generation=generation)
             )
             return generation
+
+    def prune_records(self, max_bytes: int) -> int:
+        items, nodes = self.items_table, self.nodes_table
+        with self.transaction(read_only=True) as connection:
+            held = connection.execute(
+                select(func.coalesce(func.sum(func.length(items.c.content_json)), 0)).where(items.c.kind == "record")
+            ).scalar_one()
+            held += connection.execute(select(func.coalesce(func.sum(nodes.c.body_bytes), 0))).scalar_one()
+        excess = int(held) - max_bytes
+        sizes = EvictionSizes(nodes, ("owner",))
+        evicted, after = 0, 0
+        while excess > 0:
+            with self.transaction(read_only=True) as connection:
+                page = (
+                    connection.execute(
+                        select(
+                            items.c.sequence,
+                            items.c.owner,
+                            items.c.item_id,
+                            items.c.message_field,
+                            items.c.metadata_json,
+                            func.coalesce(func.length(items.c.content_json), 0).label("body_bytes"),
+                        )
+                        .where(items.c.kind == "record", items.c.sequence > after)
+                        .order_by(items.c.sequence)
+                        .limit(PRUNE_PAGE_SIZE)
+                    )
+                    .mappings()
+                    .all()
+                )
+                sizes.read(connection, page)
+            if not page:
+                break
+            chosen: list[tuple[RowMapping, int]] = []
+            for row in page:
+                size = sizes.count(row)
+                chosen.append((row, size))
+                excess -= size
+                if excess <= 0:
+                    break
+            after = int(chosen[-1][0]["sequence"])
+            by_owner: dict[str, list[tuple[RowMapping, int]]] = {}
+            for row, size in chosen:
+                by_owner.setdefault(row["owner"], []).append((row, size))
+            for owner, rows in by_owner.items():
+                evicted += self.evict_records(owner, rows)
+        return evicted
+
+    def evict_records(self, owner: str, rows: Sequence[tuple[RowMapping, int]]) -> int:
+        """Delete the record items of ``owner`` in ``rows``, each with the bytes that deleting it frees, and add them
+        to the losses of their origins. Return the number that it deleted: another writer can delete one first."""
+        items, uses, losses = self.items_table, self.scenarios_table, self.losses_table
+        metadata = {row["item_id"]: json.loads(row["metadata_json"]) for row, _ in rows}
+        with self.transaction() as connection:
+            self.lock_scenarios(connection, owner, scenarios_of(metadata.values()))
+            present = set(
+                connection.execute(
+                    select(items.c.item_id).where(items.c.owner == owner, items.c.item_id.in_(list(metadata)))
+                ).scalars()
+            )
+            kept = [(row, size) for row, size in rows if row["item_id"] in present]
+            if not kept:
+                return 0
+            ids = [row["item_id"] for row, _ in kept]
+            connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.item_id.in_(ids)))
+            connection.execute(delete(items).where(items.c.owner == owner, items.c.item_id.in_(ids)))
+            self.trajectory_nodes(owner).release(
+                connection, [int(row["sequence"]) for row, _ in kept if row["message_field"] is not None]
+            )
+            by_origin: dict[str, list[tuple[RowMapping, int]]] = {}
+            for row, size in kept:
+                by_origin.setdefault(metadata[row["item_id"]]["origin"]["scenario"], []).append((row, size))
+            for scenario, members in by_origin.items():
+                sequences = [int(row["sequence"]) for row, _ in members]
+                added = RecordLoss(len(members), sum(size for _, size in members), min(sequences), max(sequences))
+                mine = (losses.c.owner == owner, losses.c.scenario == scenario)
+                previous = connection.execute(select(losses).where(*mine)).mappings().first()
+                if previous is None:
+                    connection.execute(
+                        insert(losses).values(
+                            owner=owner,
+                            scenario=scenario,
+                            record_count=added.record_count,
+                            body_bytes=added.body_bytes,
+                            first_sequence=added.first_sequence,
+                            last_sequence=added.last_sequence,
+                        )
+                    )
+                else:
+                    connection.execute(
+                        update(losses)
+                        .where(*mine)
+                        .values(
+                            record_count=losses.c.record_count + added.record_count,
+                            body_bytes=losses.c.body_bytes + added.body_bytes,
+                            first_sequence=min(int(previous["first_sequence"]), added.first_sequence),
+                            last_sequence=max(int(previous["last_sequence"]), added.last_sequence),
+                        )
+                    )
+            return len(kept)
+
+    def record_loss(self, owner: str, scenario: str) -> RecordLoss:
+        check_owner(owner)
+        losses = self.losses_table
+        with self.transaction(read_only=True) as connection:
+            row = (
+                connection.execute(select(losses).where(losses.c.owner == owner, losses.c.scenario == scenario))
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return RecordLoss()
+        return RecordLoss(
+            *(int(row[name]) for name in ("record_count", "body_bytes", "first_sequence", "last_sequence"))
+        )
 
     def current_generation(self, connection: Connection, owner: str, scenario: str) -> str | None:
         """The current generation of ``scenario`` of ``owner``, or None when it has none."""
