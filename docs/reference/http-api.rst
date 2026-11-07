@@ -1010,11 +1010,10 @@ The body takes these fields:
   The item has the kind ``harness_plugin``, and ``adapter`` in its metadata. Its
   adapter must install with npm or uv and call the runtime's API dialect. Each
   agent runs in the task's container. On ``docker``, the container reaches the
-  model at ``evaluation.agent_host``. On ``modal``, Harbor runs the trial in
-  stream mode, and the agent bridges the container's loopback to the model
-  through Harbor's SSH access and Reef's sandbox relay (RFC #986). Reef refuses
-  another environment, because Harbor gives no SSH access to its sandboxes. Reef
-  also refuses a task that declares MCP servers or skills. This
+  model at ``evaluation.agent_host``. In a remote environment, such as
+  ``modal``, the agent bridges the container's loopback to the model through
+  Reef's sandbox relay and Harbor's exec, also for a task with a compose sidecar
+  (RFC #986). Reef refuses a task that declares MCP servers or skills. This
   evaluation does not reach the activation rule, and an automatic evaluation
   cannot use an item.
 - ``model``: the model binding that a harness artifact runs on. A request

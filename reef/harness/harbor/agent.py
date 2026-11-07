@@ -18,12 +18,12 @@ the adapter's ``install``, ``dirs``, ``run.task`` and ``sessions``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import secrets
 import shlex
 import shutil
-import socket
 import sys
 import tempfile
 import urllib.parse
@@ -32,10 +32,10 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, override
 
+import aiohttp
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
-from harbor.environments.factory import EnvironmentFactory
 from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import TaskConfig
 
@@ -43,9 +43,10 @@ from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.execution.sandbox import relay as sandbox_relay
 from reef.execution.sandbox.environment import run_sync
 from reef.execution.sandbox.process import ProgramLaunchError
-from reef.execution.sandbox.remote import TunnelPump
+from reef.execution.sandbox.remote import HOP_BY_HOP
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
+from reef.harness.harbor import bridge_client
 from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
@@ -62,12 +63,13 @@ SESSIONS_DIR = "sessions"
 CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv"})
 #: Where Astral's installer puts uv in a task's container, under the agent user's own home.
 CONTAINER_UV = "$HOME/.local/bin/uv"
-#: The remote environments in which a tree's container reaches the rollout's capture proxy through the bridge:
-#: Harbor gives SSH access to their sandboxes in stream mode (RFC #986).
-BRIDGE_ENVIRONMENTS = frozenset({"modal"})
-#: Where the bridge's relay lives in a task's container, and the loopback port on which it answers this host.
+#: Where the bridge's relay lives in a task's container, and the loopback port on which it answers the bridge client.
 RELAY_DIR = "/tmp/reef-relay"
 RELAY_TUNNEL_PORT = 47811
+#: The exchanges that the bridge keeps waiting at once: the model calls that it can answer at the same time.
+BRIDGE_POLLERS = 4
+#: How long the bridge waits for the relay to answer after it starts.
+RELAY_READY_SECONDS = 60.0
 
 
 def can_run_in_task_container(descriptor: AdapterDescriptor) -> bool:
@@ -201,20 +203,21 @@ class AdapterAgent(BaseInstalledAgent):
         """Bridge the container's ``127.0.0.1:<bridge_port>`` to the same port on this host for the time of the
         block, or do nothing without a ``bridge_port``.
 
-        Reef's sandbox relay answers that port in the container and holds each call. Harbor's SSH access to the
-        sandbox forwards a local port to the relay's own loopback port, and a ``TunnelPump`` answers each call from
-        this host's port. Raise ``ProgramLaunchError`` when the relay does not answer.
+        Reef's sandbox relay answers that port in the container and holds each call. ``BRIDGE_POLLERS`` loops here
+        take the calls through Harbor's exec, with ``bridge_client``, answer each from this host's port, and give the
+        answer back in the next exchange. Exec works in every Harbor environment, also for a task with a compose
+        sidecar. Raise ``ProgramLaunchError`` when the relay does not answer.
         """
         if self.bridge_port is None:
             yield
             return
         tunnel_port = RELAY_TUNNEL_PORT + 1 if self.bridge_port == RELAY_TUNNEL_PORT else RELAY_TUNNEL_PORT
-        secret = secrets.token_hex(16)
-        await self.exec_as_agent(environment, command=f"mkdir -p {RELAY_DIR} && chmod 700 {RELAY_DIR}")
+        await self.exec_as_agent(environment, command=f"mkdir -p {RELAY_DIR}/replies && chmod 700 {RELAY_DIR}")
         await environment.upload_file(Path(sandbox_relay.__file__), f"{RELAY_DIR}/relay.py")
+        await environment.upload_file(Path(bridge_client.__file__), f"{RELAY_DIR}/client.py")
         with tempfile.TemporaryDirectory(prefix="reef-relay-") as staging:
             secret_file = Path(staging) / "secret"
-            secret_file.write_text(secret, encoding="utf-8")
+            secret_file.write_text(secrets.token_hex(16), encoding="utf-8")
             await environment.upload_file(secret_file, f"{RELAY_DIR}/secret")
         python = await self.relay_python(environment)
         await self.exec_as_agent(
@@ -224,17 +227,69 @@ class AdapterAgent(BaseInstalledAgent):
                 f"--tunnel-host 127.0.0.1 --secret-file {RELAY_DIR}/secret >{RELAY_DIR}/relay.log 2>&1 &"
             ),
         )
-        local_port = free_port()
-        async with (
-            EnvironmentFactory.connect_ssh(environment.stream_handle) as access,
-            access.process("sleep infinity", forward=(local_port, tunnel_port)),
-        ):
-            pump = TunnelPump(f"http://127.0.0.1:{local_port}", secret, self.bridge_port)
-            await asyncio.to_thread(pump.start)
+        client = f"{python} {RELAY_DIR}/client.py {tunnel_port} {RELAY_DIR}/secret"
+        deadline = asyncio.get_running_loop().time() + RELAY_READY_SECONDS
+        while (await environment.exec(command=f"{client} ready")).return_code != 0:
+            if asyncio.get_running_loop().time() > deadline:
+                raise ProgramLaunchError(f"the bridge's relay did not answer in {RELAY_READY_SECONDS:.0f} s")
+            await asyncio.sleep(0.5)
+        async with aiohttp.ClientSession(auto_decompress=False) as local:
+            pollers = [
+                asyncio.create_task(self.relay_calls(environment, client, local)) for _ in range(BRIDGE_POLLERS)
+            ]
             try:
                 yield
             finally:
-                await asyncio.to_thread(pump.stop)
+                for poller in pollers:
+                    poller.cancel()
+                await asyncio.gather(*pollers, return_exceptions=True)
+
+    async def relay_calls(self, environment: BaseEnvironment, client: str, local: aiohttp.ClientSession) -> None:
+        """Answer the relay's calls one at a time, until cancelled: each exchange gives the last answer back and
+        takes the next call. A failed exchange runs again with the same answer, which the relay takes once."""
+        reply = ""
+        while True:
+            result = await environment.exec(command=f"{client} {reply}".rstrip(), timeout_sec=120)
+            if result.return_code != 0:
+                await asyncio.sleep(1)
+                continue
+            reply = ""
+            if not (result.stdout or "").strip():
+                continue
+            request = json.loads(result.stdout)
+            piece = await self.answer(local, request)
+            path = f"{RELAY_DIR}/replies/{request['id']}.json"
+            with tempfile.TemporaryDirectory(prefix="reef-relay-") as staging:
+                staged = Path(staging) / "piece.json"
+                staged.write_text(json.dumps(piece), encoding="utf-8")
+                await environment.upload_file(staged, path)
+            reply = f"{request['id']} {path}"
+
+    async def answer(self, local: aiohttp.ClientSession, request: Mapping[str, Any]) -> dict[str, Any]:
+        """The relay's one piece that answers ``request`` from this host's ``bridge_port``: the whole answer."""
+        headers = {
+            name: value for name, value in (request.get("headers") or {}).items() if name.lower() not in HOP_BY_HOP
+        }
+        body = base64.b64decode(request.get("body") or "")
+        try:
+            async with local.request(
+                str(request.get("method") or "GET"),
+                f"http://127.0.0.1:{self.bridge_port}{request.get('path') or '/'}",
+                headers=headers,
+                data=body or None,
+                timeout=aiohttp.ClientTimeout(total=None, sock_read=3600),
+            ) as response:
+                data = await response.read()
+                answer = {
+                    "status": response.status,
+                    "headers": {
+                        name: value for name, value in response.headers.items() if name.lower() not in HOP_BY_HOP
+                    },
+                }
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            data = f"the Reef host did not answer: {exc}".encode()
+            answer = {"status": 502, "headers": {"Content-Type": "text/plain"}}
+        return {**answer, "data": base64.b64encode(data).decode(), "end": True, "sequence": 0}
 
     async def relay_python(self, environment: BaseEnvironment) -> str:
         """The command that runs the relay: the container's ``python3``, else a Python from uv, which the agent
@@ -260,13 +315,6 @@ def uv_install_command(version: str) -> str:
         f'set -euo pipefail; curl -LsSf {installer} | env UV_INSTALL_DIR="$HOME/.local/bin" '
         f'UV_NO_MODIFY_PATH=1 sh && "{CONTAINER_UV}" --version'
     )
-
-
-def free_port() -> int:
-    """A loopback port of this host that no process listens on now."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 class TreeAgent(AdapterAgent):

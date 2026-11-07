@@ -388,7 +388,7 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
 
 
 @pytest.mark.integration
-def test_a_tree_on_modal_runs_in_stream_mode_and_bridges_its_container_to_the_proxy(tmp_path: Path) -> None:
+def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
     lab = TreeCallingLab(tmp_path / "logs")
 
@@ -405,7 +405,7 @@ def test_a_tree_on_modal_runs_in_stream_mode_and_bridges_its_container_to_the_pr
             assert answer["state"] == "finished", answer
 
     asyncio.run(run())
-    assert lab.overrides["environment"] == {"type": "modal", "stream": True}
+    assert lab.overrides["environment"] == {"type": "modal"}
     assert lab.agent is not None and lab.agent.bridge_port is not None
     assert f"http://127.0.0.1:{lab.agent.bridge_port}" in "".join(lab.rendered.values())
 
@@ -420,7 +420,6 @@ def test_a_tree_on_modal_runs_in_stream_mode_and_bridges_its_container_to_the_pr
         ({"adapter": "missing"}, "unknown harness adapter"),
         ({"adapter": "hermes"}, "cannot run in a task's container"),
         ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
-        ({"environment": "e2b"}, "Harbor gives no SSH access to its sandboxes"),
     ],
 )
 def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
