@@ -29,6 +29,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.record2sample.service import ProducedSamples
+from reef.storage.record_items import used_record, used_records
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
@@ -247,6 +248,10 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
+        # The records of other scenarios that this one uses. Commits name the ones that trained, so a new process reads
+        # them from the start and ``push_retained`` skips those.
+        self._used_sequence = 0
+        self._used_read = 0
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         #: The record IDs that a commit of this trainer named; the next commit names the other consumed records.
@@ -457,7 +462,13 @@ class Trainer:
                 return True
             if self._pipeline.has_unread_samples():
                 return True
-            return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
+            if self._records.count(self.scenario, after_sequence=self._data_sequence) > 0:
+                return True
+            samples = self._pipeline.store.store
+            used = used_records(
+                samples.data, samples.owner, self.scenario, after_sequence=self._used_sequence, limit=1
+            )
+            return bool(used[1])
 
     def next_job_listing(self) -> Mapping[str, Any]:
         """The trainer's training mode and the samples of its next automatic job (``TrainingPipeline.next_job_listing``)."""
@@ -501,7 +512,11 @@ class Trainer:
             if any(ref in self.consumed_record_ids for ref in item.references):
                 self.skipped_record_ids.add(item.agent_record_id)
                 return
-            missing = [ref for ref in item.references if self._records.get(self.scenario, ref) is None]
+            missing = [
+                ref
+                for ref in item.references
+                if self._records.get(self.scenario, ref) is None and self.used_record(ref) is None
+            ]
             if missing:
                 logger.warning(
                     "Skipping report %s in scenario %s: %d referenced records are no longer stored; "
@@ -527,7 +542,7 @@ class Trainer:
             # Another samples process can have stored the samples of later records since this trainer loaded;
             # the records that stored samples consumed never form a record set again.
             self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
-            before_records = self._data_offset
+            before_records = self._data_offset + self._used_read
             before_samples = self._pipeline.stored_sample_count
             self.read_records()
             stored = self._pipeline.produce()
@@ -539,7 +554,7 @@ class Trainer:
             return ProducedSamples(
                 changed=stored,
                 background=self._pipeline.background_jobs_running(),
-                records_read=self._data_offset - before_records,
+                records_read=self._data_offset + self._used_read - before_records,
                 samples_created=self._pipeline.stored_sample_count - before_samples,
                 due_in_seconds=None if due is None else max(0.0, due - time.monotonic()),
             )
@@ -571,6 +586,7 @@ class Trainer:
         """Push every record after the record cursor into the pipeline and move the cursor. The samples service
         calls it for a trainer that trains (``produce_samples``); ``read_new_records`` calls it for one that trains
         nothing. The caller holds the lock."""
+        self.read_used_records()
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -583,6 +599,32 @@ class Trainer:
                 self.push_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
+
+    def used_record(self, record_id: str) -> AgentRecord | None:
+        """The record item of another scenario that this scenario uses, read as its record, or None."""
+        samples = self._pipeline.store.store
+        return used_record(samples.data, samples.owner, self.scenario, record_id)
+
+    def read_used_records(self) -> None:
+        """Push the record items of other scenarios that this scenario uses and that this process has not read. A
+        record that the record store holds is a copy from before these reads (RFC #1219), which ``read_records``
+        pushed. The caller holds the lock."""
+        samples = self._pipeline.store.store
+        while True:
+            cursor, records = used_records(
+                samples.data,
+                samples.owner,
+                self.scenario,
+                after_sequence=self._used_sequence,
+                limit=self._DATA_READ_BATCH_SIZE,
+            )
+            self._used_sequence = cursor
+            for item in records:
+                if self._records.get(self.scenario, item.agent_record_id) is None:
+                    self.push_retained(item)
+                    self._used_read += 1
+            if not records:
+                return
 
     def advance_job(
         self, *, serving_artifact_id: str | None = None, train_from_artifact_id: str | None = None

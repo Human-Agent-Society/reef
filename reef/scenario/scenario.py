@@ -27,6 +27,7 @@ from reef.record2sample.service import ProducedSamples
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.scenario.snapshots import ServedBesideArtifact
+from reef.core.records_types import AgentRecord
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -536,6 +537,10 @@ class Scenario:
         return self._committer.import_artifact(
             files, component, source=source, directory=directory, artifact_id=artifact_id
         )
+
+    def used_record(self, record_id: str) -> AgentRecord | None:
+        """The record item of another scenario that this scenario uses, read as its record, or None."""
+        return self.stepping_trainers()[0].trainer.used_record(record_id)
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""
