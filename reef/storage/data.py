@@ -308,7 +308,7 @@ class DataStore(Plugin, ABC):
       digest is unchanged; with another digest it is an ``ItemConflict``, and nothing is stored. Bad metadata or
       content is a ``ValueError``, and nothing is stored. New artifact items omit the obsolete ``content_id``.
       A retry of an older artifact compares all other content fields and preserves the stored content and digest.
-      It returns the stored items in the order given.
+      It returns the stored items in the order given, without their content.
     * ``read(owner, item_id)`` returns the item, or None.
     * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
       ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
@@ -652,7 +652,7 @@ class MemoryDataStore(DataStore):
                     )
                 )
             result.append(created)
-        return tuple(result)
+        return tuple(replace(item, content=None) for item in result)
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
