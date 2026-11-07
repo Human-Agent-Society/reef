@@ -217,7 +217,8 @@ class StoredItem:
     SHA-256 of the content: ``json_digest`` of the JSON content, without ``created_at`` for a record
     (``record_digest``), or the task file store's digest of a task directory. A trajectory, a record or an artifact has its JSON ``content``, except in the result of a ``query``
     without content. A task has no ``content``: the task file store
-    keeps its directory under ``digest``, in the owner's partition (``task_partition``).
+    keeps its directory under ``digest``, in the owner's partition (``task_partition``). ``inserted`` is True only
+    in the result of the ``create`` that stored the item.
 
     Purpose: what ``DataStore`` returns. Training reads a scenario's items, and clients read and query them.
     """
@@ -228,6 +229,7 @@ class StoredItem:
     metadata: Mapping[str, Any]
     digest: str
     content: Mapping[str, Any] | None = field(default=None, compare=False)
+    inserted: bool = field(default=False, compare=False)
 
     @property
     def kind(self) -> ItemKind:
@@ -314,7 +316,8 @@ class DataStore(Plugin, ABC):
       digest is unchanged; with another digest it is an ``ItemConflict``, and nothing is stored. Bad metadata or
       content is a ``ValueError``, and nothing is stored. New artifact items omit the obsolete ``content_id``.
       A retry of an older artifact compares all other content fields and preserves the stored content and digest.
-      It returns the stored items in the order given, without their content.
+      It returns the stored items in the order given, without their content; ``inserted`` marks those that this
+      call stored.
     * ``read(owner, item_id)`` returns the item, or None.
     * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
       ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
@@ -675,7 +678,7 @@ class MemoryDataStore(DataStore):
                         artifact_id=stored_record_artifact_id(content, content["payload"]),
                     )
                 )
-            result.append(created)
+            result.append(replace(created, inserted=True))
         return tuple(replace(item, content=None) for item in result)
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
