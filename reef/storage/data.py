@@ -389,6 +389,12 @@ class DataStore(Plugin, ABC):
     def read(self, owner: str, item_id: str) -> StoredItem | None: ...
 
     @abstractmethod
+    def read_many(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]:
+        """The items of ``owner`` that ``item_ids`` name, with their content, each once, in the order of their first
+        ID in ``item_ids``. An ID that names no item gives none. A store reads them together, so that a write that
+        names many items does not read each one alone."""
+
+    @abstractmethod
     def query(
         self,
         owner: str,
@@ -657,6 +663,11 @@ class MemoryDataStore(DataStore):
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
         return self.items.get(owner, {}).get(item_id)
+
+    def read_many(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        return tuple(stored[item_id] for item_id in dict.fromkeys(item_ids) if item_id in stored)
 
     def query(
         self,

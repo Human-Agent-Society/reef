@@ -93,6 +93,20 @@ def test_new_trajectory_items_go_to_one_segment_and_read_back(open_store, tmp_pa
         assert len(segment_files(tmp_path)) == 1
 
 
+def test_a_read_of_many_items_reads_their_segment_lines_together(open_store, monkeypatch):
+    with closing(open_store()) as store:
+        created = [trajectory(f"t{number}", str(number)) for number in range(5)]
+        store.create("acme", created)
+        reads = []
+        read_text = SegmentPartition.read_text
+        monkeypatch.setattr(
+            SegmentPartition, "read_text", lambda self, lines: reads.append(lines) or read_text(self, lines)
+        )
+        found = store.read_many("acme", [item.item_id for item in reversed(created)])
+        assert [item.content for item in found] == [item.content for item in reversed(created)]
+        assert [len(lines) for lines in reads] == [5]
+
+
 def test_maintain_moves_waiting_content_into_segments_and_reads_stay_exact(open_store, monkeypatch):
     items = calls(1, 2, 3)
     with closing(open_store(segments=False)) as store:
