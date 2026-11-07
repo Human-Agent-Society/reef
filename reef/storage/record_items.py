@@ -25,6 +25,7 @@ its own, and a read skips the item.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 from typing import Any, Self
@@ -159,7 +160,7 @@ class ItemRecordStore(RecordStore):
     Values: ``data`` is the data store, ``owner`` the scenario's owner, ``scenario`` the scenario and ``generation``
     its generation (``DataStore.scenario_generation``) when the session opened. A record of the scenario is its
     record item ``record_item(r)``. The store reads the record items that the scenario made and still uses, as the
-    records that it stored (``copied_record`` in the origin itself). An append sequence is the item's sequence. A
+    records that it stored. An append sequence is the item's sequence. A
     read of another scenario gives nothing.
 
     The store differs from a record store in two ways. A retry of a record that ``prune_records`` deleted stores it
@@ -175,10 +176,18 @@ class ItemRecordStore(RecordStore):
         self.generation = generation
 
     def record(self, item: StoredItem) -> AgentRecord:
-        """The record of the record item ``item`` that this scenario made."""
+        """The record of the record item ``item`` that this scenario made: the record that ``record_item`` stored,
+        with its own ID and references. ``copied_record`` checks the content."""
         if item.content is None:
             raise ValueError(f"record item {item.item_id!r} was read without its content")
-        return copied_record(item.item_id, item.content, self.scenario, self.scenario)
+        checked = copied_record(item.item_id, item.content, self.scenario, self.scenario)
+        content = item.content
+        return replace(
+            checked,
+            agent_record_id=content["agent_record_id"],
+            payload=dict(content["payload"]),
+            references=tuple(content["references"]),
+        )
 
     def stored(self, scenario: str, agent_record_id: str) -> StoredItem | None:
         """The record item of ``agent_record_id`` that ``scenario`` made and uses, or None."""
