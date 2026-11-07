@@ -441,8 +441,8 @@ class TrainingPipeline:
         The candidates are the held samples that no job data reserved, of a kind that the recipe gives job parameters
         (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), of the kind of the first
         of them, and that are not stale: a sample that the record-to-sample stage made is stale when the stage's
-        staleness check finds its data too many versions behind (``Record2Sample.is_stale``), and so is every sample
-        of its group. The job takes the first ``buffer_size`` candidates, or all of them without a ``buffer_size``,
+        staleness check finds its data too many versions behind (``Record2Sample.is_stale``). An artifact that the
+        scenario serves beside its active selection is not behind. Every sample of a stale sample's group is stale. The job takes the first ``buffer_size`` candidates, or all of them without a ``buffer_size``,
         and the other candidates of every group that those touch, so a group trains whole.
         """
         # A kind that the recipe gives no parameters trains only with a request that gives them.
@@ -457,6 +457,7 @@ class TrainingPipeline:
             stored.group or stored.sample_id
             for stored, sample in candidates
             if stored.component is not None
+            and not self.served_artifacts.served_beside((sample,))
             and self.record2sample.is_stale((sample,), self.served_artifacts.artifact_ids)
         }
         fresh = [entry for entry in candidates if (entry[0].group or entry[0].sample_id) not in stale_groups]

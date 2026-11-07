@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import cast
 
 from reef.core.errors import ReefError
@@ -176,6 +177,12 @@ class ServedModelsPublisher(ServiceWorker):
             "beside": beside,
             "serving_config": current.served_serving_config(),
         }
+
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int]) -> None:
+        """Make ``weights`` the traffic split of ``scenario`` (``ServedModelsWriter.write_traffic_weights``)."""
+        self.coordination.served_models.write_traffic_weights(
+            scenario, weights, control_lease_number=self.lease_number
+        )
 
     def publish(self, current: Scenario, *, now: float | None = None, retry_failed: bool = False) -> None:
         """Queue the desired payload of ``current`` at ``now`` while this instance holds the lease.

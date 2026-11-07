@@ -1467,6 +1467,8 @@ body holds one or more of these settings. Reef rejects other fields:
 - ``activation``: the scenario's activation rule, below.
 - ``serving_config``: the serving fields that the scenario sets over the
   deployment's values (`Serving config`_).
+- ``traffic_weights``: how Reef divides the scenario's model requests between
+  its artifacts (`Traffic weights`_).
 
 The response holds the scenario name and each setting that the request
 changed. To change the data processor's mode:
@@ -1565,6 +1567,66 @@ the scenario's settings, so a reload and a restart keep it. A stored field that
 the deployment no longer accepts is ignored with a warning, and the scenario
 serves with the deployment's values until a person changes the config.
 
+Traffic weights
+~~~~~~~~~~~~~~~
+
+The ``traffic_weights`` setting divides the scenario's model requests between
+its artifacts. For example, it can send 5% of the requests to a new artifact. It
+maps artifact IDs to integers from 0 to 100 that sum to 100:
+
+.. code:: json
+
+   {"traffic_weights": {"artifact:a": 95, "artifact:b": 5}}
+
+To start a split:
+
+1. Serve each artifact with ``POST /reef/scenarios/{scenario}/serve``, unless it is
+   the active artifact.
+2. Wait until each artifact has started.
+3. Send the weights. Inference replicas use them within a few seconds, without a
+   restart.
+
+The request replaces the stored weights. ``null`` ends the split, so the active
+artifact answers again. Reef answers HTTP 400 for invalid weights, and for an
+artifact with a weight above 0 that has no route. An artifact that stops serving
+keeps its weight, and its requests go to the active artifact.
+
+The weights apply to a model request that names ``active``, or a model that the
+scenario does not serve under that name:
+
+- **One conversation stays on one artifact.** Send the
+  ``x-reef-session-key`` header with an identifier of the conversation. Reef then
+  computes a bucket from the scenario and that identifier.
+- **Without the header, Reef reads the first messages.** It computes the bucket
+  from the scenario and the text of the system message, the first message and the
+  first user message. Later turns repeat these messages. A client that shortens
+  its history can move to another artifact. Conversations that start with the same
+  messages get the same artifact. So fixed prompts can change the observed
+  percentages.
+- **A changed weight moves few conversations.** A change from 95/5 to 80/20 moves
+  only the conversations of the 15 buckets that go to another artifact.
+- **Some requests do not use the weights.** These requests keep their usual
+  target:
+
+  - a request without a message;
+  - a request with ``previous_response_id`` and no ``x-reef-session-key``, which
+    goes to the active artifact;
+  - a request that names an artifact or an artifact's route;
+  - a rollout call or an evaluation call.
+
+- **Reef does not move a failed request.** A request to a failed artifact fails.
+  To stop new requests to an artifact, set its weight to 0.
+
+The weights select the artifact. The engine of the artifact selects its own
+replica.
+
+The record names the artifact that answered in ``artifact_id``, and holds the
+bucket and the weights in ``metadata.traffic``. These records train like other
+records, because the staleness check accepts an artifact that the scenario serves
+beside its active selection. That check does not read the weights. A job can then
+hold samples of several artifacts. Each sample keeps its own ``artifact_id`` and
+recorded log probabilities.
+
 Read the settings
 ~~~~~~~~~~~~~~~~~
 
@@ -1591,6 +1653,8 @@ scenario:
   class of its own, ``module`` is the ``package.module:ClassName`` of that class.
 - ``serving_config`` is the stored `serving config <#serving-config>`__, ``{}``
   when the scenario sets no field.
+- ``traffic_weights`` is the scenario's `traffic split <#traffic-weights>`__, ``{}``
+  without one.
 - ``effective_serving_config`` maps the served component to each of its serving
   fields that has a value: the scenario's value, else the deployment's.
 - ``job_parameters`` maps a sample kind (``trajectory`` or ``task``) to the
