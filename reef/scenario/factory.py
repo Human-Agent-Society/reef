@@ -35,11 +35,11 @@ from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
-from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
+from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
-from reef.scenario.binding import ScenarioBinding
+from reef.scenario.binding import ScenarioBinding, profiled_artifact
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
@@ -150,24 +150,25 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
 class ItemStart:
     """The artifact item that a new scenario's root snapshot holds.
 
-    Values: ``item_id`` is the item's non-empty ID, and ``uri`` its non-empty ``source_uri``. ``files`` is the
+    Values: ``item`` is the item's ``ItemIdentity``, and ``uri`` its non-empty ``source_uri``. ``files`` is the
     ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
-    ``None`` for the scenario's one component. ``artifact_id`` is the item's artifact ID, which the root snapshot
-    keeps (RFC #1218), or ``None`` for a new one.
+    ``None`` for the scenario's one component. The root's artifact of ``component`` keeps the item's artifact ID and
+    names its serving profile.
 
     Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
     ``ScenarioFactory.register`` checks it and writes it as the root snapshot.
     """
 
-    item_id: str
+    item: ItemIdentity
     uri: str
     files: SourceFiles
     component: str | None = None
-    artifact_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.item_id, str) or not self.item_id or not isinstance(self.uri, str) or not self.uri:
-            raise ValueError("an item start names a non-empty item_id and uri")
+        if not isinstance(self.item, ItemIdentity):
+            raise TypeError("an item start's item is an ItemIdentity")
+        if not isinstance(self.uri, str) or not self.uri:
+            raise ValueError("an item start names a non-empty uri")
         if not isinstance(self.files, SourceFiles):
             raise TypeError("an item start's files are SourceFiles")
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -314,7 +315,8 @@ class ScenarioFactory:
         ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
         manifest of the components that the root makes. An item that the component's layout or admission check
         refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
-        start from (``Recipe.check_root_start``). Nothing is registered after a refusal.
+        start from (``Recipe.check_root_start``), and so does an item's serving profile that ``profiled_artifact``
+        refuses. Nothing is registered after a refusal.
         """
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -346,8 +348,12 @@ class ScenarioFactory:
             component, layout = components.import_target(start.component)
             directory = work / "item"
             directory.mkdir()
-            stored = layout.stored(start.files, directory, artifact_id=start.artifact_id)
-            source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
+            stored = profiled_artifact(
+                self._recipe.runtime,
+                layout.stored(start.files, directory, artifact_id=start.item.artifact_id),
+                start.item.serving_profile,
+            )
+            source = RootSource("item", item=start.item.item_id, uri=start.uri, version=start.files.version)
             # The admission checks of an import: the snapshot's own with one component, else the component's here and
             # the snapshot's on the composed root.
             if components.single:
