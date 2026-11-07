@@ -210,3 +210,9 @@ def test_an_archive_ends_the_writes_of_the_open_records_and_the_loss_is_the_data
     with pytest.raises(ScenarioArchived):
         item_records.append(plain("late"))
     assert item_records.replay("math") == ()
+
+
+def test_a_copy_in_its_origin_has_the_item_id_and_the_item_references():
+    item = record_item(plain("report", "first"))
+    copied = copied_record(item.item_id, item.content, "math", "math")
+    assert (copied.agent_record_id, copied.references) == ("math/report", ("math/first",))
