@@ -24,7 +24,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -41,7 +41,7 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.learning_rate import learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.task_rollouts import RolloutSettings, RolloutTokens, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
@@ -270,7 +270,9 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data_id, samples)),
+                RolloutScores.from_json(kept["scores"]),
+                tuple(RolloutTokens(**item) for item in kept.get("tokens", [])),
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
@@ -300,6 +302,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             {
                 "samples": JobData(job.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
+                "tokens": [asdict(item) for item in rollouts.tokens],
             },
         )
         return rollouts
@@ -330,10 +333,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
-            rollout_metrics = {
-                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
-                "rollout_samples": len(rollouts.samples),
-            }
+            rollout_metrics = rollouts.metrics()
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics
@@ -356,6 +356,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
             score_centering=self.score_centering,
+            max_sequence_tokens=self._sampler.context_window() if self._sampler is not None else None,
         )
         if prepared.loss is None:
             # The objective skipped the job's data: the job trains nothing and saves no checkpoint.

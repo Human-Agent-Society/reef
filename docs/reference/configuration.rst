@@ -2109,7 +2109,9 @@ samples train.
        the reward of a rollout whose verifier timed out; ``null`` leaves it unscored
 
    ``rollout.scaffold_tolerance`` : 8
-       masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+       tokens at the end of a prompt that the next prompt's history may drop, such as the empty think block of a thinking template with thinking off; the sample keeps them, and the response after them trains
+
+The job's metrics report each task's rollout rewards (``rollout_rewards``), the samples that train (``rollout_samples``), each rollout's response tokens and the tokens of them that train (``rollout_tokens``), their sums (``rollout_response_tokens`` and ``rollout_trained_tokens``), and the count of rollouts that do not assemble into a sample (``unassembled_rollouts``).
 
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~

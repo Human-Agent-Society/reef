@@ -142,6 +142,48 @@ def test_an_answer_without_its_record_is_never_returned_and_a_dead_engine_is_a_b
     assert asyncio.run(ask_failing(tmp_path / "engine", engine_url="http://127.0.0.1:9", refuse_records=False)) == 502
 
 
+def refusing_engine_app(status: int) -> web.Application:
+    """An engine that answers every request with ``status``, as Tinker answers a prompt past the model's context."""
+    app = web.Application()
+
+    async def refuse(request: web.Request) -> web.Response:
+        message = "context_length_exceeded: the prompt exceeds this model's maximum context length. 66527 > 65536"
+        return web.json_response({"error": {"message": message}}, status=status)
+
+    app.router.add_post("/v1/chat/completions", refuse)
+    return app
+
+
+async def ask_refused(tmp_path: Path, status: int, *, stream: bool) -> tuple[int, str]:
+    storage = SQLiteScenarioStorage(tmp_path / "records")
+    storage.open("math").commit_step(expected_step=0, commit=commit("release-1"))
+    coordination = memory_coordination()
+    table = coordination.served_models
+    number = coordination.control_lease.acquire("control-1").number
+    async with TestServer(refusing_engine_app(status)) as engine:
+        served = ServedArtifact("release-1", str(engine.make_url("/")), "math-v1")
+        table.write(ScenarioModel("math", ACTIVE), served, control_lease_number=number)
+        async with TestClient(TestServer(build_inference_app(table, storage, Engines(), tokens=TOKEN))) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers=HEADERS,
+                json={"model": "any", "messages": [{"role": "user"}], "stream": stream},
+            )
+            return response.status, await response.text()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_engine_that_refuses_a_request_answers_with_its_own_status_and_one_that_fails_is_a_bad_gateway(
+    tmp_path: Path, stream: bool
+) -> None:
+    # An agent reads the refusal to repair its run: Harbor's terminus-2 ends or compacts on a context error.
+    status, body = asyncio.run(ask_refused(tmp_path / "refused", 400, stream=stream))
+    assert status == 400 and "context_length_exceeded" in body
+    status, body = asyncio.run(ask_refused(tmp_path / "failed", 500, stream=stream))
+    assert status == 502 and "the engine at" in body
+
+
 @pytest.mark.unit
 def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path) -> None:
     async def check() -> None:

@@ -83,59 +83,56 @@ def common_prefix_length(left: list[int], right: list[int]) -> int:
     return min(len(left), len(right))
 
 
-def extend_with_prompt_delta(
+def extend_with_masked_context(
     tokens: list[int],
     token_mask: list[int],
     token_log_probs: list[float],
-    prompt: list[int],
+    context: list[int],
     retain_log_probs: bool,
     token_topk: list[TopkRow] | None,
 ) -> None:
-    """Exact extension: the new prompt starts with the whole assembled
-    transcript, so append only the masked context it adds."""
-    prompt_delta = prompt[len(tokens) :]
-    tokens.extend(prompt_delta)
-    token_mask.extend([0] * len(prompt_delta))
+    """Append ``context``, the tokens that a new prompt adds after the history that it repeats, as masked context."""
+    tokens.extend(context)
+    token_mask.extend([0] * len(context))
     if retain_log_probs:
-        token_log_probs.extend([0.0] * len(prompt_delta))
+        token_log_probs.extend([0.0] * len(context))
     if token_topk is not None:
-        token_topk.extend(([], []) for _ in prompt_delta)
+        token_topk.extend(([], []) for _ in context)
 
 
 def drift_is_realignable(
     common_prefix: int,
-    latest_response_start: int | None,
-    transcript_length: int,
+    previous_prompt_length: int,
+    previous_call_length: int,
     realign_threshold: int,
     scaffold_tolerance: int,
 ) -> bool:
-    """Whether prompt drift stays inside the latest response (allowing at most
-    ``scaffold_tolerance`` tokens of masked end-of-prompt scaffold before it)
-    and the budget."""
-    if latest_response_start is None or common_prefix < latest_response_start - scaffold_tolerance:
+    """Whether a new prompt that first differs from the previous call (its prompt and output, ``previous_call_length``
+    tokens) at ``common_prefix`` differs at most ``scaffold_tolerance`` tokens before that call's output, and at most
+    ``realign_threshold`` tokens before the call's end."""
+    if common_prefix < previous_prompt_length - scaffold_tolerance:
         return False
-    return transcript_length - common_prefix <= realign_threshold
+    return previous_call_length - common_prefix <= realign_threshold
 
 
 def realign_latest_response(
     tokens: list[int],
     token_mask: list[int],
     token_log_probs: list[float],
-    prompt: list[int],
+    replacement: list[int],
     realign_start: int,
     retain_log_probs: bool,
     token_topk: list[TopkRow] | None,
 ) -> None:
-    """Short drift confined to the latest response (plus at most the scaffold
-    tolerance of masked context before it): replace that span with the
-    prompt's masked rendering of it."""
-    prompt_tail = prompt[realign_start:]
-    tokens[realign_start:] = prompt_tail
-    token_mask[realign_start:] = [0] * len(prompt_tail)
+    """Replace the transcript from ``realign_start``, the latest response and at most the scaffold tolerance of context
+    before it, with ``replacement``, a new prompt's rendering of it, as masked context: that response does not
+    train."""
+    tokens[realign_start:] = replacement
+    token_mask[realign_start:] = [0] * len(replacement)
     if retain_log_probs:
-        token_log_probs[realign_start:] = [0.0] * len(prompt_tail)
+        token_log_probs[realign_start:] = [0.0] * len(replacement)
     if token_topk is not None:
-        token_topk[realign_start:] = [([], []) for _ in prompt_tail]
+        token_topk[realign_start:] = [([], []) for _ in replacement]
 
 
 def make_policy_trajectory(
@@ -184,20 +181,21 @@ def make_multi_turn_policy_trajectory(
 ) -> TrajectorySample | None:
     """Assemble one linear, terminally selected rollout into one sample.
 
-    This follows slime's trajectory builder: exact prompt extension appends
-    masked context, while short drift confined to the latest response is
-    realigned as masked context. A genuine fork returns ``None`` rather than
-    reconstructing training tokens and log probabilities from decoded text.
+    Each call's prompt is compared with the previous call as its sampler saw it: the previous prompt and output. A
+    prompt that repeats the whole previous call appends the rest of it as masked context. A prompt that drops at most
+    ``scaffold_tolerance`` tokens at the end of the previous prompt and then repeats the previous output exactly also
+    appends only the rest of it: the sample keeps the dropped tokens and the sampled output, and that output trains.
+    Qwen3.5 with thinking off needs this, because each generation prompt ends with an empty think block that the next
+    call's history drops. A later output then trains in a context that holds the dropped tokens, which its sampler did
+    not see.
 
-    ``scaffold_tolerance`` lets the drift reach a bounded number of tokens
-    *before* the latest response span. Thinking chat templates need it: the
-    generation prompt ends with an opening ``<think>`` scaffold that the
-    history re-rendering of the same turn drops, so every turn's prompt
-    diverges a couple of tokens ahead of the previous response. That span is
-    always masked prompt context (the previous turn's trained tokens start at
-    the response boundary), so the realignment replaces only masked scaffold,
-    never tokens or log probabilities used for training. Default 0 keeps the
-    strict boundary.
+    Other drift that starts at most ``scaffold_tolerance`` tokens before the previous output, and at most
+    ``realign_threshold`` tokens before the previous call's end, realigns as in slime's trajectory builder: the
+    prompt's tokens from the first difference or from the latest output, whichever comes first, replace the end of the
+    sample as masked context, so the latest output does not train. Any other prompt is a fork and returns ``None``, as
+    does drift that reaches tokens which an earlier prompt dropped; Reef never reconstructs training tokens or log
+    probabilities from decoded text. With the default ``scaffold_tolerance`` 0, a prompt that does not repeat the whole
+    previous prompt is a fork.
     """
     if not items or not math.isfinite(reward) or realign_threshold < 0 or scaffold_tolerance < 0:
         return None
@@ -227,7 +225,12 @@ def make_multi_turn_policy_trajectory(
     token_log_probs: list[float] = []
     token_topk: list[TopkRow] | None = [] if retain_topk else None
     leading_prompt_length = 0
-    latest_response_start: int | None = None
+    # The previous call as its sampler saw it. The transcript also keeps the scaffold that later prompts dropped: from
+    # index ``aligned_start`` on, transcript token ``i`` is the previous call's token ``i - offset``.
+    previous_prompt: list[int] = []
+    previous_output: list[int] = []
+    offset = 0
+    aligned_start = 0
 
     for turn_index, turn in enumerate(turns):
         response_length = len(turn.training.get("loss_mask", []))
@@ -255,29 +258,41 @@ def make_multi_turn_policy_trajectory(
                 token_topk.extend(([], []) for _ in prompt)
             leading_prompt_length = len(prompt)
         else:
-            common_prefix = common_prefix_length(tokens, prompt)
-            if common_prefix == len(tokens):
-                extend_with_prompt_delta(tokens, token_mask, token_log_probs, prompt, retain_log_probs, token_topk)
-            elif drift_is_realignable(
-                common_prefix, latest_response_start, len(tokens), realign_threshold, scaffold_tolerance
-            ):
-                if latest_response_start is None:
-                    raise RuntimeError("realignable response drift has no response boundary")
+            previous_call = previous_prompt + previous_output
+            common_prefix = common_prefix_length(previous_call, prompt)
+            dropped = len(previous_prompt) - common_prefix
+            history_end = common_prefix + len(previous_output)
+            if common_prefix == len(previous_call):
+                extend_with_masked_context(
+                    tokens, token_mask, token_log_probs, prompt[common_prefix:], retain_log_probs, token_topk
+                )
+            elif 0 < dropped <= scaffold_tolerance and prompt[common_prefix:history_end] == previous_output:
+                # The history dropped the end of the previous prompt and repeats its output: keep both, so the
+                # output trains.
+                aligned_start = offset + len(previous_prompt)
+                offset += dropped
+                extend_with_masked_context(
+                    tokens, token_mask, token_log_probs, prompt[history_end:], retain_log_probs, token_topk
+                )
+            else:
+                realign_start = min(len(previous_prompt), common_prefix)
+                if offset + realign_start < aligned_start or not drift_is_realignable(
+                    common_prefix, len(previous_prompt), len(previous_call), realign_threshold, scaffold_tolerance
+                ):
+                    # A genuine fork: the divergence reaches further back than the tolerance, into scaffold that an
+                    # earlier prompt dropped, or past the realign budget.
+                    return None
                 realign_latest_response(
                     tokens,
                     token_mask,
                     token_log_probs,
-                    prompt,
-                    min(latest_response_start, common_prefix),
+                    prompt[realign_start:],
+                    offset + realign_start,
                     retain_log_probs,
                     token_topk,
                 )
-            else:
-                # A genuine fork: the divergence reaches back before the latest
-                # response or exceeds the realign budget.
-                return None
 
-        latest_response_start = len(tokens)
+        previous_prompt, previous_output = prompt, output
         tokens.extend(output)
         token_mask.extend(turn.training.get("loss_mask", []))
         if retain_log_probs:

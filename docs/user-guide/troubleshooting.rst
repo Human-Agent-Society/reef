@@ -37,7 +37,7 @@ describes.
 
 **409 on an inference request.** The engine answered under another model name, or aborted the request, on two attempts. Reef reads the scenario's row again before the second attempt, so a single change of the served model does not cause it. A repeated 409 means that the engine does not serve the model name that the row names. Check the model names that the engine serves.
 
-**502 the engine failed.** The engine returned an error status or could not be reached. The response body carries the engine's status and message; read it. For a 4xx status, the request body is usually the problem.
+**502 the engine failed.** The engine returned a 5xx status, answered with something that is not a JSON object, or could not be reached. The response body carries the engine's message; read it. An engine that refuses the request with a 4xx, for example a prompt longer than the model's context, answers the client with that status and its message.
 
 **404 on a deployment that runs no inference engine.** The deployment sets
 ``inference.backend: none``, so it trains without an engine and its scenarios
