@@ -8,6 +8,7 @@ from reef.core.errors import UnknownScenario
 from reef.core.records_types import RequestType
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
+from reef.service.inference_service import TrafficWeights
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.storage.data import check_owner
@@ -150,8 +151,11 @@ def register_scenario_writes(
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if not payload or set(payload) - {"training_mode", "artifact_evaluation", "activation", "serving_config"}:
-            raise ValueError("expected training_mode, artifact_evaluation, activation or serving_config settings")
+        settings = {"training_mode", "artifact_evaluation", "activation", "serving_config", "traffic_weights"}
+        if not payload or set(payload) - settings:
+            raise ValueError(
+                "expected training_mode, artifact_evaluation, activation, serving_config or traffic_weights settings"
+            )
         if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
             raise ValueError("expected training_mode 'auto' or 'manual'")
         name = request.match_info["scenario"]
@@ -169,6 +173,9 @@ def register_scenario_writes(
             result.update(
                 await asyncio.to_thread(request_service.dispatcher.set_serving_config, name, payload["serving_config"])
             )
+        if "traffic_weights" in payload:
+            weights = TrafficWeights.from_json(payload["traffic_weights"]).by_artifact
+            result.update(await asyncio.to_thread(request_service.dispatcher.set_traffic_weights, name, weights))
         return web.json_response(result)
 
     async def delete_scenario(request: web.Request) -> web.Response:

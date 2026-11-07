@@ -101,6 +101,7 @@ class CoordinationTables:
     sequence: Table
     served_model: Table
     serving_config: Table
+    traffic_weights: Table
     scheduled_stop: Table
     control_lease: Table
     work_item: Table
@@ -128,6 +129,13 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
     # The override of the served component that each scenario's routes serve with (RFC #1097); no row is no field.
     serving_config = Table(
         "serving_config",
+        metadata,
+        Column("scenario", Text, primary_key=True),
+        Column("value_json", Text, nullable=False),
+    )
+    # The weight of each artifact in each scenario's traffic split; no row is no split.
+    traffic_weights = Table(
+        "traffic_weights",
         metadata,
         Column("scenario", Text, primary_key=True),
         Column("value_json", Text, nullable=False),
@@ -181,7 +189,9 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("name", Text, primary_key=True),
         Column("value", BigInteger, nullable=False),
     )
-    return CoordinationTables(sequence, served_model, serving_config, scheduled_stop, control_lease, work_item, mark)
+    return CoordinationTables(
+        sequence, served_model, serving_config, traffic_weights, scheduled_stop, control_lease, work_item, mark
+    )
 
 
 #: The counter row that numbers the changes of the work queues.
@@ -472,6 +482,8 @@ class SQLServedModels(ServedModelsWriter):
                 return item
             self.replace_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
             self.replace_serving_config(connection, served_counter, scenario, {})
+            traffic = self.tables.traffic_weights
+            connection.execute(delete(traffic).where(traffic.c.scenario == scenario))
             return self.work.save(connection, counter, item, moment, state="finished", result={}, ended_at=moment)
 
     def replace_routes(
@@ -710,6 +722,28 @@ class SQLServedModels(ServedModelsWriter):
         with self.database.read() as connection:
             value_json = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
         return {} if value_json is None else cast(dict[str, JsonValue], json.loads(value_json))
+
+    def read_traffic_weights(self, scenario: str) -> Mapping[str, int]:
+        table = self.tables.traffic_weights
+        with self.database.read() as connection:
+            value_json = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
+        return {} if value_json is None else cast(dict[str, int], json.loads(value_json))
+
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
+        table = self.tables.traffic_weights
+        routes = self.tables.served_model
+        with self.database.write(SERVED_SEQUENCE) as (connection, counter):
+            self.checked(connection, control_lease_number)
+            names = connection.execute(select(routes.c.name).where(routes.c.scenario == scenario)).scalars().all()
+            missing = sorted(
+                artifact_id for artifact_id, weight in weights.items() if weight > 0 and artifact_id not in names
+            )
+            if missing:
+                raise ValueError(f"serve these artifacts before they get a traffic weight: {', '.join(missing)}")
+            connection.execute(delete(table).where(table.c.scenario == scenario))
+            if weights:
+                connection.execute(insert(table).values(scenario=scenario, value_json=canonical_json(dict(weights))))
+            counter.next()
 
     def changed_sequence(self) -> int:
         with self.database.read() as connection:

@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
+from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import data_storage, made_task, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
@@ -564,6 +565,24 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     assert processor.status()["ready_samples"] == 0
     assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"
     assert not processor.ready(1)
+
+
+@pytest.mark.unit
+def test_the_records_of_an_artifact_served_beside_train_while_it_serves() -> None:
+    context = PipelineContext("s")
+    later_tasks = LaterSamples()
+    processor = TrainingPipeline(context, record2sample=later_tasks, sample2job=UploadJobData(context, 1, None))
+    processor.push(inference("i1"))
+    later_tasks.finish(
+        "i1", SampleResult.ready((policy_trajectory("i1", [1], [1], [0.0], 1.0, artifact_id="beside"),))
+    )
+    processor.produce()
+    processor.observe_serving_artifact_id("active")
+    assert auto_ids(processor) == (), "an artifact outside the served history is stale"
+    processor.served_artifacts.restore_beside(("beside",))
+    assert len(auto_ids(processor)) == 1
+    processor.served_artifacts.restore_beside(())
+    assert auto_ids(processor) == ()
 
 
 @pytest.mark.unit

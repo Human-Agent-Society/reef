@@ -690,6 +690,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "effective_activation": {"module": "never", "config": {}},
                 "serving_config": {},
                 "effective_serving_config": {"weights": {}},
+                "traffic_weights": {},
                 "job_parameters": {"trajectory": {}, "task": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}

@@ -329,10 +329,12 @@ class Trainer:
         with self._lock:
             self._pipeline.queue_requests(requests, failures)
 
-    def restore_served_artifacts(self, artifact_ids: Iterable[str]) -> None:
-        """Set the artifacts that the scenario served, oldest first, for the staleness check of the pipeline."""
+    def restore_served_artifacts(self, artifact_ids: Iterable[str], beside: Iterable[str] = ()) -> None:
+        """Set the artifacts that the scenario served, oldest first, and those that it serves ``beside`` its active
+        selection, for the staleness check of the pipeline."""
         with self._lock:
             self._pipeline.served_artifacts.restore(tuple(artifact_ids))
+            self._pipeline.served_artifacts.restore_beside(beside)
 
     def fail_pending_request(self, error: str) -> str | None:
         """Mark the reserved request as failed, so its next job data is a skip row; return its ID, or None when no
