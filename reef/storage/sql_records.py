@@ -210,6 +210,20 @@ def node_texts(line: str) -> tuple[str, str | None, str]:
 
 
 @dataclass(frozen=True)
+class NewNode:
+    """The node of one record to add: its sequence, scenario and record ID, and its payload with that payload's key.
+
+    Purpose: a store gives these to ``TrajectoryNodes.add_many`` when it writes records.
+    """
+
+    node_sequence: int
+    scenario: str
+    agent_record_id: str
+    payload: Mapping[str, Any]
+    key: CallKey
+
+
+@dataclass(frozen=True)
 class TrajectoryNodes:
     """The trajectory nodes of one store's records, in one scoped node table (RFC #1054).
 
@@ -261,52 +275,89 @@ class TrajectoryNodes:
         resends, then the newest. The node converts only the request values after its parent's to ATIF. A node
         without a parent keeps the shape and the tools.
         """
-        shape = call_shape(payload)
-        if shape is None:
-            raise ValueError(f"record {agent_record_id!r} has no message list, so it has no trajectory node")
+        self.add_many(connection, [NewNode(node_sequence, scenario, agent_record_id, payload, key)])
+
+    def add_many(self, connection: Connection, new_nodes: Sequence[NewNode]) -> None:
+        """Add ``new_nodes``, in sequence order, with a number of statements that does not grow with their count.
+
+        The parent of each is as ``add`` gives, also among the earlier ones of ``new_nodes``.
+        """
+        if not new_nodes:
+            return
         table = self.nodes.table
-        candidates: list[ParentCandidate] = []
-        for batch in batches(key.prefix_sha256):
+        candidates: dict[tuple[str, str], list[ParentCandidate]] = {}
+        hashes = sorted({prefix for node in new_nodes for prefix in node.key.prefix_sha256})
+        for batch in batches(hashes):
             rows = connection.execute(
-                select(table.c.node_sequence, table.c.entry_count, table.c.reply_count, table.c.reply_sha256).where(
-                    self.nodes.condition(), table.c.scenario == scenario, table.c.list_sha256.in_(batch)
+                select(
+                    table.c.scenario,
+                    table.c.list_sha256,
+                    table.c.node_sequence,
+                    table.c.entry_count,
+                    table.c.reply_count,
+                    table.c.reply_sha256,
+                ).where(
+                    self.nodes.condition(),
+                    table.c.scenario.in_({node.scenario for node in new_nodes}),
+                    table.c.list_sha256.in_(batch),
                 )
             )
-            candidates.extend(
-                ParentCandidate(int(sequence), int(count), int(reply_count), reply)
-                for sequence, count, reply_count, reply in rows
+            for scenario, list_sha256, sequence, count, reply_count, reply in rows:
+                candidates.setdefault((scenario, list_sha256), []).append(
+                    ParentCandidate(int(sequence), int(count), int(reply_count), reply)
+                )
+        values: list[dict[str, Any]] = []
+        children: dict[int, int] = {}
+        for node in new_nodes:
+            shape = call_shape(node.payload)
+            if shape is None:
+                raise ValueError(f"record {node.agent_record_id!r} has no message list, so it has no trajectory node")
+            parent = best_parent(
+                node.key,
+                (found for prefix in node.key.prefix_sha256 for found in candidates.get((node.scenario, prefix), ())),
             )
-        parent = best_parent(key, candidates)
-        entries_json = canonical_json(atif_entries(payload, shape, 0 if parent is None else parent.entry_count))
-        shape_json = None
-        if parent is None:
-            agent = atif_agent(payload["tools"], shape.provider) if shape.has_tools else None
-            shape_json = canonical_json({"shape": shape.as_json(), "agent": agent})
-        reply, call = atif_reply(payload, shape)
-        call_json = canonical_json({"reply": reply, "call": call})
-        connection.execute(
-            table.insert().values(
-                **self.nodes.scope,
-                node_sequence=node_sequence,
-                parent_sequence=None if parent is None else parent.sequence,
-                scenario=scenario,
-                agent_record_id=agent_record_id,
-                entry_count=key.entry_count,
-                list_sha256=key.list_sha256,
-                reply_count=key.reply_count,
-                reply_sha256=key.reply_sha256,
-                entries_json=entries_json,
-                shape_json=shape_json,
-                call_json=call_json,
-                body_bytes=len((entries_json + (shape_json or "") + call_json).encode("utf-8")),
-                record_count=1,
+            start = 0 if parent is None else parent.entry_count
+            entries_json = canonical_json(atif_entries(node.payload, shape, start))
+            shape_json = None
+            if parent is None:
+                agent = atif_agent(node.payload["tools"], shape.provider) if shape.has_tools else None
+                shape_json = canonical_json({"shape": shape.as_json(), "agent": agent})
+            reply, call = atif_reply(node.payload, shape)
+            call_json = canonical_json({"reply": reply, "call": call})
+            values.append(
+                {
+                    **self.nodes.scope,
+                    "node_sequence": node.node_sequence,
+                    "parent_sequence": None if parent is None else parent.sequence,
+                    "scenario": node.scenario,
+                    "agent_record_id": node.agent_record_id,
+                    "entry_count": node.key.entry_count,
+                    "list_sha256": node.key.list_sha256,
+                    "reply_count": node.key.reply_count,
+                    "reply_sha256": node.key.reply_sha256,
+                    "entries_json": entries_json,
+                    "shape_json": shape_json,
+                    "call_json": call_json,
+                    "body_bytes": len((entries_json + (shape_json or "") + call_json).encode("utf-8")),
+                    "record_count": 1,
+                }
             )
-        )
-        if parent is not None:
+            if parent is not None:
+                children[parent.sequence] = children.get(parent.sequence, 0) + 1
+            candidates.setdefault((node.scenario, node.key.list_sha256), []).append(
+                ParentCandidate(node.node_sequence, node.key.entry_count, node.key.reply_count, node.key.reply_sha256)
+            )
+        connection.execute(table.insert().values(values))
+        # A parent that is new in this call gets its children here too. Most parents have one child, so this is
+        # usually one statement.
+        by_count: dict[int, list[int]] = {}
+        for sequence, count in children.items():
+            by_count.setdefault(count, []).append(sequence)
+        for count, sequences in by_count.items():
             connection.execute(
                 update(table)
-                .where(self.nodes.condition(), table.c.node_sequence == parent.sequence)
-                .values(record_count=table.c.record_count + 1)
+                .where(self.nodes.condition(), table.c.node_sequence.in_(sequences))
+                .values(record_count=table.c.record_count + count)
             )
 
     def paths(self, connection: Connection, node_sequences: Iterable[int], *columns: str) -> list[RowMapping]:

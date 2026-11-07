@@ -96,6 +96,7 @@ from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
     SEGMENT_COLUMNS,
+    NewNode,
     ScopedTable,
     TrajectoryNodes,
     batches,
@@ -260,11 +261,12 @@ class SQLDataStore(DataStore):
         remove a row between two of them."""
 
     @abstractmethod
-    def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
-        """Insert one ``data_item`` row unless the owner has its ID already; return whether it inserted it.
+    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+        """Insert the ``data_item`` rows ``values`` in one statement, each unless the owner has its ID already; return
+        the sequence of each row that it inserted, by item ID.
 
-        The insert never fails on the unique ``(owner, item_id)``: a row that another transaction inserts
-        first wins, and the caller compares digests after the insert.
+        The insert never fails on the unique ``(owner, item_id)``: a row that another transaction inserts first wins,
+        and the caller compares digests after the insert.
         """
 
     def lock_scenarios(self, connection: Connection, owner: str, scenarios: Iterable[str]) -> None:
@@ -436,7 +438,11 @@ class SQLDataStore(DataStore):
                 places = {item_id: line for (item_id, _), line in zip(new, lines, strict=True)}
         with self.transaction() as connection:
             self.lock_scenarios(connection, owner, scenarios_of(metadata for _, metadata, _ in prepared))
+            values: dict[str, dict[str, Any]] = {}
+            calls: dict[str, tuple[str, Mapping[str, Any], Any]] = {}
             for item, metadata, digest in prepared:
+                if item.item_id in values:
+                    continue
                 content = dict(item.content) if isinstance(item.content, Mapping) else None
                 place = places.get(item.item_id)
                 payload = content["payload"] if content is not None and metadata["kind"] == "record" else None
@@ -444,38 +450,67 @@ class SQLDataStore(DataStore):
                 shape = None if payload is None else call_shape(payload)
                 if content is not None and shape is not None:
                     content["payload"] = {}
-                inserted = self.insert_new_item(
-                    connection,
-                    {
-                        "owner": owner,
-                        "item_id": item.item_id,
-                        "kind": metadata["kind"],
-                        "digest": digest,
-                        "metadata_json": canonical_json(metadata),
-                        "content_json": None if content is None or place is not None else canonical_json(content),
-                        "message_field": None if shape is None else shape.message_field,
-                        "segment_id": None if place is None else place.segment_id,
-                        "segment_offset": None if place is None else place.offset,
-                        "segment_length": None if place is None else place.length,
-                    },
+                if payload is not None and key is not None:
+                    calls[item.item_id] = (metadata["origin"]["scenario"], payload, key)
+                values[item.item_id] = {
+                    "owner": owner,
+                    "item_id": item.item_id,
+                    "kind": metadata["kind"],
+                    "digest": digest,
+                    "metadata_json": canonical_json(metadata),
+                    "content_json": None if content is None or place is not None else canonical_json(content),
+                    "message_field": None if shape is None else shape.message_field,
+                    "segment_id": None if place is None else place.segment_id,
+                    "segment_offset": None if place is None else place.offset,
+                    "segment_length": None if place is None else place.length,
+                }
+            sequences = self.insert_new_items(connection, list(values.values()))
+            metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
+            uses = [
+                {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
+                for item_id in sequences
+                for scenario, split in metadata_of[item_id]["scenarios"].items()
+            ]
+            if uses:
+                connection.execute(self.scenarios_table.insert().values(uses))
+            self.trajectory_nodes(owner).add_many(
+                connection,
+                [
+                    NewNode(sequence, calls[item_id][0], item_id, calls[item_id][1], calls[item_id][2])
+                    for item_id, sequence in sorted(sequences.items(), key=lambda pair: pair[1])
+                    if item_id in calls
+                ],
+            )
+            # An ID that was stored before, or that a concurrent create stored first, keeps its row; another digest
+            # there is a conflict, and the rollback removes the rows that this call inserted. A row of this call has
+            # the digest of its first item with that ID. Only another digest needs the stored content, which can be
+            # in S3, and this transaction holds its locks.
+            kept = [item_id for item_id in values if item_id not in sequences]
+            stored_rows = self.rows(connection, owner, kept) if kept else {}
+            for row in self.stored_items(
+                connection,
+                owner,
+                [row for item_id, row in stored_rows.items() if row["digest"] != values[item_id]["digest"]],
+            ):
+                if not item_digest_matches(row, values[row.item_id]["digest"]):
+                    raise ItemConflict(f"item {row.item_id!r} of {owner!r} is stored with other content")
+            stored = {
+                item.item_id: item
+                for item in self.stored_items(connection, owner, list(stored_rows.values()), content=False)
+            }
+            for item, _, digest in prepared:
+                if item.item_id in sequences and digest != values[item.item_id]["digest"]:
+                    raise ItemConflict(f"item {item.item_id!r} of {owner!r} is stored with other content")
+            return tuple(
+                (
+                    stored[item_id]
+                    if item_id in stored
+                    else StoredItem(
+                        sequences[item_id], owner, item_id, metadata_of[item_id], values[item_id]["digest"], None
+                    )
                 )
-                if inserted:
-                    self.write_scenarios(connection, owner, item.item_id, metadata["scenarios"])
-                    if payload is not None and key is not None:
-                        sequence = self.rows(connection, owner, [item.item_id])[item.item_id]["sequence"]
-                        self.trajectory_nodes(owner).add(
-                            connection, int(sequence), metadata["origin"]["scenario"], item.item_id, payload, key
-                        )
-            # An ID that was stored before, or that a concurrent create stored first, keeps its row; another
-            # digest there is a conflict, and the rollback removes the rows that this call inserted.
-            rows = self.rows(connection, owner, item_ids)
-            digests = {entry[0].item_id: entry[2] for entry in prepared}
-            # Only another digest needs the stored content, which can be in S3 and this transaction holds its locks.
-            other = [rows[item_id] for item_id in item_ids if rows[item_id]["digest"] != digests[item_id]]
-            for stored_item in self.stored_items(connection, owner, other):
-                if not item_digest_matches(stored_item, digests[stored_item.item_id]):
-                    raise ItemConflict(f"item {stored_item.item_id!r} of {owner!r} is stored with other content")
-            return self.stored_items(connection, owner, [rows[item_id] for item_id in item_ids], content=False)
+                for item_id in item_ids
+            )
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
@@ -840,15 +875,14 @@ class SQLiteDataStore(SQLDataStore):
                 self.connection.exec_driver_sql("BEGIN IMMEDIATE")
                 yield self.connection
 
-    def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
+    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         statement = (
             sqlite_insert(self.items_table)
-            .values(**values)
+            .values(list(values))
             .on_conflict_do_nothing(index_elements=["owner", "item_id"])
-            .returning(self.items_table.c.sequence)
+            .returning(self.items_table.c.item_id, self.items_table.c.sequence)
         )
-        # A row comes back only when this statement inserted one; rowcount is not reliable with RETURNING.
-        return connection.execute(statement).first() is not None
+        return {item_id: int(sequence) for item_id, sequence in connection.execute(statement)}
 
     def metadata_string(self, key: str) -> ColumnElement[str]:
         path = f"$.{key}"
@@ -935,15 +969,14 @@ class PostgresDataStore(SQLDataStore):
         with self.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
             yield connection
 
-    def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
+    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         statement = (
             postgresql_insert(self.items_table)
-            .values(**values)
+            .values(list(values))
             .on_conflict_do_nothing(index_elements=["owner", "item_id"])
-            .returning(self.items_table.c.sequence)
+            .returning(self.items_table.c.item_id, self.items_table.c.sequence)
         )
-        # A row comes back only when this statement inserted one; rowcount is not reliable with RETURNING.
-        return connection.execute(statement).first() is not None
+        return {item_id: int(sequence) for item_id, sequence in connection.execute(statement)}
 
     def metadata_string(self, key: str) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
