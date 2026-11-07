@@ -134,7 +134,7 @@ def artifact_item_of(dispatcher: Dispatcher, owner: str, item_id: str) -> Stored
 
 def source_uri_of(item: StoredItem) -> str:
     """The ``source_uri`` of the artifact item ``item``; ``ValueError`` when it has none."""
-    uri = item.content["source_uri"]
+    uri = (item.content or {}).get("source_uri")
     if uri is None:
         raise ValueError(
             f"artifact item {item.item_id!r} has no source_uri: its repository gives no URI to import from"
@@ -153,7 +153,7 @@ def item_artifact_id(dispatcher: Dispatcher, item: StoredItem) -> str:
     try:
         (updated,) = store.update(item.owner, [item.item_id], {"artifact_id": f"artifact:{uuid.uuid4().hex}"})
     except ValueError:
-        updated = store.read(item.owner, item.item_id)
+        return str(artifact_item_of(dispatcher, item.owner, item.item_id).metadata["artifact_id"])
     return str(updated.metadata["artifact_id"])
 
 
