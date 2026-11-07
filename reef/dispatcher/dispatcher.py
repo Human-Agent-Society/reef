@@ -627,6 +627,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         source: Mapping[str, str],
         directory: Path,
         artifact_id: str | None = None,
+        serving_profile: str | None = None,
     ) -> ComponentArtifact:
         """Publish ``files`` as an artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
 
@@ -634,7 +635,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """
         with self.registry.lock_for(scenario):
             imported = self.registry.require(scenario).import_artifact(
-                files, component, source=source, directory=directory, artifact_id=artifact_id
+                files,
+                component,
+                source=source,
+                directory=directory,
+                artifact_id=artifact_id,
+                serving_profile=serving_profile,
             )
         self.request_artifact_copy(scenario)
         return imported
@@ -841,7 +847,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_settings(self, scenario: str) -> dict[str, Any]:
         """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
 
-        ``serving_profile`` is the profile that the scenario named when it was created, or None.
         ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
         scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
@@ -861,7 +866,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             job_parameters = current.stepping_trainers()[0].trainer.pipeline.sample2job.context.job_parameters
             return {
                 "scenario": scenario,
-                "serving_profile": current.serving_profile,
                 "training_mode": current.training_mode,
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,

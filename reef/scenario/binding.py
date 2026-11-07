@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from reef.artifact.artifact import Artifact
+from reef.artifact.artifact import Artifact, with_serving_profile
 from reef.artifact.components import ScenarioComponents
 from reef.core.activation import ActivationRule
 from reef.core.reports import ReportBase
@@ -33,6 +33,20 @@ class ScenarioBinding:
     training_component: TrainingComponent | None = None
     #: The actual serving routes, or None for a scenario without them, whose served artifact is unknown.
     served_models: ServedModels | None = None
+
+
+def profiled_artifact(runtime: InferenceRuntime | None, artifact: Artifact, serving_profile: str | None) -> Artifact:
+    """``artifact`` with ``serving_profile`` in its own metadata (RFC #1233), or ``artifact`` itself for None.
+
+    Raise ``ValueError`` when ``runtime`` refuses the profile (``InferenceRuntime.check_serving_profile``), or when
+    there is no runtime. The scenario factory calls it for a new root, and the committer for an import.
+    """
+    if serving_profile is None:
+        return artifact
+    if runtime is None:
+        raise ValueError(f"this deployment serves no model, so it refuses serving profile {serving_profile!r}")
+    runtime.check_serving_profile(serving_profile, artifact)
+    return with_serving_profile(artifact, serving_profile)
 
 
 def activate_snapshot(

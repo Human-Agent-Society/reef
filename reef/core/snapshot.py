@@ -81,13 +81,9 @@ class RootSource:
       the non-empty URI that its files were read from, and ``version`` what the source served there (``""`` when
       the source names none), as an import records them. ``inputs`` is empty.
 
-    With either kind, ``serving_profile`` is ``None`` or the non-empty serving profile that the scenario named when
-    it was created (RFC #1233). The inference runtime defines and checks the profiles; Reef only keeps the value. It
-    never changes, so every release of the scenario carries the same one.
-
     Purpose: ``ScenarioFactory`` makes the value when it creates a scenario, and the scenario metadata stores it as
     ``to_dict``. A trainer gives it to ``TrainingComponent.root_start``, and the snapshot list shows it on the
-    creation row. An inference runtime reads ``serving_profile`` from the release that it activates.
+    creation row.
     """
 
     kind: Literal["default", "item"]
@@ -95,13 +91,8 @@ class RootSource:
     item: str | None = None
     uri: str | None = None
     version: str | None = None
-    serving_profile: str | None = None
 
     def __post_init__(self) -> None:
-        if self.serving_profile is not None and (
-            not isinstance(self.serving_profile, str) or not self.serving_profile
-        ):
-            raise ValueError("a root source's serving_profile is a non-empty string or None")
         if not isinstance(self.inputs, Mapping):
             raise ValueError("a root source's inputs are a mapping")
         if self.kind == "default":
@@ -121,31 +112,25 @@ class RootSource:
             raise ValueError(f"a root source's kind is 'default' or 'item', not {self.kind!r}")
 
     def to_dict(self) -> dict[str, Any]:
-        """``{kind: "default", inputs}`` or ``{kind: "item", item, uri, version}``, with ``serving_profile`` when it
-        is set; ``from_dict`` reads it back."""
+        """``{kind: "default", inputs}`` or ``{kind: "item", item, uri, version}``; ``from_dict`` reads it back."""
         if self.kind == "default":
-            value: dict[str, Any] = {"kind": "default", "inputs": dict(self.inputs)}
-        else:
-            value = {"kind": "item", "item": self.item, "uri": self.uri, "version": self.version}
-        if self.serving_profile is not None:
-            value["serving_profile"] = self.serving_profile
-        return value
+            return {"kind": "default", "inputs": dict(self.inputs)}
+        return {"kind": "item", "item": self.item, "uri": self.uri, "version": self.version}
 
     @classmethod
     def from_dict(cls, value: object) -> RootSource:
         """Read ``to_dict``'s object; ``ValueError`` for any other value."""
         if not isinstance(value, Mapping):
             raise ValueError(f"a root source is an object, not {value!r}")
-        profile = value.get("serving_profile")
-        keys = set(value) - {"serving_profile"}
-        if value.get("kind") == "default" and keys == {"kind", "inputs"} and isinstance(value["inputs"], Mapping):
-            return cls("default", inputs=dict(value["inputs"]), serving_profile=profile)
-        if value.get("kind") == "item" and keys == {"kind", "item", "uri", "version"}:
-            return cls("item", item=value["item"], uri=value["uri"], version=value["version"], serving_profile=profile)
-        raise ValueError(
-            f"a root source is {{kind, inputs}} or {{kind, item, uri, version}}, with an optional serving_profile, "
-            f"not {value!r}"
-        )
+        if (
+            value.get("kind") == "default"
+            and set(value) == {"kind", "inputs"}
+            and isinstance(value["inputs"], Mapping)
+        ):
+            return cls("default", inputs=dict(value["inputs"]))
+        if value.get("kind") == "item" and set(value) == {"kind", "item", "uri", "version"}:
+            return cls("item", item=value["item"], uri=value["uri"], version=value["version"])
+        raise ValueError(f"a root source is {{kind, inputs}} or {{kind, item, uri, version}}, not {value!r}")
 
 
 __all__ = [

@@ -112,11 +112,6 @@ class Scenario:
         return self._binding.runtime
 
     @property
-    def serving_profile(self) -> str | None:
-        """The serving profile that the scenario named when it was created (``RootSource.serving_profile``)."""
-        return self._committer.root_source.serving_profile
-
-    @property
     def activation_rule(self) -> ActivationRule:
         """The rule that decides whether an artifact that training makes serves."""
         return self._committer.activation_rule
@@ -537,10 +532,16 @@ class Scenario:
         source: Mapping[str, str],
         directory: Path,
         artifact_id: str | None = None,
+        serving_profile: str | None = None,
     ) -> ComponentArtifact:
         """Publish ``files`` as an artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
         return self._committer.import_artifact(
-            files, component, source=source, directory=directory, artifact_id=artifact_id
+            files,
+            component,
+            source=source,
+            directory=directory,
+            artifact_id=artifact_id,
+            serving_profile=serving_profile,
         )
 
     def used_record(self, record_id: str) -> AgentRecord | None:

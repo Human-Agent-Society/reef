@@ -15,7 +15,7 @@ from tests.support.runtime_stubs import runtime_bindings
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import SnapshotRef
+from reef.artifact.artifact import SnapshotRef, serving_profile_of
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
@@ -223,7 +223,6 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                     "scenario": name,
                     "owner": "acme",
                     "components": {imported["component"]: started},
-                    "serving_profile": None,
                     "artifact_id": started,
                 }
                 scenario = cells[name].get_or_create_scenario(name)
@@ -259,11 +258,14 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
 
 
 @pytest.mark.integration
-def test_a_scenario_keeps_its_serving_profile_and_takes_only_artifacts_of_that_profile(tmp_path: Path) -> None:
-    """RFC #1233: the runtime checks the profile, every release and library item of the scenario names it, and a
-    scenario of another profile refuses the item. A process trains one scenario, so each scenario has its own Cell."""
-    cells = {name: cell(tmp_path, name, serves_profiles=True) for name in ("qwen", "muse", "qwen-copy")}
-    plain = cell(tmp_path, "plain")
+def test_each_artifact_names_its_own_serving_profile_and_its_library_item_keeps_it(tmp_path: Path) -> None:
+    """RFC #1233: the runtime checks each profile, a scenario holds artifacts of several profiles, the library item
+    keeps the artifact's profile, and an import of the item cannot change it."""
+    profiled, other, plain = (
+        cell(tmp_path, "profiled", serves_profiles=True),
+        cell(tmp_path, "other", serves_profiles=True),
+        cell(tmp_path, "plain"),
+    )
 
     async def run() -> None:
         async with client_of(plain, tmp_path) as client:
@@ -272,49 +274,48 @@ def test_a_scenario_keeps_its_serving_profile_and_takes_only_artifacts_of_that_p
             )
             assert refused.status == 400 and "takes no serving profile" in await refused.text()
             assert not plain.has_scenario("plain")
-        async with client_of(cells["qwen"], tmp_path) as client:
-            unknown = await client.post(
-                "/reef/scenarios", json={"name": "qwen", "owner": "acme", "serving_profile": "gpt@1"}
-            )
+        async with client_of(profiled, tmp_path) as client:
+            body = {"name": "math", "owner": "acme"}
+            unknown = await client.post("/reef/scenarios", json={**body, "serving_profile": "gpt@1"})
             assert unknown.status == 400 and "unknown serving profile" in await unknown.text()
-            assert not cells["qwen"].has_scenario("qwen")
-            created = await client.post(
-                "/reef/scenarios", json={"name": "qwen", "owner": "acme", "serving_profile": "qwen@1"}
-            )
+            assert not profiled.has_scenario("math")
+            created = await client.post("/reef/scenarios", json={**body, "serving_profile": "qwen@1"})
             assert created.status == 201, await created.text()
-            assert (await created.json())["serving_profile"] == "qwen@1"
-            settings = await (await client.get("/reef/scenarios/qwen/settings")).json()
-            assert settings["serving_profile"] == "qwen@1"
-            imported = await (
+            root = (await created.json())["artifact_id"]
+            assert (await library_item(client, f"math/{root}"))["metadata"]["serving_profile"] == "qwen@1"
+
+            source = weights(tmp_path / "muse", b"w9").as_uri()
+            muse = await client.post(
+                "/reef/scenarios/math/artifacts", json={"source": source, "serving_profile": "muse@1"}
+            )
+            assert muse.status == 201, await muse.text()
+            muse_item = f"math/{(await muse.json())['artifact_id']}"
+            assert (await library_item(client, muse_item))["metadata"]["serving_profile"] == "muse@1"
+            plain_import = await (
                 await client.post(
-                    "/reef/scenarios/qwen/artifacts", json={"source": weights(tmp_path / "source", b"w9").as_uri()}
+                    "/reef/scenarios/math/artifacts", json={"source": weights(tmp_path / "w", b"w").as_uri()}
                 )
             ).json()
-            item_id = f"qwen/{imported['artifact_id']}"
-            assert (await library_item(client, item_id))["metadata"]["serving_profile"] == "qwen@1"
-            listed = (await (await client.get("/reef/scenarios/qwen/artifacts")).json())["artifacts"]
-            (root,) = [row for row in listed if row["operation"] == "creation"]
-            assert root["source"]["serving_profile"] == "qwen@1"
-        async with client_of(cells["muse"], tmp_path) as client:
-            created = await client.post(
-                "/reef/scenarios", json={"name": "muse", "owner": "acme", "serving_profile": "muse@1"}
+            assert (
+                "serving_profile"
+                not in (await library_item(client, f"math/{plain_import['artifact_id']}"))["metadata"]
             )
-            assert created.status == 201, await created.text()
-            into = await client.post("/reef/scenarios/muse/artifacts", json={"item": item_id})
-            assert into.status == 400 and "needs serving profile 'qwen@1'" in await into.text()
-        async with client_of(cells["qwen-copy"], tmp_path) as client:
-            body = {"name": "qwen-copy", "owner": "acme", "artifact_id": item_id}
-            refused = await client.post("/reef/scenarios", json={**body, "serving_profile": "muse@1"})
-            assert refused.status == 400 and "needs serving profile" in await refused.text()
-            assert not cells["qwen-copy"].has_scenario("qwen-copy")
-            started = await client.post("/reef/scenarios", json={**body, "serving_profile": "qwen@1"})
-            assert started.status == 201, await started.text()
-            assert (await started.json())["artifact_id"] == imported["artifact_id"]
+        async with client_of(other, tmp_path) as client:
+            assert (await client.post("/reef/scenarios", json={"name": "other", "owner": "acme"})).status == 201
+            changed = await client.post(
+                "/reef/scenarios/other/artifacts", json={"item": muse_item, "serving_profile": "qwen@1"}
+            )
+            assert changed.status == 400 and "has serving profile 'muse@1'" in await changed.text()
+            kept = await client.post("/reef/scenarios/other/artifacts", json={"item": muse_item})
+            assert kept.status == 201, await kept.text()
+            scenario = other.registry.require("other")
+            _, snapshot = scenario.resolve_artifact((await kept.json())["artifact_id"])
+            assert serving_profile_of(snapshot) == "muse@1"
 
     try:
         asyncio.run(run())
     finally:
-        for dispatcher in (*cells.values(), plain):
+        for dispatcher in (profiled, other, plain):
             dispatcher.close()
 
 

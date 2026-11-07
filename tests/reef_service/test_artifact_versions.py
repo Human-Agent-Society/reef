@@ -17,6 +17,7 @@ from tests.reef_service.test_served_artifacts import serving_dispatcher
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import (
     ImportingComponent,
+    ImportingInference,
     RecordingExperimentTracker,
     dispatcher,
     inference,
@@ -26,6 +27,7 @@ from tests.support.artifact_versions import (
 from tests.support.runtime_stubs import runtime_bindings
 from tests.support.serving import wait_for_serving
 
+from reef.artifact.artifact import serving_profile_of
 from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
@@ -181,6 +183,23 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     train(value, 3)
     assert runtime.submitted[-1].start == imported
     assert value.list_artifacts("math")[0]["parent_artifact_id"] == target["artifact_id"]
+    value.close()
+
+
+def test_a_training_artifact_keeps_the_serving_profile_of_its_training_start(tmp_path, monkeypatch) -> None:
+    """RFC #1233: the weights of a training artifact come from its training start, so it names the start's profile."""
+    monkeypatch.setattr(ImportingInference, "check_serving_profile", lambda self, profile, artifact: None)
+    value, _, _ = dispatcher(tmp_path)
+    value.create_scenario("math", None, "qwen@1")
+    train(value, 1)
+    train(value, 2)
+    scenario = value.get_or_create_scenario("math")
+
+    profiles = [
+        serving_profile_of(scenario.resolve_artifact(row["artifact_id"])[1]) for row in value.list_artifacts("math")
+    ]
+
+    assert len(profiles) == 3 and set(profiles) == {"qwen@1"}
     value.close()
 
 

@@ -149,7 +149,6 @@ def register_scenario_writes(
             "scenario": scenario.name,
             "owner": dispatcher.scenario_owner(name),
             "components": components,
-            "serving_profile": scenario.serving_profile,
         }
         if len(components) == 1:
             answer["artifact_id"] = next(iter(components.values()))

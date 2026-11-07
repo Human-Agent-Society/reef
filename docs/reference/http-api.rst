@@ -725,8 +725,8 @@ its original content and digest when every other content field matches.
 The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
-The item of a scenario with a serving profile also has ``serving_profile`` in
-its metadata, and only a scenario with the same profile imports it.
+The item of an artifact with a `serving profile <#serving-profiles>`__ also
+has ``serving_profile`` in its metadata.
 Its ``source_uri`` comes from the artifact backend: a backend
 that keeps releases where other deployments can read them, such as an object
 store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
@@ -1295,13 +1295,9 @@ Create a scenario
   <../user-guide/operate.rst#starting-artifacts>`__).
 - ``component``: the component that holds the item. Leave it out when the
   scenario has one component. It needs ``artifact_id``.
-- ``serving_profile``: the model that the scenario serves, such as
-  ``qwen3.8-27b@1``, on a deployment whose inference runtime serves several
-  (RFC #1233). The runtime defines the profiles and refuses an unknown one with
-  400. A runtime that serves one model refuses every profile. The profile never
-  changes after creation. Every artifact row's ``source`` and every artifact
-  item of the scenario name it, and an artifact item that names another
-  profile cannot start or enter the scenario (400).
+- ``serving_profile``: the `serving profile <#serving-profiles>`__ of the
+  starting artifact. Without it, the starting artifact keeps the item's own
+  profile, or has none.
 
 Reef stores the starting artifacts and registers the scenario with their
 component mapping. With ``artifact_id``, Reef reads the item's files and checks
@@ -1314,8 +1310,7 @@ check refuses it, Reef registers no scenario. It answers with the status of
 the refusal, such as 400 for a directory without the component's layout or 404
 for an item that the owner does not store.
 
-The answer is ``{scenario, owner, components, serving_profile}``.
-``serving_profile`` is null for a scenario without one. ``components`` maps each
+The answer is ``{scenario, owner, components}``. ``components`` maps each
 component name to its selected ``artifact_id``. A scenario with one component
 also returns that value as ``artifact_id``. The status is 201 for a new
 scenario. An existing scenario returns 200 with its current selections and
@@ -1340,8 +1335,8 @@ returns HTTP 404, and you create the scenario first:
 +=============================================+=============================================+
 | ``POST /reef/scenarios``                    | ``{"name", "owner"?, "artifact_id"?,        |
 |                                             | "component"?, "serving_profile"?}`` →       |
-|                                             | ``{scenario, owner, components,             |
-|                                             | serving_profile, artifact_id?}``;           |
+|                                             | ``{scenario, owner,                         |
+|                                             | components, artifact_id?}``;                |
 |                                             | 201 created, 200 already existed            |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios``                     | every known scenario, its selections        |
@@ -1586,7 +1581,6 @@ scenario:
 
    {
      "scenario": "agents",
-     "serving_profile": null,
      "training_mode": "auto",
      "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
      "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
@@ -1596,8 +1590,6 @@ scenario:
      "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
-- ``serving_profile`` is the profile that the scenario named when it was
-  created (`Create a scenario`_), or null. An update cannot change it.
 - ``training_mode`` is what the scenario runs.
 - ``artifact_evaluation`` and ``activation`` are the stored settings, or null.
 - ``effective_activation`` is the rule that applies: the scenario's
@@ -2063,6 +2055,27 @@ files, returns 404. ``?signed=1`` returns a `signed download URL
 <#signed-download-urls>`__ of the list or the file. The data service answers
 this route.
 
+Serving profiles
+~~~~~~~~~~~~~~~~
+
+A serving profile names the model that serves an artifact, such as
+``qwen3.8-27b@1`` (RFC #1233). It lets one deployment serve artifacts of
+several base models, also in one scenario. The deployment's inference runtime
+defines the profiles. It checks a profile when an artifact gets one and
+refuses an unknown profile with 400. A runtime that serves one model refuses
+every profile. An artifact without a profile is served with the deployment's
+model.
+
+An artifact gets its profile when it is made, and the profile never changes:
+
+- A new scenario's starting artifact gets the ``serving_profile`` of `Create a
+  scenario`_.
+- An import gets the ``serving_profile`` of its body, or its item's own.
+- An artifact that training makes gets the profile of its training start.
+
+The profile is in the artifact's own metadata, so it moves with the artifact
+to other scenarios through its artifact item.
+
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
 
@@ -2070,7 +2083,10 @@ Import an artifact
 artifact from the directory that a URI names. Leave out ``component`` when
 the scenario has one component. The body is ``{"source": "<uri>"}``, or
 ``{"item": "<id>"}`` for an `artifact item <#artifact-items>`__ of the
-scenario's owner, whose ``source_uri`` Reef reads. Reef checks the layout
+scenario's owner, whose ``source_uri`` Reef reads. Either body can also have
+``"serving_profile"``, the `serving profile <#serving-profiles>`__ of the new
+artifact. An item's own profile applies when the body names none, and a body
+that names another one returns 400. Reef checks the layout
 below on the source, and then copies the directory from one of these URIs:
 
 - ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
