@@ -434,6 +434,25 @@ def test_creates_that_wait_for_one_scenario_share_a_transaction(postgres_config,
         assert not store.waiting
 
 
+def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
+    (made,) = calls(1)
+    store.create("acme", [made, trajectory("t1", scenarios={"coding": "train", "review": "train"})])
+    store.update("acme", [made.item_id], {"scenarios": {"review": "train"}})
+    with pytest.raises(ValueError, match="stays in 'coding'"):
+        store.update("acme", [made.item_id], {"scenarios": {"coding": None}})
+
+    assert store.remove_scenario("acme", "coding") == 2
+    assert store.query("acme", scenario="coding") == ()
+    assert store.scenario_items("acme", "coding", kinds=("record", "trajectory")) == ()
+    assert [(item.item_id, dict(item.scenarios)) for item in store.query("acme")] == [
+        (made.item_id, {"review": "train"}),
+        ("t1", {"review": "train"}),
+    ]
+    assert store.scenarios_with_records("acme") == ("review",)
+    assert store.remove_scenario("acme", "coding") == 0
+    assert store.remove_scenario("globex", "review") == 0
+
+
 def test_the_store_lists_the_scenarios_with_record_items(store):
     assert store.scenarios_with_records("acme") == ()
     store.create("acme", calls(1))
