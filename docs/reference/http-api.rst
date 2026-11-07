@@ -759,7 +759,7 @@ Read, query, update and delete items
   leaves it out. Use it with ``kind=artifact`` to read the artifact library's
   kinds and sources in one page; a page of trajectories with content can be
   large.
-- ``GET /reef/namespaces/{owner}/data/groups/{key}?kind=&before=&limit=``
+- ``GET /reef/namespaces/{owner}/data/groups/{key}?kind=&scenario=&before=&limit=``
   groups the owner's items of ``kind`` by the string under ``key`` in their
   metadata, for example the trajectories of each uploaded file by
   ``set_id``: ``{"owner", "groups", "next"}``. Each group is ``{"value",
@@ -767,11 +767,14 @@ Read, query, update and delete items
   null for the items without a string under ``key``. ``metadata`` is that of
   the group's first item. The groups come newest first, by
   ``first_sequence``. ``kind`` is required. ``key`` is 1 to 64 letters, digits
-  and underscores. ``before`` returns only the groups whose
+  and underscores. ``scenario`` groups only the items that the scenario uses,
+  and ``item_count``, ``first_sequence`` and ``last_sequence`` count only
+  those items. ``before`` returns only the groups whose
   ``first_sequence`` is lower. ``limit`` is 1 to 1000, 1000 by default.
   ``next`` is the ``before`` of the next page, or null after the last group.
   To read the items of one group, page with ``after`` from its
-  ``first_sequence`` and stop after its ``last_sequence``.
+  ``first_sequence`` and stop after its ``last_sequence``. Give the same
+  ``scenario`` to that query.
 - ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its
   ``content``. A task's ``content`` is null.
 - ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...],
