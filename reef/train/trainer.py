@@ -606,9 +606,8 @@ class Trainer:
         return used_record(samples.data, samples.owner, self.scenario, record_id)
 
     def read_used_records(self) -> None:
-        """Push the record items of other scenarios that this scenario uses and that this process has not read. A
-        record that the record store holds is a copy from before these reads (RFC #1219), which ``read_records``
-        pushed. The caller holds the lock."""
+        """Push the record items of other scenarios that this scenario uses and that this process has not read. The
+        caller holds the lock."""
         samples = self._pipeline.store.store
         while True:
             cursor, records = used_records(
@@ -620,9 +619,8 @@ class Trainer:
             )
             self._used_sequence = cursor
             for item in records:
-                if self._records.get(self.scenario, item.agent_record_id) is None:
-                    self.push_retained(item)
-                    self._used_read += 1
+                self.push_retained(item)
+                self._used_read += 1
             if not records:
                 return
 
@@ -840,58 +838,16 @@ class Trainer:
         with self._lock:
             self._pipeline.close()
 
-    def replay_retained(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
-        """Rebuild pipeline memory from retained rows at or below a watermark.
+    def restore_consumed_records(self, consumed_ids: frozenset[str]) -> None:
+        """Set the records that committed job data or stored samples consumed, which a recovered trainer skips.
 
-        The committed high-water mark is a consumption cursor, not a liveness
-        boundary: consumption stops the moment job data is ready, so the cursor
-        passes rows of the next, still-incomplete step, and retention keeps
-        them stored. Only pipeline memory knew about them, and a rebuilt
-        pipeline starts empty: without this replay, a report arriving after
-        recovery waits forever on a reference that can never be pushed
-        again. ``consumed_ids`` names the rows that committed job data consumed —
-        the commit history records them per step because retention may keep a
-        consumed row stored (audit-only retention is contract-legal), and a
-        row that committed job data consumed must never train twice. Skipping them
-        while replaying the retained prefix reconstructs the live state the
-        crash destroyed and nothing more; consumption accounting stays
-        untouched, since the recovered mark already covers every replayed row.
+        A recovered trainer reads every retained record again, so the records of a step that was not complete reach
+        its pipeline again. Retention can keep a consumed record stored, and a consumed record never trains twice.
         """
-        if up_to_sequence < 0:
-            raise ValueError("up_to_sequence must be non-negative")
         with self._lock:
             self.consumed_record_ids.update(consumed_ids)
-            sequence = 0
-            while True:
-                items = self._records.replay_page(
-                    self.scenario,
-                    after_sequence=sequence,
-                    limit=self._DATA_READ_BATCH_SIZE,
-                )
-                if not items:
-                    return
-                for sequence, item in items:
-                    if sequence > up_to_sequence:
-                        return
-                    if item.agent_record_id in consumed_ids:
-                        continue
-                    self.push_retained(item)
 
     def restore_committed_records(self, record_ids: frozenset[str]) -> None:
         """Set the record IDs that the commits of this trainer named, so that its next commit does not name them again."""
         with self._lock:
             self.committed_record_ids = set(record_ids)
-
-    def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
-        """Resume consumption from a recovered commit record's high-water mark.
-
-        Without this, a recovered trainer would page the record store from
-        sequence 0 and push again the consumed rows that the retention policy
-        protected from deletion — re-training them. Restoring the watermark makes
-        replay start exactly where the recovered step left off.
-        """
-        if after_sequence < 0 or offset < 0:
-            raise ValueError("record progress must be non-negative")
-        with self._lock:
-            self._data_sequence = after_sequence
-            self._data_offset = offset

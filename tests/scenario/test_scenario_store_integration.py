@@ -306,7 +306,7 @@ def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatc
             if failure_point == "binding":
                 patch.setattr(Recipe, "activation_rule", fail_restore)
             else:
-                patch.setattr(Trainer, "restore_record_progress", fail_restore)
+                patch.setattr(Trainer, "restore_consumed_records", fail_restore)
             with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
                 dispatcher.registry.reload("math")
         assert dispatcher.get_or_create_scenario("math") is current

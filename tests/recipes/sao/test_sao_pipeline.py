@@ -647,8 +647,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     second_session = second_storage.open("math")
     try:
         second = _trainer(second_storage, second_session, prepared.algorithm_state)
-        second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=frozenset(consumed))
-        second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
+        second.restore_consumed_records(frozenset(consumed))
         make_samples(second)
         assert JobLoopState.from_dict(second.state).finished_jobs == 1
         assert second.advance_job() is not None

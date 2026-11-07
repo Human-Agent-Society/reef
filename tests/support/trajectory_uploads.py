@@ -10,7 +10,6 @@ from typing import Any
 
 from aiohttp import ClientResponse
 from aiohttp.test_utils import TestClient
-
 from tests.support.runtime_stubs import RecordingComponent
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend
@@ -23,6 +22,7 @@ from reef.sample2job import Sample2Job
 from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
+from reef.storage.record_items import ItemRecordStorage
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -144,16 +144,19 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     initial.mkdir(parents=True, exist_ok=True)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
-    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files)
+    coordination = memory_coordination()
+    storage = ItemRecordStorage(
+        SQLiteScenarioStorage(tmp_path / "records", task_files=task_files), data, coordination.marks
+    )
     dispatcher = Dispatcher(
         recipe,
         factory or InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
         data_store=data,
-        coordination=memory_coordination(),
+        coordination=coordination,
     )
-    # The data service copies the records to record items, as assembly runs it.
+    # The data service runs the data jobs, as assembly runs it.
     dispatcher.workers.add(
         DataWorker(
             dispatcher.queue,

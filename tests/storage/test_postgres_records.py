@@ -20,9 +20,9 @@ from reef.service.deploy.deployment_config import translate_layout
 from reef.service.deploy.service_config import ServiceConfig, service_config_arguments, service_config_from_mapping
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.sql_records import SQLRecordRetention
-from reef.storage.sqlite import SQLiteRecordStore
 
 
 def record(record_id="first", scenario="math"):
@@ -387,9 +387,14 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
             "module": "reef.storage.postgres:PostgresScenarioStorage",
             "config": {"database_url": url, "schema": schema},
         }
+        # The records are record items, so a new host needs the data store in PostgreSQL too.
         values = {
             "record_backend": plugin,
             "coordination_backend": "postgres",
+            "data_store": {
+                "module": "reef.storage.sql_data:PostgresDataStore",
+                "config": {"database_url": url, "schema": f"{schema}_data"},
+            },
             "record_database_url": url,
             "record_database_schema": schema,
         }
@@ -401,7 +406,6 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         artifact_cache_dir=str(tmp_path / "cache"),
         **values,
     )
-    expected = PostgresRecordStore if backend.startswith("postgres") else SQLiteRecordStore
     for restart in (False, True):
         if restart and backend.startswith("postgres"):
             # PostgreSQL keeps all scenario state, so a new host starts from an empty record directory.
@@ -409,7 +413,8 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         dispatcher = build_dispatcher(settings)
         try:
             scenario = dispatcher.get_or_create_scenario("math")
-            assert isinstance(scenario.records, expected)
+            # The records are record items of the data store, which follows the record backend (RFC #1219).
+            assert isinstance(scenario.records, ItemRecordStore)
             if restart:
                 assert scenario.records.get("math", "first") == record()
             else:

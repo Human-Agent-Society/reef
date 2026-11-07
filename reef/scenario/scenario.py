@@ -383,18 +383,6 @@ class Scenario:
         served = routes.read(ScenarioModel(self.name))
         return None if served is None else served.artifact_id
 
-    def replay_retained(
-        self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
-    ) -> None:
-        """Rebuild processor memory from retained rows behind a recovered watermark."""
-        with self._committer.lock:
-            self.trainer_for(component).replay_retained(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
-
-    def restore_record_progress(self, *, after_sequence: int, offset: int, component: str | None = None) -> None:
-        """Resume record consumption at a recovered commit's high-water mark."""
-        with self._committer.lock:
-            self.trainer_for(component).restore_record_progress(after_sequence=after_sequence, offset=offset)
-
     @property
     def commit_status(self) -> Mapping[str, Any]:
         """The non-blocking committed step, training outcome, and artifact-head sync status."""

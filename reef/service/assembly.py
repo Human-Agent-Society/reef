@@ -57,6 +57,7 @@ from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
+from reef.storage.record_items import ItemRecordStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.segments import LocalSegmentStore, SegmentStore
@@ -473,6 +474,8 @@ def build_dispatcher(
     try:
         scenario_storage, task_files = open_scenario_storage(settings)
         data_store = build_data_store(settings, task_files)
+        # Each scenario's records are record items (RFC #1219).
+        scenario_storage = ItemRecordStorage(scenario_storage, data_store, coordination.marks)
         task_import = (
             TaskImport(Path(settings.task_import_manifest), Path(settings.task_import_tasks_root))
             if settings.task_import_manifest is not None and settings.task_import_tasks_root is not None
