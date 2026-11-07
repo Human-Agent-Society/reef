@@ -752,9 +752,13 @@ an artifact item: see `Create a scenario`_.
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&after=&limit=&content=``
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&group_key=&group_value=&after=&limit=&content=``
   lists the owner's items in the order they arrived: ``{"owner", "items",
-  "next"}``. ``kind`` and ``scenario`` filter the items. ``after`` is the
+  "next"}``. ``kind`` and ``scenario`` filter the items. ``group_key`` keeps
+  only the items of one group of the groups route below: those with the
+  string ``group_value`` under ``group_key`` in their metadata, or with no
+  string there when ``group_value`` is not given. ``group_value`` without
+  ``group_key`` returns 400. ``after`` is the
   ``sequence`` of the last item of the previous page, 0 by default. ``limit``
   is 1 to 1000, 1000 by default. ``next`` is the ``after`` of the next page,
   or null after the last item. With ``content=1``, each item has its
@@ -775,9 +779,9 @@ Read, query, update and delete items
   those items. ``before`` returns only the groups whose
   ``first_sequence`` is lower. ``limit`` is 1 to 1000, 1000 by default.
   ``next`` is the ``before`` of the next page, or null after the last group.
-  To read the items of one group, page with ``after`` from its
-  ``first_sequence`` and stop after its ``last_sequence``. Give the same
-  ``scenario`` to that query.
+  To read the items of one group, query with ``group_key`` and its
+  ``value``, and page with ``after`` from its ``first_sequence``. Give the
+  same ``scenario`` to that query.
 - ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its
   ``content``. A task's ``content`` is null.
 - ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...],

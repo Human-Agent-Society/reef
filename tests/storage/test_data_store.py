@@ -303,6 +303,12 @@ def test_groups_count_the_items_of_each_metadata_value_newest_first(store):
     assert store.groups("acme", kind="trajectory", key="set_id", before=groups[1].first_sequence) == groups[2:]
     with pytest.raises(ValueError, match="key"):
         store.groups("acme", kind="trajectory", key="set.id")
+    # A query reads the items of one group, also of the group without a string value.
+    for value, item_ids in [("a", ["a1", "a2"]), (None, ["n1", "x"])]:
+        found = store.query("acme", kind="trajectory", group=("set_id", value), content=False)
+        assert [item.item_id for item in found] == item_ids
+    with pytest.raises(ValueError, match="key"):
+        store.query("acme", group=("set.id", "a"))
 
 
 def test_groups_of_a_scenario_count_only_the_items_it_uses(store):
