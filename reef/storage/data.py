@@ -24,10 +24,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
+from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.job_data import JobData
 from reef.core.plugins import Plugin, PluginConfigError
-from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
+from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
@@ -351,6 +352,12 @@ class DataStore(Plugin, ABC):
       new when the scenario has none. A writer of the scenario's records reads it when it opens the scenario, and
       gives it to ``create``. ``create(owner, items, generation=...)`` stores record items of one origin scenario
       only while that generation is current; else it raises ``ScenarioArchived`` and stores nothing.
+    * ``prune_records(max_bytes)`` deletes the oldest record items, across owners, until the record items hold at
+      most ``max_bytes``, and returns their number. Each deleted item adds to the ``RecordLoss`` of its origin
+      scenario. A store counts the bytes that it keeps for a record item: its row and the trajectory nodes that
+      only it needs. A retry of a deleted record stores it again.
+    * ``record_loss(owner, scenario)`` returns the ``RecordLoss`` of the record items of ``owner`` that
+      ``scenario`` made.
     * ``task_path(item)`` returns a local directory with the files of a task item.
     * ``record_links(owner, item_ids)`` maps each ID of ``item_ids`` that names a stored record item of ``owner``
       with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
@@ -413,6 +420,12 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def scenario_generation(self, owner: str, scenario: str) -> str: ...
+
+    @abstractmethod
+    def prune_records(self, max_bytes: int) -> int: ...
+
+    @abstractmethod
+    def record_loss(self, owner: str, scenario: str) -> RecordLoss: ...
 
     @abstractmethod
     def read(self, owner: str, item_id: str) -> StoredItem | None: ...
@@ -680,6 +693,7 @@ class MemoryDataStore(DataStore):
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
         self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
         self.generations: dict[tuple[str, str], str] = {}
+        self.losses: dict[tuple[str, str], RecordLoss] = {}
         self.next_sequence = 1
 
     def take_sequence(self) -> int:
@@ -905,6 +919,34 @@ class MemoryDataStore(DataStore):
         check_owner(owner)
         check_owner(scenario)
         return self.generations.setdefault((owner, scenario), uuid.uuid4().hex)
+
+    def prune_records(self, max_bytes: int) -> int:
+        records = sorted(
+            (item for stored in self.items.values() for item in stored.values() if item.kind == "record"),
+            key=lambda item: item.sequence,
+        )
+        sizes = {item.sequence: len(canonical_json(item.content or {}).encode("utf-8")) for item in records}
+        excess = sum(sizes.values()) - max_bytes
+        evicted = 0
+        for item in records:
+            if excess <= 0:
+                break
+            excess -= sizes[item.sequence]
+            self.delete(item.owner, item.item_id)
+            key = (item.owner, item.metadata["origin"]["scenario"])
+            loss = self.losses.get(key, RecordLoss())
+            self.losses[key] = RecordLoss(
+                loss.record_count + 1,
+                loss.body_bytes + sizes[item.sequence],
+                loss.first_sequence or item.sequence,
+                item.sequence,
+            )
+            evicted += 1
+        return evicted
+
+    def record_loss(self, owner: str, scenario: str) -> RecordLoss:
+        check_owner(owner)
+        return self.losses.get((owner, scenario), RecordLoss())
 
     def task_path(self, item: StoredItem) -> Path:
         if item.kind != "task":

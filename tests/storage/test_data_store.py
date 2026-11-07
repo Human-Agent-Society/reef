@@ -18,7 +18,7 @@ from tests.support.conversations import conversation
 
 from reef.core.atif_payloads import canonical_json
 from reef.core.job_data import JobData
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
@@ -486,6 +486,37 @@ def test_a_write_of_an_ended_generation_stores_nothing(store):
     for items in ([trajectory("t1")], [first, review]):
         with pytest.raises(ValueError, match="one origin scenario"):
             store.create("acme", items, generation=renewed)
+
+
+def test_pruning_deletes_the_oldest_record_items_and_counts_the_loss(store):
+    reports = [
+        record_item(
+            AgentRecord.create(
+                scenario="coding",
+                request_type=RequestType.REPORT,
+                payload={"score": 1.0},
+                agent_record_id=f"r{index}",
+                created_at=1.0,
+            )
+        )
+        for index in range(3)
+    ]
+    created = [store.create(owner, [item])[0] for owner, item in zip(("acme", "globex", "acme"), reports, strict=True)]
+    store.create("acme", [trajectory("t1")])
+    size = len(canonical_json(reports[0].content))
+    assert store.prune_records(3 * size) == 0
+    assert store.prune_records(2 * size) == 1
+    assert store.read("acme", "coding/r0") is None
+    assert store.record_loss("acme", "coding") == RecordLoss(1, size, created[0].sequence, created[0].sequence)
+    assert store.record_loss("globex", "coding") == RecordLoss()
+
+    store.create("acme", calls(1, 2, 3))
+    assert store.prune_records(0) == 5
+    assert store.query("acme", kind="record") == () and store.query("globex") == ()
+    assert [item.item_id for item in store.query("acme")] == ["t1"]
+    assert store.record_loss("acme", "coding").record_count == 5
+    if not isinstance(store, MemoryDataStore):
+        assert node_counts(store)[0] == 0
 
 
 def test_the_store_lists_the_scenarios_with_record_items(store):
