@@ -53,7 +53,7 @@ from reef.evaluation.rollout_worker import (
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.harbor.agent import BRIDGE_ENVIRONMENTS, can_run_in_task_container, task_agent_tools
+from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tools
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
 from reef.service.data import DataAccess, NoDataStore
@@ -537,11 +537,6 @@ class ArtifactEvaluations:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
-        if item is not None and request.environment != "docker" and request.environment not in BRIDGE_ENVIRONMENTS:
-            raise ValueError(
-                f"a harness tree runs on docker or on {', '.join(sorted(BRIDGE_ENVIRONMENTS))}, not on "
-                f"{request.environment!r}: Harbor gives no SSH access to its sandboxes"
-            )
         tree = None if item is None else self.tree_harness(scenario, item, api, [str(held[name]) for name in names])
         agent = None if tree is not None else harbor_agent(request.harness)
         # The rollouts go to the queue before the evaluation exists, so that no reader sees an evaluation whose
