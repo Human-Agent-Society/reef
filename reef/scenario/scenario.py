@@ -15,6 +15,7 @@ from reef.core.activation import ActivationRule
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
+from reef.core.records_types import AgentRecord
 from reef.core.reports import ReportBase
 from reef.core.served_models import ScenarioModel
 from reef.core.serving_config import ServingConfig
@@ -536,6 +537,10 @@ class Scenario:
         return self._committer.import_artifact(
             files, component, source=source, directory=directory, artifact_id=artifact_id
         )
+
+    def used_record(self, record_id: str) -> AgentRecord | None:
+        """The record item of another scenario that this scenario uses, read as its record, or None."""
+        return self.stepping_trainers()[0].trainer.used_record(record_id)
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""

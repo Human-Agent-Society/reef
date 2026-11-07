@@ -682,17 +682,19 @@ records, in pages. The scenario serves while it copies them.
 
 The scenario that made a record trains on its own record store, as before.
 To train another scenario of the same owner on a record, add that scenario to
-the item's ``scenarios``. Reef then appends a copy of the record to the other
-scenario's record store, with the item ID as its record ID. Each reference
-``x`` of a report becomes ``<origin scenario>/x``, so add a report together
-with the inferences that it references. The copy is not the other scenario's
-own traffic: its recipe decides whether it trains on it. For example, ``sft``
-trains on it, and an on-policy recipe skips an inference that another runtime
-load served.
+the item's ``scenarios``. Reef then reads the record from the data store for
+the other scenario, with the item ID as its record ID, and it stores no copy.
+Each reference ``x`` of a report reads as ``<origin scenario>/x``, so add a
+report together with the inferences that it references. The record is not the
+other scenario's own traffic: its recipe decides whether it trains on it. For
+example, ``sft`` trains on it, and an on-policy recipe skips an inference that
+another runtime load served.
 
-A record store keeps what it holds. When an item leaves a scenario that
-holds its copy, the copy stays and can still train. The scenario that made a
-record always uses its item: a patch that removes it returns 400.
+When an item leaves a scenario, new reads of that scenario stop giving it. A
+training set that a process already holds in memory can still train until it
+restarts. A record store from before this release can hold a copy of an item,
+and that copy stays. The scenario that made a record always uses its item: a
+patch that removes it returns 400.
 
 You can also create record items with ``POST /reef/namespaces/{owner}/data``,
 for example records that you keep from an older system. The content must have
@@ -782,8 +784,8 @@ Read, query, update and delete items
   ``{"owner", "items", "synced"}``, without content.
 - ``DELETE /reef/namespaces/{owner}/data/{id}`` deletes one item and returns
   ``{"owner", "id", "deleted": true, "synced"}``. The scenarios that used a
-  trajectory or a task lose its copy. A record stays in each record store that
-  holds it. The item of an artifact that a scenario made returns 400 while
+  trajectory or a task lose its copy. A record stays in the record store of the
+  scenario that made it. The item of an artifact that a scenario made returns 400 while
   the scenario exists, because the next copy would make it again.
 
 An unknown ID returns 404. A deployment without a data store returns 503.

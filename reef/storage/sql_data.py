@@ -508,6 +508,7 @@ class SQLDataStore(DataStore):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        excluding_origin: str | None = None,
     ) -> tuple[tuple[int, StoredItem], ...]:
         check_query(owner, None, scenario, after, limit)
         items, uses = self.items_table, self.scenarios_table
@@ -520,15 +521,26 @@ class SQLDataStore(DataStore):
             .order_by(uses.c.sequence)
             .limit(limit)
         )
+        if excluding_origin is not None:
+            statement = statement.where(~uses.c.item_id.startswith(f"{excluding_origin}/", autoescape=True))
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement).mappings().all()
             stored = self.stored_items(connection, owner, found, content=content)
         return tuple((int(row["use_sequence"]), item) for row, item in zip(found, stored, strict=True))
 
+    def last_use_sequence(self, owner: str, scenario: str) -> int:
+        check_owner(owner)
+        uses = self.scenarios_table
+        statement = select(func.max(uses.c.sequence)).where(uses.c.owner == owner, uses.c.scenario == scenario)
+        with self.transaction(read_only=True) as connection:
+            return int(connection.execute(statement).scalar() or 0)
+
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)
         unique_ids = list(dict.fromkeys(item_ids))
         with self.transaction() as connection:
+            # A new use gets its sequence here, so that a reader's cursor of use sequences misses none (RFC #1219).
+            self.lock_creates(connection)
             # A patch merges into the whole metadata, so a concurrent patch must read after this one commits.
             existing = self.rows(connection, owner, unique_ids, lock=True)
             missing = [item_id for item_id in unique_ids if item_id not in existing]
