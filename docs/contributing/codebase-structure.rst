@@ -390,8 +390,7 @@ The extension points those packages expose are in `Python API
   ``reef/storage/served_models.py`` the ``served_models`` table, which control
   writes and the inference service reads;
   ``reef/storage/control_lease.py`` the lease that makes one control instance
-  active; and ``reef/storage/marks.py`` the named positions that a service
-  keeps, such as how far the data service copied each scenario's records.
+  active.
   ``reef/storage/sql_coordination.py`` keeps these tables in SQLite or
   PostgreSQL. ``reef/execution/workers.py`` holds ``QueueWorker``, the loop
   that takes, leases and finishes queue items. The workers that take queue
