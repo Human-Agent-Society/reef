@@ -1,0 +1,41 @@
+schema_version: 2
+automatic_model: auto
+deployment:
+  # Local image used for the real-inference test; see README.md to build it on another host.
+  semantic_router_image: reef-direct-sr@sha256:090b81606403497c9b3cd48eb576ad1f4406024ee0f242cb714ba8fe3962dfe1
+targets:
+  code-student:
+    provider_model: code-student
+    revision: REPLACE_WITH_STUDENT_REVISION
+    url: http://127.0.0.1:8101
+    role: student
+  code-teacher:
+    provider_model: code-teacher
+    revision: REPLACE_WITH_TEACHER_REVISION
+    url: http://127.0.0.1:8102
+    role: teacher
+  math-student:
+    provider_model: math-student
+    revision: REPLACE_WITH_STUDENT_REVISION
+    url: http://127.0.0.1:8103
+    role: student
+  math-teacher:
+    provider_model: math-teacher
+    revision: REPLACE_WITH_TEACHER_REVISION
+    url: http://127.0.0.1:8104
+    role: teacher
+scenarios:
+  code-opd:
+    default_target: code-student
+    targets: [code-student, code-teacher]
+    rules:
+      - name: teacher_requested
+        keywords: [reef_teacher_required]
+        target: code-teacher
+  math-opd:
+    default_target: math-student
+    targets: [math-student, math-teacher]
+    rules:
+      - name: teacher_requested
+        keywords: [reef_teacher_required]
+        target: math-teacher
