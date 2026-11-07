@@ -311,16 +311,19 @@ def query_items(
 
 
 def group_items(
-    data: DataAccess, owner: str, *, kind: str | None, key: str, before: int | None, limit: int
+    data: DataAccess, owner: str, *, kind: str | None, key: str, scenario: str | None, before: int | None, limit: int
 ) -> dict[str, Any]:
-    """The groups of the items of ``owner`` and ``kind`` by the metadata key ``key`` (``DataStore.groups``), newest
-    first: ``{owner, groups, next}``. Each group is ``{value, item_count, first_sequence, last_sequence, metadata}``.
+    """The groups of the items of ``owner`` and ``kind`` by the metadata key ``key`` (``DataStore.groups``), only of
+    the items that ``scenario`` uses if it is given, newest first: ``{owner, groups, next}``. Each group is
+    ``{value, item_count, first_sequence, last_sequence, metadata}``.
 
     ``next`` is the ``before`` of the next page, or null after the last group.
     """
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
-    found = data.require_store().groups(owner, kind=KINDS[kind], key=key, before=before, limit=limit)
+    found = data.require_store().groups(
+        owner, kind=KINDS[kind], key=key, scenario=scenario, before=before, limit=limit
+    )
     return {
         "owner": owner,
         "groups": [
