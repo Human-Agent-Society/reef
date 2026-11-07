@@ -29,8 +29,8 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.record2sample.service import ProducedSamples
-from reef.storage.record_items import used_record, used_records
 from reef.storage.commits import CommitRecord
+from reef.storage.record_items import used_record, used_records
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
