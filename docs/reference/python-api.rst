@@ -125,6 +125,14 @@ methods. Each has a default for a handler or runtime without serving fields:
   engine fields. The inference worker calls it before each activation and when
   only the override changed.
 
+A runtime that serves several models accepts `serving profiles
+<http-api.rst#serving-profiles>`__ with
+``InferenceRuntime.check_serving_profile(profile, artifact)``. Control calls it
+before an artifact takes a profile from its item. Raise ``ValueError`` to refuse
+the profile; the default refuses every profile. The runtime reads the profile of
+an artifact that it activates with ``reef.artifact.artifact.serving_profile_of``.
+None selects the deployment's model.
+
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.
 Implementations and test doubles must initialize these fields through the

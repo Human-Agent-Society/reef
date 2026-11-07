@@ -23,6 +23,7 @@ from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
 from reef.core.serving_config import ServingConfig
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
@@ -621,7 +622,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         *,
         source: Mapping[str, str],
         directory: Path,
-        artifact_id: str | None = None,
+        item: ItemIdentity | None = None,
     ) -> ComponentArtifact:
         """Publish ``files`` as an artifact of ``component`` in ``scenario``, stored in the empty ``directory``.
 
@@ -629,7 +630,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """
         with self.registry.lock_for(scenario):
             imported = self.registry.require(scenario).import_artifact(
-                files, component, source=source, directory=directory, artifact_id=artifact_id
+                files, component, source=source, directory=directory, item=item
             )
         self.request_artifact_copy(scenario)
         return imported
