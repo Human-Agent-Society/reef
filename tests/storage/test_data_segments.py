@@ -14,7 +14,7 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage import sql_data
 from reef.storage.data import NewItem
 from reef.storage.record_items import record_item
-from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentNotFound, segment_lines
+from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentNotFound, SegmentPartition, segment_lines
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -81,7 +81,8 @@ def test_a_segment_is_json_lines_and_a_reader_reads_only_its_lines(tmp_path):
 
 def test_new_trajectory_items_go_to_one_segment_and_read_back(open_store, tmp_path):
     with closing(open_store()) as store:
-        created = store.create("acme", [trajectory("t1", "one"), trajectory("t2", "two")])
+        created = [trajectory("t1", "one"), trajectory("t2", "two")]
+        store.create("acme", created)
         assert waiting_rows(store) == (0, 0)
         assert [len(path.read_text().splitlines()) for path in segment_files(tmp_path)] == [2]
         assert store.read("acme", "t2").content == created[1].content
@@ -95,7 +96,8 @@ def test_new_trajectory_items_go_to_one_segment_and_read_back(open_store, tmp_pa
 def test_maintain_moves_waiting_content_into_segments_and_reads_stay_exact(open_store, monkeypatch):
     items = calls(1, 2, 3)
     with closing(open_store(segments=False)) as store:
-        created = store.create("acme", [*items, trajectory("t1", "kept in the database")])
+        created = [*items, trajectory("t1", "kept in the database")]
+        store.create("acme", created)
         assert waiting_rows(store) == (1, 3)
     monkeypatch.setattr(sql_data, "PACK_BYTES", 1)
     with closing(open_store()) as store:
@@ -105,7 +107,14 @@ def test_maintain_moves_waiting_content_into_segments_and_reads_stay_exact(open_
         assert store.read("acme", "coding/call-3").content == items[2].content
         # A record that continues a moved node still links to it, and reads back whole.
         later = calls(4)
+        read_text = SegmentPartition.read_text
+
+        def refuse(*_):
+            raise AssertionError("a create reads no content from a segment, under the scenario's lock")
+
+        monkeypatch.setattr(SegmentPartition, "read_text", refuse)
         store.create("acme", later)
+        monkeypatch.setattr(SegmentPartition, "read_text", read_text)
         assert store.read("acme", "coding/call-4").content == later[0].content
         assert store.record_links("acme", ["coding/call-4"])["coding/call-4"].parent == "coding/call-3"
 
