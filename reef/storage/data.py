@@ -325,11 +325,13 @@ class DataStore(Plugin, ABC):
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, origin, request_type, after, limit, content)`` returns the items of ``owner``
-      with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when
-      those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those of
-      ``request_type``; they need ``kind="record"``. Without ``content``, each item's ``content`` is None, and the
-      store does not read it.
+    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group)`` returns the items of
+      ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
+      when those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
+      of ``request_type``; they need ``kind="record"``. ``group``, a pair ``(key, value)``, keeps only the items of
+      that group of ``groups``: the items with the string ``value`` under ``key`` in their metadata, or with no
+      string there when ``value`` is None. Without ``content``, each item's ``content`` is None, and the store does
+      not read it.
     * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
       with these filters and no limit gives.
     * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,
@@ -345,7 +347,7 @@ class DataStore(Plugin, ABC):
     * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``. A durable reader of record items keeps one cursor for each: a
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
-      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
+      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items, without content.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
     * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
       the record items that it made, and returns their number. It also ends the scenario's generation. The archive
@@ -450,6 +452,7 @@ class DataStore(Plugin, ABC):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        group: tuple[str, str | None] | None = None,
     ) -> tuple[StoredItem, ...]: ...
 
     @abstractmethod
@@ -526,8 +529,7 @@ class DataStore(Plugin, ABC):
         after = 0
         while page := self.query(owner, kind=kind, scenario=scenario, after=after, content=False):
             for item in page:
-                value = item.metadata.get(key)
-                value = value if isinstance(value, str) else None
+                value = group_value(item.metadata, key)
                 group = found.get(value)
                 found[value] = (
                     ItemGroup(value, 1, item.sequence, item.sequence, item.metadata)
@@ -596,10 +598,21 @@ def check_groups(owner: str, kind: object, key: object, scenario: object, before
     check_query(owner, kind, scenario, 0, limit)
     if kind is None:
         raise ValueError("groups need a kind")
-    if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
-        raise ValueError("key must be 1 to 64 letters, digits and underscores")
+    check_group_key(key)
     if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 1):
         raise ValueError("before must be a positive int")
+
+
+def check_group_key(key: object) -> None:
+    """Raise ``ValueError`` unless ``key`` is a metadata key that groups items (``GROUP_KEY``)."""
+    if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
+        raise ValueError("key must be 1 to 64 letters, digits and underscores")
+
+
+def group_value(metadata: Mapping[str, Any], key: str) -> str | None:
+    """The value of the group of ``key`` that an item with ``metadata`` is in: its string under ``key``, else None."""
+    value = metadata.get(key)
+    return value if isinstance(value, str) else None
 
 
 def check_query(
@@ -611,9 +624,16 @@ def check_query(
     *,
     origin: object = None,
     request_type: object = None,
+    group: object = None,
 ) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
     check_filters(owner, kind, scenario, origin, request_type, after)
+    if group is not None:
+        if not isinstance(group, tuple) or len(group) != 2:
+            raise ValueError("group must be a pair (key, value)")
+        check_group_key(group[0])
+        if group[1] is not None and not isinstance(group[1], str):
+            raise ValueError("a group value is a string or None")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
         raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
 
@@ -800,10 +820,16 @@ class MemoryDataStore(DataStore):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        group: tuple[str, str | None] | None = None,
     ) -> tuple[StoredItem, ...]:
-        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type)
+        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type, group=group)
         matched = sorted(
-            self.matching(owner, kind, scenario, origin, request_type, after), key=lambda item: item.sequence
+            (
+                item
+                for item in self.matching(owner, kind, scenario, origin, request_type, after)
+                if group is None or group_value(item.metadata, group[0]) == group[1]
+            ),
+            key=lambda item: item.sequence,
         )
         return tuple(item if content else replace(item, content=None) for item in matched[:limit])
 
@@ -924,7 +950,7 @@ class MemoryDataStore(DataStore):
         for item in updated:
             stored[item.item_id] = item
             self.write_uses(owner, item.item_id, item.scenarios)
-        return tuple(updated)
+        return tuple(replace(item, content=None) for item in updated)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
