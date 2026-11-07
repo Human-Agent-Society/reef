@@ -273,11 +273,14 @@ class ScenarioFactory:
             self._backend_factory, RegistrationAwareRepositoryBackendFactory
         ) and self._backend_factory.has_registration(scenario)
 
-    def load_or_create(self, scenario: str, start: ItemStart | None = None) -> Scenario:
+    def load_or_create(
+        self, scenario: str, start: ItemStart | None = None, serving_profile: str | None = None
+    ) -> Scenario:
         """Recover the scenario ``scenario``, or create it when the backend has no registration of it.
 
         A new scenario gets its own root snapshot (``register``): the artifact item ``start``, or the recipe's
-        default start when ``start`` is ``None``. An existing scenario ignores ``start``.
+        default start when ``start`` is ``None``, with ``serving_profile``. An existing scenario ignores ``start``
+        and ``serving_profile``.
         """
         backend = self._backend_factory(scenario)
         if self._storage.durable and not isinstance(backend, StagedSnapshotRepositoryBackend):
@@ -288,7 +291,7 @@ class ScenarioFactory:
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
         components = self._recipe.scenario_components(scenario)
         if registration is None:
-            self.register(scenario, backend, components, start)
+            self.register(scenario, backend, components, start, serving_profile)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
             # the durable registration instead of assuming this creation attempt won.
             metadata = backend.metadata()
@@ -304,7 +307,12 @@ class ScenarioFactory:
         )
 
     def register(
-        self, scenario: str, backend: RepositoryBackend, components: ScenarioComponents, start: ItemStart | None
+        self,
+        scenario: str,
+        backend: RepositoryBackend,
+        components: ScenarioComponents,
+        start: ItemStart | None,
+        serving_profile: str | None = None,
     ) -> None:
         """Write the root snapshot of the new scenario ``scenario`` and register it with ``backend``.
 
@@ -314,12 +322,22 @@ class ScenarioFactory:
         ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
         manifest of the components that the root makes. An item that the component's layout or admission check
         refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
-        start from (``Recipe.check_root_start``). Nothing is registered after a refusal.
+        start from (``Recipe.check_root_start``). The ``RootSource`` names ``serving_profile`` when it is not None;
+        a profile that the recipe's inference runtime refuses (``InferenceRuntime.check_serving_profile``), or a
+        profile on a recipe without a runtime, raises ``ValueError``. Nothing is registered after a refusal.
         """
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
             root, source = self.root_snapshot(components, start, Path(work))
+            if serving_profile is not None:
+                runtime = self._recipe.runtime
+                if runtime is None:
+                    raise ValueError(
+                        f"this deployment serves no model, so it refuses serving profile {serving_profile!r}"
+                    )
+                runtime.check_serving_profile(serving_profile, None if start is None else root)
+                source = replace(source, serving_profile=serving_profile)
             if start is not None:
                 self._recipe.check_root_start(ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {

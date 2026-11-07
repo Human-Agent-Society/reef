@@ -396,6 +396,16 @@ class InferenceRuntime(ABC):
         field and does nothing; the handler applies request fields to each request."""
         return
 
+    def check_serving_profile(self, profile: str, start: Artifact | None) -> None:
+        """Accept ``profile`` as the serving profile of a new scenario (RFC #1233), or raise ``ValueError``.
+
+        ``start`` is the scenario's root snapshot when it starts from an artifact item, or None when it starts from
+        the recipe's default start. The runtime defines which profiles exist, and later serves each release with
+        the profile in its ``RootSource``. Control calls it without opening the runtime, before it registers the
+        scenario. The default serves one model, so it refuses every profile.
+        """
+        raise ValueError(f"this deployment's inference runtime takes no serving profile, so it refuses {profile!r}")
+
     def open(self) -> None:
         """Open the engines before the inference worker adopts or activates artifacts. A second call does nothing.
 

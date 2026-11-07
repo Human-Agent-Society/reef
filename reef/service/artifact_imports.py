@@ -91,25 +91,34 @@ class ArtifactImports:
         if owner is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         item = artifact_item_of(dispatcher, owner, item_id)
+        check_serving_profile(item, dispatcher.registry.require(scenario).serving_profile)
         artifact_id = item_artifact_id(dispatcher, item)
         return self.import_source(
             dispatcher, scenario, component, source_uri_of(item), item_id=item_id, artifact_id=artifact_id
         )
 
     def create_from_item(
-        self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str
+        self,
+        dispatcher: Dispatcher,
+        scenario: str,
+        owner: str,
+        component: str | None,
+        item_id: str,
+        serving_profile: str | None = None,
     ) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it: a new scenario's root snapshot holds
-        the artifact item ``item_id`` of ``owner`` in ``component`` (``Dispatcher.create_scenario``).
+        the artifact item ``item_id`` of ``owner`` in ``component``, with ``serving_profile``
+        (``Dispatcher.create_scenario``).
 
         The item is read and its files opened first, so an item that cannot be read registers nothing. Raise as
         ``item_source`` and ``ArtifactSources.open`` do, and as ``Dispatcher.create_scenario`` does for an item that
         the component's layout or admission check refuses.
         """
         item = artifact_item_of(dispatcher, owner, item_id)
+        check_serving_profile(item, serving_profile)
         uri = source_uri_of(item)
         start = ItemStart(item_id, uri, self.sources.open(uri), component, item_artifact_id(dispatcher, item))
-        return dispatcher.create_scenario(scenario, start)
+        return dispatcher.create_scenario(scenario, start, serving_profile)
 
 
 def item_source(dispatcher: Dispatcher, owner: str, item_id: str) -> str:
@@ -130,6 +139,16 @@ def artifact_item_of(dispatcher: Dispatcher, owner: str, item_id: str) -> Stored
     if item.kind != "artifact" or item.content is None:
         raise ValueError(f"item {item_id!r} is a {item.kind}, not an artifact")
     return item
+
+
+def check_serving_profile(item: StoredItem, serving_profile: str | None) -> None:
+    """Raise ``ValueError`` when the artifact item ``item`` names a serving profile other than
+    ``serving_profile``. An item that names none, such as an upload, fits any scenario (RFC #1233)."""
+    profile = item.metadata.get("serving_profile")
+    if profile is not None and profile != serving_profile:
+        raise ValueError(
+            f"artifact item {item.item_id!r} needs serving profile {profile!r}, and the scenario has {serving_profile!r}"
+        )
 
 
 def source_uri_of(item: StoredItem) -> str:

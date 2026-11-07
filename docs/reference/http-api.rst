@@ -725,6 +725,8 @@ its original content and digest when every other content field matches.
 The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
+The item of a scenario with a serving profile also has ``serving_profile`` in
+its metadata, and only a scenario with the same profile imports it.
 Its ``source_uri`` comes from the artifact backend: a backend
 that keeps releases where other deployments can read them, such as an object
 store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
@@ -1279,8 +1281,8 @@ Create a scenario
 ~~~~~~~~~~~~~~~~~
 
 ``POST /reef/scenarios`` takes the object ``{"name", "owner"?,
-"artifact_id"?, "component"?}``. Any other key is HTTP 400, and the message
-names the keys that the route takes:
+"artifact_id"?, "component"?, "serving_profile"?}``. Any other key is HTTP
+400, and the message names the keys that the route takes:
 
 - ``name``: the scenario's name, a non-empty string.
 - ``owner``: the owner whose `data items <#data-items>`__ the scenario uses.
@@ -1293,6 +1295,13 @@ names the keys that the route takes:
   <../user-guide/operate.rst#starting-artifacts>`__).
 - ``component``: the component that holds the item. Leave it out when the
   scenario has one component. It needs ``artifact_id``.
+- ``serving_profile``: the model that the scenario serves, such as
+  ``qwen3.8-27b@1``, on a deployment whose inference runtime serves several
+  (RFC #1233). The runtime defines the profiles and refuses an unknown one with
+  400. A runtime that serves one model refuses every profile. The profile never
+  changes after creation. Every artifact row's ``source`` and every artifact
+  item of the scenario name it, and an artifact item that names another
+  profile cannot start or enter the scenario (400).
 
 Reef stores the starting artifacts and registers the scenario with their
 component mapping. With ``artifact_id``, Reef reads the item's files and checks
@@ -1305,11 +1314,12 @@ check refuses it, Reef registers no scenario. It answers with the status of
 the refusal, such as 400 for a directory without the component's layout or 404
 for an item that the owner does not store.
 
-The answer is ``{scenario, owner, components}``. ``components`` maps each
+The answer is ``{scenario, owner, components, serving_profile}``.
+``serving_profile`` is null for a scenario without one. ``components`` maps each
 component name to its selected ``artifact_id``. A scenario with one component
 also returns that value as ``artifact_id``. The status is 201 for a new
 scenario. An existing scenario returns 200 with its current selections and
-ignores the requested ``artifact_id`` and ``component``.
+ignores the requested ``artifact_id``, ``component`` and ``serving_profile``.
 
 .. code:: bash
 
@@ -1329,8 +1339,9 @@ returns HTTP 404, and you create the scenario first:
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
 | ``POST /reef/scenarios``                    | ``{"name", "owner"?, "artifact_id"?,        |
-|                                             | "component"?}`` → ``{scenario, owner,       |
-|                                             | components, artifact_id?}``;                |
+|                                             | "component"?, "serving_profile"?}`` →       |
+|                                             | ``{scenario, owner, components,             |
+|                                             | serving_profile, artifact_id?}``;           |
 |                                             | 201 created, 200 already existed            |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios``                     | every known scenario, its selections        |
@@ -1575,6 +1586,7 @@ scenario:
 
    {
      "scenario": "agents",
+     "serving_profile": null,
      "training_mode": "auto",
      "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
      "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
@@ -1584,6 +1596,8 @@ scenario:
      "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
+- ``serving_profile`` is the profile that the scenario named when it was
+  created (`Create a scenario`_), or null. An update cannot change it.
 - ``training_mode`` is what the scenario runs.
 - ``artifact_evaluation`` and ``activation`` are the stored settings, or null.
 - ``effective_activation`` is the rule that applies: the scenario's

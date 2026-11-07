@@ -125,6 +125,15 @@ methods. Each has a default for a handler or runtime without serving fields:
   engine fields. The inference worker calls it before each activation and when
   only the override changed.
 
+A runtime that serves several models accepts a scenario's `serving profile
+<http-api.rst#create-a-scenario>`__ with
+``InferenceRuntime.check_serving_profile(profile, start)``. Control calls it
+before it registers a new scenario that names a profile. ``start`` is the root
+snapshot of an item start, or None for the default start. Raise ``ValueError``
+to refuse the profile; the default refuses every profile. The runtime reads the
+profile of a release it activates from
+``RootSource.serving_profile`` in the release's scenario metadata.
+
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.
 Implementations and test doubles must initialize these fields through the

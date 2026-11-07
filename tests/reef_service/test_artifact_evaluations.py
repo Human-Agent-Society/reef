@@ -684,6 +684,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
             await created(client, tmp_path, "add")
             assert await settings_of(client) == {
                 "scenario": "s",
+                "serving_profile": None,
                 "training_mode": "auto",
                 "artifact_evaluation": None,
                 "activation": None,

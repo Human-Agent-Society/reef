@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent
+from tests.support.artifact_versions import ImportingComponent, ImportingInference
 from tests.support.runtime_stubs import runtime_bindings
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
@@ -48,14 +48,24 @@ def weights(directory: Path, content: bytes) -> Path:
     return directory
 
 
-def cell(tmp_path: Path, name: str) -> Dispatcher:
+class ProfileInference(ImportingInference):
+    """A runtime that serves the serving profiles ``qwen@1`` and ``muse@1`` (RFC #1233)."""
+
+    def check_serving_profile(self, profile, start):
+        if profile not in ("qwen@1", "muse@1"):
+            raise ValueError(f"unknown serving profile {profile!r}")
+
+
+def cell(tmp_path: Path, name: str, *, serves_profiles: bool = False) -> Dispatcher:
     """One deployment, a Cell, whose data service copies records and artifacts, as assembly builds it.
 
     Every Cell of ``tmp_path`` shares the data store under ``tmp_path / "data"``; each has its own repository and
-    records.
+    records. With ``serves_profiles``, its runtime is a ``ProfileInference``.
     """
     root = tmp_path / name
     runtime = ImportingComponent(root / "exported")
+    if serves_profiles:
+        runtime.inference = ProfileInference(runtime.restore_order)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(root / "records", task_files=task_files)
@@ -213,6 +223,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                     "scenario": name,
                     "owner": "acme",
                     "components": {imported["component"]: started},
+                    "serving_profile": None,
                     "artifact_id": started,
                 }
                 scenario = cells[name].get_or_create_scenario(name)
@@ -244,6 +255,66 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
         asyncio.run(run())
     finally:
         for dispatcher in cells.values():
+            dispatcher.close()
+
+
+@pytest.mark.integration
+def test_a_scenario_keeps_its_serving_profile_and_takes_only_artifacts_of_that_profile(tmp_path: Path) -> None:
+    """RFC #1233: the runtime checks the profile, every release and library item of the scenario names it, and a
+    scenario of another profile refuses the item. A process trains one scenario, so each scenario has its own Cell."""
+    cells = {name: cell(tmp_path, name, serves_profiles=True) for name in ("qwen", "muse", "qwen-copy")}
+    plain = cell(tmp_path, "plain")
+
+    async def run() -> None:
+        async with client_of(plain, tmp_path) as client:
+            refused = await client.post(
+                "/reef/scenarios", json={"name": "plain", "owner": "acme", "serving_profile": "qwen@1"}
+            )
+            assert refused.status == 400 and "takes no serving profile" in await refused.text()
+            assert not plain.has_scenario("plain")
+        async with client_of(cells["qwen"], tmp_path) as client:
+            unknown = await client.post(
+                "/reef/scenarios", json={"name": "qwen", "owner": "acme", "serving_profile": "gpt@1"}
+            )
+            assert unknown.status == 400 and "unknown serving profile" in await unknown.text()
+            assert not cells["qwen"].has_scenario("qwen")
+            created = await client.post(
+                "/reef/scenarios", json={"name": "qwen", "owner": "acme", "serving_profile": "qwen@1"}
+            )
+            assert created.status == 201, await created.text()
+            assert (await created.json())["serving_profile"] == "qwen@1"
+            settings = await (await client.get("/reef/scenarios/qwen/settings")).json()
+            assert settings["serving_profile"] == "qwen@1"
+            imported = await (
+                await client.post(
+                    "/reef/scenarios/qwen/artifacts", json={"source": weights(tmp_path / "source", b"w9").as_uri()}
+                )
+            ).json()
+            item_id = f"qwen/{imported['artifact_id']}"
+            assert (await library_item(client, item_id))["metadata"]["serving_profile"] == "qwen@1"
+            listed = (await (await client.get("/reef/scenarios/qwen/artifacts")).json())["artifacts"]
+            (root,) = [row for row in listed if row["operation"] == "creation"]
+            assert root["source"]["serving_profile"] == "qwen@1"
+        async with client_of(cells["muse"], tmp_path) as client:
+            created = await client.post(
+                "/reef/scenarios", json={"name": "muse", "owner": "acme", "serving_profile": "muse@1"}
+            )
+            assert created.status == 201, await created.text()
+            into = await client.post("/reef/scenarios/muse/artifacts", json={"item": item_id})
+            assert into.status == 400 and "needs serving profile 'qwen@1'" in await into.text()
+        async with client_of(cells["qwen-copy"], tmp_path) as client:
+            body = {"name": "qwen-copy", "owner": "acme", "artifact_id": item_id}
+            refused = await client.post("/reef/scenarios", json={**body, "serving_profile": "muse@1"})
+            assert refused.status == 400 and "needs serving profile" in await refused.text()
+            assert not cells["qwen-copy"].has_scenario("qwen-copy")
+            started = await client.post("/reef/scenarios", json={**body, "serving_profile": "qwen@1"})
+            assert started.status == 201, await started.text()
+            assert (await started.json())["artifact_id"] == imported["artifact_id"]
+
+    try:
+        asyncio.run(run())
+    finally:
+        for dispatcher in (*cells.values(), plain):
             dispatcher.close()
 
 

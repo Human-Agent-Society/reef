@@ -63,7 +63,9 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
             # has no kind.
             declared = components.components.get(row["component"])
             kind = None if declared is None else declared.kind
-            missing.append(artifact_item(scenario, row, kind, uri, dispatcher.recipe.harness_adapter))
+            missing.append(
+                artifact_item(scenario, row, kind, uri, dispatcher.recipe.harness_adapter, current.serving_profile)
+            )
     for start in range(0, len(missing), MAX_ITEMS_PER_CREATE):
         store.create(owner, missing[start : start + MAX_ITEMS_PER_CREATE])
     return len(missing)

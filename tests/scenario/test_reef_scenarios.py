@@ -114,6 +114,17 @@ def test_scenario_metadata_round_trips() -> None:
     ) == parse_scenario_metadata(metadata, checkpoint_head=checkpoint_head)
 
 
+def test_a_root_source_keeps_its_serving_profile_and_reads_a_source_without_one() -> None:
+    """RFC #1233: the profile is a key of the source only when it is set, so a source written before it still reads."""
+    source = RootSource("item", item="upload-1", uri="s3://bucket/upload-1/", version="", serving_profile="qwen@1")
+
+    assert source.to_dict()["serving_profile"] == "qwen@1"
+    assert RootSource.from_dict(source.to_dict()) == source
+    assert RootSource.from_dict({"kind": "default", "inputs": {}}).serving_profile is None
+    with pytest.raises(ValueError, match="serving_profile"):
+        RootSource("default", serving_profile="")
+
+
 @pytest.mark.parametrize("operation", ["activate", "train_from", "rollback"])
 def test_checkpoint_metadata_names_only_a_training_step(operation) -> None:
     """An artifact is made only by a training step; its metadata names no other operation."""

@@ -112,6 +112,11 @@ class Scenario:
         return self._binding.runtime
 
     @property
+    def serving_profile(self) -> str | None:
+        """The serving profile that the scenario named when it was created (``RootSource.serving_profile``)."""
+        return self._committer.root_source.serving_profile
+
+    @property
     def activation_rule(self) -> ActivationRule:
         """The rule that decides whether an artifact that training makes serves."""
         return self._committer.activation_rule

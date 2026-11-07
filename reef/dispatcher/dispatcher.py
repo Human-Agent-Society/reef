@@ -299,18 +299,23 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def get_or_create_scenario(self, scenario: str, *, allow_implicit_creation: bool | None = None) -> Scenario | None:
         return self.registry.get_or_create(scenario, allow_implicit_creation=allow_implicit_creation)
 
-    def create_scenario(self, scenario: str, start: ItemStart | None = None) -> tuple[Scenario, bool]:
+    def create_scenario(
+        self, scenario: str, start: ItemStart | None = None, serving_profile: str | None = None
+    ) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it.
 
         A new scenario's root snapshot holds the artifact item ``start``, or the recipe's default start when
-        ``start`` is ``None`` (``ScenarioFactory.load_or_create``); an existing scenario ignores ``start``. The check
+        ``start`` is ``None``, and names ``serving_profile`` (``ScenarioFactory.load_or_create``); an existing
+        scenario ignores ``start`` and ``serving_profile``. The check
         and the creation hold the scenario's lock, so of several calls for one new name only one gets True. Raise as
         ``get_or_create_scenario`` does when the creation is refused, and ``ValueError`` when the item's layout or
-        admission check refuses it; no scenario is registered then.
+        admission check, or the runtime's profile check, refuses it; no scenario is registered then.
         """
         with self.registry.lock_for(scenario):
             created = not self.registry.has(scenario)
-            current = self.registry.get_or_create(scenario, start, allow_implicit_creation=True)
+            current = self.registry.get_or_create(
+                scenario, start, allow_implicit_creation=True, serving_profile=serving_profile
+            )
         if current is None:
             raise RuntimeError("scenario creation returned no scenario")
         return current, created
@@ -836,6 +841,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_settings(self, scenario: str) -> dict[str, Any]:
         """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
 
+        ``serving_profile`` is the profile that the scenario named when it was created, or None.
         ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
         scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
@@ -855,6 +861,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             job_parameters = current.stepping_trainers()[0].trainer.pipeline.sample2job.context.job_parameters
             return {
                 "scenario": scenario,
+                "serving_profile": current.serving_profile,
                 "training_mode": current.training_mode,
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
