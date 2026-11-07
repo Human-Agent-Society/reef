@@ -49,6 +49,9 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
         components = current.components
         missing: list[NewItem] = []
         for row in current.artifacts():
+            # An artifact from an item has that item already (RFC #1218).
+            if isinstance(row.get("source"), Mapping) and row["source"].get("item"):
+                continue
             if store.read(owner, f"{scenario}/{row['artifact_id']}") is not None:
                 continue
             _, artifact = current.resolve_artifact(row["artifact_id"], row["component"])

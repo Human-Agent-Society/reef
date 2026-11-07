@@ -152,7 +152,8 @@ class ItemStart:
 
     Values: ``item_id`` is the item's non-empty ID, and ``uri`` its non-empty ``source_uri``. ``files`` is the
     ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
-    ``None`` for the scenario's one component.
+    ``None`` for the scenario's one component. ``artifact_id`` is the item's artifact ID, which the root snapshot
+    keeps (RFC #1218), or ``None`` for a new one.
 
     Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
     ``ScenarioFactory.register`` checks it and writes it as the root snapshot.
@@ -162,6 +163,7 @@ class ItemStart:
     uri: str
     files: SourceFiles
     component: str | None = None
+    artifact_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or not self.item_id or not isinstance(self.uri, str) or not self.uri:
@@ -344,7 +346,7 @@ class ScenarioFactory:
             component, layout = components.import_target(start.component)
             directory = work / "item"
             directory.mkdir()
-            stored = layout.stored(start.files, directory)
+            stored = layout.stored(start.files, directory, artifact_id=start.artifact_id)
             source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
             # The admission checks of an import: the snapshot's own with one component, else the component's here and
             # the snapshot's on the composed root.
