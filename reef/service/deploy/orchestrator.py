@@ -565,6 +565,8 @@ def _run_orchestrator(
     # Routing is always owned by this process: it runs the router container and the REEF child together.
     if config_value(config, "reef", "routing_manifest"):
         settings = service_config_from_mapping(config)
+        if settings.routing_deployment.lifecycle != "managed":
+            raise DeployConfigError("external routing runs only with reef serve --component inference")
         if any(service_executor_selection(config, service).settings.backend != "uni" for service in services):
             raise DeployConfigError("managed routing requires uni execution for every native service")
         if len(services) != 1 or services[0]["name"] != "reef":

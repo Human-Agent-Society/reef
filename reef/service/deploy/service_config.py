@@ -41,7 +41,7 @@ class ServiceConfig:
 
     ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
     takes a blank value as not supplied, and nothing checks the file when the value is made.
-    ``routing_deployment`` holds the managed router's settings; loading a configuration parses and checks
+    ``routing_deployment`` holds the router's settings; loading a configuration parses and checks
     them even when routing is off, but only a routed deployment acts on them. Starting managed routing also
     needs a deployment ID, a record-only recipe and a loopback host; the controller and app assembly check
     those when they start, not here.
@@ -80,7 +80,7 @@ class ServiceConfig:
     routing_manifest: str | None = config_option(
         None,
         public_path=("reef", "routing_manifest"),
-        help="External-target routing manifest; reef serve manages Semantic Router for a record-only recipe.",
+        help="External-target routing manifest for a record-only recipe; see reef.routing_deployment.lifecycle.",
     )
     routing_deployment: RoutingDeploymentSettings = field(default_factory=RoutingDeploymentSettings)
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
@@ -550,7 +550,7 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
             "object",
             False,
             {},
-            "Local Semantic Router lifecycle settings; reef serve owns routing whenever routing_manifest is set.",
+            "Semantic Router settings; reef serve owns the router unless the lifecycle is external.",
             public_path=("reef", "routing_deployment"),
         ),
         ConfigArgument(
