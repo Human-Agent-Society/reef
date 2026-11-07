@@ -957,8 +957,8 @@ In ``manual``, a request names the samples that its job trains: the
      -d '{"text": "Train these", "session": "s-1", "artifact_id": "a-1",
           "samples": ["trajectory-0001", "report-17:0"]}'
 
-- ``samples`` is 1 to 10000 distinct sample IDs, of one kind: trajectories or
-  tasks, not both.
+- ``samples`` is one or more distinct sample IDs, of one kind: trajectories or
+  tasks, not both. The request body limit of 64 MiB bounds the list.
 - Reef returns 400, and queues nothing, for an ID that the store does not
   hold, or a sample that no trainer can train (an eval or an imported task,
   an upload that its recipe does not take, another trainer's sample).
