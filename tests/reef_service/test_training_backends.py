@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support._training_deployment import LocalDeployment
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 
 from reef.core.errors import RuntimeConfigError
@@ -120,13 +121,12 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
 
 def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanup(tmp_path):
     from recipes.sao.recipe import SAORecipe
-    from reef.storage.sqlite import SQLiteRecordStore
 
     config, _ = resolve_deployment_config(
         {**deployment(), "pipeline": {"sample2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
     )
     recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
-    records = SQLiteRecordStore()
+    records = memory_records("scenario")
     try:
         trainer = recipe.build("scenario", records, root=STUB_ROOT)
         assert trainer.job_loop.component is recipe.training_component

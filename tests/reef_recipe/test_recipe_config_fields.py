@@ -12,6 +12,7 @@ from dataclasses import KW_ONLY, dataclass
 import pytest
 import yaml
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from reef.core.config import config_arguments
@@ -19,7 +20,6 @@ from reef.evaluation.activation import AlwaysActivate
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 
@@ -242,7 +242,7 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
         {"sample2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
     recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=stages)
-    trainer = recipe.build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
+    trainer = recipe.build("scenario", memory_records("scenario"), root=STUB_ROOT)
 
     assert isinstance(trainer.pipeline.record2sample, ThresholdSamples)
     assert isinstance(trainer.pipeline.sample2job, ThresholdJobData)
@@ -274,12 +274,11 @@ def test_the_default_recipe_sends_the_configured_job_parameters_with_every_job()
 @pytest.mark.unit
 def test_a_weight_recipe_without_job_samples_fails_its_build() -> None:
     with pytest.raises(RecipeConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
-        StagedRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
+        StagedRecipe(**runtime_bindings()).build("scenario", memory_records("scenario"), root=STUB_ROOT)
 
 
 @pytest.mark.unit
 def test_default_build_requires_a_sample2job_stage() -> None:
-    from reef.storage.sqlite import SQLiteRecordStore
 
     @dataclass(frozen=True)
     class NoSample2JobRecipe(WeightTrainingRecipe):
@@ -288,7 +287,7 @@ def test_default_build_requires_a_sample2job_stage() -> None:
             return {kind: {"objective": "sft"} for kind in ("trajectory", "task")}
 
     with pytest.raises(TypeError, match=r"declares no sample2job.*pipeline_spec\(\).*override build"):
-        NoSample2JobRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
+        NoSample2JobRecipe(**runtime_bindings()).build("scenario", memory_records("scenario"), root=STUB_ROOT)
 
 
 @pytest.mark.unit

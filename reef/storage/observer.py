@@ -18,6 +18,7 @@ from typing import Any, Self
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord, CommitSnapshots
+from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import AppendResult, RecordLoss, RecordStore, StoredRecord
 from reef.storage.samples import SampleStore, TrainingState
@@ -168,7 +169,9 @@ class ObservedScenarioStorage(ScenarioStorage):
         self._observer = observer
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         raise PluginConfigError(f"{cls.__name__} wraps another storage; deployment assembly applies it")
 
     @property
@@ -189,9 +192,6 @@ class ObservedScenarioStorage(ScenarioStorage):
 
     def archive(self, scenario: str) -> tuple[str, ...]:
         return self._inner.archive(scenario)
-
-    def prune(self, *, max_bytes: int) -> int:
-        return self._inner.prune(max_bytes=max_bytes)
 
     def close(self) -> None:
         try:

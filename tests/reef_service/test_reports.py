@@ -353,33 +353,6 @@ def test_missing_reference_rejection_does_not_queue_or_reserve_the_report_id() -
         dispatcher.close()
 
 
-def test_report_retry_after_capacity_eviction_remains_idempotent_and_conflicts_fail(tmp_path) -> None:
-    from dataclasses import replace
-
-    from reef.storage.records import RecordConflict, RecordRetention
-
-    dispatcher = _dispatcher(Recipe(), "recipe", record_dir=tmp_path)
-    try:
-        dispatcher.accept_record(
-            AgentRecord.create(
-                scenario="workload",
-                request_type=RequestType.INFERENCE,
-                agent_record_id="source",
-                payload={},
-            )
-        )
-        record = _report_record("feedback", {"references": ["source"], "score": 1.0})
-        dispatcher.accept_record(record)
-        scenario = dispatcher.get_or_create_scenario("workload")
-        dispatcher.prune_record_archives(RecordRetention(max_bytes=1))
-        assert dispatcher.accept_record(record).agent_record_id == "feedback"
-        with pytest.raises(RecordConflict):
-            dispatcher.accept_record(replace(record, payload={**record.payload, "score": 0.0}))
-        assert scenario.records.count("workload") == 0
-    finally:
-        dispatcher.close()
-
-
 @pytest.mark.parametrize("eligible", [True, False])
 def test_report_eligibility_flag_is_rejected_at_ingress(eligible: bool) -> None:
     dispatcher = _dispatcher(Recipe(), "recipe")

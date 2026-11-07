@@ -7,6 +7,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
@@ -17,7 +18,6 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
 from reef.record2sample import NoSamples
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
@@ -163,7 +163,7 @@ def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
     def build(job_samples: int) -> Trainer:
         return Trainer.build(
             "discovery",
-            SQLiteRecordStore(),
+            memory_records("discovery"),
             pipeline_factory=lambda context: _processor(job_samples=job_samples),
             root=STUB_ROOT,
         )

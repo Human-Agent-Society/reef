@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent
 from tests.support.samples_service import make_samples
 
@@ -11,7 +12,6 @@ from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.records import RecordConflict
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.storage.work_queue import NewWork
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
@@ -57,7 +57,7 @@ def test_a_trainer_gets_the_queued_requests_and_a_commit_settles_the_one_it_cons
         def make_job_data(self, samples, data_id):
             return JobData(data_id, samples)
 
-    records = SQLiteRecordStore()
+    records = memory_records("s")
     component = RecordingComponent()
     trainer = Trainer.build(
         "s",
