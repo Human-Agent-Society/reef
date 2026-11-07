@@ -138,7 +138,8 @@ class Artifact:
         """The artifact that this value holds: the artifact of a component view, or the only component of a snapshot.
 
         New artifacts record an independent ID before publication. A component
-        view keeps that ID when another snapshot carries it.
+        view keeps that ID when another snapshot carries it, and a use through an artifact item keeps it in another
+        scenario (RFC #1218).
         A snapshot containing several components has no single artifact ID;
         callers must select a component.
         """
@@ -203,14 +204,16 @@ class Artifact:
         *,
         metadata: Mapping[str, object] | None = None,
         repository: ArtifactRepository | None = None,
+        artifact_id: str | None = None,
     ) -> Artifact:
-        """Create an unpublished artifact with a fresh ID that staging and publication preserve."""
+        """Create an unpublished artifact with the ID ``artifact_id``, or a fresh one, that staging and publication
+        preserve. ``artifact_id`` names an artifact that already exists elsewhere, with the same content."""
         token = uuid.uuid4().hex
         stored_metadata = dict(metadata or {})
         stored_metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
         manifest = snapshot_components(stored_metadata)
         if manifest is None:
-            stored_metadata[ARTIFACT_ID_METADATA_KEY] = f"artifact:{token}"
+            stored_metadata[ARTIFACT_ID_METADATA_KEY] = artifact_id or f"artifact:{token}"
         else:
             manifest = SnapshotComponents(
                 {

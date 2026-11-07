@@ -165,7 +165,7 @@ def merge_patch(target: Any, patch: Any) -> Any:
 def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     """``metadata`` with the JSON merge patch ``patch`` applied, or ``ValueError``.
 
-    The patch may not change ``kind``, ``owner`` or ``origin``. The patched ``scenarios`` must be valid for the
+    The patch may not change ``kind``, ``owner`` or ``origin``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
     that scenario's record store keeps the record.
     """
@@ -175,6 +175,8 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
     for key in FIXED_KEYS:
         if patched.get(key) != metadata.get(key):
             raise ValueError(f"metadata.{key} is set at creation and never changes")
+    if metadata.get("artifact_id") not in (None, patched.get("artifact_id")):
+        raise ValueError("metadata.artifact_id is set once and never changes")
     patched["scenarios"] = check_scenarios(patched.get("scenarios", {}), metadata["kind"])
     if metadata["kind"] == "record":
         origin = metadata["origin"]["scenario"]
