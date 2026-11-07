@@ -9,7 +9,6 @@ import pytest
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage import record_items
 from reef.storage.data import ItemConflict, MemoryDataStore, NewItem
-from reef.storage.data_sync import release_items
 from reef.storage.item_kinds import copied_record
 from reef.storage.record_items import copy_records, record_item, used_record, used_records
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -127,15 +126,3 @@ def test_another_scenario_of_the_owner_reads_the_records_it_uses_and_stores_no_c
             data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": None}})
             assert used_records(data, "acme", "code")[1] == ()
             assert used_record(data, "acme", "code", "math/i1") is None
-
-
-def test_an_archive_releases_the_items_of_the_scenario_but_not_the_records_it_made(tmp_path):
-    data = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
-    data.create("acme", [record_item(record("r1", score=1.0))])
-    atif = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
-    data.create("acme", [NewItem("t1", atif, {"kind": "trajectory", "scenarios": {"math": "train"}})])
-    release_items(data, "acme", "math")
-    assert [(item.item_id, dict(item.scenarios)) for item in data.query("acme")] == [
-        ("math/r1", {"math": "train"}),
-        ("t1", {}),
-    ]

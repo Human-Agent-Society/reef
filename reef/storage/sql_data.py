@@ -739,6 +739,39 @@ class SQLDataStore(DataStore):
             stored = self.rows(connection, owner, unique_ids)
             return self.stored_items(connection, owner, [stored[item_id] for item_id in unique_ids])
 
+    def remove_scenario(self, owner: str, scenario: str) -> int:
+        check_owner(owner)
+        items, uses = self.items_table, self.scenarios_table
+        with self.transaction() as connection:
+            self.lock_scenarios(connection, owner, [scenario])
+            # The rows stay locked, so that a concurrent patch of another scenario reads after this one commits.
+            rows = connection.execute(
+                select(items.c.item_id, items.c.metadata_json)
+                .where(
+                    items.c.owner == owner,
+                    exists().where(
+                        uses.c.owner == owner, uses.c.item_id == items.c.item_id, uses.c.scenario == scenario
+                    ),
+                )
+                .order_by(items.c.item_id)
+                .with_for_update(of=items)
+            ).all()
+            if not rows:
+                return 0
+            values = []
+            for item_id, text in rows:
+                metadata = json.loads(text)
+                metadata["scenarios"].pop(scenario, None)
+                values.append({"row_owner": owner, "row_item_id": item_id, "metadata_json": canonical_json(metadata)})
+            connection.execute(
+                update(items)
+                .where(items.c.owner == bindparam("row_owner"), items.c.item_id == bindparam("row_item_id"))
+                .values(metadata_json=bindparam("metadata_json")),
+                values,
+            )
+            connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.scenario == scenario))
+            return len(rows)
+
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
         with self.transaction() as connection:

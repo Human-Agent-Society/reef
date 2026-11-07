@@ -167,7 +167,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
 
     The patch may not change ``kind``, ``owner`` or ``origin``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
-    that scenario's record store keeps the record.
+    that scenario's record store keeps the record. Only ``DataStore.remove_scenario`` removes that use.
     """
     if not isinstance(patch, Mapping):
         raise ValueError("a metadata patch must be an object")
@@ -321,12 +321,14 @@ class DataStore(Plugin, ABC):
       split changes get a new one. A trainer reads its scenario's items with
       it. With ``excluding_origin``, the record items that this scenario made are left out.
     * ``last_use_sequence(owner, scenario)`` returns the sequence of the newest use by ``scenario``, or 0.
-    * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``, also a deleted
-      one, because a record item keeps its origin. A durable reader of record items keeps one cursor for each: a
+    * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``. A durable reader of record items keeps one cursor for each: a
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
+    * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
+      the record items that it made, and returns their number. The archive of a scenario calls it, so that a new
+      scenario with that name uses nothing. The items stay.
     * ``task_path(item)`` returns a local directory with the files of a task item.
     * ``record_links(owner, item_ids)`` maps each ID of ``item_ids`` that names a stored record item of ``owner``
       with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
@@ -430,6 +432,9 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def delete(self, owner: str, item_id: str) -> bool: ...
+
+    @abstractmethod
+    def remove_scenario(self, owner: str, scenario: str) -> int: ...
 
     @abstractmethod
     def task_path(self, item: StoredItem) -> Path: ...
@@ -775,6 +780,16 @@ class MemoryDataStore(DataStore):
         check_owner(owner)
         self.write_uses(owner, item_id, {})
         return self.items.get(owner, {}).pop(item_id, None) is not None
+
+    def remove_scenario(self, owner: str, scenario: str) -> int:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        used = [item for item in stored.values() if scenario in item.scenarios]
+        for item in used:
+            scenarios = {name: split for name, split in item.scenarios.items() if name != scenario}
+            stored[item.item_id] = replace(item, metadata={**item.metadata, "scenarios": scenarios})
+            self.write_uses(owner, item.item_id, scenarios)
+        return len(used)
 
     def task_path(self, item: StoredItem) -> Path:
         if item.kind != "task":
