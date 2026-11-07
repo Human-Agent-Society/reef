@@ -61,7 +61,7 @@ def test_the_first_load_moves_the_old_records_in_pages(tmp_path: Path, monkeypat
         dispatcher.close()
 
 
-def test_another_scenario_of_the_owner_gets_a_copy_when_an_item_names_it(tmp_path: Path) -> None:
+def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_stores_no_copy(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
     try:
         for scenario in ("s", "t"):
@@ -72,7 +72,25 @@ def test_another_scenario_of_the_owner_gets_a_copy_when_an_item_names_it(tmp_pat
         dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": "train"}})
         dispatcher.sync_items("s", ["t"])
         with dispatcher.locked_scenario("t") as current:
-            assert current.store.records.get("t", "s/r1").payload == {"score": 1.0}
+            trainer = current.trainers[0].trainer
+            assert trainer.holds_untrained_records()
+            assert trainer.produce_samples().records_read == 1
+            assert trainer.produce_samples().records_read == 0, "a process reads each record once"
+            assert current.store.records.get("t", "s/r1") is None, "t stores no copy"
+            assert current.used_record("s/r1").payload == {"score": 1.0}
+
+        # A new process reads the item again, and skips a copy from before these reads.
+        dispatcher.registry.reload("t")
+        with dispatcher.locked_scenario("t") as current:
+            current.store.records.append(AgentRecord("s/r1", "t", RequestType.REPORT, {"score": 1.0}, 1.0, (), None))
+            assert current.trainers[0].trainer.produce_samples().records_read == 1, "the copy, read once"
+
+        # Without the use, the read stops.
+        dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": None}})
+        with dispatcher.locked_scenario("t") as current:
+            assert current.used_record("s/r1") is None
+        dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": "train"}})
+
         # Archiving t releases the item; the record stays an item of its origin.
         dispatcher.delete_scenario("t")
         (item,) = dispatcher.data_store.query("s", kind="record")

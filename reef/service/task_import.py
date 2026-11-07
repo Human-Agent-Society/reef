@@ -25,7 +25,6 @@ from reef.core.plugins import PluginConfigError
 from reef.core.tasks.split import read_split_manifest
 from reef.storage.data import DataStore, NewItem
 from reef.storage.data_sync import release_items
-from reef.storage.record_items import sync_scenario_records
 from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import SplitName, TaskFileStore
@@ -85,9 +84,7 @@ class DataScenarioStorage(ScenarioStorage):
 
     1. sets the owner of a scenario that has none to the scenario's name;
     2. runs ``task_import`` for the owner, when it is set;
-    3. appends to its record store the copy of each record item of the owner
-       that it uses and that another scenario made (``sync_scenario_records``);
-    4. returns the session.
+    3. returns the session.
 
     ``sample_store`` gives the items of the owner that the scenario uses.
 
@@ -128,7 +125,6 @@ class DataScenarioStorage(ScenarioStorage):
                 self.inner.write_settings(scenario, replace(settings, owner=owner))
             if self.task_import is not None:
                 self.task_import.run(self.data, owner, scenario)
-            sync_scenario_records(session.records, self.data, owner, scenario)
         except BaseException:
             session.close()
             raise
