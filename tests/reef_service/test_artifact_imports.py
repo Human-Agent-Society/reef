@@ -24,6 +24,7 @@ from reef.artifact import (
 )
 from reef.artifact.artifact import serving_profile_of
 from reef.core.errors import CommitPending, UnknownScenario
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
@@ -70,7 +71,12 @@ def test_an_import_keeps_the_items_serving_profile_and_training_from_it_inherits
 
     def import_with(profile: str):
         return value.import_artifact(
-            "math", opened(files), None, source=source(files), directory=store(tmp_path), serving_profile=profile
+            "math",
+            opened(files),
+            None,
+            source=source(files),
+            directory=store(tmp_path),
+            item=ItemIdentity("qwen-base", serving_profile=profile),
         )
 
     with pytest.raises(ValueError, match="takes no serving profile"):

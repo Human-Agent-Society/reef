@@ -33,7 +33,7 @@ from reef.core.activation import MadeArtifact
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents, validate_component_name
 from reef.core.errors import CommitPending, ReefError
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import ItemIdentity, RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding, profiled_artifact
@@ -584,8 +584,7 @@ class ScenarioCommitter:
         *,
         source: Mapping[str, str],
         directory: Path,
-        artifact_id: str | None = None,
-        serving_profile: str | None = None,
+        item: ItemIdentity | None = None,
     ) -> ComponentArtifact:
         """Publish ``files``, which an import's URI names, as a new artifact of ``component``; return it.
 
@@ -596,7 +595,7 @@ class ScenarioCommitter:
         own admission check runs on what is stored, as at a training
         publication. The imported artifact receives an independent ID,
         including when its bytes match an existing artifact, unless
-        ``artifact_id`` names the artifact of an artifact item (RFC #1218): it
+        the files are those of the artifact item ``item`` with an artifact ID (RFC #1218): the artifact
         keeps that ID, and when ``component`` lists that ID already, this call
         returns it and reads nothing. The snapshot binds the artifact as ``component`` and every other
         component as the active selection binds it; its parent is the chain tip,
@@ -604,13 +603,14 @@ class ScenarioCommitter:
         the next step with ``source``, the ``{"uri", "version"}`` that the
         files were read from (and the ``item`` of an artifact item's import), as its metrics. The active selection, the chain
         tip, every training start and the activation rule are left alone.
-        The artifact names ``serving_profile`` when it is not None (``profiled_artifact``).
+        The artifact names the item's serving profile, when it has one (``profiled_artifact``).
         Raise ``ValueError`` for an unknown component, a component that takes
         no import, a profile that the runtime refuses, or files that the layout or the admission check refuses;
         ``ArtifactSourceError`` when the copy fails; ``CommitPending`` while a
         training result waits for its commit. Nothing changes then.
         """
         component, layout = self.import_target(component)
+        artifact_id = None if item is None else item.artifact_id
         if artifact_id is not None:
             with self._publication_lock:
                 listed = self.snapshot_queries.artifacts(self._step, self.component_names())
@@ -619,7 +619,9 @@ class ScenarioCommitter:
         components = self._binding.components
         spec = components.components[component]
         imported = profiled_artifact(
-            self._binding.runtime, layout.stored(files, directory, artifact_id=artifact_id), serving_profile
+            self._binding.runtime,
+            layout.stored(files, directory, artifact_id=artifact_id),
+            None if item is None else item.serving_profile,
         )
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")

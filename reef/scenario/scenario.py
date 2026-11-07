@@ -19,7 +19,7 @@ from reef.core.records_types import AgentRecord
 from reef.core.reports import ReportBase
 from reef.core.served_models import ScenarioModel
 from reef.core.serving_config import ServingConfig
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import ItemIdentity, RootSource
 from reef.core.values import JsonValue
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
@@ -531,18 +531,10 @@ class Scenario:
         *,
         source: Mapping[str, str],
         directory: Path,
-        artifact_id: str | None = None,
-        serving_profile: str | None = None,
+        item: ItemIdentity | None = None,
     ) -> ComponentArtifact:
         """Publish ``files`` as an artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
-        return self._committer.import_artifact(
-            files,
-            component,
-            source=source,
-            directory=directory,
-            artifact_id=artifact_id,
-            serving_profile=serving_profile,
-        )
+        return self._committer.import_artifact(files, component, source=source, directory=directory, item=item)
 
     def used_record(self, record_id: str) -> AgentRecord | None:
         """The record item of another scenario that this scenario uses, read as its record, or None."""

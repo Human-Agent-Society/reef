@@ -21,6 +21,7 @@ from typing import Any
 
 from reef.artifact.sources import ArtifactSources
 from reef.core.errors import UnknownScenario
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.scenario.factory import ItemStart
 from reef.scenario.scenario import Scenario
@@ -50,17 +51,13 @@ class ArtifactImports:
         component: str | None,
         uri: str,
         *,
-        item_id: str | None = None,
-        artifact_id: str | None = None,
-        serving_profile: str | None = None,
+        item: ItemIdentity | None = None,
     ) -> dict[str, Any]:
-        """Import the files ``uri`` names into ``component`` of ``scenario``, by reference or as a copy, as an artifact
-        that names ``serving_profile``, the serving profile of the artifact item ``item_id`` (RFC #1233), when it is
-        not None.
+        """Import the files ``uri`` names into ``component`` of ``scenario``, by reference or as a copy.
 
         Return ``{scenario, component, artifact_id}``. The import's ``source`` is ``{uri,
-        version}``, and also ``item``, ``item_id``, when the URI came from that artifact item, whose artifact has the
-        ID ``artifact_id``. Before any file is
+        version}``, and also ``item`` when the URI came from the artifact item ``item``, whose artifact ID and serving
+        profile the new artifact takes (``ScenarioCommitter.import_artifact``). Before any file is
         read, raise ``UnknownScenario`` for an unknown scenario and ``ValueError`` for a component that cannot take
         the import (``Dispatcher.import_target``). The layout check then runs on the source, before anything is
         copied; otherwise raise as ``ArtifactSources.open`` and ``Dispatcher.import_artifact`` do.
@@ -68,8 +65,8 @@ class ArtifactImports:
         component = dispatcher.import_target(scenario, component)
         files = self.sources.open(uri)
         source = {"uri": uri, "version": files.version}
-        if item_id is not None:
-            source["item"] = item_id
+        if item is not None:
+            source["item"] = item.item_id
         self.work_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="import-", dir=self.work_dir) as work:
             imported = dispatcher.import_artifact(
@@ -78,8 +75,7 @@ class ArtifactImports:
                 component,
                 source=source,
                 directory=Path(work),
-                artifact_id=artifact_id,
-                serving_profile=serving_profile,
+                item=item,
             )
         return {
             "scenario": scenario,
@@ -91,7 +87,7 @@ class ArtifactImports:
         self, dispatcher: Dispatcher, scenario: str, component: str | None, item_id: str
     ) -> dict[str, Any]:
         """Import the artifact item ``item_id`` of the owner of ``scenario`` into ``component``: the files that its
-        ``source_uri`` names, as ``import_source`` imports them, with the item's serving profile.
+        ``source_uri`` names, as ``import_source`` imports them, with the item's identity (``item_identity``).
 
         Raise ``UnknownScenario`` for an unknown scenario; otherwise raise as ``item_source`` and
         ``import_source``.
@@ -100,23 +96,16 @@ class ArtifactImports:
         if owner is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         item = artifact_item_of(dispatcher, owner, item_id)
-        artifact_id = item_artifact_id(dispatcher, item)
         return self.import_source(
-            dispatcher,
-            scenario,
-            component,
-            source_uri_of(item),
-            item_id=item_id,
-            artifact_id=artifact_id,
-            serving_profile=item.metadata.get("serving_profile"),
+            dispatcher, scenario, component, source_uri_of(item), item=item_identity(dispatcher, item)
         )
 
     def create_from_item(
         self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str
     ) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it: a new scenario's root snapshot holds
-        the artifact item ``item_id`` of ``owner`` in ``component``, with the item's serving profile
-        (``Dispatcher.create_scenario``).
+        the artifact item ``item_id`` of ``owner`` in ``component``, with the item's identity (``item_identity``,
+        ``Dispatcher.create_scenario``).
 
         The item is read and its files opened first, so an item that cannot be read registers nothing. Raise as
         ``item_source`` and ``ArtifactSources.open`` do, and as ``Dispatcher.create_scenario`` does for an item that
@@ -124,14 +113,7 @@ class ArtifactImports:
         """
         item = artifact_item_of(dispatcher, owner, item_id)
         uri = source_uri_of(item)
-        start = ItemStart(
-            item_id,
-            uri,
-            self.sources.open(uri),
-            component,
-            item_artifact_id(dispatcher, item),
-            item.metadata.get("serving_profile"),
-        )
+        start = ItemStart(item_identity(dispatcher, item), uri, self.sources.open(uri), component)
         return dispatcher.create_scenario(scenario, start)
 
 
@@ -163,6 +145,12 @@ def source_uri_of(item: StoredItem) -> str:
             f"artifact item {item.item_id!r} has no source_uri: its repository gives no URI to import from"
         )
     return str(uri)
+
+
+def item_identity(dispatcher: Dispatcher, item: StoredItem) -> ItemIdentity:
+    """The ``ItemIdentity`` of the artifact item ``item``: its ID, its artifact ID (``item_artifact_id``) and its
+    ``metadata.serving_profile``."""
+    return ItemIdentity(item.item_id, item_artifact_id(dispatcher, item), item.metadata.get("serving_profile"))
 
 
 def item_artifact_id(dispatcher: Dispatcher, item: StoredItem) -> str:
