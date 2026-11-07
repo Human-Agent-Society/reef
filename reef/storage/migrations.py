@@ -10,7 +10,21 @@ from collections import defaultdict
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Column, LargeBinary, MetaData, Table, Text, cast, func, inspect, literal, select, tuple_, update
+from sqlalchemy import (
+    Column,
+    LargeBinary,
+    MetaData,
+    Table,
+    Text,
+    bindparam,
+    cast,
+    func,
+    inspect,
+    literal,
+    select,
+    tuple_,
+    update,
+)
 from sqlalchemy.engine import Connection
 
 from reef.core.atif_payloads import call_shape, canonical_json
@@ -20,6 +34,9 @@ from reef.storage.sql_records import SEGMENT_COLUMNS, ScopedTable, SQLRecordStor
 from reef.storage.work_queue import FINAL_STATES
 
 logger = logging.getLogger(__name__)
+
+#: The rows that one page of ``migrate_data_request_types`` reads.
+MIGRATION_BATCH_SIZE = 1000
 
 
 def migrate_record_storage(connection: Connection, records: Table, consumption: Table) -> None:
@@ -220,6 +237,34 @@ def migrate_data_segments(connection: Connection, items: Table, nodes: Table) ->
                 batch.alter_column("call_json", existing_type=table.c.call_json.type, nullable=True)
         index = next(index for index in table.indexes if "segment_id" in index.columns)
         index.create(connection)
+
+
+def migrate_data_request_types(connection: Connection, items: Table) -> None:
+    """Add ``request_type`` to ``items``, and fill it for each record item from its content (RFC #1219).
+
+    Run in the caller's schema transaction, after ``create_all``. A table that has ``request_type`` is left
+    unchanged. A record item's content stays in its row, so the fill reads no segment.
+    """
+    if "request_type" in {
+        column["name"] for column in inspect(connection).get_columns(items.name, schema=items.schema)
+    }:
+        return
+    with Operations(MigrationContext.configure(connection)).batch_alter_table(
+        items.name, schema=items.schema
+    ) as batch:
+        batch.add_column(Column("request_type", items.c.request_type.type, nullable=True))
+    after = 0
+    while rows := connection.execute(
+        select(items.c.sequence, items.c.content_json)
+        .where(items.c.kind == "record", items.c.sequence > after)
+        .order_by(items.c.sequence)
+        .limit(MIGRATION_BATCH_SIZE)
+    ).all():
+        after = rows[-1].sequence
+        connection.execute(
+            update(items).where(items.c.sequence == bindparam("row_sequence")).values(request_type=bindparam("value")),
+            [{"row_sequence": row.sequence, "value": json.loads(row.content_json)["request_type"]} for row in rows],
+        )
 
 
 def migrate_data_uses(connection: Connection, items: Table, uses: Table) -> None:
