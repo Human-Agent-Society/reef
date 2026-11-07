@@ -205,8 +205,8 @@ class AdapterAgent(BaseInstalledAgent):
 
         Reef's sandbox relay answers that port in the container and holds each call. ``BRIDGE_POLLERS`` loops here
         take the calls through Harbor's exec, with ``bridge_client``, answer each from this host's port, and give the
-        answer back in the next exchange. Exec works in every Harbor environment, also for a task with a compose
-        sidecar. Raise ``ProgramLaunchError`` when the relay does not answer.
+        answer back in the next exchange. Exec works in every Harbor environment, also for a task with several compose
+        services. Raise ``ProgramLaunchError`` when the relay does not answer.
         """
         if self.bridge_port is None:
             yield

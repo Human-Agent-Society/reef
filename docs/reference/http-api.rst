@@ -1012,8 +1012,8 @@ The body takes these fields:
   agent runs in the task's container. On ``docker``, the container reaches the
   model at ``evaluation.agent_host``. In a remote environment, such as
   ``modal``, the agent bridges the container's loopback to the model through
-  Reef's sandbox relay and Harbor's exec, also for a task with a compose sidecar
-  (RFC #986). Reef refuses a task that declares MCP servers or skills. This
+  Reef's sandbox relay and Harbor's exec, also for a task with several compose
+  services (RFC #986). Reef refuses a task that declares MCP servers or skills. This
   evaluation does not reach the activation rule, and an automatic evaluation
   cannot use an item.
 - ``model``: the model binding that a harness artifact runs on. A request
