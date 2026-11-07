@@ -302,13 +302,21 @@ class SQLDataStore(DataStore):
         string. ``key`` passes ``GROUP_KEY``."""
 
     def groups(
-        self, owner: str, *, kind: ItemKind, key: str, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        *,
+        kind: ItemKind,
+        key: str,
+        scenario: str | None = None,
+        before: int | None = None,
+        limit: int = MAX_QUERY_LIMIT,
     ) -> tuple[ItemGroup, ...]:
-        check_groups(owner, kind, key, before, limit)
+        check_groups(owner, kind, key, scenario, before, limit)
         items = self.items_table
         values = (
             select(items.c.sequence, self.metadata_string(key).label("value"))
             .where(items.c.owner == owner, items.c.kind == kind)
+            .where(*self.used_by(owner, items, scenario))
             .subquery()
         )
         first = func.min(values.c.sequence)
@@ -644,14 +652,17 @@ class SQLDataStore(DataStore):
         statement = select(*columns).where(items.c.owner == owner, items.c.sequence > after)
         if kind is not None:
             statement = statement.where(items.c.kind == kind)
-        if scenario is not None:
-            uses = self.scenarios_table
-            statement = statement.where(
-                exists().where(uses.c.owner == owner, uses.c.item_id == items.c.item_id, uses.c.scenario == scenario)
-            )
+        statement = statement.where(*self.used_by(owner, items, scenario))
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
+
+    def used_by(self, owner: str, items: Table, scenario: str | None) -> tuple[ColumnElement[bool], ...]:
+        """The condition that ``scenario`` uses the item of the row of ``items``, or none without a scenario."""
+        if scenario is None:
+            return ()
+        uses = self.scenarios_table
+        return (exists().where(uses.c.owner == owner, uses.c.item_id == items.c.item_id, uses.c.scenario == scenario),)
 
     def scenario_items(
         self,

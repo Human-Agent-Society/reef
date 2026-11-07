@@ -296,6 +296,18 @@ def test_groups_count_the_items_of_each_metadata_value_newest_first(store):
         store.groups("acme", kind="trajectory", key="set.id")
 
 
+def test_groups_of_a_scenario_count_only_the_items_it_uses(store):
+    store.create("acme", [trajectory("a1", set_id="a"), trajectory("a2", set_id="a", scenarios={"coding": "train"})])
+    store.create("acme", [trajectory("b1", set_id="b"), trajectory("a3", set_id="a", scenarios={"coding": "train"})])
+    store.create("acme", [trajectory("c1", set_id="c", scenarios={"writing": "train"})])
+    (group,) = store.groups("acme", kind="trajectory", key="set_id", scenario="coding")
+    assert (group.value, group.item_count) == ("a", 2)
+    assert [group.first_sequence, group.last_sequence] == [
+        item.sequence for item in store.query("acme", scenario="coding")
+    ]
+    assert store.groups("acme", kind="trajectory", key="set_id", scenario="unused") == ()
+
+
 def test_query_arguments_are_checked(store):
     for arguments, reason in [({"kind": "dataset"}, "kind"), ({"after": -1}, "after"), ({"limit": 0}, "limit")]:
         with pytest.raises(ValueError, match=reason):
