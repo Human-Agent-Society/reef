@@ -365,9 +365,12 @@ pg-primitive family. The distillation base adds it inside its own loss, using
 the teacher signal and that loss's masks; other custom losses use a wrapper.
 
 The term reads the sampler's top-K, so every trained sample must carry the
-top-K that its sampler recorded. Serving records no tensors: a sample that
-serving recorded cannot train with score centering. A training component's own
-task rollouts record the sampler's top-K (see the requirements below).
+top-K that its sampler recorded. Serving records no tensors, except for a
+call with ``x-reef-record-training`` (see `Headers
+<../reference/http-api.rst#headers>`__), which records no top-K either: a
+sample that serving recorded cannot train with score centering. A training
+component's own task rollouts record the sampler's top-K (see the requirements
+below).
 
 To enable it, set the flags in ``training.options``:
 

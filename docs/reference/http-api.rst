@@ -231,12 +231,14 @@ Headers
 |                                   | reply token IDs, the sampled log-probs and the sampling |
 |                                   | distribution. It is the one exception to the rule that  |
 |                                   | a record keeps no training tensors. The response does   |
-|                                   | not change. HTTP 400 for a call that streams, that      |
-|                                   | names no ``temperature``, ``top_p`` or ``top_k`` in the |
-|                                   | request or the scenario's serving config, or whose      |
-|                                   | engine gives no exact sample with its distribution.     |
-|                                   | ``true`` also asks for it; ``0``, ``false`` or no       |
-|                                   | header keeps no sample.                                 |
+|                                   | not change. ``true`` also asks for it; ``0``, ``false`` |
+|                                   | or no header keeps no sample. HTTP 400 for another      |
+|                                   | value, for a call that keeps no record (one with        |
+|                                   | ``x-reef-rollout`` or to an ``/evaluation/v1/{route}``  |
+|                                   | route), for a call that streams, that names no          |
+|                                   | ``temperature``, ``top_p`` or ``top_k`` in the request  |
+|                                   | or the scenario's serving config, or whose engine gives |
+|                                   | no exact sample with its distribution.                  |
 +-----------------------------------+---------------------------------------------------------+
 
 Client artifact tags

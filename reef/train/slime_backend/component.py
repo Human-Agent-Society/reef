@@ -323,7 +323,8 @@ class SlimeJobs(LocalJobComponent):
 
         Slime computes its advantages and trains its loss, so the job's objective has the ``slime`` loss family, and
         Slime's options must leave that loop's generate step and data source to the job (``check_task_job_options``).
-        ``ValueError``: the parameters or the options do not allow it.
+        An objective with its own advantage rule, or one that carries delayed samples, also needs the options that
+        ``check_delayed_task_job`` names. ``ValueError``: the parameters or the options do not allow it.
         """
         job_parameters = SlimeJobParameters.from_parameters(parameters)
         if job_parameters.harbor is None:

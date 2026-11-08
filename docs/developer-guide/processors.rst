@@ -118,8 +118,9 @@ for an engine abort. An abort rejects the entire set, including a report and
 all its referenced inferences. The stage uses its normal rejection and release
 lifecycle; it does not alter the stored responses. Retained records pass the
 same check during replay. A record holds the provider exchange and no
-training tensors; the training component renders each sample (see `Rendering
-in the training component`_).
+training tensors, except for a call with ``x-reef-record-training`` (see
+`Headers <../reference/http-api.rst#headers>`__); the training component
+renders each sample (see `Rendering in the training component`_).
 
 A record set unit (``RecordSetUnit``) holds one or more record sets that must
 train in the same job. A report by itself is a unit of one record set. A

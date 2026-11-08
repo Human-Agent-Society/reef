@@ -197,9 +197,10 @@ call to a model.
 Delayed sample
 --------------
 
-A trajectory that an earlier job's policy sampled and that trains in a later
-task job, beside the job's task rollouts, with an advantage that the recipe
-gives it: a ``DelayedSample`` in ``JobData.delayed`` (``reef.core.job_data``).
+A trajectory that a served artifact sampled through the inference service and
+that trains in a later task job, beside the job's task rollouts, with an
+advantage that the recipe gives it: a ``DelayedSample`` in ``JobData.delayed``
+(``reef.core.job_data``).
 It keeps the exact tokens, log-probs and sampling distribution of a served call
 that sent ``x-reef-record-training``. SPADE's Designer replies are delayed
 samples. A training component trains the delayed samples that its

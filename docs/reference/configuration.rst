@@ -829,8 +829,10 @@ the response, and a scenario that does not train serves it under its release
 id.
 
 ``rollout_log_probs`` are the sampled tokens' log probabilities that a
-training component's own task rollouts record; serving records none. They
-must mean the same thing as the trainer's. Sampling runs through::
+training component's own task rollouts record; serving records none, except
+for a call with ``x-reef-record-training`` (see `Headers
+<http-api.rst#headers>`__). They must mean the same thing as the trainer's.
+Sampling runs through::
 
    raw logits -> penalties, logit_bias -> / temperature -> [A] -> top-k, top-p, min-p -> [B] -> sample
 
@@ -858,8 +860,10 @@ this check.
 Chat template arguments
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Serving records the provider exchange only. The training component renders
-each recorded call with the model's chat template, and must render it as the
+Serving records the provider exchange only, except for a call with
+``x-reef-record-training`` (see `Headers <http-api.rst#headers>`__), whose
+record also keeps the engine's token IDs. The training component renders each
+other recorded call with the model's chat template, and must render it as the
 serving engine did. Give the training component the same chat template
 arguments that the engine renders with: the handler's
 ``chat_template_kwargs``, or the arguments that the clients send.
