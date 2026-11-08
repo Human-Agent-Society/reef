@@ -981,7 +981,9 @@ def test_the_recipe_refuses_a_training_component_that_runs_no_task_jobs() -> Non
         GeneratedTaskRecipe(TrajectoryOnly(), runtime=runtime, job_parameters={"rollout": ROLLOUT})
 
 
-def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str, Any]) -> WeightTrainingRecipe:
+def generated_pipeline_recipe(
+    environ: Mapping[str, str], pipeline: Mapping[str, Any], training_component: TrainingComponent | None = None
+) -> WeightTrainingRecipe:
     return GeneratedTaskRecipe.from_environment(
         environ,
         config={
@@ -990,8 +992,48 @@ def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str,
             "pipeline": pipeline,
         },
         runtime=InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000"),
-        training_component=StubTrainingComponent(),
+        training_component=StubTrainingComponent() if training_component is None else training_component,
     )
+
+
+class CarryingComponent(StubTrainingComponent):
+    """A stub component whose task jobs train up to ``DELAYED_LIMIT`` delayed samples."""
+
+    def delayed_sample_limit(self, parameters: Mapping[str, object]) -> DelayedSampleLimit | None:
+        return DELAYED_LIMIT
+
+
+class RefusingComponent(StubTrainingComponent):
+    """A stub component whose options do not allow the delayed samples of the objective."""
+
+    def delayed_sample_limit(self, parameters: Mapping[str, object]) -> DelayedSampleLimit | None:
+        raise ValueError("a task job that carries samples needs --use-tis")
+
+
+def designer_pipeline(key: str = "designer_delay") -> dict[str, object]:
+    """A pipeline section whose record-to-sample stage carries the Designer replies one round later."""
+    return {"record2sample": {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {key: 1}}}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ["designer_delay", "designer-delay"])
+def test_the_recipe_refuses_a_designer_delay_that_the_training_component_cannot_train(key: str) -> None:
+    with pytest.raises(RecipeConfigError, match=r"designer_delay 1 .* the stub training component trains no delayed"):
+        generated_pipeline_recipe({}, designer_pipeline(key))
+    with pytest.raises(RecipeConfigError, match=r"which the training component cannot run: .* needs --use-tis"):
+        generated_pipeline_recipe({}, designer_pipeline(key), RefusingComponent())
+
+
+@pytest.mark.unit
+def test_the_recipe_gives_its_stages_the_delayed_sample_limit_of_the_training_component(tmp_path: Path) -> None:
+    recipe = generated_pipeline_recipe({}, designer_pipeline(), CarryingComponent())
+    session, samples = scenario_session(tmp_path, "one")
+    built = recipe.build_pipeline(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
+    assert isinstance(built.sample2job, GeneratedTaskJobData)
+    assert (built.sample2job.designer_delay, built.sample2job.delayed_sample_limit) == (1, DELAYED_LIMIT)
+    built.close()
+    plain = generated_pipeline_recipe({}, {}, CarryingComponent())
+    assert isinstance(plain, GeneratedTaskRecipe) and plain.delayed_sample_limit() is None, "no Designer reply"
 
 
 def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_once_for_each_scenario(

@@ -15,7 +15,8 @@ from tests.slime_backend.test_slime_component import Stack, batch_for, parameter
 from tests.support.job_data import delayed_sample, job_data_ref
 from tests.support.slime_component import finished
 
-from reef.core.job_data import DelayedSample, JobData, TaskSample
+from reef.core.job_data import DelayedSample, DelayedSampleLimit, JobData, TaskSample
+from reef.core.training_capture import SamplingDistribution
 from reef.execution.executor.placement import GpuBundles
 from reef.storage.durable_files import read_json
 from reef.train.algos.group_advantages import GroupAdvantageRule
@@ -472,3 +473,19 @@ def test_delayed_samples_that_the_job_cannot_train_are_refused_at_submit(tmp_pat
     with pytest.raises(ValueError, match="without --use-tis"):
         stack.component.submit(job("refused", CARRYING, (delayed_sample(),)))
     assert events == []
+
+
+@pytest.mark.unit
+def test_the_component_gives_the_delayed_sample_limit_of_an_objective_that_carries_samples(
+    tmp_path, task_stack
+) -> None:
+    stack, _, _ = task_stack
+    for name, value in CARRYING_OPTIONS.items():
+        setattr(stack.args, name, value)
+    carrying = {"objective": CARRYING, "harbor": HARBOR}
+    # Groups of two in a rollout of four prompts: three groups beside a task, within --global-batch-size 7.
+    assert stack.component.delayed_sample_limit(carrying) == DelayedSampleLimit(6, SamplingDistribution(0.6, 1.0, -1))
+    assert stack.component.delayed_sample_limit({"objective": OBJECTIVE, "harbor": HARBOR}) is None
+    stack.args.use_tis = False
+    with pytest.raises(ValueError, match="without --use-tis"):
+        stack.component.delayed_sample_limit(carrying)
