@@ -69,8 +69,9 @@ message starts with ``context_length_exceeded``. A thinking model's reasoning
 comes in the message's ``reasoning_content``, and its answer in ``content``.
 
 Streaming is buffered: the complete sampled response is emitted as valid
-OpenAI SSE events. It does not provide token-by-token latency. Prompt IDs come
-from the tokenizer's chat template.
+OpenAI SSE events. It does not provide token-by-token latency. A streamed
+answer carries only ``content``, so a streaming client gets no reasoning.
+Prompt IDs come from the tokenizer's chat template.
 
 Serving returns and records no training tensors. The training component
 renders each recorded call with the base model's tokenizer and

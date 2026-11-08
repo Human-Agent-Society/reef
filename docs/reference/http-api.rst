@@ -2809,9 +2809,11 @@ Status codes
 |        | Authorization header is sent; the two harness pages also    |
 |        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
-| 403    | never issued by Reef: an unaccepted token is 401, and       |
+| 403    | a routed request for an unconfigured Scenario or a pin to a |
+|        | target outside it (see Routed external-model requests), or  |
+|        | an engine's own 403; an unaccepted token is 401, and        |
 |        | per-scenario authorization belongs to the gateway in front  |
-|        | of Reef.                                                    |
+|        | of Reef                                                     |
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (on inference, on ``POST /reef/train``,    |
 |        | or with implicit creation off), a scenario that serves no   |
@@ -2825,11 +2827,14 @@ Status codes
 |        | aborted the request on both attempts                        |
 +--------+-------------------------------------------------------------+
 | 4xx    | an engine's own 4xx, with its message, such as for a prompt |
-|        | longer than the model's context window                      |
+|        | that fills the model's context window: an engine's 400,     |
+|        | 401, 403, 404, 408, 409, 422 or 429 passes through as sent, |
+|        | and any other engine 4xx becomes 400                        |
 +--------+-------------------------------------------------------------+
 | 502    | the engine failed with a 5xx, answered with no JSON object, |
 |        | or could not be reached; the body carries the engine's      |
-|        | status and message                                          |
+|        | status and message for a 5xx, and the engine's URL and the  |
+|        | connection error for an engine that could not be reached    |
 +--------+-------------------------------------------------------------+
 | 503    | the artifact store is unreachable, no loaded scenario is    |
 |        | idle at ``reef.max_loaded_scenarios`` (with                 |

@@ -142,11 +142,10 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
 class ReasoningStreamSplitter:
     """Split sampled thinking tags without waiting for the full completion.
 
-    Follows SGLang's Qwen3 reasoning parser, as ``split_reasoning`` does for
-    a whole reply: the first ``<think>`` starts reasoning and is dropped, the
-    first ``</think>`` or ``<tool_call>`` ends it, and a stream that ends
-    inside it is reasoning. A slice that may be the start of one of these
-    tags is held until the next delta.
+    Follows SGLang's Qwen3 reasoning parser: the first ``<think>`` starts
+    reasoning and is dropped, the first ``</think>`` or ``<tool_call>`` ends
+    it, and a stream that ends inside it is reasoning. A slice that may be
+    the start of one of these tags is held until the next delta.
     """
 
     def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:

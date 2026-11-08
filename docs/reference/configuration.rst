@@ -2118,7 +2118,9 @@ samples train.
 The job's metrics report each task's rewards of the rollouts that ran
 (``rollout_rewards``), the samples that train (``rollout_samples``), and the
 rollouts that give no sample because they fail in the infrastructure or their
-model calls do not assemble into one (``removed_rollouts``). A Tinker task job
+model calls do not assemble into one (``removed_rollouts``). A sample alone in
+its group trains with advantage 0 on Slime and counts in ``rollout_samples``;
+on Tinker it does not train, and it is in neither count. A Tinker task job
 also reports each rollout's response tokens and the tokens of them that train
 (``rollout_tokens``), and their sums (``rollout_response_tokens`` and
 ``rollout_trained_tokens``).

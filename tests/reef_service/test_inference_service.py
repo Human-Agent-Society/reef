@@ -142,8 +142,11 @@ def test_an_answer_without_its_record_is_never_returned_and_a_dead_engine_is_a_b
     assert asyncio.run(ask_failing(tmp_path / "engine", engine_url="http://127.0.0.1:9", refuse_records=False)) == 502
 
 
-#: Tinker's answer to a prompt past the model's context window.
-CONTEXT_ERROR = "context_length_exceeded: the prompt exceeds this model's maximum context length. 66527 > 65536"
+#: An engine's refusal of a prompt that fills the model's context window, in Tinker's words.
+CONTEXT_ERROR = (
+    "context_length_exceeded: the prompt exceeds this model's maximum context length. "
+    "66527 prompt tokens fill the context window of 65536"
+)
 
 
 def refusing_engine_app(status: int, message: str) -> web.Application:
