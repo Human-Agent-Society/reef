@@ -18,8 +18,8 @@ from reef.core.snapshot import LOCAL_SNAPSHOT_PREFIX, SnapshotRef, decode_snapsh
 __all__ = [
     "ARTIFACT_ID_METADATA_KEY",
     "LOCAL_SNAPSHOT_PREFIX",
-    "SERVING_PROFILE_METADATA_KEY",
     "SNAPSHOT_METADATA_KEYS",
+    "TRAINING_STARTS_METADATA_KEY",
     "Artifact",
     "ArtifactConflict",
     "ArtifactError",
@@ -34,8 +34,8 @@ __all__ = [
     "content_metadata",
     "decode_snapshot_ref",
     "encode_snapshot_ref",
-    "serving_profile_of",
-    "with_serving_profile",
+    "training_starts_of",
+    "with_training_starts",
 ]
 
 #: Files a repository adds to a materialized snapshot; a snapshot with nothing else holds no weights.
@@ -44,8 +44,8 @@ REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 ARTIFACT_ID_METADATA_KEY = "artifact_id"
 #: Metadata keys that describe a snapshot, not the content of the artifact it holds.
 SNAPSHOT_METADATA_KEYS = frozenset({COMPONENTS_METADATA_KEY, "scenario_commit_record"})
-#: The key of an artifact's own metadata that names its serving profile (RFC #1233).
-SERVING_PROFILE_METADATA_KEY = "serving_profile"
+#: The key of an artifact's own metadata that names its training starts (RFC #1263).
+TRAINING_STARTS_METADATA_KEY = "training_starts"
 
 
 class ArtifactError(ReefError):
@@ -278,25 +278,26 @@ def content_metadata(snapshot: Artifact, component: str | None) -> dict[str, obj
     return dict(manifest.entries[component].metadata)
 
 
-def serving_profile_of(artifact: Artifact) -> str | None:
-    """The serving profile in the own metadata of ``artifact`` (RFC #1233), or None when it names none.
+def training_starts_of(artifact: Artifact) -> tuple[str, ...]:
+    """The artifact IDs of the training starts of ``artifact`` (RFC #1263), nearest first: the training start of
+    the trainer that made it, then that start's own training starts. Empty for an artifact that no training made.
 
-    A profile is a non-empty string that the inference runtime defines; None selects the runtime's default model.
-    ``artifact`` is one artifact: a flat snapshot or a component view. Raise ``ValueError`` for another value.
+    ``artifact`` is one artifact: a flat snapshot or a component view. Raise ``ValueError`` when its metadata holds
+    another value than a list of non-empty strings.
     """
-    profile = artifact.metadata.get(SERVING_PROFILE_METADATA_KEY)
-    if profile is not None and (not isinstance(profile, str) or not profile):
-        raise ValueError(f"an artifact's serving profile is a non-empty string, not {profile!r}")
-    return profile
+    starts = artifact.metadata.get(TRAINING_STARTS_METADATA_KEY, [])
+    if not isinstance(starts, list) or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError(f"an artifact's training starts are a list of artifact IDs, not {starts!r}")
+    return tuple(starts)
 
 
-def with_serving_profile(artifact: Artifact, profile: str) -> Artifact:
-    """``artifact``, unpublished, with ``profile`` as the serving profile in its own metadata."""
-    if not isinstance(profile, str) or not profile:
-        raise ValueError("a serving profile is a non-empty string")
+def with_training_starts(artifact: Artifact, starts: tuple[str, ...]) -> Artifact:
+    """``artifact``, unpublished, with ``starts`` as the training starts in its own metadata."""
+    if not starts or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError("training starts are a non-empty tuple of artifact IDs")
     return Artifact(
         artifact.ref,
         artifact.repository,
         local_path=artifact.local_path,
-        metadata={**artifact.storage_metadata, SERVING_PROFILE_METADATA_KEY: profile},
+        metadata={**artifact.storage_metadata, TRAINING_STARTS_METADATA_KEY: list(starts)},
     )

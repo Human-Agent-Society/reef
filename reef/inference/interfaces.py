@@ -391,20 +391,12 @@ class InferenceRuntime(ABC):
     def apply_serving_config(self, scenario: str, override: Mapping[str, JsonValue]) -> None:
         """Make the engine fields of ``override``, which ``serving_config`` accepted, hold for ``scenario``: for the
         engine that serves it now, and for each engine that starts for it later. A field that ``override`` does not
-        set takes the deployment's value again. The inference worker calls it before each activation and when only
-        the override changed, so a second call with the same values changes nothing. The default has no engine
-        field and does nothing; the handler applies request fields to each request."""
+        set takes the deployment's value again. The inference worker calls it before each activation and each
+        ``serve_artifact``, and when only the override changed, so a second call with the same values changes
+        nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
+        the scenario to another engine. The default has no engine field and does nothing; the handler applies
+        request fields to each request."""
         return
-
-    def check_serving_profile(self, profile: str, artifact: Artifact) -> None:
-        """Accept ``profile`` as the serving profile of ``artifact`` (RFC #1233), or raise ``ValueError``.
-
-        ``artifact`` is the unpublished artifact that will name the profile: the root of a new scenario, or an
-        import. The runtime defines which profiles exist, and serves each artifact that it activates with the
-        profile in its own metadata (``serving_profile_of``); an artifact without one gets the deployment's model.
-        Control calls it without opening the runtime. The default serves one model, so it refuses every profile.
-        """
-        raise ValueError(f"this deployment's inference runtime takes no serving profile, so it refuses {profile!r}")
 
     def open(self) -> None:
         """Open the engines before the inference worker adopts or activates artifacts. A second call does nothing.
@@ -490,9 +482,10 @@ class InferenceRuntime(ABC):
         """
         raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
-    def serve_artifact(self, artifact: Artifact) -> ServedArtifact | None:
-        """Make an engine answer for ``artifact``, and return the value that reaches it: the engine's URL and the model
-        name that samples that artifact. None when the engine has no address that another process can call.
+    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
+        """Make an engine answer for ``artifact`` of ``scenario``, and return the value that reaches it: the engine's
+        URL and the model name that samples that artifact. None when the engine has no address that another process
+        can call. The inference worker applies ``scenario``'s serving config (``apply_serving_config``) first.
 
         Return only when the engine is ready. A second call for a served artifact starts nothing. Only the inference
         owner calls it, one call at a time.

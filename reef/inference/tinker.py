@@ -131,7 +131,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def serves_any_artifact(self) -> bool:
         return True
 
-    def serve_artifact(self, artifact: Artifact) -> ServedArtifact | None:
+    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
         """``artifact``'s own sampler on the service: a call that names it samples that artifact's weights."""
         try:
             return ServedArtifact(artifact.artifact_id, self.base_url, self.sampler_path(artifact) or self._model)

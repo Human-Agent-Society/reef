@@ -148,9 +148,8 @@ def source_uri_of(item: StoredItem) -> str:
 
 
 def item_identity(dispatcher: Dispatcher, item: StoredItem) -> ItemIdentity:
-    """The ``ItemIdentity`` of the artifact item ``item``: its ID, its artifact ID (``item_artifact_id``) and its
-    ``metadata.serving_profile``."""
-    return ItemIdentity(item.item_id, item_artifact_id(dispatcher, item), item.metadata.get("serving_profile"))
+    """The ``ItemIdentity`` of the artifact item ``item``: its ID and its artifact ID (``item_artifact_id``)."""
+    return ItemIdentity(item.item_id, item_artifact_id(dispatcher, item))
 
 
 def item_artifact_id(dispatcher: Dispatcher, item: StoredItem) -> str:
