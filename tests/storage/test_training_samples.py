@@ -208,6 +208,23 @@ def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     assert scenario.samples.page()[-1].sample_id == "t1" and scenario.samples.page()[-1].sequence > last
 
 
+def test_a_trainer_removes_its_own_samples_from_the_scenario_and_no_other_sample(scenario):
+    samples = scenario.samples
+    scenario.data.create("acme", [upload("upload", math="train")])
+    samples.for_trainer("a").add_record_samples(None, (), (("a:r1:0", trajectory("a1")), ("a:r2:0", trajectory("a2"))))
+    samples.for_trainer("b").add_record_samples(None, (), (("b:r3:0", trajectory("b")),))
+    removed, kept, other = (stage_item_id("math", name) for name in ("a:r1:0", "a:r2:0", "b:r3:0"))
+    for refused in ("upload", other):
+        with pytest.raises(ValueError, match="did not make the samples"):
+            samples.for_trainer("a").remove_samples([removed, refused])
+    assert scenario.ids() == ["upload", removed, kept, other], "a refused call changes nothing"
+    samples.for_trainer("a").remove_samples([removed, "missing"])
+    assert scenario.ids() == ["upload", kept, other]
+    assert scenario.data.read("acme", removed).metadata["scenarios"] == {}, "the item stays in the data store"
+    samples.for_trainer("a").remove_samples([removed])
+    assert scenario.ids() == ["upload", kept, other]
+
+
 def test_a_commit_that_fails_counts_no_sample(scenario, monkeypatch):
     session = scenario.session
     scenario.data.create("acme", [upload("t1", math="train")])

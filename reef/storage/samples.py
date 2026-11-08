@@ -272,8 +272,8 @@ class TrainerSamples:
     component that its commits name, or ``""`` for the only trainer of a scenario.
 
     Purpose: ``SampleStore.for_trainer`` makes it. The trainer's pipeline (``PipelineContext.samples``) and its stages
-    read the samples that the trainer trains on, save the samples that its stages make, and read the records that
-    they consumed.
+    read the samples that the trainer trains on, save the samples that its stages make, end the use of the ones that
+    should no longer train, and read the records that they consumed.
     """
 
     store: SampleStore
@@ -333,6 +333,27 @@ class TrainerSamples:
             new += 1
         store.state.consume_records(trainer, record_ids)
         return new
+
+    def remove_samples(self, sample_ids: Sequence[str]) -> None:
+        """End the scenario's use of the samples ``sample_ids`` that the stages of ``trainer`` made, so that no later
+        job takes them. The items stay in the data store with their train counts. An ID that the scenario does not
+        use changes nothing. Raise ``ValueError``, and change nothing, for a sample that the stages of ``trainer`` did
+        not make: an upload, an imported task, or another trainer's sample."""
+        store = self.store
+        items = [
+            item
+            for item in store.data.read_many(store.owner, sample_ids, content=False)
+            if store.scenario in item.scenarios
+        ]
+        others = sorted(
+            item.item_id
+            for item in items
+            if (origin := store.own_origin(item)) is None or origin["component"] != self.trainer
+        )
+        if others:
+            raise ValueError(f"the stages of trainer {self.trainer!r} did not make the samples {others}")
+        if items:
+            store.data.update(store.owner, [item.item_id for item in items], {"scenarios": {store.scenario: None}})
 
     def consumed_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` consumed."""

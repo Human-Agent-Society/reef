@@ -166,7 +166,40 @@ Reef refuses at startup a token that is missing or is no Claude Code OAuth token
 
 The pass rate of a task that ran is the mean reward of its training rollouts. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
-The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. The objective that the deployment provides (`recipe.config.job_parameters.objective`) decides what such a group trains. The example `serve.yaml` names `recipes.task_group.tinker:TaskGroupTinkerObjective`: each rollout's advantage is its reward minus its task's mean reward, so a group whose rewards are all equal trains nothing, and a job whose groups are all equal is skipped. On Slime, a task job names the `slime_dataset` objective, and Slime's own GRPO trains it; `disable-grpo-std-normalization: true` in `training.options` gives the same advantage, the reward minus the task's mean reward, without the division by the group's standard deviation. With 0 or 1 rewards and four rollouts per task, a task outside the default band has equal rewards in its group, and it still takes a place in a batch.
+By default, the band does not decide what trains. The recipe trains each valid train task once, before the band is known. The objective that the deployment provides (`recipe.config.job_parameters.objective`) decides what such a group trains. The example `serve.yaml` names `recipes.task_group.tinker:TaskGroupTinkerObjective`: each rollout's advantage is its reward minus its task's mean reward, so a group whose rewards are all equal trains nothing, and a job whose groups are all equal is skipped. On Slime, a task job names the `slime_dataset` objective, and Slime's own GRPO trains it; `disable-grpo-std-normalization: true` in `training.options` gives the same advantage, the reward minus the task's mean reward, without the division by the group's standard deviation. With 0 or 1 rewards and four rollouts per task, a task outside the default band has equal rewards in its group, and it still takes a place in a batch. With the recipe's pool review on, the recipe's own band decides which tasks continue to train ([the training pool review](#the-training-pool-review)).
+
+## The training pool review
+
+By default, each train task trains once. With `pool_capacity` above 0 in `pipeline.sample2job.config`, the recipe keeps a training pool, as AutoEnvScaling's self-play loop does. When a task's job ends, the task waits for a job again after the tasks that wait already, so the tasks train in turn. A new generation starts only while fewer tasks than `pool_capacity` are active.
+
+```yaml
+pipeline:
+  sample2job:
+    config:
+      buffer_size: 8
+      pool_capacity: 32
+```
+
+Every `review_interval` task jobs, the recipe reviews the pool. For each active task, it reads the last `review_window` rewards that training recorded; a task with fewer rewards stays. The review retires a task for one of these reasons, in this order:
+
+- `below_band`: the pass rate, the mean of those rewards, is below `review_band_low`.
+- `above_band`: the pass rate is above `review_band_high`.
+- `no_reward_spread`: the population standard deviation of the rewards is below `review_min_reward_std`.
+
+A retired task does not train again. With `review_interval: 0`, the tasks train in turn and no review retires them, as in AutoEnvScaling's static mode. The generator still receives the first rollout of each task only.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `pool_capacity` | 0 | 0 trains each task once; above 0, tasks train again, and rounds start only while fewer tasks than this are active |
+| `review_interval` | 16 | task jobs between two reviews; 0 reviews nothing |
+| `review_window` | 4 | the most recent rewards of a task that a review reads; at least 2 |
+| `review_band_low` | 0.25 | the lowest pass rate that keeps a task |
+| `review_band_high` | 0.75 | the highest pass rate that keeps a task |
+| `review_min_reward_std` | 0.1 | the smallest population standard deviation of the rewards that keeps a task; 0 turns this rule off |
+
+The review keys need `pool_capacity` above 0, and `refill_tasks` must stay 1. The recipe's band keys repeat the generator's `band_low` and `band_high`, because the generator does not read the recipe's settings. Set both bands when you change one. Seeds uploaded as train tasks train once; give the seeds to the generator to keep them in the pool ([seed tasks](#seed-tasks)). The task store keeps each use, review and retired task, and the stage's status shows them under `training_pool`; the [configuration reference](../../../docs/reference/configuration.rst) has the details.
+
+This review differs from AutoEnvScaling's. It reads the rewards of recent training rollouts, which can be one pool cycle old; it does not run the current model again. The trainer can take the next job's tasks before the review at the end of the job before it, so a retired task can train once more. It keeps no reserve of tasks, and it asks the generator for no replacement tasks.
 
 ## Solver calibration
 
@@ -211,7 +244,7 @@ No results with the calibration are published yet.
 
 With `adaptive: true`, the solver's results steer later generations, as in RFC #811. When a generation closes, each training task whose pass rate fell outside the band becomes a parent: the generator keeps its files under `state_dir/<scenario>/parents/` and its pass rate in `adaptive.json`. A later generation gives up to `variant_share` of its slots to the newest parents. The slot count is rounded down after adding a tolerance of 1e-9 slots, so floating-point error does not turn 29 slots into 28. The agent gets the parent and its pass rate in its inputs and writes a harder task for a parent above the band, or a simpler one for a parent below it, from the same session. So a variant keeps its parent's source and its split. The other slots rebuild the next sessions of the walk, and a variant takes no session from it.
 
-Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, a parent gets one variant slot whatever becomes of the variant, except an outage, which leaves the parent its slot for the next generation, and the generator keeps at most 256 parents, dropping the oldest. Parents with missing files or sessions are skipped but still count toward the limit until they are dropped. A replayed result adds nothing: a closed generation is not closed again, and one closed again after a crash adds each parent once. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. With `calibration: refuse`, a task outside the band is refused before it trains, so it never becomes a parent: the parents are then the admitted tasks that the solver outgrows, or falls behind on, during training. With `calibration: measure`, every task is admitted and trained, so a task the calibration placed outside the band can still become a parent. Proposer training and retiring tasks from the pool are not part of this mode.
+Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, a parent gets one variant slot whatever becomes of the variant, except an outage, which leaves the parent its slot for the next generation, and the generator keeps at most 256 parents, dropping the oldest. Parents with missing files or sessions are skipped but still count toward the limit until they are dropped. A replayed result adds nothing: a closed generation is not closed again, and one closed again after a crash adds each parent once. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. With `calibration: refuse`, a task outside the band is refused before it trains, so it never becomes a parent: the parents are then the admitted tasks that the solver outgrows, or falls behind on, during training. With `calibration: measure`, every task is admitted and trained, so a task the calibration placed outside the band can still become a parent. Proposer training is not part of this mode; [the training pool review](#the-training-pool-review) retires tasks from the pool.
 
 A variant keeps its parent's limits: `[agent]` and `[verifier]` `timeout_sec` and `[environment]` `cpus`, `memory_mb`, `storage_mb` and `gpus` are the parent's, whatever the Designer wrote. A variant is harder or simpler by what it asks, not by more time or a larger machine, so its pass rate stays comparable with its parent's place in the band. Without this, a variant of a TMax seed (1200 s) took the 3600 s that the Designer wrote.
 

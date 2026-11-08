@@ -2030,7 +2030,7 @@ which are not records.
        the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
 
    ``pipeline.record2sample.config.refill_tasks`` : 1
-       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
+       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait. With ``pipeline.sample2job.config.pool_capacity`` above 0, it must stay 1.
 
    ``pipeline.record2sample.config.rounds`` : 0
        rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
@@ -2084,6 +2084,62 @@ whatever Tinker's batch size (``training.options.batch-size``) is:
 
    ``pipeline.sample2job.config.buffer_size`` : 4
        the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
+
+   ``pipeline.sample2job.config.pool_capacity`` : 0
+       0 trains each train task once. Above 0, a task trains again after its job ends, and rounds start only while fewer tasks than this are active.
+
+   ``pipeline.sample2job.config.review_interval`` : 16
+       task jobs between two pool reviews; 0 reviews nothing
+
+   ``pipeline.sample2job.config.review_window`` : 4
+       the most recent rewards of a task that a review reads; at least 2
+
+   ``pipeline.sample2job.config.review_band_low`` : 0.25
+       a review retires a task whose pass rate is below this; between 0 and 1
+
+   ``pipeline.sample2job.config.review_band_high`` : 0.75
+       a review retires a task whose pass rate is above this; between ``review_band_low`` and 1
+
+   ``pipeline.sample2job.config.review_min_reward_std`` : 0.1
+       a review retires a task whose rewards have a smaller population standard deviation; 0 turns this rule off
+
+With ``pool_capacity`` above 0, the train tasks form a training pool. When a
+task's job ends, the stage saves a new task item for the task's next use,
+``<scenario>.generated-tasks.<task name>@<k>`` for use ``k``, after the items
+that wait. So the tasks train in turn, and each item trains once. The tasks
+of a job that a new training start cancelled go back when the next job ends.
+A new round
+starts only while fewer tasks than ``pool_capacity`` are active, so the pool
+can hold more tasks than the capacity by the train tasks of one generation.
+The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks`` must
+stay 1. Imported train tasks still train once.
+
+After every ``review_interval`` task jobs, a review reads the last
+``review_window`` rewards of each active task. A failed task job counts too.
+The pass rate is the mean of those rewards. A task with fewer rewards stays.
+The review retires a task for one of these reasons, in this order:
+
+- ``below_band``: the pass rate is below ``review_band_low``.
+- ``above_band``: the pass rate is above ``review_band_high``.
+- ``no_reward_spread``: the population standard deviation of the rewards is
+  below ``review_min_reward_std``.
+
+A pass rate on a bound keeps the task. A retired task does not train again:
+the scenario stops using its item that waits. The review reads the rewards
+that training recorded, so they can be one pool cycle old. The trainer can
+take the next job's tasks before the review at the end of the job before it,
+so a retired task can train in that next job once more. With
+``review_interval: 0``, the tasks train in turn and no review retires them. The
+generator still receives the first rollout of each task only.
+
+The task store keeps each use of a task with its rewards, each review, and
+each retired task with its rewards, pass rate and reason. The status shows
+them under ``training_pool``: ``capacity``, ``active``, ``retired``,
+``reviews``, and ``last_review_retired``. The task store and the scenario's
+items hold the pool, so a restart continues it in the same order. A restart
+also repeats a review that a stop interrupted. When a deployment sets
+``pool_capacity`` on a scenario whose train tasks trained once, those tasks
+join the pool at the start.
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
 job's start weights, as the ``rollout`` job parameter says. The Slime component runs
