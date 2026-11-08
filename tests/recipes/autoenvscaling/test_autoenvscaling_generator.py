@@ -56,7 +56,7 @@ from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling import workspace_reply
 from recipes.beta.autoenvscaling.checks import CheckResult, PassRateBand
 from recipes.beta.autoenvscaling.designer import AgentTools, TaskVariant
-from recipes.task_group.tinker import TaskGroupTinkerObjective
+from recipes.beta.autoenvscaling.tinker import AutoEnvScalingTinkerObjective
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
@@ -895,7 +895,7 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
     assert rollout_agent["import_path"] == "reef.record2sample.generator.terminus:VerifiedTerminus2"
     # Each rollout's advantage is its reward minus its task's mean reward.
     objective = resolve_tinker_objective(config["recipe"]["config"]["job_parameters"]["objective"])
-    assert isinstance(objective, TaskGroupTinkerObjective)
+    assert isinstance(objective, AutoEnvScalingTinkerObjective)
     # The official solver's cap of one reply; on chat completions, model_info caps nothing.
     assert kwargs["llm_kwargs"]["max_tokens"] == 16384
     assert kwargs["enable_summarize"] is False and kwargs["record_terminal_session"] is False

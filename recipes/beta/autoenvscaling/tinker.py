@@ -1,4 +1,8 @@
-"""The task-group objective on Tinker: group relative advantages over the rollouts of one task."""
+"""The AutoEnvScaling objective on Tinker: each rollout's reward minus the mean reward of its task's rollouts.
+
+A task job of the generated-task recipe names it as its ``objective``, as the AutoEnvScaling examples on Tinker do. It
+trains on Tinker's built-in importance-sampling loss.
+"""
 
 from __future__ import annotations
 
@@ -14,15 +18,17 @@ from reef.train.tinker_backend.objectives import TinkerObjective, register_tinke
 
 
 @register_tinker_objective
-class TaskGroupTinkerObjective(TinkerObjective):
+class AutoEnvScalingTinkerObjective(TinkerObjective):
     """Each rollout's advantage is its reward minus its task group's mean reward; a constant group gets 0.
 
-    The advantage is not divided by the group's standard deviation, as in the AutoEnvScaling and DAPO recipes: with
-    partial credit, a group whose rewards differ a little (1.0 and 0.9) would otherwise train as hard as one whose
-    rewards differ fully (1.0 and 0.0). A job whose groups are all constant trains nothing, so it is skipped.
+    Values: the advantage is not divided by the group's standard deviation, as in the AutoEnvScaling and DAPO
+    recipes: with partial credit, a group whose rewards differ a little (1.0 and 0.9) would otherwise train as hard as
+    one whose rewards differ fully (1.0 and 0.0). A job whose groups are all constant trains nothing, so it is skipped
+    and keeps its weights and step count.
+    Purpose: a Tinker task job names it as its ``objective``; ``recipes.beta.autoenvscaling`` registers its name.
     """
 
-    name = "task_group"
+    name = "autoenvscaling"
     # The advantage on every response token, the rollout log probs as the reference.
     loss_family = "importance_sampling"
 
@@ -51,3 +57,6 @@ class TaskGroupTinkerObjective(TinkerObjective):
             {"advantages": values, "constant_groups": constant_groups, "steps": steps},
             values,
         )
+
+
+__all__ = ["AutoEnvScalingTinkerObjective"]

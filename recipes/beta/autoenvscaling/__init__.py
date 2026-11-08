@@ -17,6 +17,8 @@ tasks and trains on them.
 - ``generator``: ``AutoEnvScalingGenerator``: the sessions walked with a cursor, admission and the history
   step, the agent's check and the task checks through the generator service, the band, the parents and the seeds.
 - ``tmax``: the command that converts extracted TMax tasks into seed tasks.
+- ``tinker``: the Tinker objective of a task job, each rollout's reward minus its task's mean reward, on Tinker's
+  built-in importance-sampling loss. It is imported only when that backend resolves the objective.
 """
 
 from recipes.beta.autoenvscaling.checks import (
@@ -45,6 +47,11 @@ from recipes.beta.autoenvscaling.designer import (
 )
 from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator, GeneratorChecks, admitted_task
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource, load_sources, render_session
+from reef.train.algos.registry import register_objective_ref
+
+register_objective_ref(
+    "autoenvscaling", "recipes.beta.autoenvscaling.tinker:AutoEnvScalingTinkerObjective", backend="tinker"
+)
 
 __all__ = [
     "AgentDesigner",
