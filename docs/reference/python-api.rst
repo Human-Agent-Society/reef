@@ -1112,7 +1112,9 @@ For example, inspect one trace without making it available to training again:
 The HTTP service runs background retention at startup and every 60 seconds. It
 deletes the oldest record items, across owners, only when they hold more than a
 shared 20 GiB budget (``DataStore.prune_records``). The budget counts each record
-item's row and the trajectory nodes that only it needs. Limits are configurable
+item's row and the trajectory nodes that only it needs. It counts and deletes
+only the record items whose ``origin.source`` is ``inference``; it keeps the
+calls of evaluation rollouts. Limits are configurable
 in `Configuration <configuration.rst>`__.
 
 For embedded Python deployments, use

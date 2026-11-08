@@ -19,6 +19,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, UpstreamStatusError
+from reef.core.evaluation import EvaluationCall
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
 
@@ -116,12 +117,14 @@ class ArtifactEndpoint:
 
 
 class CandidateArtifacts(ABC):
-    """Finds the candidate of an evaluation rollout.
+    """Finds the candidate of an evaluation rollout, and keeps the rollout's calls.
 
     ``candidate(scenario, artifact_id, component)`` returns the runtime of ``scenario`` and the materialized
     artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
     runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
     ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
+    ``add_evaluation_call(scenario, evaluation_id, artifact_id, call)`` keeps one call of a rollout to the candidate
+    ``artifact_id`` as a record item of the scenario's owner (``reef.storage.record_items.evaluation_call_item``).
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """
@@ -135,6 +138,11 @@ class CandidateArtifacts(ABC):
     def candidate(
         self, scenario: str, artifact_id: str, component: str | None
     ) -> tuple[InferenceRuntime, Artifact]: ...
+
+    @abstractmethod
+    def add_evaluation_call(
+        self, scenario: str, evaluation_id: str, artifact_id: str, call: EvaluationCall
+    ) -> None: ...
 
 
 __all__ = ["ArtifactEndpoint", "CandidateArtifacts"]
