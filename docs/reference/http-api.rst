@@ -1820,7 +1820,7 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null}
+   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null}
 
 ``model`` defaults to ``active``. It can also name an active artifact alias
 or an artifact selected for serving beside the active one. An unknown name
@@ -1836,7 +1836,19 @@ returns 404.
   doubles at each failed retry, up to one hour. A retry returns the state to
   ``pending``. Activate the active artifact again to retry at once.
 
-``error`` is null in every other state. The status describes the selected
+``error`` is null in every other state.
+
+``engine`` is the state of the engine behind the route of a ``ready`` artifact
+(RFC #1269), when the deployment's inference handler reports it:
+
+* ``warm``: an engine answers now.
+* ``starting``: an engine runs, but it does not answer yet.
+* ``idle``: no engine runs. The next request starts one and waits for it.
+
+``engine`` is null in every other state, and when the handler cannot tell.
+Reading it starts no engine.
+
+The status describes the selected
 artifact, even while an older route still serves requests. It is a startup
 result, not a continuous health check. Reading it starts no work.
 No startup work returns 404. An unreadable state store returns 503.
