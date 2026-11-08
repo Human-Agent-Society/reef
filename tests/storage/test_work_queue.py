@@ -196,8 +196,6 @@ def warnings_of(caplog) -> list[str]:
         (RuntimeError("engine down"), 2, "queued"),
         (RuntimeError("engine down"), 1, "failed"),
         (WorkerStopped(), 1, "failed"),
-        # A driver log's tail ends with a newline; the item still fails, with the trimmed text.
-        (ItemFailed("the driver exited with 1; the end of driver.log:\nTraceback\n"), 2, "failed"),
     ],
 )
 def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, error, attempts, state):
@@ -211,6 +209,27 @@ def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, err
         assert warnings_of(caplog) == (
             [f"work item jobs/a of scenario s failed: {item.error}"] if state == "failed" else []
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error", "stored"),
+    [
+        (
+            RuntimeError("modal run failed:\n  the export failed\n"),
+            "RuntimeError: modal run failed:\n  the export failed",
+        ),
+        (RuntimeError(), "RuntimeError:"),
+        (ItemFailed(" "), "the work item failed"),
+    ],
+)
+def test_a_worker_stores_an_error_message_with_surrounding_spaces(error, stored):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.add(job("a"))
+        assert FailingWorker(queue, error).run_once()
+        item = queue.get("jobs", "a")
+        assert (item.state, item.error) == ("failed", stored)
 
 
 @pytest.mark.unit

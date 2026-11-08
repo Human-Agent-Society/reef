@@ -229,11 +229,11 @@ class QueueWorker(ServiceWorker):
 
     def fail(self, item: WorkItem, error: str, *, retryable: bool) -> None:
         """Fail ``item`` with ``error`` (``WorkQueue.fail``) and log a warning when it failed for good; nothing
-        happens when another worker holds it now. The queue stores the error without surrounding spaces, so an
-        error that ends with a log's last newline is trimmed first."""
-        text = error.strip() or "the item failed"
+        happens when another worker holds it now. The queue refuses an error text with surrounding spaces or none,
+        and an exception's message can have them, so the worker strips ``error`` first."""
+        error = error.strip() or "the work item failed"
         try:
-            failed = self.queue.fail(self.queue_name, item.id, self.worker_id, text, retryable=retryable)
+            failed = self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable)
         except WorkLeaseLost:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
