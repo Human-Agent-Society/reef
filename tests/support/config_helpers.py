@@ -15,6 +15,10 @@ def load_deployment(path):
         {
             "GUIDANCE_MODEL_PATH": os.environ.get("GUIDANCE_MODEL_PATH") or "/tmp/reef-test-model",
             "GUIDANCE_STATE_DIR": os.environ.get("GUIDANCE_STATE_DIR") or "/tmp/reef-test-guidance",
+            # The paths that the AutoEnvScaling Slime example reads from the shell.
+            "REEF_AUTOENVSCALING_MODEL_PATH": os.environ.get("REEF_AUTOENVSCALING_MODEL_PATH") or "/tmp/reef-model",
+            "REEF_AUTOENVSCALING_STATE_DIR": os.environ.get("REEF_AUTOENVSCALING_STATE_DIR") or "/tmp/reef-aes",
+            "REEF_AUTOENVSCALING_SEEDS_PATH": os.environ.get("REEF_AUTOENVSCALING_SEEDS_PATH") or "/tmp/reef-seeds",
         },
     ):
         return resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]

@@ -141,11 +141,15 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--disable-bias-linear",
         "--expert-model-parallel-size",
         "--expert-tensor-parallel-size",
+        "--ffn-hidden-size",
         "--group-query-attention",
         "--hidden-dropout",
+        "--hidden-size",
+        "--kv-channels",
         "--lr-decay-iters",
         "--lr-decay-style",
         "--lr-warmup-iters",
+        "--min-lr",
         "--moe-aux-loss-coeff",
         "--moe-grouped-gemm",
         "--moe-permute-fusion",
@@ -154,10 +158,14 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--moe-token-dispatcher-type",
         "--normalization",
         "--no-save-optim",
+        "--num-attention-heads",
+        "--num-layers",
+        "--num-query-groups",
         "--optimizer",
         "--optimizer-cpu-offload",
         "--optimizer-offload-fraction",
         "--overlap-cpu-optimizer-d2h-h2d",
+        "--use-distributed-optimizer",
         "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
@@ -285,8 +293,10 @@ def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
     recipe_type = recipe_class_for(recipe)
     weight_type = None if recipe_type is None else selected_weight_training(recipe_type, config)
     assert weight_type is not None, f"reef.recipe {recipe!r} must train weights"
+    # As the service does: the recipe's defaults with the deployment's job_parameters over them.
+    default_parameters = weight_type.configured_parameters(config["reef"].get("job_parameters"))
     runtime = SlimeDeployment().component_config(
-        asdict(service_config_from_mapping(config)), default_parameters=weight_type.default_parameters()
+        asdict(service_config_from_mapping(config)), default_parameters=default_parameters
     )
     loss_family = runtime["loss_family"]
     assert runtime["recipe"] == recipe
@@ -412,8 +422,9 @@ def test_user_facing_example_deployments_are_discovered() -> None:
     paths = {_config_id(path) for path in EXAMPLE_DEPLOYMENTS}
     assert paths == {
         "recipes/basic/external-provider.yaml",
-        "recipes/beta/autoenvscaling/examples/tinker/serve.yaml",
-        "recipes/beta/autoenvscaling/examples/tinker-seeds/serve.yaml",
+        "recipes/beta/autoenvscaling/examples/recorded_sessions/serve-tinker.yaml",
+        "recipes/beta/autoenvscaling/examples/tmax_seeds/serve-tinker.yaml",
+        "recipes/beta/autoenvscaling/examples/tmax_seeds/serve-slime.yaml",
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
         "recipes/beta/spade/examples/tinker/serve.yaml",
         "recipes/basic/local-sglang.yaml",

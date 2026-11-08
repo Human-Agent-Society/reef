@@ -50,8 +50,15 @@ def test_a_job_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_count
     assert signal.action == "skip" and signal.next_algorithm_state == {"steps": 3}
 
 
-@pytest.mark.parametrize("recipe", ["autoenvscaling", "spade"])
-def test_the_tinker_examples_of_generated_tasks_name_this_objective(recipe: str) -> None:
-    example = Path(__file__).resolve().parents[3] / "recipes" / "beta" / recipe / "examples" / "tinker" / "serve.yaml"
-    reference = yaml.safe_load(example.read_text())["recipe"]["config"]["job_parameters"]["objective"]
+@pytest.mark.parametrize(
+    "example",
+    [
+        "autoenvscaling/examples/recorded_sessions/serve-tinker.yaml",
+        "autoenvscaling/examples/tmax_seeds/serve-tinker.yaml",
+        "spade/examples/tinker/serve.yaml",
+    ],
+)
+def test_the_tinker_examples_of_generated_tasks_name_this_objective(example: str) -> None:
+    path = Path(__file__).resolve().parents[3] / "recipes" / "beta" / example
+    reference = yaml.safe_load(path.read_text())["recipe"]["config"]["job_parameters"]["objective"]
     assert isinstance(resolve_tinker_objective(reference), TaskGroupTinkerObjective)
