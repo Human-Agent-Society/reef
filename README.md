@@ -35,6 +35,14 @@ to train model weights with Slime and SGLang, or improve an agent's harness, inc
 </div>
 
 
+## 📰 News
+
+- **2026-11:** We are refactoring Reef to a control plane + workers architecture. Some recipes and examples can fail on `main` until the refactor is complete. If a recipe fails, please [open an issue](https://github.com/Human-Agent-Society/reef/issues/new/choose).
+- **2026-11:** A scenario can split its traffic across its served artifacts [#1227](https://github.com/Human-Agent-Society/reef/pull/1227), also through [Semantic Router](https://github.com/vllm-project/semantic-router) [#859](https://github.com/Human-Agent-Society/reef/pull/859). The new `python` harness adapter evolves a Python program [#1242](https://github.com/Human-Agent-Society/reef/pull/1242).
+- **2026-10:** Tinker runs as a training component [#901](https://github.com/Human-Agent-Society/reef/pull/901). Episodes and agents can run in Modal Sandboxes [#942](https://github.com/Human-Agent-Society/reef/pull/942). The artifact repository can live on Hugging Face [#1003](https://github.com/Human-Agent-Society/reef/pull/1003). New recipe: [OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) [#683](https://github.com/Human-Agent-Society/reef/pull/683).
+- **2026-09:** [`reef-infra` v0.1.0](https://github.com/Human-Agent-Society/reef/releases/tag/v0.1.0) is on PyPI. New recipes: [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/), [SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/) and [Meta-Harness](recipes/meta_harness/README.md). Reef serves the OpenAI Responses API at `/v1/responses` [#528](https://github.com/Human-Agent-Society/reef/pull/528).
+- **2026-08:** Reef is open source. Read the [launch post](https://x.com/ao_qu18465/status/2094867930081337730).
+
 ## 🎯 When to use Reef
 
 Use Reef when you want your agent to keep improving simply by learning from how you interact with your agent.
