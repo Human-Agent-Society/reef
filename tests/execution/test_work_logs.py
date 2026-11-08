@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
+import time
 from contextlib import closing
 
 import pytest
 
 from reef.execution import work_logs
+from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.execution.workers import QueueWorker
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue
 from reef.storage.work_queue import MAX_LOG_LINES, NewWork
@@ -46,7 +49,7 @@ def queue():
 
 
 @pytest.mark.unit
-def test_a_worker_keeps_the_lines_that_its_thread_logs_in_each_attempt(queue, caplog):
+def test_a_worker_keeps_the_lines_that_its_work_logs_in_each_attempt(queue, caplog):
     with caplog.at_level(logging.INFO, logger="reef"):
         assert LoggingWorker(queue, error=RuntimeError("judge down")).run_once()
         assert LoggingWorker(queue).run_once()
@@ -78,3 +81,40 @@ def test_a_worker_without_a_log_keeps_nothing(queue, caplog):
         assert Quiet(queue).run_once()
     assert queue.read_log("jobs", "a", 1) == ()
     assert MAX_LOG_LINES == 2000
+
+
+class Judge(BackgroundJobRunner):
+    """Logs one line when its job runs, after ``release`` is set."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    async def run(self, job):
+        await asyncio.to_thread(self.release.wait, 5)
+        logger.info("judged %s", job.receipt)
+        return job
+
+
+@pytest.mark.unit
+def test_a_background_job_logs_to_the_attempt_that_submitted_it_also_after_the_attempt(queue, caplog):
+    judge = Judge()
+    background = BackgroundJobWorker(judge, thread_name="judge", concurrency=1)
+
+    class Submitting(LoggingWorker):
+        def run_item(self, item, lease_lost):
+            logger.info("submit")
+            assert background.submit(SupportsReceipt("r1"))
+            return {}
+
+    try:
+        with caplog.at_level(logging.INFO, logger="reef"):
+            assert Submitting(queue).run_once()
+            assert [line.message for line in queue.read_log("jobs", "a", 1)] == ["submit"]
+            judge.release.set()
+            while not background.poll():
+                time.sleep(0.01)
+            # The job ended after its attempt: the flusher writes its line to that attempt.
+            work_logs.FLUSHER.flush()
+    finally:
+        background.close()
+    assert [line.message for line in queue.read_log("jobs", "a", 1)] == ["submit", "judged r1"]

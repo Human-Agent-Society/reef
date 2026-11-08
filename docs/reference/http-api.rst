@@ -2993,9 +2993,10 @@ Control removes ended tasks after ``storage.work_retention_s``, which defaults t
 This removes task history, not stored samples. Active tasks do not expire through this retention policy.
 
 ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs`` returns the log of one attempt of a task.
-The samples worker keeps each line that its thread logs while the attempt runs.
-It writes them every 2 seconds and when the attempt ends.
-Lines from other threads, such as a stage's background jobs, are not kept.
+The samples worker keeps each line that the attempt's work logs.
+This includes the stage's background jobs that the attempt submitted, also when they end after the attempt.
+Reef writes the lines every 2 seconds and when the attempt ends.
+Lines of threads that the work starts by hand are not kept.
 One attempt keeps at most 2,000 lines of at most 4,096 characters.
 The line after the last one says that the log was cut.
 
