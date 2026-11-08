@@ -35,7 +35,7 @@ from reef.storage.record_items import ItemRecordStore, old_record_copied
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_call_table, evaluation_table
+from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
 from reef.storage.sql_setup import enable_wal
@@ -57,7 +57,6 @@ TASK_TABLES = task_tables(_METADATA)
 SAMPLE_TRAIN_COUNT_TABLE = ScopedTable(sample_train_count_table(_METADATA))
 STAGE_RECORD_TABLE = ScopedTable(stage_record_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
-EVALUATION_CALL_TABLE = ScopedTable(evaluation_call_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 #: The record tables of a version before the record items (RFC #1219); the newest of them is ``agent_record``.
 OLD_RECORD_TABLES = ("record_node", "consumed_agent_record", "record_consumption", "record_eviction", "agent_record")
@@ -171,8 +170,8 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
         return SQLTrainingState(self, SAMPLE_TRAIN_COUNT_TABLE, STAGE_RECORD_TABLE)
 
     def evaluation_store(self) -> SQLEvaluationStore:
-        """Open the artifact evaluations and their calls in this database."""
-        return SQLEvaluationStore(self, EVALUATION_TABLE, EVALUATION_CALL_TABLE)
+        """Open the artifact evaluations in this database."""
+        return SQLEvaluationStore(self, EVALUATION_TABLE)
 
     def commit_history(self) -> SQLCommitHistory:
         """Open the commit history in this database; it is durable unless the database is in memory."""

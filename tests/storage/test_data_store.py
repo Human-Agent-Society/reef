@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -23,9 +24,10 @@ from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
+from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
-from reef.storage.record_items import record_item
+from reef.storage.record_items import evaluation_call_item, record_item, stored_evaluation_call
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.tasks import LocalTaskFileStore, files_digest
@@ -869,3 +871,101 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     # The periodic work keeps a directory that a job used within the time to live.
     store.maintain()
     assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+
+
+def evaluation_call(turns: int, attempt: int, index: int, status: int = 200, response: object = "reply"):
+    """The record item of call ``index`` of attempt ``attempt`` of rollout (0, 0) of evaluation ``e1`` of ``coding``:
+    the request of a conversation of ``turns`` turns, with its reply, or ``response`` when it is not ``"reply"``."""
+    payload = dict(conversation("unused", turns, scenario="coding").payload)
+    reply = payload.pop("response")
+    summary = EvaluationCallSummary(
+        0, 0, attempt, index, "/v1/chat/completions", status, 10.0 + index, 0.5, None, None, None, 0
+    )
+    call = EvaluationCall(summary, payload, reply if response == "reply" else response)
+    return call, evaluation_call_item("coding", "a1", "e1", call)
+
+
+def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_data(store):
+    first, second = evaluation_call(1, 1, 0), evaluation_call(2, 1, 1)
+    # A failed call with no reply, and one with an error body, take part in the links as calls without a reply.
+    no_reply = evaluation_call(3, 1, 2, status=502, response=None)
+    error = evaluation_call(3, 1, 3, status=500, response={"error": {"message": "the engine stopped"}})
+    retried = evaluation_call(2, 2, 0)
+    store.create("acme", [item for _, item in (first, second, no_reply, error, retried)])
+    # The scenario's own calls come later and have the same messages, but they never link to an evaluation call.
+    store.create("acme", calls(1, 2))
+    entries = {turns: call_key(conversation("c", turns).payload).entry_count for turns in (1, 2, 3)}
+    ids = [item.item_id for _, item in (first, second, no_reply, error, retried)]
+    assert store.record_links("acme", [*ids, "coding/call-1", "coding/call-2"]) == {
+        "coding/e1:0:0:1:0": RecordLink(None, entries[1]),
+        "coding/e1:0:0:1:1": RecordLink("coding/e1:0:0:1:0", entries[2]),
+        "coding/e1:0:0:1:2": RecordLink("coding/e1:0:0:1:1", entries[3]),
+        # The same request again retries the failed call.
+        "coding/e1:0:0:1:3": RecordLink("coding/e1:0:0:1:2", entries[3]),
+        "coding/e1:0:0:2:0": RecordLink(None, entries[2]),
+        "coding/call-1": RecordLink(None, entries[1]),
+        "coding/call-2": RecordLink("coding/call-1", entries[2]),
+    }
+    for call, item in (first, second, no_reply, error, retried):
+        assert stored_evaluation_call(store.read("acme", item.item_id)) == call
+    if not isinstance(store, MemoryDataStore):
+        # The node of a continued call keeps only the messages after its parent's.
+        nodes, items = store.nodes_table, store.items_table
+        with store.transaction() as connection:
+            kept = connection.execute(
+                select(nodes.c.entries_json)
+                .join(items, (items.c.owner == nodes.c.owner) & (items.c.sequence == nodes.c.node_sequence))
+                .where(items.c.item_id == "coding/e1:0:0:1:1")
+            ).scalar_one()
+        assert len(json.loads(kept)) == entries[2] - entries[1]
+
+    found = store.query("acme", kind="record", origin="coding", group=("evaluation_id", "e1"), content=False)
+    assert [item.item_id for item in found] == ids
+    assert all(item.scenarios == {} for item in found)
+    assert [item.item_id for item in store.query("acme", scenario="coding")] == ["coding/call-1", "coding/call-2"]
+    assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("record",))] == [
+        "coding/call-1",
+        "coding/call-2",
+    ]
+    with pytest.raises(ValueError, match="no scenario"):
+        store.update("acme", [ids[0]], {"scenarios": {"coding": "train"}})
+    with pytest.raises(ValueError, match="never changes"):
+        store.update("acme", [ids[0]], {"evaluation_id": "e2"})
+    # Pruning deletes and counts the scenario's own calls only; evaluation calls stay.
+    assert store.prune_records(0) == 2
+    assert store.record_loss("acme", "coding").record_count == 2
+    assert [item.item_id for item in store.query("acme", kind="record")] == ids
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda metadata: {**metadata, "scenarios": {"coding": "train"}}, "no scenario"),
+        (lambda metadata: {**metadata, "evaluation_id": "e2"}, "evaluation_id"),
+        (lambda metadata: {**metadata, "origin": {**metadata["origin"], "source": "replay"}}, "source"),
+        (lambda metadata: {**metadata, "origin": {**metadata["origin"], "source": "inference"}}, "evaluation"),
+        (
+            lambda metadata: {
+                **metadata,
+                "origin": {**metadata["origin"], "evaluation": {**metadata["origin"]["evaluation"], "attempt": 0}},
+            },
+            "attempt",
+        ),
+        (
+            lambda metadata: {
+                **metadata,
+                "origin": {**metadata["origin"], "evaluation": {**metadata["origin"]["evaluation"], "index": 7}},
+            },
+            "evaluation call has the ID",
+        ),
+    ],
+)
+def test_the_metadata_of_an_evaluation_call_is_checked(store, change, message):
+    _, item = evaluation_call(1, 1, 0)
+    with pytest.raises(ValueError, match=message):
+        store.create("acme", [NewItem(item.item_id, item.content, change(item.metadata))])
+    plain = record_item(conversation("call-1", 1, scenario="coding"))
+    with pytest.raises(ValueError, match="evaluation_id"):
+        store.create("acme", [NewItem(plain.item_id, plain.content, {**plain.metadata, "evaluation_id": "e1"})])
+    explicit = {**plain.metadata, "origin": {**plain.metadata["origin"], "source": "inference"}}
+    assert store.create("acme", [NewItem(plain.item_id, plain.content, explicit)])[0].inserted

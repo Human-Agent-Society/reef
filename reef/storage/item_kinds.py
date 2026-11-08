@@ -44,6 +44,11 @@ def json_digest(content: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def evaluation_call_id(evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int) -> str:
+    """The record ID of a call of an evaluation rollout: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``."""
+    return f"{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}"
+
+
 def task_partition(owner: str) -> str:
     """The task file store partition that keeps the task directories of ``owner``."""
     return TASK_PARTITION_PREFIX + owner
@@ -172,7 +177,8 @@ class TrajectoryRules(JsonItemRules):
 
 
 class RecordRules(JsonItemRules):
-    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``.
+    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``. The record ID of
+    an evaluation call is the ``evaluation_call_id`` of its ``origin.evaluation``.
 
     Its digest is ``json_digest`` of the content without ``created_at``, as the record store's retry fingerprint,
     so a client's retry with a new time matches. An item stored before had ``created_at`` in its digest, and it
@@ -194,7 +200,12 @@ class RecordRules(JsonItemRules):
 
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         origin = metadata["origin"]["scenario"]
-        copied_record(item_id, content, origin, origin)
+        record = copied_record(item_id, content, origin, origin)
+        location = metadata["origin"].get("evaluation")
+        if location is not None and record.agent_record_id != f"{origin}/{evaluation_call_id(**location)}":
+            raise ValueError(
+                f"an evaluation call has the ID {origin}/<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>"
+            )
 
 
 def record_digest(content: Mapping[str, Any]) -> str:
@@ -252,6 +263,7 @@ __all__ = [
     "TrajectoryRules",
     "check_artifact_content",
     "copied_record",
+    "evaluation_call_id",
     "json_digest",
     "task_partition",
 ]

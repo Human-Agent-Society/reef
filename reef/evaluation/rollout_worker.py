@@ -9,7 +9,7 @@ A worker asks inference to serve the candidate before each trial (a ``serve_arti
 and waits until the engine is ready. It answers the agent's model calls from that engine on a loopback endpoint
 (``CandidateEndpoints``). The item writes no route, so no client reaches the candidate through ``served_models``, and
 no call is a record, so an evaluation never trains the scenario. The worker keeps each call of the rollout, failed
-calls too, in the evaluation store of the scenario as the call ends (``RolloutCalls``), so a client can read the calls
+calls too, as a record item of the scenario's owner in the data store as the call ends (``RolloutCalls``), so a client can read the calls
 of a rollout while it runs.
 """
 
@@ -260,7 +260,8 @@ class CandidateEndpoints(ABC):
 
     @abstractmethod
     def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
-        """Keep ``call``, a call of ``rollout``, in the evaluation store of the rollout's scenario."""
+        """Keep ``call``, a call of ``rollout``, as a record item in the data store
+        (``reef.storage.record_items.evaluation_call_item``)."""
 
 
 class LocalCandidateEndpoints(CandidateEndpoints):
@@ -284,7 +285,7 @@ class LocalCandidateEndpoints(CandidateEndpoints):
             yield CandidateEndpoint(endpoint.url, None)
 
     def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
-        self.artifacts.add_evaluation_call(rollout.scenario, rollout.evaluation_id, call)
+        self.artifacts.add_evaluation_call(rollout.scenario, rollout.evaluation_id, rollout.artifact_id, call)
 
 
 def reply_summary(path: str, reply: Mapping[str, Any]) -> tuple[int | None, int | None, str | None, int]:
@@ -367,7 +368,7 @@ def evaluation_call(turn: CapturedTurn, rollout: EvaluationRollout, attempt: int
 
 
 class RolloutCalls(CaptureObserver):
-    """Keeps each call of one attempt of an evaluation rollout in its evaluation's store, as the call ends.
+    """Keeps each call of one attempt of an evaluation rollout in the data store, as the call ends.
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is

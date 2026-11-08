@@ -16,18 +16,33 @@ Another scenario ``t`` of ``o`` uses a record item ``i`` whose ``scenarios`` nam
 the data store as ``copied_record(i, t)``, with the record ID ``i.item_id``, and each reference ``x`` of ``i`` becomes
 ``<origin>/x`` (``used_records``). Nothing is stored in ``t``, so when ``i`` leaves ``t``, the read stops
 giving it (RFC #1219).
+
+An evaluation of ``s`` keeps each model call of its rollouts as an evaluation call: a record item of ``o`` whose
+origin source is ``evaluation`` (``evaluation_call_item``). It is the data of no scenario, so its ``scenarios`` stays
+empty, and no record store, trainer or record route of ``s`` reads it. It links only to the calls of the same
+evaluation attempt (``reef.storage.data.record_link_scope``), and ``prune_records`` keeps it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, NewItem, StoredItem, item_digest_matches
-from reef.storage.item_kinds import copied_record, record_digest
+from reef.core.values import JsonValue
+from reef.storage.data import (
+    MAX_QUERY_LIMIT,
+    DataStore,
+    ItemConflict,
+    NewItem,
+    StoredItem,
+    item_digest_matches,
+    record_source,
+)
+from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
+from reef.storage.item_kinds import copied_record, evaluation_call_id, record_digest
 from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
 
 #: The most record items that one ``used_records`` call reads.
@@ -61,6 +76,98 @@ def record_item(record: AgentRecord) -> NewItem:
             },
         },
     )
+
+
+#: The payload key of an evaluation call that holds its status and reply summary, beside the request body and
+#: ``response``.
+EVALUATION_CALL_KEY = "evaluation_call"
+
+
+def evaluation_call_item(scenario: str, artifact_id: str, evaluation_id: str, call: EvaluationCall) -> NewItem:
+    """The record item of ``call``, a call of evaluation ``evaluation_id`` of ``scenario`` to the candidate
+    ``artifact_id``.
+
+    Its ID is ``<scenario>/<evaluation_call_id>``. Its content is the record of an inference: the payload is the
+    request body, with ``response``, the response body or null, and ``EVALUATION_CALL_KEY``, the summary's fields
+    but its place and start; ``created_at`` is the call's start. Its metadata is ``kind: record``, empty
+    ``scenarios``, the ``evaluation_id``, and the origin ``{scenario, artifact_id, source: evaluation, evaluation:
+    {evaluation_id, task_index, repeat, attempt, index}}``.
+    """
+    summary = call.summary
+    record_id = evaluation_call_id(evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index)
+    details = {key: value for key, value in summary.to_json().items() if key not in ("attempt", "index", "started_at")}
+    record = AgentRecord(
+        record_id,
+        scenario,
+        RequestType.INFERENCE,
+        {
+            **(call.request or {}),
+            "response": None if call.response is None else dict(call.response),
+            EVALUATION_CALL_KEY: details,
+        },
+        summary.started_at,
+        artifact_id=artifact_id,
+    )
+    location = {
+        "evaluation_id": evaluation_id,
+        "task_index": summary.task_index,
+        "repeat": summary.repeat,
+        "attempt": summary.attempt,
+        "index": summary.index,
+    }
+    return NewItem(
+        f"{scenario}/{record_id}",
+        record_content(record),
+        {
+            "kind": "record",
+            "scenarios": {},
+            "evaluation_id": evaluation_id,
+            "origin": {
+                "scenario": scenario,
+                "artifact_id": artifact_id,
+                "source": "evaluation",
+                "evaluation": location,
+            },
+        },
+    )
+
+
+def stored_evaluation_call(item: StoredItem) -> EvaluationCall:
+    """The ``EvaluationCall`` that ``evaluation_call_item`` stored as ``item``, read with its content."""
+    if item.content is None or record_source(item.metadata) != "evaluation":
+        raise ValueError(f"item {item.item_id!r} is no evaluation call read with its content")
+    payload = dict(item.content["payload"])
+    details = payload.pop(EVALUATION_CALL_KEY)
+    response = payload.pop("response")
+    location = item.metadata["origin"]["evaluation"]
+    summary = EvaluationCallSummary(
+        task_index=location["task_index"],
+        repeat=location["repeat"],
+        attempt=location["attempt"],
+        index=location["index"],
+        started_at=float(item.content["created_at"]),
+        **details,
+    )
+    # The item keeps an absent request as an empty payload, so an empty request reads as None too.
+    return EvaluationCall(summary, cast(dict[str, JsonValue], payload) or None, response)
+
+
+def evaluation_call_items(
+    data: DataStore, owner: str, scenario: str, evaluation_id: str, *, content: bool
+) -> Iterator[StoredItem]:
+    """The evaluation calls of evaluation ``evaluation_id`` of ``scenario``, in sequence order, a page at a time: one
+    query of the record items of ``scenario`` with that ``evaluation_id`` for each page."""
+    after = 0
+    while page := data.query(
+        owner,
+        kind="record",
+        origin=scenario,
+        group=("evaluation_id", evaluation_id),
+        after=after,
+        content=content,
+    ):
+        yield from (item for item in page if record_source(item.metadata) == "evaluation")
+        after = page[-1].sequence
 
 
 def origin_of(item: StoredItem) -> str:
@@ -291,11 +398,15 @@ class ItemRecordStore(RecordStore):
 
 
 __all__ = [
+    "EVALUATION_CALL_KEY",
     "RECORD_PAGE_SIZE",
     "ItemRecordStore",
+    "evaluation_call_item",
+    "evaluation_call_items",
     "old_record_copied",
     "record_content",
     "record_item",
+    "stored_evaluation_call",
     "used_record",
     "used_records",
 ]

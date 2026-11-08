@@ -123,8 +123,8 @@ class CandidateArtifacts(ABC):
     artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
     runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
     ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
-    ``add_evaluation_call(scenario, evaluation_id, call)`` keeps one call of a rollout in the scenario's evaluation
-    store (``EvaluationStore.add_call``).
+    ``add_evaluation_call(scenario, evaluation_id, artifact_id, call)`` keeps one call of a rollout to the candidate
+    ``artifact_id`` as a record item of the scenario's owner (``reef.storage.record_items.evaluation_call_item``).
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """
@@ -140,7 +140,9 @@ class CandidateArtifacts(ABC):
     ) -> tuple[InferenceRuntime, Artifact]: ...
 
     @abstractmethod
-    def add_evaluation_call(self, scenario: str, evaluation_id: str, call: EvaluationCall) -> None: ...
+    def add_evaluation_call(
+        self, scenario: str, evaluation_id: str, artifact_id: str, call: EvaluationCall
+    ) -> None: ...
 
 
 __all__ = ["ArtifactEndpoint", "CandidateArtifacts"]

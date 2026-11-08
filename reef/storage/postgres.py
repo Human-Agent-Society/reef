@@ -53,7 +53,7 @@ from reef.storage.record_items import ItemRecordStore, old_record_copied
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import PostgresDataStore
-from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_call_table, evaluation_table
+from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
 from reef.storage.sql_setup import postgres_url, validate_postgres_schema
@@ -61,7 +61,7 @@ from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 21
+POSTGRES_SCHEMA_VERSION = 20
 #: The record tables of a version before the record items (RFC #1219), in the order that a drop removes them.
 OLD_RECORD_TABLES = ("record_node", "consumed_agent_record", "record_consumption", "record_eviction", "agent_record")
 logger = logging.getLogger(__name__)
@@ -100,7 +100,6 @@ class PostgresRecordDatabase:
         self.stage_record_table = stage_record_table(metadata, foreign_key="record_store.storage_id")
         self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
-        self.evaluation_call_table = evaluation_call_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
             self._engine = create_engine(postgres_url(database_url), pool_pre_ping=True, hide_parameters=True)
@@ -141,7 +140,6 @@ class PostgresRecordDatabase:
                 # (migrate_published_tasks): a published task is a candidate with a split. Version 20 has no
                 # record tables: a scenario's records are record items (RFC #1219), and
                 # PostgresScenarioStorage drops the OLD_RECORD_TABLES once their records are record items.
-                # Version 21 adds evaluation_call, the model calls of each evaluation rollout.
                 metadata.create_all(connection)
                 migrate_training_samples(connection, self.sample_train_count_table)
                 migrate_scenario_settings(connection, self.settings_table)
@@ -314,12 +312,9 @@ class PostgresScenarioDatabase(SQLScenarioDatabase):
         )
 
     def evaluation_store(self) -> SQLEvaluationStore:
-        """Open the artifact evaluations and their calls of this store generation."""
-        scope = {"storage_id": self.storage_id}
+        """Open the artifact evaluations of this store generation."""
         return SQLEvaluationStore(
-            self,
-            ScopedTable(self._database.evaluation_table, scope=scope),
-            ScopedTable(self._database.evaluation_call_table, scope=scope),
+            self, ScopedTable(self._database.evaluation_table, scope={"storage_id": self.storage_id})
         )
 
     def commit_history(self) -> SQLCommitHistory:

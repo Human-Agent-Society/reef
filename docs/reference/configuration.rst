@@ -1222,7 +1222,8 @@ by append sequence. Both consumed and unconsumed data are eligible, with one
 exception: storage keeps the model calls that a stored training sample holds. A
 sample that a recipe made from model calls stores their IDs and its own fields,
 such as its reward and training tokens, and renders the calls when it is read.
-Records do not expire by age.
+Records do not expire by age. The model calls of evaluation rollouts are not in
+the budget, and storage does not evict them.
 
 The budget measures the stored UTF-8 JSON of payloads, references and artifact
 references across active and archived scenarios. A scenario's store keeps

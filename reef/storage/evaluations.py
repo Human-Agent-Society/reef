@@ -5,10 +5,12 @@ A client asks Reef to evaluate one artifact of a scenario
 artifact with the scenario's settings. The evaluation store keeps each request,
 its state and its result, so a client reads them after the evaluation ends and
 after a restart. Reef does not resume an evaluation that was queued or running
-when its service stopped: a later read reports it failed. The store also keeps
-every model call of each rollout, failed calls too, with the bodies that the
-agent sent and got. Archiving the scenario retires its evaluations and their
-calls with its records.
+when its service stopped: a later read reports it failed. Archiving the
+scenario retires its evaluations with its records.
+
+The model calls of each rollout are not in this store: each is a record item of
+the scenario's owner in the data store, whose origin source is ``evaluation``
+(``reef.storage.record_items``). This module defines their values.
 """
 
 from __future__ import annotations
@@ -181,8 +183,8 @@ class EvaluationCall:
     and ``response`` the JSON object that it got: the reply, or the error body of a failed call. Each is None when the
     capture proxy kept no JSON object.
 
-    Purpose: the evaluation worker makes it for each captured call and adds it to the evaluation store
-    (``EvaluationStore.add_call``); the call route answers it with ``to_json``.
+    Purpose: the evaluation worker makes it for each captured call, and the data store keeps it as a record item
+    (``reef.storage.record_items.evaluation_call_item``). The call route answers it with ``to_json``.
     """
 
     summary: EvaluationCallSummary
@@ -213,7 +215,8 @@ class EvaluationCallTotals:
     not 200, from 0 to ``count``. ``prompt_tokens`` and ``completion_tokens`` are the sums of the known token counts
     of the calls, integers from 0; a call whose count is None adds nothing.
 
-    Purpose: ``EvaluationStore.call_totals`` makes it; the rollouts route answers it with ``to_json``.
+    Purpose: ``ArtifactEvaluations.rollouts_json`` adds up the calls of each rollout into one; the rollouts route
+    answers it with ``to_json``.
     """
 
     count: int
@@ -242,21 +245,15 @@ class EvaluationStore(ABC):
     """The artifact evaluations of one scenario.
 
     Values: the state of a store is a finite set of stored evaluations with
-    distinct IDs, and a finite set of pairs ``(evaluation_id, EvaluationCall)``
-    in which no two pairs have the same evaluation ID and call key. An
-    evaluation is created ``queued`` or ``running``; a queued one starts
-    running once (``begin``). It ends once, as ``finished`` from ``running``,
-    or as ``failed`` from either; an ended evaluation does not change. A kept
-    call does not change. A call can name an evaluation that the store does
-    not hold yet: a worker can run a rollout before control stores its
-    evaluation.
+    distinct IDs. An evaluation is created ``queued`` or ``running``; a queued
+    one starts running once (``begin``). It ends once, as ``finished`` from
+    ``running``, or as ``failed`` from either; an ended evaluation does not
+    change.
 
     Purpose: the evaluation service creates an evaluation when it accepts a
     request (``create``), starts a queued one when a run is free (``begin``),
     ends it when its rollouts end (``finish``, ``fail``), and reads the store
-    for the evaluation routes (``get``, ``newest``). The evaluation worker
-    keeps each call of a rollout as it ends (``add_call``), and the evaluation
-    routes read them (``call_totals``, ``call_summaries``, ``call``).
+    for the evaluation routes (``get``, ``newest``).
     """
 
     @abstractmethod
@@ -294,29 +291,6 @@ class EvaluationStore(ABC):
     @abstractmethod
     def newest(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations, newest ``created_at`` first; ``ValueError`` unless ``limit`` is positive."""
-
-    @abstractmethod
-    def add_call(self, evaluation_id: str, call: EvaluationCall) -> None:
-        """Keep ``call`` as a call of evaluation ``evaluation_id``.
-
-        Raises ``ValueError`` when the store holds a call of ``evaluation_id`` with the same key already.
-        """
-
-    @abstractmethod
-    def call_totals(self, evaluation_id: str) -> dict[tuple[int, int], EvaluationCallTotals]:
-        """For each rollout ``(task_index, repeat)`` of ``evaluation_id`` with at least one kept call, the totals of
-        its calls. A rollout without a kept call has no entry."""
-
-    @abstractmethod
-    def call_summaries(self, evaluation_id: str, task_index: int, repeat: int) -> tuple[EvaluationCallSummary, ...]:
-        """The summaries of the kept calls of rollout ``(task_index, repeat)`` of ``evaluation_id``, in attempt and
-        then index order; empty when it has none."""
-
-    @abstractmethod
-    def call(
-        self, evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int
-    ) -> EvaluationCall | None:
-        """The kept call of ``evaluation_id`` with the key ``(task_index, repeat, attempt, index)``, or None."""
 
 
 __all__ = [

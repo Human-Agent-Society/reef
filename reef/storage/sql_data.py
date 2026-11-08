@@ -88,6 +88,7 @@ from reef.storage.data import (
     item_digest_matches,
     patched_metadata,
     prepared_items,
+    record_link_scope,
 )
 from reef.storage.item_kinds import task_partition
 from reef.storage.migrations import (
@@ -137,7 +138,8 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
     item's trajectory node keeps (``call_shape``); the content then holds an empty payload. It is NULL for an
     item without one. ``request_type`` is a record's request type, from its content, and NULL for another kind.
     ``metadata_json`` is the item's metadata. ``data_record_node`` is the node table of ``TrajectoryNodes``,
-    scoped by ``owner``; a node's sequence is its item's, and its scenario the item's origin.
+    scoped by ``owner``; a node's sequence is its item's, and its scenario the item's link scope
+    (``record_link_scope``).
 
     The ``SEGMENT_COLUMNS`` of ``data_item`` and ``data_record_node`` are NULL, or the segment line that holds the
     content of the row: then ``content_json`` of the item, or the JSON columns of the node, are NULL.
@@ -340,6 +342,16 @@ class SQLDataStore(DataStore):
         """The string under ``key`` in the ``metadata_json`` of an item row, or NULL when the value there is not a
         string. ``key`` passes ``GROUP_KEY``."""
 
+    @abstractmethod
+    def record_source(self) -> ColumnElement[str]:
+        """The source of the record item of an item row (``reef.storage.data.record_source``): its
+        ``origin.source``, or ``inference`` when it has none."""
+
+    def is_inference(self) -> ColumnElement[bool]:
+        """The condition that an item row is a record item of the source ``inference``, which ``prune_records``
+        counts and deletes."""
+        return and_(self.items_table.c.kind == "record", self.record_source() == "inference")
+
     def groups(
         self,
         owner: str,
@@ -535,7 +547,7 @@ class SQLDataStore(DataStore):
             if payload is not None and key is not None and shape is not None:
                 calls[item.item_id] = NewNode(
                     0,
-                    metadata["origin"]["scenario"],
+                    record_link_scope(metadata),
                     item.item_id,
                     payload,
                     key,
@@ -886,11 +898,21 @@ class SQLDataStore(DataStore):
 
     def prune_records(self, max_bytes: int) -> int:
         items, nodes = self.items_table, self.nodes_table
+        # An evaluation call is not pruned, so neither its row nor its node counts. Its node is in a scope of its own
+        # (``record_link_scope``), so no node of an inference record needs it.
+        evaluation_node = exists().where(
+            items.c.owner == nodes.c.owner,
+            items.c.sequence == nodes.c.node_sequence,
+            items.c.kind == "record",
+            self.record_source() == "evaluation",
+        )
         with self.transaction(read_only=True) as connection:
             held = connection.execute(
-                select(func.coalesce(func.sum(func.length(items.c.content_json)), 0)).where(items.c.kind == "record")
+                select(func.coalesce(func.sum(func.length(items.c.content_json)), 0)).where(self.is_inference())
             ).scalar_one()
-            held += connection.execute(select(func.coalesce(func.sum(nodes.c.body_bytes), 0))).scalar_one()
+            held += connection.execute(
+                select(func.coalesce(func.sum(nodes.c.body_bytes), 0)).where(~evaluation_node)
+            ).scalar_one()
         excess = int(held) - max_bytes
         sizes = EvictionSizes(nodes, ("owner",))
         evicted, after = 0, 0
@@ -906,7 +928,7 @@ class SQLDataStore(DataStore):
                             items.c.metadata_json,
                             func.coalesce(func.length(items.c.content_json), 0).label("body_bytes"),
                         )
-                        .where(items.c.kind == "record", items.c.sequence > after)
+                        .where(self.is_inference(), items.c.sequence > after)
                         .order_by(items.c.sequence)
                         .limit(PRUNE_PAGE_SIZE)
                     )
@@ -1310,6 +1332,9 @@ class SQLiteDataStore(SQLDataStore):
         metadata = self.items_table.c.metadata_json
         return case((func.json_type(metadata, path) == "text", func.json_extract(metadata, path)))
 
+    def record_source(self) -> ColumnElement[str]:
+        return func.coalesce(func.json_extract(self.items_table.c.metadata_json, "$.origin.source"), "inference")
+
     def close(self) -> None:
         with self.lock:
             if self.connection is not None:
@@ -1403,6 +1428,10 @@ class PostgresDataStore(SQLDataStore):
     def metadata_string(self, key: str) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
         return case((func.jsonb_typeof(metadata[key]) == "string", metadata[key].astext))
+
+    def record_source(self) -> ColumnElement[str]:
+        metadata = cast(self.items_table.c.metadata_json, JSONB)
+        return func.coalesce(metadata[("origin", "source")].astext, "inference")
 
     @contextmanager
     def pack_lock(self, owner: str) -> Iterator[bool]:

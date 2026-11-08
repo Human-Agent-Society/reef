@@ -160,6 +160,10 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls/{attempt}/{index}`` | one model call of a rollout, with its bodies      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``            | the ATIF trajectory of each attempt of a rollout  |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``                                           | the trajectories of an evaluation, as NDJSON      |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                                                                 | remove a scenario; its state is archived          |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                                                                                                 | the harness tree of the active selection, rendered|
@@ -544,8 +548,10 @@ for the deployment (RFC #1028). An item is content and metadata:
   create a new item.
 - The metadata is a JSON object. Reef reads ``kind`` (``trajectory``,
   ``task``, ``record`` or ``artifact``), ``owner``, ``scenarios`` and
-  ``origin``: the scenario that made a record or an artifact. ``kind``,
-  ``owner`` and ``origin`` never change. You can add other keys.
+  ``origin``: the scenario that made a record or an artifact. A record's
+  ``origin.source`` is ``inference`` or ``evaluation``; a record without it is
+  ``inference``. ``kind``, ``owner``, ``origin`` and ``evaluation_id`` never
+  change. You can add other keys.
 
 Each item belongs to one owner. The routes have the owner in the path:
 ``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
@@ -706,6 +712,33 @@ You can also create record items with ``POST /reef/namespaces/{owner}/data``,
 for example records that you keep from an older system. The content must have
 the keys above, ``request_type`` must be ``inference`` or ``report``, and the
 ID must be ``<origin scenario>/<agent_record_id>``. Otherwise Reef returns 400.
+
+Evaluation calls
+~~~~~~~~~~~~~~~~
+
+Reef also keeps each model call of an evaluation rollout as a record item of
+the scenario's owner (`Model calls of a rollout`_). Such an item differs from
+a scenario's own record item:
+
+- Its ID is ``<scenario>/<agent_record_id>``, with the record ID
+  ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``.
+- Its content is a record of an inference. The payload is the request body,
+  plus ``response``, the response body or null, and ``evaluation_call``:
+  ``{path, status, duration_s, prompt_tokens, completion_tokens,
+  finish_reason, tool_calls}``. ``created_at`` is the start of the call.
+- Its metadata is ``{"kind": "record", "scenarios": {}, "evaluation_id",
+  "origin": {"scenario", "artifact_id", "source": "evaluation", "evaluation":
+  {"evaluation_id", "task_index", "repeat", "attempt", "index"}}}``.
+  ``artifact_id`` names the evaluated artifact.
+
+An evaluation call is the data of no scenario: a patch that adds a scenario to
+its ``scenarios`` returns 400, so no scenario trains on it. The scenario's
+records route does not list it. To read the calls of one evaluation, query
+the data with ``kind=record``, ``group_key=evaluation_id`` and the
+evaluation's ID as ``group_value``. An evaluation call links only to the
+earlier calls of the same attempt, so its trajectory node keeps only
+the messages after its parent's. A scenario's own call never links to an
+evaluation call.
 
 Artifact items
 ~~~~~~~~~~~~~~
@@ -1093,8 +1126,12 @@ Model calls of a rollout
 Reef keeps each model call that a rollout makes to the candidate, failed
 calls too. It keeps a call when the call ends, so a client that polls sees
 the calls of a running rollout. Reef keeps only the calls that reach the
-candidate, not the calls of a verifier's judge, for example. The calls stay with their evaluation, and archiving the
-scenario retires them with it.
+candidate, not the calls of a verifier's judge, for example.
+
+Each call is a record item of the scenario's owner (`Evaluation calls`_). No
+scenario trains on it, and record retention does not delete it. After an
+archive of the scenario, the items stay in the data store, but these routes no
+longer reach them, because the evaluation is gone.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls``
 answers the calls of one rollout, without their bodies:
@@ -1126,6 +1163,39 @@ call: the fields above, plus ``request``, the JSON body that the agent sent,
 and ``response``, the JSON body that it got or the error body of a failed
 call. Each is null when the call had no JSON body. A call that Reef did not
 keep returns 404.
+
+Trajectories of an evaluation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Reef makes one ATIF trajectory from the kept calls of each attempt of a
+rollout. It joins the calls with status 200 in index order, as it joins the
+records of a training sample. An attempt without a 200 call has no
+trajectory.
+
+- Each call is one entry of ``extra.reef.records``. Its ``agent_record_id`` is
+  ``{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}``, and its
+  ``created_at`` is the call's ``started_at``. Its ``payload`` is the request
+  body plus ``response``, the response body.
+- ``extra.reef.reward`` is the rollout's score for the attempt that was scored:
+  the last attempt of a finished rollout. It is null for every other attempt,
+  and for a failed score.
+- ``extra.reef.evaluation`` is ``{evaluation_id, task, task_index, repeat,
+  attempt, scored}``. ``scored`` is true only for the attempt that was scored.
+
+``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``
+answers ``{scenario, evaluation_id, task_index, repeat, trajectories}``: the
+trajectory of each attempt of one rollout, in attempt order.
+
+``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``
+streams the trajectories of the whole evaluation as ``application/x-ndjson``:
+one trajectory on each line, in task and repeat order. By default it sends the
+last attempt of each rollout. Add ``?attempts=all`` to send every attempt.
+Reef reads the calls of one rollout at a time, so the memory of an export does
+not grow with the evaluation. A file within the upload limits uploads as it
+is as trajectory items (`Create trajectory items <#create-trajectory-items>`__).
+
+Both routes return 404 for an unknown evaluation. Another ``attempts`` value
+returns 400.
 
 Automatic evaluation
 ~~~~~~~~~~~~~~~~~~~~

@@ -10,8 +10,9 @@ from tests.support.conversations import conversation
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.data import MemoryDataStore, ScenarioArchived
+from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.item_kinds import copied_record
-from reef.storage.record_items import ItemRecordStore, record_item, used_record, used_records
+from reef.storage.record_items import ItemRecordStore, evaluation_call_item, record_item, used_record, used_records
 from reef.storage.records import AppendResult, RecordConflict
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_data import SQLiteDataStore
@@ -194,3 +195,23 @@ def test_a_copy_in_its_origin_has_the_item_id_and_the_item_references():
     item = record_item(plain("report", "first"))
     copied = copied_record(item.item_id, item.content, "math", "math")
     assert (copied.agent_record_id, copied.references) == ("math/report", ("math/first",))
+
+
+def test_a_scenarios_records_and_its_trainers_never_read_its_evaluation_calls(item_records):
+    data = item_records.data
+    own = conversation("call-1", 1)
+    item_records.append(own)
+    request = dict(conversation("unused", 2).payload)
+    response = request.pop("response")
+    summary = EvaluationCallSummary(0, 0, 1, 0, "/v1/chat/completions", 200, 5.0, 0.1, 3, 1, "stop", 0)
+    call = evaluation_call_item("math", "a1", "e1", EvaluationCall(summary, request, response))
+    data.create("acme", [call], generation=item_records.generation)
+    assert data.read("acme", call.item_id) is not None
+    assert item_records.replay("math") == (own,)
+    assert item_records.count("math") == 1 and item_records.count("math", request_type=RequestType.INFERENCE) == 1
+    assert item_records.get("math", "e1:0:0:1:0") is None
+    assert item_records.last_sequence("math") == item_records.get_for_audit("math", "call-1").sequence
+    assert item_records.trajectory("math", "e1:0:0:1:0") == ()
+    assert item_records.trajectory("math", "call-1") == ("call-1",)
+    assert used_records(data, "acme", "code")[1] == () and used_record(data, "acme", "code", call.item_id) is None
+    assert data.scenarios_with_records("acme") == ("math",)
