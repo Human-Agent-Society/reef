@@ -35,6 +35,14 @@ harness，包括提示词、规则和技能。
 </div>
 
 
+## 📰 最新动态
+
+- **2026-11：** Reef 正在迁移到 control plane + workers 架构。迁移完成前，`main` 上的部分 recipe 和示例可能会失败。如果遇到失败的 recipe，请[提交 issue](https://github.com/Human-Agent-Society/reef/issues/new/choose)。
+- **2026-11：** scenario 可以把流量分给它正在 serve 的多个 artifact [#1227](https://github.com/Human-Agent-Society/reef/pull/1227)，也可以通过 [Semantic Router](https://github.com/vllm-project/semantic-router) 分流 [#859](https://github.com/Human-Agent-Society/reef/pull/859)。新的 `python` harness adapter 可以进化一个 Python 程序 [#1242](https://github.com/Human-Agent-Society/reef/pull/1242)。
+- **2026-10：** Tinker 作为训练组件运行 [#901](https://github.com/Human-Agent-Society/reef/pull/901)。episode 和 agent 可以在 Modal Sandbox 中运行 [#942](https://github.com/Human-Agent-Society/reef/pull/942)。artifact 仓库可以放在 Hugging Face 上 [#1003](https://github.com/Human-Agent-Society/reef/pull/1003)。新增 recipe：[OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) [#683](https://github.com/Human-Agent-Society/reef/pull/683)。
+- **2026-09：** [`reef-infra` v0.1.0](https://github.com/Human-Agent-Society/reef/releases/tag/v0.1.0) 发布到 PyPI。新增 recipe：[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/)、[SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/) 和 [Meta-Harness](recipes/meta_harness/README.md)。Reef 在 `/v1/responses` 提供 OpenAI Responses API [#528](https://github.com/Human-Agent-Society/reef/pull/528)。
+- **2026-08：** Reef 开源。阅读[发布文章](https://x.com/ao_qu18465/status/2094867930081337730)。
+
 ## 🎯 何时使用 Reef
 
 如果你希望 Agent 通过与你的日常交互不断学习、持续进化，就适合使用 Reef。
