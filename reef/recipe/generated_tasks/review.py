@@ -187,7 +187,7 @@ class RetiredTask:
         return statistics.pstdev(self.rewards)
 
     def document(self) -> str:
-        """The retired task as canonical JSON text: a repeated review gives the same text."""
+        """The retired task as canonical JSON text."""
         return canonical_json(
             {
                 "task_name": self.task_name,
@@ -312,8 +312,9 @@ def review_pool(store: TaskStore, settings: ReviewSettings, task_names: Sequence
     """Run the review that is due, save it, and return it; return None when no review is due.
 
     ``task_names`` are the train tasks of the complete generations. The review reads each of them that no
-    earlier review retired. A stop between the retired tasks and the review repeats the same review, which
-    saves the same documents again.
+    earlier review retired. A stop or a failed write after some retired tasks and before the review runs the
+    review again at a later call: a task that it retired stays retired with its saved rewards and reason, and the
+    review reads the rewards of the other tasks at that call.
     """
     if settings.interval == 0:
         return None
@@ -322,11 +323,14 @@ def review_pool(store: TaskStore, settings: ReviewSettings, task_names: Sequence
     jobs = len({use.job_id for found in uses.values() for use in found})
     if jobs < (review + 1) * settings.interval:
         return None
-    earlier = {name for name, task in retired_tasks(store).items() if task.review < review}
+    saved = retired_tasks(store)
     kept = 0
     retired_reasons: dict[str, str] = {}
     for name in task_names:
-        if name in earlier:
+        if name in saved:
+            # An earlier review retired the task, or this review did before a stop or a failed write.
+            if saved[name].review == review:
+                retired_reasons[name] = saved[name].reason
             continue
         rewards = tuple(reward for use in uses.get(name, ()) for reward in use.rewards)
         recent = rewards[-settings.window :]

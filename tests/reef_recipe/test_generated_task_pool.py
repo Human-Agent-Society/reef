@@ -270,6 +270,25 @@ def test_a_job_end_repeated_while_the_next_job_runs_saves_nothing_for_the_next_j
     ]
 
 
+def test_a_job_end_given_again_while_the_next_job_runs_leaves_every_task_of_that_job(tmp_path: Path) -> None:
+    p = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=0)
+    train(p, "job-1")
+    assert waiting(p) == [TASK_C, TASK_A, TASK_B]
+    # The trainer starts with no running job and gives the stage job-1's end again, but control submits job-2 first.
+    assert submit(p) == [TASK_C, TASK_A]
+    p.job_ended(finished("job-1", {TASK_A: (1.0, 0.0), TASK_B: (1.0, 0.0)}))
+    assert waiting(p) == [TASK_B], "task C trains in job-2, so it does not wait again"
+    p.job_ended(finished("job-2", {TASK_C: (0.0, 1.0), TASK_A: (1.0, 1.0)}))
+    store = task_store(p)
+    assert {name: [(use.job_id, use.rewards) for use in found] for name, found in task_uses(store).items()} == {
+        TASK_A: [("job-1", (1.0, 0.0)), ("job-2", (1.0, 1.0))],
+        TASK_B: [("job-1", (1.0, 0.0))],
+        TASK_C: [("job-2", (0.0, 1.0))],
+    }
+    assert rollout_results(store)[TASK_C].rollout_rewards == (0.0, 1.0)
+    assert waiting(p) == [TASK_B, TASK_C, TASK_A]
+
+
 def test_first_rollout_results_still_reach_the_generator_in_pool_mode(tmp_path: Path) -> None:
     task_generator = FixedTasks(generated(0, 2))
     p = pipeline(tmp_path, task_generator, pool_capacity=2, review_interval=0)
@@ -582,6 +601,65 @@ def test_a_restart_after_a_stop_between_two_uses_reviews_every_use_of_the_job(
     again.job_ended(finished("job-1", rewards))
     assert pool_reviews(task_store(again)) == (PoolReview(0, 1, 1, {TASK_B: "above_band"}),)
     assert waiting(again) == [TASK_A]
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["same_service", "restart"])
+def test_a_review_that_a_failed_write_cut_short_keeps_its_retirements_at_a_later_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: bool
+) -> None:
+    config = {"pool_capacity": 2, "review_interval": 2, "review_window": 2}
+    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), job_samples=1, **config)
+    train(p, "job-1", {TASK_A: (1.0, 1.0)})
+    assert submit(p) == [TASK_B]
+    # The trainer submits job-3 before the samples service reads job-2's end.
+    assert submit(p) == [TASK_A]
+    store = task_store(p)
+    write_document = store.write_document
+
+    def failing_write_document(*, key: str, document: str) -> None:
+        if key.startswith("review/"):
+            raise OSError("connection reset")
+        write_document(key=key, document=document)
+
+    # The review of job-2's end saves the retired task A, and then the database fails once.
+    monkeypatch.setattr(store, "write_document", failing_write_document)
+    with pytest.raises(OSError, match="connection reset"):
+        p.job_ended(finished("job-2", {TASK_B: (1.0, 0.0)}))
+    monkeypatch.undo()
+    if restart:
+        # job-3 runs at the restart, so the trainer does not give job-2's end again.
+        p.close()
+        p = pipeline(tmp_path, FixedTasks(), job_samples=1, **config)
+    p.job_ended(finished("job-3", {TASK_A: (0.0, 0.0)}))
+    store = task_store(p)
+    assert pool_reviews(store) == (PoolReview(0, 3, 1, {TASK_A: "above_band"}),)
+    assert retired_tasks(store) == {TASK_A: RetiredTask(TASK_A, 0, (1.0, 1.0), "above_band")}
+    assert waiting(p) == [TASK_B]
+
+
+def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_path: Path) -> None:
+    config = {"pool_capacity": 4, "review_interval": 0}
+    task_d = "harbor-00000-003"
+    first = pipeline(tmp_path, FixedTasks(generated(0, 4)), **config)
+    assert submit(first) == [TASK_A, TASK_B]
+    # The trainer submits job-2 before the samples service reads job-1's end.
+    assert submit(first) == [TASK_C, task_d]
+    first.job_ended(finished("job-1", {TASK_A: (1.0, 0.0), TASK_B: (1.0, 0.0)}))
+    assert set(rollout_results(task_store(first))) == {TASK_A, TASK_B}, "job-2 still runs the rollouts of C and D"
+    first.close()
+    # job-2 runs at the restart, so the trainer does not give job-1's end again.
+    again = pipeline(tmp_path, FixedTasks(), **config)
+    assert waiting(again) == [TASK_A, TASK_B], "C and D wait for the end of job-2"
+    again.job_ended(finished("job-2", {TASK_C: (0.0, 1.0), task_d: (1.0, 0.0)}))
+    store = task_store(again)
+    assert {name: [(use.job_id, use.rewards) for use in found] for name, found in task_uses(store).items()} == {
+        TASK_A: [("job-1", (1.0, 0.0))],
+        TASK_B: [("job-1", (1.0, 0.0))],
+        TASK_C: [("job-2", (0.0, 1.0))],
+        task_d: [("job-2", (1.0, 0.0))],
+    }
+    assert rollout_results(store)[TASK_C].rollout_rewards == (0.0, 1.0)
+    assert waiting(again) == [TASK_A, TASK_B, TASK_C, task_d]
 
 
 # ------------------------------------------------------------------------------------------------- settings and status

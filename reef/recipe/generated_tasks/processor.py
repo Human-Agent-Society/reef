@@ -820,10 +820,12 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     (``active_task_count``), in place of the ``refill_tasks`` rule, and the last case of the list above is "no task
     is active" in place of "no train task is unfinished". A train task of a complete generation is active until a
     review retires it. Each use of a task trains one sample of it: the first use trains the task's sample above, and
-    use ``k`` the sample ``generated-tasks/<task name>@<k>``. When a job's end commits, ``reuse_tasks`` saves a use
-    of each task of the job with its rewards, runs the review that is due, ends the scenario's use of each sample of
-    a retired task that waits, and makes the sample of the next use of each other task of the job. A task has at
-    most one sample that waits or trains at a time.
+    use ``k`` the sample ``generated-tasks/<task name>@<k>``. When a job's end commits, the stage saves the uses that
+    the end ends with their rewards (``ended_uses``), runs the review that is due, ends the scenario's use of each
+    sample of a retired task that waits, and makes the sample of the next use of each other task whose use ended
+    (``reuse_tasks``). A task has at most one sample that waits or trains at a time, except after the end of a
+    failed job that the stage read after the next job started: the tasks of that next job then get their next
+    sample while they train, and the stage does not save their rewards in that job.
     """
 
     def __init__(
@@ -1193,13 +1195,14 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         self.generation_runner.save_result(result)
 
     def job_ended(self, outcome: JobOutcome) -> None:
-        """Save a result for each task that a committed job trained and that has none: its rewards in the job's
-        ``rollout_rewards``, or why no rollout ran. With a training pool, then reuse the job's tasks
-        (``reuse_tasks``).
+        """Save a result for each task of the ended job that has none: its rewards in the job's ``rollout_rewards``,
+        or why no rollout ran. With a training pool, then reuse the tasks (``reuse_tasks``).
 
-        One task job runs at a time, so such a task belongs to the ended job, or to an earlier job that a new
-        training start cancelled. A second call for the same end saves nothing new. Then the stage sends the
-        finished generations' results to the generator.
+        Without a training pool, these are the trained tasks without a result: those of the ended job, of an earlier
+        job that a new training start cancelled, and of a job that started before the stage read this end. With one,
+        they are the tasks of the uses that the end ends (``ended_uses``), so a task of a later job waits for the end
+        of that job. A second call for the same end saves nothing new. Then the stage sends the finished
+        generations' results to the generator.
         """
         rewards = outcome.metrics.get("rollout_rewards", {})
         if not isinstance(rewards, Mapping):
@@ -1207,12 +1210,22 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         error = outcome.error or "no rollout of the task ran"
         store = self.task_store
         if store is not None and self.samples is not None:
-            saved = rollout_results(store)
+            trainer = self.samples.trainer
             items = self.task_items()
-            for name, samples in items.items():
-                if all(sample.train_count(self.samples.trainer) == 0 for sample in samples) or name in saved:
+            uses = None if self.training_pool is None else self.ended_uses(outcome.job_id, rewards, items)
+            ended = (
+                {
+                    name: tuple(rewards.get(name) or ())
+                    for name, samples in items.items()
+                    if any(sample.train_count(trainer) > 0 for sample in samples)
+                }
+                if uses is None
+                else {use.task_name: use.rewards for use in uses}
+            )
+            saved = rollout_results(store)
+            for name, values in ended.items():
+                if name in saved:
                     continue
-                values = tuple(rewards.get(name) or ())
                 if values:
                     self.generation_runner.save_result(TaskRolloutResult(name, values))
                 else:
@@ -1220,50 +1233,63 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                         TaskRolloutResult(name, error=error, infrastructure_failure=True)
                     )
                 self.unfinished.discard(name)
-            if self.training_pool is not None:
-                self.reuse_tasks(outcome.job_id, rewards, items)
+            if uses is not None:
+                self.reuse_tasks(uses, items)
         self.task_job_ended(finished=outcome.event == "finished")
         self.deliver_later()
 
-    def reuse_tasks(
+    def ended_uses(
         self, job_id: str, rewards: Mapping[str, Sequence[float]], items: Mapping[str, tuple[StoredSample, ...]]
-    ) -> None:
-        """Save a use of each task of the ended job ``job_id`` with its ``rewards``, run the pool review that is due,
-        end the scenario's use of each sample of a retired task that waits, and make the next sample of each active
-        task whose last use ended. ``items`` is ``task_items`` at the job's end.
+    ) -> tuple[TaskUse, ...]:
+        """The uses that the end of the task job ``job_id`` ends, with the job's ``rollout_rewards`` as ``rewards``.
+        ``items`` is ``task_items`` at the job's end.
 
-        A task is taken when its last sample trained and no use of that sample is saved. The ended job holds the
-        taken tasks that its ``rollout_rewards`` names. In ``auto``, a job takes samples after those of the jobs
-        before it, so a taken task that the rewards do not name belongs to an earlier job that a new training start
-        cancelled when its sample comes before the named ones, and to a job that started after this end otherwise.
-        The end returns the tasks of a cancelled job too, with no rewards. A job whose rewards name no task, such as
-        a failed one, holds every taken task. Each step reads what the earlier steps saved, so the end of the same
-        job again, as after a restart, saves the uses that a stop left out, repeats a review that it cut short, and
-        makes the samples that it did not make.
+        The candidates are the samples in flight: the last sample of each task that trained, whose use did not end,
+        and whose task has no saved use in this job. A job trains a task once, so the sample of a task that has one
+        belongs to a later job. The job's own samples are the candidates whose tasks the rewards name; their uses
+        have the tasks' rewards, and the other uses have none. In ``auto``, a job takes samples after those of the
+        jobs before it, so a candidate before the job's first own sample belongs to an earlier job that a new
+        training start cancelled, and one after it to a job that started before the stage read this end. The end
+        ends the uses of its own samples and of the candidates before them. The rewards of a failed job name no
+        task, and its end ends the use of every candidate: the stage cannot tell the samples of that job from those
+        of a job that started before it read the end.
+        """
+        store, samples = self.task_store, self.samples
+        if store is None or samples is None:
+            raise RuntimeError("the uses of a job need the task store and the scenario's samples")
+        uses = task_uses(store)
+        candidates: dict[str, StoredSample] = {}
+        for _, stored in published_train_tasks(store):
+            found = uses.get(stored.name, ())
+            last = items.get(stored.name, ())[-1:]
+            if (
+                last
+                and last[0].train_count(samples.trainer) > 0
+                and sample_use(last[0]) > last_ended_use(found)
+                and all(use.job_id != job_id for use in found)
+            ):
+                candidates[stored.name] = last[0]
+        first_own = min((sample.sequence for name, sample in candidates.items() if name in rewards), default=None)
+        return tuple(
+            TaskUse(name, job_id, sample_use(sample), tuple(rewards[name] or ()) if name in rewards else ())
+            for name, sample in candidates.items()
+            if not rewards or name in rewards or (first_own is not None and sample.sequence < first_own)
+        )
+
+    def reuse_tasks(self, uses: Sequence[TaskUse], items: Mapping[str, tuple[StoredSample, ...]]) -> None:
+        """Save ``uses`` (``ended_uses``), run the pool review that is due, end the scenario's use of each sample of a
+        retired task that waits, and make the next sample of each active task whose last use ended. ``items`` is
+        ``task_items`` at the job's end.
+
+        Each step reads what the earlier steps saved, so the end of the same job again, as after a restart, saves the
+        uses that a stop left out, runs a review that a stop or a failed write cut short, and makes the samples that
+        it did not make.
         """
         pool, store, samples = self.training_pool, self.task_store, self.samples
         if pool is None or store is None or samples is None:
             raise RuntimeError("reusing tasks needs a training pool, a task store and the scenario's samples")
+        save_task_uses(store, uses)
         names = tuple(stored.name for _, stored in published_train_tasks(store))
-        uses = task_uses(store)
-        taken: dict[str, StoredSample] = {}
-        for name in names:
-            last = items.get(name, ())[-1:]
-            if (
-                last
-                and last[0].train_count(samples.trainer) > 0
-                and sample_use(last[0]) > last_ended_use(uses.get(name, ()))
-            ):
-                taken[name] = last[0]
-        first_named = min((sample.sequence for name, sample in taken.items() if name in rewards), default=None)
-        save_task_uses(
-            store,
-            [
-                TaskUse(name, job_id, sample_use(sample), tuple(rewards.get(name) or ()))
-                for name, sample in taken.items()
-                if not rewards or name in rewards or (first_named is not None and sample.sequence < first_named)
-            ],
-        )
         review = review_pool(store, pool.review, names)
         if review is not None:
             logger.info(

@@ -2106,13 +2106,26 @@ whatever Tinker's batch size (``training.options.batch-size``) is:
 With ``pool_capacity`` above 0, the train tasks form a training pool. When a
 task's job ends, the stage saves a new task item for the task's next use,
 ``<scenario>.generated-tasks.<task name>@<k>`` for use ``k``, after the items
-that wait. So the tasks train in turn, and each item trains once. The tasks
-of a job that a new training start cancelled go back when the next job ends.
-A new round
+that wait. So the tasks train in turn, and each item trains once. The trainer
+can start the next job before the stage reads the end of the job before it;
+the tasks of that next job wait for the end of their own job. A new round
 starts only while fewer tasks than ``pool_capacity`` are active, so the pool
 can hold more tasks than the capacity by the train tasks of one generation.
 The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks`` must
 stay 1. Imported train tasks still train once.
+
+Two cases break the turn order:
+
+- A failed task job reports no rewards. When the trainer starts the next job
+  before the stage reads the end of a failed job, the stage cannot tell the
+  tasks of the two jobs apart. The tasks of the next job then also get a use
+  with no rewards and a new item while they train, and their rewards in that
+  job are not kept.
+- The tasks of a job that a new training start cancelled go back to the pool
+  when a later job ends. When that job held so many tasks that fewer than
+  ``job_samples`` wait, and the pool is full, no job and no round can start,
+  also after a restart. Restart with a larger ``pool_capacity`` and rounds
+  left: a round starts, and the next job end returns those tasks.
 
 After every ``review_interval`` task jobs, a review reads the last
 ``review_window`` rewards of each active task. A failed task job counts too.
@@ -2136,8 +2149,9 @@ The task store keeps each use of a task with its rewards, each review, and
 each retired task with its rewards, pass rate and reason. The status shows
 them under ``training_pool``: ``capacity``, ``active``, ``retired``,
 ``reviews``, and ``last_review_retired``. The task store and the scenario's
-items hold the pool, so a restart continues it in the same order. A restart
-also repeats a review that a stop interrupted. When a deployment sets
+items hold the pool, so a restart continues it in the same order. A review
+that a stop or a failed write cut short runs again at the next job end, and
+it keeps the tasks that it retired already. When a deployment sets
 ``pool_capacity`` on a scenario whose train tasks trained once, those tasks
 join the pool at the start.
 
