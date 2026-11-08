@@ -16,8 +16,9 @@ On reef's native harness (``./run.sh native``) the same pass runs through a
 resident ``reef-native serve`` process, so the publish lands in a process
 that is already running:
 
-    pull   - ``python3 run.py pull`` names the scenario and writes the model
-             binding at this Reef under work/tree; run.sh then starts
+    pull   - ``python3 run.py pull`` names the scenario, waits until
+             inference serves its model, and writes the model binding at
+             this Reef under work/tree; run.sh then starts
              ``reef-native serve`` there, which pulls the served source tree
              and follows the head
     turns  - ``python3 run.py native`` sends each task to the process as one
@@ -54,6 +55,7 @@ PULL_TIMEOUT_S = 900.0
 # run.sh polls the head every 5 s, but a poll that started during the evolve step waits behind the step's
 # lock until the client's 30 s timeout; the mount lands on the poll after that one.
 MOUNT_TIMEOUT_S = 120.0
+#: The seconds a run waits for inference to start the scenario's model before it stops.
 INFERENCE_TIMEOUT_S = 300.0
 
 WORK = Path(__file__).resolve().parent / "work"
@@ -72,7 +74,8 @@ def main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # The inference routes serve only a scenario that exists: create it first.
-    create_scenario(client)
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    wait_for_inference(client)
 
     before = steps_before(client)
     # record + report: the traffic the evolve steps learn from.
@@ -128,12 +131,9 @@ def main():
     # wait for: the head this run pulled is the one a win left behind.
 
 
-def create_scenario(client):
-    """Create the scenario, or find it, and wait until inference serves its model.
-
-    Creation does not wait for the model to start, and a model call before then is HTTP 503.
-    """
-    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+def wait_for_inference(client):
+    """Wait until inference serves the scenario's model; ``SystemExit`` when its startup fails or takes longer than
+    ``INFERENCE_TIMEOUT_S``."""
     deadline = time.monotonic() + INFERENCE_TIMEOUT_S
     while time.monotonic() < deadline:
         startup = client.get(f"/reef/scenarios/{SCENARIO}/inference/status")
@@ -203,13 +203,15 @@ def head_manifest(client):
 
 
 def pull():
-    """Name the scenario and write the model binding the serve process runs with under work/tree.
+    """Name the scenario, wait until inference serves its model, and write the model binding the serve process runs
+    with under work/tree.
 
     The serve process pulls the served source tree itself and writes the snapshot file beside it.
     """
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # Create the scenario if it does not exist yet: its base snapshot is the seed tree.
-    create_scenario(client)
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    wait_for_inference(client)
     manifest = head_manifest(client)
     shutil.rmtree(TREE_DIR, ignore_errors=True)
     binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN or NO_TOKEN_API_KEY, "model": MODEL}
