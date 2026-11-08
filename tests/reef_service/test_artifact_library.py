@@ -10,12 +10,12 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent, ImportingInference
+from tests.support.artifact_versions import ImportingComponent
 from tests.support.runtime_stubs import runtime_bindings
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import SnapshotRef, serving_profile_of
+from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
@@ -48,24 +48,14 @@ def weights(directory: Path, content: bytes) -> Path:
     return directory
 
 
-class ProfileInference(ImportingInference):
-    """A runtime that serves the serving profiles ``qwen@1`` and ``muse@1`` (RFC #1233)."""
-
-    def check_serving_profile(self, profile, start):
-        if profile not in ("qwen@1", "muse@1"):
-            raise ValueError(f"unknown serving profile {profile!r}")
-
-
-def cell(tmp_path: Path, name: str, *, serves_profiles: bool = False) -> Dispatcher:
+def cell(tmp_path: Path, name: str) -> Dispatcher:
     """One deployment, a Cell, whose data service copies records and artifacts, as assembly builds it.
 
     Every Cell of ``tmp_path`` shares the data store under ``tmp_path / "data"``; each has its own repository and
-    records. With ``serves_profiles``, its runtime is a ``ProfileInference``.
+    records.
     """
     root = tmp_path / name
     runtime = ImportingComponent(root / "exported")
-    if serves_profiles:
-        runtime.inference = ProfileInference(runtime.restore_order)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(root / "records", task_files=task_files, data=data)
@@ -261,53 +251,28 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
 
 
 @pytest.mark.integration
-def test_an_artifact_takes_its_serving_profile_from_its_item_and_the_profile_never_changes(tmp_path: Path) -> None:
-    """RFC #1233: a client writes the profile when it creates an item, the runtime checks it when an artifact takes it,
-    and one scenario holds artifacts of several profiles."""
-    profiled, plain = cell(tmp_path, "profiled", serves_profiles=True), cell(tmp_path, "plain")
-
-    def profiled_item(item_id: str, profile: str) -> dict[str, Any]:
-        body = upload_item(item_id, weights(tmp_path / item_id, item_id.encode()))
-        body["items"][0]["metadata"]["serving_profile"] = profile
-        return body
+def test_an_item_with_the_old_serving_profile_key_starts_a_scenario_and_can_drop_the_key(tmp_path: Path) -> None:
+    """RFC #1263: Reef ignores ``serving_profile``, an item key of RFC #1233, and a patch can remove it."""
+    dispatcher = cell(tmp_path, "cell-a")
+    body = upload_item("qwen-base", weights(tmp_path / "qwen-base", b"q"))
+    body["items"][0]["metadata"]["serving_profile"] = "qwen@1"
 
     async def run() -> None:
-        async with client_of(plain, tmp_path) as client:
-            for item_id, profile in (("qwen-base", "qwen@1"), ("muse-ft", "muse@1"), ("gpt-base", "gpt@1")):
-                assert (await client.post(DATA, json=profiled_item(item_id, profile))).status == 201
-            changed = await client.post(
-                f"{DATA}/metadata", json={"ids": ["qwen-base"], "patch": {"serving_profile": "x"}}
+        async with client_of(dispatcher, tmp_path) as client:
+            assert (await client.post(DATA, json=body)).status == 201
+            created = await client.post(
+                "/reef/scenarios", json={"name": "math", "owner": "acme", "artifact_id": "qwen-base"}
             )
-            assert changed.status == 400 and "never changes" in await changed.text()
-            refused = await client.post(
-                "/reef/scenarios", json={"name": "plain", "owner": "acme", "artifact_id": "qwen-base"}
-            )
-            assert refused.status == 400 and "takes no serving profile" in await refused.text()
-            assert not plain.has_scenario("plain")
-        async with client_of(profiled, tmp_path) as client:
-            body = {"name": "math", "owner": "acme"}
-            unknown = await client.post("/reef/scenarios", json={**body, "artifact_id": "gpt-base"})
-            assert unknown.status == 400 and "unknown serving profile" in await unknown.text()
-            assert not profiled.has_scenario("math")
-            created = await client.post("/reef/scenarios", json={**body, "artifact_id": "qwen-base"})
             assert created.status == 201, await created.text()
-            muse = await client.post("/reef/scenarios/math/artifacts", json={"item": "muse-ft"})
-            assert muse.status == 201, await muse.text()
-            direct = await client.post(
-                "/reef/scenarios/math/artifacts", json={"source": weights(tmp_path / "direct", b"d").as_uri()}
+            patched = await client.post(
+                f"{DATA}/metadata", json={"ids": ["qwen-base"], "patch": {"serving_profile": None}}
             )
-            scenario = profiled.registry.require("math")
-            profiles = {
-                answer["artifact_id"]: serving_profile_of(scenario.resolve_artifact(answer["artifact_id"])[1])
-                for answer in [await created.json(), await muse.json(), await direct.json()]
-            }
-            assert sorted(profiles.values(), key=str) == [None, "muse@1", "qwen@1"]
+            assert patched.status == 200, await patched.text()
 
     try:
         asyncio.run(run())
     finally:
-        profiled.close()
-        plain.close()
+        dispatcher.close()
 
 
 @pytest.mark.integration
