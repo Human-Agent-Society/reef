@@ -318,7 +318,7 @@ def scaffold_dropping_rollout() -> list[AgentRecord]:
 
 
 @pytest.mark.unit
-def test_multi_turn_scaffold_drop_trains_every_turn() -> None:
+def test_a_rollout_whose_history_drops_the_scaffold_trains_every_turn() -> None:
     """Turn 3's prompt lacks both scaffolds that the transcript keeps: each prompt is compared with the previous call,
     so it still extends, and every response trains with its sampler's log probabilities."""
     turns = scaffold_dropping_rollout()
@@ -336,12 +336,12 @@ def test_multi_turn_scaffold_drop_trains_every_turn() -> None:
 
 
 @pytest.mark.unit
-def test_multi_turn_default_tolerance_keeps_the_strict_boundary() -> None:
+def test_the_default_tolerance_makes_a_dropped_scaffold_a_fork() -> None:
     assert make_multi_turn_policy_trajectory(scaffold_dropping_rollout(), 1.0, source_agent_record_id="r1") is None
 
 
 @pytest.mark.unit
-def test_multi_turn_scaffold_drop_with_response_drift_masks_only_that_response() -> None:
+def test_a_drifted_response_is_masked_and_the_other_turns_train() -> None:
     """The history also trimmed a trailing newline of turn 1's response: that response realigns as masked context,
     and the other turns still train."""
     sample = make_multi_turn_policy_trajectory(
@@ -363,7 +363,7 @@ def test_multi_turn_scaffold_drop_with_response_drift_masks_only_that_response()
 
 
 @pytest.mark.unit
-def test_multi_turn_scaffold_drop_keeps_top_k_aligned() -> None:
+def test_the_top_k_rows_stay_aligned_when_the_scaffold_is_kept() -> None:
     sample = make_multi_turn_policy_trajectory(
         [
             _turn("i1", [1, 99, 3], [1], [-0.1], topk=[([3, 5], [-0.1, -1.0])]),
@@ -382,7 +382,7 @@ def test_multi_turn_scaffold_drop_keeps_top_k_aligned() -> None:
 
 
 @pytest.mark.unit
-def test_multi_turn_drift_into_a_dropped_scaffold_is_a_fork() -> None:
+def test_drift_into_a_dropped_scaffold_is_a_fork() -> None:
     """Turn 2's prompt dropped scaffold 99, which the transcript keeps; turn 3's prompt then rewrites the history
     before it, which the transcript cannot realign."""
     turns = [
