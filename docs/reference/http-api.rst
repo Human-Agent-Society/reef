@@ -2964,6 +2964,14 @@ A task from an older Reef has no triggers.
 ``started_at`` is the first attempt's start. ``error`` can describe a queued task's previous failed attempt.
 
 Processing counts describe the completed attempt only; they exclude earlier failed attempts.
+``records_read`` includes records that replay read but the pipeline ignored.
+``samples_created`` counts new inserts, excluding duplicate writes.
+Legacy results report null counts.
+``changed`` can also mean a new training request, without new samples.
+``background=true`` means work remained active when the task finished; later tasks check it.
+
+Control removes ended tasks after ``storage.work_retention_s``, which defaults to seven days.
+This removes task history, not stored samples. Active tasks do not expire through this retention policy.
 
 ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs`` returns the log of one attempt of a task.
 The samples worker keeps each line that its thread logs while the attempt runs.
@@ -2983,11 +2991,3 @@ The response includes ``task_id``, ``attempt``, ``attempt_count``, ``running``, 
 Each line has ``number``, ``at``, ``level``, ``logger`` and ``message``.
 ``next`` is the next page's ``after`` value, or null at the end of the lines kept so far.
 The log goes with its task when the retention deletes the task.
-``records_read`` includes records that replay read but the pipeline ignored.
-``samples_created`` counts new inserts, excluding duplicate writes.
-Legacy results report null counts.
-``changed`` can also mean a new training request, without new samples.
-``background=true`` means work remained active when the task finished; later tasks check it.
-
-Control removes ended tasks after ``storage.work_retention_s``, which defaults to seven days.
-This removes task history, not stored samples. Active tasks do not expire through this retention policy.
