@@ -571,6 +571,27 @@ def test_native_loop_records_provider_reasoning_without_changing_reply_or_tool_r
         assert messages[-1]["content"] == "The file says: hello"
 
 
+def test_pre_step_system_suffix_reaches_the_model_without_accumulating(tmp_path: Path, fake_model) -> None:
+    hook = native_hook(
+        "context",
+        "pre_step",
+        "def listen(payload, next):\n"
+        "    decision = next()\n"
+        "    if payload['step'] < 3:\n"
+        "        decision['system_suffix'] = 'Memory data for this turn.'\n"
+        "    return decision\n",
+    )
+    result = loop_turn(tmp_path, rendered(fake_model, {**NATIVE_SEED_TOOLS, **hook}))
+    assert result.exit_code == 0
+    prompts = [request["messages"][0]["content"] for request in fake_model.requests]
+    assert len(prompts) == 3
+    assert prompts[0].count("Memory data for this turn.") == 1
+    assert prompts[1] == prompts[0]
+    assert "Memory data" not in prompts[2]
+    logged = [event["data"]["system"] for event in result.trajectory if event["type"] == "request/header"]
+    assert logged == [prompts[0], prompts[2]]
+
+
 def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
     with _FlakyModel() as model:
         result = loop_turn(tmp_path, rendered(model, {**NATIVE_SEED_TOOLS, **EVENT_HOOKS}))

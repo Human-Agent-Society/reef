@@ -596,6 +596,14 @@ five parts that let a method change the loop itself. The starter tree is
    * - ``native/loops/<name>.py``
      - ``run_turn(ctx)`` in place of the ``main`` graph; always reviewed
 
+A ``pre_step`` hook receives ``step``, ``task`` and ``messages``. Its enter
+decision may include ``messages`` (user-message strings to append) and
+``system_suffix`` (text to append to this step's rebuilt system prompt).
+The suffix lasts for one model call. Return it on every step that needs it;
+return messages only once if they should stay in the conversation without
+duplicates. The session's ``hook/decision`` keeps the decision, and
+``request/header`` records the resulting system prompt when it changes.
+
 .. list-table::
    :header-rows: 1
    :widths: 22 78

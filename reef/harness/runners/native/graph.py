@@ -331,6 +331,10 @@ class Run:
         if entry.get("kind") == "reject":
             reason = {"kind": "rejected", "step": step, "message": str(entry.get("reason") or "")}
             self.end_turn(reason, "gave_up")
+        system_suffix = entry.get("system_suffix")
+        if isinstance(system_suffix, str) and system_suffix:
+            self.system = f"{self.system}\n\n{system_suffix}"
+            self.messages[0] = {"role": "system", "content": self.system}
         self.session.write("step/start", {"turn": self.turn, "step": step})
         self.step_open = True
         # Model visible means logged: the header is written at step 1 and again whenever what the model sees changed.

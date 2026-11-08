@@ -4,8 +4,9 @@ Based on Ouyang et al., "ReasoningBank: Scaling Agent Self-Evolving with Reasoni
 Each step reads the runs among the step's traces. A run's outcome is its score against ``success_score``, or the
 label of a judge model when the run has no score. An extractor model then writes memory items from the run:
 strategies from a success, lessons from a failure. The bank of items is the method's state, ``state/memory.json``.
-Each item is served as the Agent Skill ``skills/rb-<slug>/SKILL.md``, so the harness's own skill list does the
-retrieval. The README describes the mapping and where it differs from the paper.
+By default each item is served as the Agent Skill ``skills/rb-<slug>/SKILL.md``. On pi and native a generated
+reader can instead select all items or embedding top_k, then inject the result into the system, a message or a
+tool result. Optional paired evaluation measures the current bank. The README describes configuration and costs.
 """
 
 from __future__ import annotations
@@ -30,6 +31,9 @@ from reef.core.trajectories import atif_messages
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.train.harness_backend import Method, StepContext, Trace
+
+from .evaluation import measure_memory
+from .reading import ReadNote, ReadSettings, runtime_files, without_memory
 
 PROMPTS = Path(__file__).parent / "prompts"
 #: The judge's prompt; ``$trace`` is the run.
@@ -64,7 +68,7 @@ class MemoryItem:
     whitespace. Every text encodes as UTF-8. ``outcome`` is one of ``OUTCOMES``, the outcome of the run the item
     came from, and ``step`` ≥ 1 is the step that wrote it.
     Purpose: ``state/memory.json`` holds the bank's items, oldest first. Each step adds the items the extractor
-    writes and writes each item into the tree as the skill at ``path``, with the text ``skill()``.
+    writes. The method exports items as skills or a runtime reader; ``path`` and ``skill()`` describe skill delivery.
     """
 
     slug: str
@@ -116,6 +120,7 @@ class ReasoningBankSettings(PluginSettings):
     Values: ``judge_model`` and ``extract_model`` are non-empty names of model bindings: ``served`` or an
     ``evolution.models`` entry. ``success_score`` is a finite number. ``max_items_per_trace`` ≥ 1.
     ``max_items`` ≥ 0 and ``max_traces_per_step`` ≥ 0, where 0 sets no limit.
+    ``ablate_every`` is a nonnegative integer: 0 disables ablation; N measures the current tree every N valid steps.
     Purpose: ``ReasoningBank.from_config`` parses it from ``evolution.method.config``; each step reads it.
     """
 
@@ -129,6 +134,9 @@ class ReasoningBankSettings(PluginSettings):
     max_traces_per_step: int = config_option(
         0, help="The most runs that one step learns from, in trace order. 0 sets no limit."
     )
+    ablate_every: int = config_option(
+        0, help="Compare the current tree with and without its bank every N steps; 0 disables."
+    )
 
     def __post_init__(self) -> None:
         if not self.judge_model.strip() or not self.extract_model.strip():
@@ -139,26 +147,38 @@ class ReasoningBankSettings(PluginSettings):
             raise ValueError("max_items_per_trace must be at least 1")
         if self.max_items < 0 or self.max_traces_per_step < 0:
             raise ValueError("max_items and max_traces_per_step must be at least 0 (0 sets no limit)")
+        if isinstance(self.ablate_every, bool) or not isinstance(self.ablate_every, int) or self.ablate_every < 0:
+            raise ValueError("ablate_every must be a nonnegative integer")
 
 
 class ReasoningBank(Method):
     """ReasoningBank as a harness evolution method: each step adds the memory items of its runs to the bank.
 
-    Values: ``settings`` is the method's config.
+    Values: ``settings`` is the method's learning config; ``reading`` is its validated runtime read config.
     Purpose: a deployment names ``recipes.reasoning_bank:ReasoningBank`` in ``evolution.method``; the backend
     calls ``step`` once per step.
     """
 
-    def __init__(self, settings: ReasoningBankSettings) -> None:
+    def __init__(self, settings: ReasoningBankSettings, reading: ReadSettings | None = None) -> None:
+        if reading is None:
+            reading = ReadSettings()
+        if not isinstance(settings, ReasoningBankSettings) or not isinstance(reading, ReadSettings):
+            raise TypeError("ReasoningBank requires learning and reading settings")
         self.settings = settings
+        self.reading = reading
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> Self:
-        return cls(ReasoningBankSettings.parse(config, plugin_class=cls))
+        learning = dict(config)
+        reading = learning.pop("reading", {})
+        if not isinstance(reading, Mapping):
+            raise ValueError("ReasoningBank reading must be a configuration object")
+        return cls(
+            ReasoningBankSettings.parse(learning, plugin_class=cls), ReadSettings.parse(reading, plugin_class=cls)
+        )
 
     def step(self, context: StepContext) -> None:
-        """Label each run among the traces, add its memory items to the bank, and write the bank as the tree's
-        ``rb-*`` skills.
+        """Label runs, update the bank and write its skills or runtime reader into the tree.
 
         A reply that is not the asked JSON skips its run, and an item that carries a credential or an
         instruction override stays out of the bank; the notes say why. The bank and the tree change together:
@@ -167,6 +187,11 @@ class ReasoningBank(Method):
         """
         workspace, services = context.workspace, context.services
         settings = self.settings
+        adapter = str(workspace.host()["adapter"])
+        if self.reading.reader != "skills" and adapter not in ("pi", "native"):
+            raise ValueError("all and top_k memory readers currently support pi and native")
+        if settings.ablate_every and (not workspace.tasks() or workspace.evaluation_repeats() < 1):
+            raise ValueError("memory ablation requires evaluation tasks and a scorer, also with policy: none")
         judge, extractor = services.models[settings.judge_model], services.models[settings.extract_model]
         bank_path = workspace.state / MEMORY_FILE
         bank = (
@@ -237,13 +262,30 @@ class ReasoningBank(Method):
             "skipped": skipped,
             "items": len(bank),
         }
-        others = {path: text for path, text in workspace.tree().files.items() if not path.startswith(SKILL_ROOT)}
-        candidate = HarnessTree({**others, **{item.path: item.skill() for item in bank}})
+        head = workspace.tree()
+        others = without_memory(head)
+        if self.reading.reader == "skills":
+            written_files = {item.path: item.skill() for item in bank}
+        else:
+            notes_for_reading = [ReadNote(item.slug, item.title, item.description, item.content) for item in bank]
+            written_files = runtime_files(notes_for_reading, self.reading, adapter)
+        candidate = HarnessTree({**others.files, **written_files})
         validation = services.check(candidate)
         if not validation.passed:
-            summary = f"the memory skills fail validation, so the bank stays as it was: {validation.message()}"
+            summary = f"the memory tree fails validation, so the bank stays as it was: {validation.message()}"
             workspace.write_output(summary, {**notes, "problems": list(validation.problems)})
             return
+        if settings.ablate_every:
+            counter_path = workspace.state / "memory_evaluation.json"
+            previous = json.loads(counter_path.read_text(encoding="utf-8")) if counter_path.exists() else {"steps": 0}
+            count = previous["steps"] + 1
+            if count % settings.ablate_every == 0:
+                result = measure_memory(context, head, others)
+                result["step"] = workspace.step
+                previous["last_result"] = result
+                notes["memory_ablation"] = result
+            previous["steps"] = count
+            counter_path.write_text(json.dumps(previous, indent=2) + "\n", encoding="utf-8")
         workspace.write_tree(candidate)
         rows = [asdict(item) for item in bank]
         bank_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
