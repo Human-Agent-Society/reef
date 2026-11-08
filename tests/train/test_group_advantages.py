@@ -1,4 +1,4 @@
-"""Group-relative advantages: SPADE's population z-score and Slime's own rule."""
+"""Group-relative advantages: SPADE's population z-score and the unbiased sample deviation."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from reef.train.algos.group_advantages import GroupAdvantageRule, group_advantages, slime_rule
+from reef.train.algos.group_advantages import GroupAdvantageRule, group_advantages
 
 SPADE = GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
 
@@ -37,25 +37,6 @@ def test_the_sample_deviation_divides_by_the_group_size_minus_one() -> None:
     )
     # Without the deviation the rule only centers.
     assert group_advantages(rewards, GroupAdvantageRule(False)) == [0.5, -0.5, -0.5, 0.5]
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("estimator", "normalization", "deviation", "rule"),
-    [
-        ("grpo", True, True, GroupAdvantageRule(True, "sample", 1e-6)),
-        ("gspo", True, True, GroupAdvantageRule(True, "sample", 1e-6)),
-        ("cispo", True, False, GroupAdvantageRule(False, "sample", 1e-6)),
-        ("reinforce_plus_plus_baseline", True, True, GroupAdvantageRule(False, "sample", 1e-6)),
-        ("grpo", False, True, None),
-        ("ppo", True, True, None),
-        ("reinforce_plus_plus", True, True, None),
-    ],
-)
-def test_slimes_rule_follows_its_estimator_and_its_normalization_options(
-    estimator: str, normalization: bool, deviation: bool, rule: GroupAdvantageRule | None
-) -> None:
-    assert slime_rule(estimator, rewards_normalization=normalization, std_normalization=deviation) == rule
 
 
 @pytest.mark.unit

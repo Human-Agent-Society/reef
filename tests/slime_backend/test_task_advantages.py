@@ -1,4 +1,5 @@
-"""Reef's reward step of a Slime rollout: delayed rows keep their advantages, task rows follow one group rule.
+"""Reef's reward step of a Slime rollout: delayed rows keep their advantages, task rows follow one group rule, and a
+rollout without either gets Slime's own step.
 
 These tests need no Slime, except the last one, which compares the step with Slime's own at the pin where Slime is
 installed.
@@ -12,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from reef.train.algos.group_advantages import GroupAdvantageRule, group_advantages
+from reef.train.algos.group_advantages import GroupAdvantageRule
+from reef.train.slime_backend import task_advantages
 from reef.train.slime_backend.task_advantages import (
     ADVANTAGE_RULE_KEY,
     DELAYED_ADVANTAGE_KEY,
@@ -83,21 +85,21 @@ def test_a_mixed_rollout_keeps_the_delayed_advantages_and_centers_the_tasks_by_t
 
 
 @pytest.mark.unit
-def test_without_a_stamped_rule_the_task_rows_follow_slimes_own_rule() -> None:
-    samples = [task(reward, 0, index, rule=None) for index, reward in enumerate([1.0, 0.0, 0.0, 1.0])]
-    # Two segments of one rollout count once: the second group holds the rollouts 4 and 6.
-    samples += [
-        FakeSample(1.0, 1, 4, rollout_id=4),
-        FakeSample(1.0, 1, 5, rollout_id=4),
-        FakeSample(0.0, 1, 6),
-    ]
-    _, advantages = post_process_rewards(slime_args(), samples)
-    sample_rule = GroupAdvantageRule(True, "sample", 1e-6)
-    assert advantages[:4] == pytest.approx(group_advantages([1.0, 0.0, 0.0, 1.0], sample_rule))
-    first, second = group_advantages([1.0, 0.0], sample_rule)
-    assert advantages[4:] == pytest.approx([first, first, second])
-    # An estimator that does not center trains the raw rewards.
-    assert post_process_rewards(slime_args("ppo"), samples)[1] == [sample.reward for sample in samples]
+def test_a_rollout_without_a_rule_or_a_delayed_row_gets_slimes_own_reward_step(monkeypatch) -> None:
+    taken: list[list[Any]] = []
+
+    def slime_rewards(args: Any, samples: list[Any]) -> tuple[list[float], list[float]]:
+        """Slime's own reward step, which a dataset job keeps."""
+        taken.append(samples)
+        return [1.0, 0.0], [0.5, -0.5]
+
+    monkeypatch.setattr(task_advantages, "slime_rewards", slime_rewards)
+    samples = [task(1.0, 0, 0, rule=None), task(0.0, 0, 1, rule=None)]
+    assert post_process_rewards(slime_args(), samples) == ([1.0, 0.0], [0.5, -0.5]) and taken == [samples]
+    # A stamped rule, or a delayed row, keeps the rollout in Reef's step.
+    post_process_rewards(slime_args(), [task(1.0, 0, 0), task(0.0, 0, 1)])
+    post_process_rewards(slime_args(), [FakeSample(0.0, 0, 0, metadata={DELAYED_ADVANTAGE_KEY: 1.0})])
+    assert len(taken) == 1
 
 
 @pytest.mark.unit
@@ -110,23 +112,13 @@ def test_a_rollout_whose_task_rows_carry_two_rules_is_refused() -> None:
 
 
 @pytest.mark.unit
-def test_rows_without_groups_follow_slimes_positions() -> None:
-    plain = GroupAdvantageRule(divide_by_std=False)
-    rows = [RewardRow(reward, None, index) for index, reward in enumerate([1.0, 0.0, 1.0, 1.0])]
-    # Two prompts of two: the complete batch groups by position, as Slime does.
-    assert rollout_advantages(rows, plain, flat_batch=(2, 2)) == [0.5, -0.5, 0.0, 0.0]
-    # Any other count of rollouts is one group.
-    assert rollout_advantages(rows, plain, flat_batch=(2, 3)) == [0.25, -0.75, 0.25, 0.25]
-
-
-@pytest.mark.unit
 def test_rows_that_slimes_grouping_cannot_center_are_refused() -> None:
-    with pytest.raises(ValueError, match="or none does"):
-        rollout_advantages([RewardRow(1.0, None, 0), RewardRow(0.0, 0, 1)], SPADE)
     with pytest.raises(ValueError, match="needs its prompt group"):
-        rollout_advantages([RewardRow(1.0, None, 0, rule=SPADE), RewardRow(0.0, None, 1, rule=SPADE)], None)
+        rollout_advantages([RewardRow(1.0, None, 0, rule=SPADE), RewardRow(0.0, 0, 1, rule=SPADE)])
     with pytest.raises(ValueError, match="segments of rollout 3"):
-        rollout_advantages([RewardRow(1.0, 0, 3), RewardRow(0.0, 0, 3)], SPADE)
+        rollout_advantages([RewardRow(1.0, 0, 3, rule=SPADE), RewardRow(0.0, 0, 3, rule=SPADE)])
+    with pytest.raises(ValueError, match="beside delayed rows need the advantage rule"):
+        rollout_advantages([RewardRow(0.0, 0, 0, delayed_advantage=1.0), RewardRow(1.0, 1, 1)])
     with pytest.raises(ValueError, match="no rule"):
         RewardRow(0.0, 0, 0, rule=SPADE, delayed_advantage=1.0)
 

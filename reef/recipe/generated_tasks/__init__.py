@@ -16,8 +16,9 @@ generator's method:
   ``GeneratedTaskJobData`` makes task jobs of the generated tasks, which the
   training component rolls out on its own sampler. ``GenerationRunner`` owns
   generation, validation, task publication and result delivery on the stage's worker.
-- ``results``: each train task's first rollout result and the generations
-  delivered to the generator, kept in the task store's documents.
+- ``results``: each train task's first rollout result, the generations
+  delivered to the generator and the Designer replies that train
+  (``DesignerReplies``), kept in the task store's documents.
 - ``recipe``: the report contract. The deployment names the objective in the
   recipe's ``job_parameters``, as a dotted reference to a method that it provides.
 

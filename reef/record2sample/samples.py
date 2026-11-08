@@ -24,10 +24,11 @@ TopkRow = tuple[list[int], list[float]]
 
 def recorded_training(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     """The ``response.training`` section of an inference: what a training component's own rollout engine attached
-    for training, such as the calls of a task rollout.
+    for training, such as the calls of a task rollout, or the exact sample of a served call that sent
+    ``x-reef-record-training``.
 
-    Empty for a record that serving made, which carries no training tensors, and for a harness that ships its
-    policy tensors at the top level of the payload.
+    Empty for any other record that serving made, which carries no training tensors, and for a harness that ships
+    its policy tensors at the top level of the payload.
     """
     response = payload.get("response")
     training = response.get("training") if isinstance(response, Mapping) else None

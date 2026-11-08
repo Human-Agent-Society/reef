@@ -8,13 +8,13 @@ customize the rest, for example ``--rollout-data-postprocess-path``, which sees
 the rollout data after the advantages and before the loss. A task job
 (``reef.train.slime_backend.harbor_rollouts``) differs only in its prompts and its
 generate step: a Harbor rollout gives each sample and the verifier its reward.
-The family installs Reef's reward step as Slime's
-``--custom-reward-post-process-path``
-(``reef.train.slime_backend.task_advantages``): it keeps Slime's own group
-rule, except for a task job whose objective declares its own rule or carries
-delayed samples. The built-in dataset recipe (``reef.recipe.dataset``)
-registers this family by reference, so only the training driver and the
-workers import the Slime code.
+Slime's rollout manager builds its reward step once for the serving session,
+so the family installs Reef's as Slime's ``--custom-reward-post-process-path``
+(``reef.train.slime_backend.task_advantages``). It runs Slime's own reward
+step for every rollout but those of a task job whose objective declares its
+own rule or carries delayed samples. The built-in dataset recipe
+(``reef.recipe.dataset``) registers this family by reference, so only the
+training driver and the workers import the Slime code.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class SlimeNativeAlgorithm(SlimeAlgorithm):
 
     def apply_driver_options(self, args: Namespace, options: object) -> None:
         super().apply_driver_options(args, options)
-        # The reward step is Reef's: it applies Slime's own rule unless a task job's objective declares another.
+        # The reward step is Reef's: it runs Slime's own unless a task job's objective declares a rule.
         if args.custom_reward_post_process_path not in (None, TASK_ADVANTAGES_PATH):
             raise ValueError(
                 "the slime family computes the rewards' advantages itself; remove --custom-reward-post-process-path"

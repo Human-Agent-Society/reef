@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from tests.support.job_data import delayed_sample
 
+from reef.core.training_capture import SamplingDistribution
 from reef.storage.durable_files import write_json
 from reef.train.algos.group_advantages import GroupAdvantageRule
 from reef.train.algos.signals import TrainingSignal
@@ -33,9 +34,9 @@ from reef.train.slime_backend.harbor_rollouts import (
     apply_fields,
     check_delayed_task_job,
     delayed_group_count,
+    delayed_sample_limit,
     generate_delayed_samples,
     read_delayed_rows,
-    trainable_delayed,
     write_delayed_rows,
 )
 from reef.train.slime_backend.objectives import SlimeObjective, resolve_slime_objective
@@ -50,7 +51,7 @@ class CarryingObjective(SlimeObjective):
 
     name = "test-carrying"
     loss_family = "slime"
-    rollout_advantages = SPADE
+    advantage_rule = SPADE
     carries_samples = True
 
     def prepare(self, data: Any, state: Mapping[str, Any]) -> TrainingSignal:
@@ -62,7 +63,7 @@ class RuleObjective(SlimeObjective):
 
     name = "test-rule"
     loss_family = "slime"
-    rollout_advantages = SPADE
+    advantage_rule = SPADE
 
     def prepare(self, data: Any, state: Mapping[str, Any]) -> TrainingSignal:
         raise AssertionError("a task job prepares nothing")
@@ -81,7 +82,7 @@ def source_of(tmp_path: Path, *, count: int = 3, carries: bool = True, skip: int
         skip,
         carries_samples=carries,
         delayed_count=count,
-        rollout_advantages=SPADE,
+        advantage_rule=SPADE,
     )
 
 
@@ -239,22 +240,21 @@ def test_options_that_a_task_job_of_the_objective_cannot_run_with_are_refused(
 
 
 @pytest.mark.unit
-def test_the_delayed_samples_that_cannot_train_are_left_out_so_the_tasks_still_train() -> None:
+def test_the_limit_keeps_the_samples_of_slimes_distribution_that_fit_the_first_step() -> None:
     samples = [delayed_sample(float(index)) for index in range(8)]
     other = delayed_sample(9.0, distribution={"temperature": 1.0, "top_p": 1.0, "top_k": -1})
-
-    assert trainable_delayed(Args(), CarryingObjective(), samples[:3]) == (tuple(samples[:3]), {})
-    assert trainable_delayed(Args(), resolve_slime_objective("slime_dataset"), samples[:2]) == ((), {"objective": 2})
-    assert trainable_delayed(Args(), CarryingObjective(), [other, samples[0]]) == ((samples[0],), {"distribution": 1})
     # Groups of 2 in a rollout of 4 prompts: at most 3 groups (6 samples) leave a prompt for a task.
-    assert trainable_delayed(Args(global_batch_size=7), CarryingObjective(), samples) == (
-        tuple(samples[:6]),
-        {"capacity": 2},
-    )
-    assert trainable_delayed(Args(global_batch_size=5), CarryingObjective(), samples[:6]) == (
-        tuple(samples[:5]),
-        {"capacity": 1},
-    )
+    limit = delayed_sample_limit(Args(global_batch_size=7))
+    assert (limit.count, limit.distribution) == (6, SamplingDistribution(0.6, 1.0, -1))
+    assert limit.trainable([other, *samples]) == tuple(samples[:6])
+    assert delayed_sample_limit(Args(global_batch_size=5)).count == 5
+    limit.check(samples[:6])
+    with pytest.raises(ValueError, match="at most 6 delayed samples"):
+        limit.check(samples)
+    with pytest.raises(ValueError, match="cannot train under"):
+        limit.check([other])
+    with pytest.raises(ValueError, match="sampled rollout distribution"):
+        delayed_sample_limit(Args(rollout_temperature=0.0))
 
 
 def slime_rollout(
@@ -302,7 +302,7 @@ def slime_rollout(
         0,
         carries_samples=True,
         delayed_count=len(carried),
-        rollout_advantages=SPADE,
+        advantage_rule=SPADE,
     )
     write_json(tmp_path / "save" / DATASET_FILE, source.to_record())
     groups = dataset_source.ReefDatasetSource(args).get_samples(batch_size)
@@ -424,7 +424,8 @@ def test_tis_weights_the_clipped_loss_of_a_delayed_sample_by_its_clamped_samplin
         loss_masks=[torch.ones(4)],
     )
     weighted.sum().backward()
-    # Each token's loss is -A * clamp(p_old / q, 0, 2) * p / p_old, so its gradient in log p is -A * clamp(p_old / q, 0, 2).
+    # Each token's loss is -A * clamp(p_old / q, 0, 2) * p / p_old, so its gradient in log p is
+    # -A * clamp(p_old / q, 0, 2).
     expected = -advantages * torch.exp(old_log_probs - rollout_log_probs).clamp(0.0, 2.0)
     assert torch.allclose(weighted.detach(), expected) and torch.allclose(log_probs.grad, expected)
     assert expected[1] == -3.0, "the ratio e is clamped to 2"

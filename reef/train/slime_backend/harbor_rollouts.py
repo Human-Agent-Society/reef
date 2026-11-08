@@ -14,7 +14,8 @@ and a blocking agent must not stop Slime's event loop. The session's thread coun
 A rollout that fails in the infrastructure, or that does not assemble, becomes a removed sample (``removed_fields``).
 
 A task job whose objective carries samples (``SlimeObjective.carries_samples``) also trains the job data's delayed
-samples (``JobData.delayed``), with the advantages that the recipe gave them. The driver writes them to the job's
+samples (``JobData.delayed``), with the advantages that the recipe gave them. The component refuses at submit a job
+whose delayed samples are outside ``delayed_sample_limit``. The driver writes them to the job's
 ``DELAYED_ROWS_FILE``. ``ReefDatasetSource`` serves them first in the job's first Slime rollout, as
 ``TaskJobSource.delayed_groups`` prompt groups of ``--n-samples-per-prompt`` entries, before the tasks. Each entry
 names ``generate_delayed_samples``, which fills one delayed sample, or a removed padding row after the last one. Each
@@ -42,11 +43,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
-from reef.core.job_data import DelayedSample, TrajectorySample
+from reef.core.job_data import DelayedSample, DelayedSampleLimit, TrajectorySample
+from reef.core.training_capture import sampling_distribution
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
-from reef.train.algos.group_advantages import SLIME_CENTERING_ESTIMATORS, GroupAdvantageRule
+from reef.train.algos.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
 from reef.train.slime_backend.engine_chat import EngineChat
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SLIME_DEFAULT_SOURCE_PATH
@@ -76,6 +78,8 @@ DELAYED_FUNCTION_PATH = "reef.train.slime_backend.harbor_rollouts.generate_delay
 DELAYED_POSITION_KEY = "delayed"
 #: The only rollout function that runs a prompt's generate function with these failure and abort rules.
 SLIME_SYNC_ROLLOUT_PATH = "slime.rollout.sglang_rollout.generate_rollout"
+#: The estimators for which Slime subtracts each prompt group's mean reward (``BatchBuilder._post_process_rewards``).
+GROUP_BASELINE_ESTIMATORS = ("grpo", "gspo", "cispo", "reinforce_plus_plus_baseline")
 #: The estimators for which Slime trains a sample's reward-step value as the advantage of each of its response tokens,
 #: so the advantage of a delayed sample reaches its loss unchanged.
 REWARD_ADVANTAGE_ESTIMATORS = ("grpo", "gspo", "cispo")
@@ -86,7 +90,7 @@ ResultT = TypeVar("ResultT")
 
 def has_group_baseline(args: SlimeArguments) -> bool:
     """Whether Slime centers each reward on its prompt group, so a group of one sample has advantage 0."""
-    return args.advantage_estimator in SLIME_CENTERING_ESTIMATORS and args.rewards_normalization
+    return args.advantage_estimator in GROUP_BASELINE_ESTIMATORS and args.rewards_normalization
 
 
 def head_count(args: SlimeArguments) -> int:
@@ -137,21 +141,22 @@ def delayed_group_count(count: int, group_size: int) -> int:
 
 
 def check_delayed_task_job(args: SlimeArguments, objective: SlimeObjective) -> None:
-    """Raise ``ValueError`` unless Slime's parsed ``args`` can run a task job of ``objective`` that carries samples.
+    """Raise ``ValueError`` unless Slime's parsed ``args`` can run a task job of ``objective`` with its own rule or
+    with delayed samples.
 
-    The checks read the options only, so the first job of a run meets any failure. An objective without its own rule
-    and that carries no samples leaves the reward step to Slime, and passes. An objective with a rule needs an
-    estimator that trains the reward step's values as advantages, without whitening them
-    (``--normalize-advantages``) or replacing them (``--custom-advantage-function-path``), and groups of at least
-    two samples. An objective that carries samples also needs TIS against the sampling policy's recorded log-probs,
-    Slime's dynamic micro-batches (the delayed groups' padding rows add rows to step 0 but no rollout), no score
-    centering (a delayed sample has no sampler top-k), a rollout of at least two prompts, and
-    ``--global-batch-size`` of at most ``(--rollout-batch-size - 1) * --n-samples-per-prompt + 1``: the fewest
-    rollouts that a first rollout holds, whatever the job carries (``trainable_delayed``), so step 0 is full. A
-    delayed sample longer than ``--max-tokens-per-gpu`` times the context parallel size trains alone in its
-    micro-batch, as a long task rollout does (Slime's ``build_dp_schedule``).
+    The checks read the options only, so the deployment's load or the first job meets any failure. An objective
+    without its own rule leaves the reward step to Slime, and passes. An objective with a rule needs an estimator
+    that trains the reward step's values as advantages, without whitening them (``--normalize-advantages``) or
+    replacing them (``--custom-advantage-function-path``), and groups of at least two samples. An objective that
+    carries samples also needs TIS against the sampling policy's recorded log-probs, Slime's dynamic micro-batches
+    (the delayed groups' padding rows add rows to step 0 but no rollout), no score centering (a delayed sample has no
+    sampler top-k), a rollout of at least two prompts, and ``--global-batch-size`` of at most
+    ``(--rollout-batch-size - 1) * --n-samples-per-prompt + 1``: the fewest rollouts that a first rollout holds,
+    whatever the job carries within ``delayed_sample_limit``, so step 0 is full. A delayed sample longer than
+    ``--max-tokens-per-gpu`` times the context parallel size trains alone in its micro-batch, as a long task rollout
+    does (Slime's ``build_dp_schedule``).
     """
-    if objective.rollout_advantages is None and not objective.carries_samples:
+    if objective.advantage_rule is None:
         return
     if args.advantage_estimator not in REWARD_ADVANTAGE_ESTIMATORS:
         raise ValueError(
@@ -167,7 +172,7 @@ def check_delayed_task_job(args: SlimeArguments, objective: SlimeObjective) -> N
     ):
         if refused:
             raise ValueError(f"a task job of the objective {objective.name!r} cannot run with {message}")
-    if objective.rollout_advantages is not None and args.n_samples_per_prompt < 2:
+    if args.n_samples_per_prompt < 2:
         raise ValueError(
             f"the objective {objective.name!r} centers each reward on its group, so a task job needs "
             "--n-samples-per-prompt of at least 2"
@@ -205,25 +210,26 @@ def check_delayed_task_job(args: SlimeArguments, objective: SlimeObjective) -> N
         )
 
 
-def trainable_delayed(
-    args: SlimeArguments, objective: SlimeObjective, delayed: Sequence[DelayedSample]
-) -> tuple[tuple[DelayedSample, ...], dict[str, int]]:
-    """The delayed samples of a task job that its first optimizer step trains, in order, and the count of the others
-    by reason.
+def delayed_sample_limit(args: SlimeArguments) -> DelayedSampleLimit:
+    """The delayed samples that a task job that carries samples trains with Slime's parsed ``args``.
 
-    A sample is left out (``objective``) when ``objective`` carries no samples; (``distribution``) when it was not
-    sampled with Slime's rollout distribution, so its log-probs do not match the workers'; and (``capacity``) after
-    the first ``min(--global-batch-size, (--rollout-batch-size - 1) * --n-samples-per-prompt)``, which keep the
-    delayed groups and a task in one rollout and the samples in one step. Leaving samples out, rather than refusing
-    the job, lets the job's tasks train: the stage would build the same job data again after a refusal.
+    The job trains at most ``min(--global-batch-size, (--rollout-batch-size - 1) * --n-samples-per-prompt)``
+    delayed samples, which keeps the delayed groups and a task in the first rollout and the samples in its first
+    optimizer step. Each sample comes from Slime's rollout distribution (``--rollout-temperature``,
+    ``--rollout-top-p``, ``--rollout-top-k``), so that its recorded log-probs are those of the sampler that the
+    workers' log-probs stand for. ``ValueError`` for a greedy rollout distribution.
     """
-    if not objective.carries_samples:
-        return (), ({"objective": len(delayed)} if delayed else {})
-    distribution = {"temperature": args.rollout_temperature, "top_p": args.rollout_top_p, "top_k": args.rollout_top_k}
-    matching = tuple(sample for sample in delayed if dict(sample.trajectory.training["distribution"]) == distribution)
-    capacity = min(args.global_batch_size, (args.rollout_batch_size - 1) * args.n_samples_per_prompt)
-    dropped = {"distribution": len(delayed) - len(matching), "capacity": max(0, len(matching) - capacity)}
-    return matching[:capacity], {reason: count for reason, count in dropped.items() if count}
+    distribution = sampling_distribution(
+        {"temperature": args.rollout_temperature, "top_p": args.rollout_top_p, "top_k": args.rollout_top_k}
+    )
+    if distribution is None:
+        raise ValueError(
+            "a task job that carries samples needs a sampled rollout distribution: a positive --rollout-temperature "
+            "and a --rollout-top-p in (0, 1]"
+        )
+    return DelayedSampleLimit(
+        min(args.global_batch_size, (args.rollout_batch_size - 1) * args.n_samples_per_prompt), distribution
+    )
 
 
 @dataclass(frozen=True)
@@ -236,8 +242,8 @@ class TaskJobSource:
     ``timeout_seconds`` is a positive bound on one model call. ``skip_rollouts`` is a non-negative int, the job's
     Slime rollouts that trained before this driver. ``carries_samples`` says whether the job's first rollout leads
     with its delayed groups, and ``delayed_count`` is a non-negative int, the delayed samples in the job directory's
-    ``DELAYED_ROWS_FILE``; it is 0 unless ``carries_samples``. ``rollout_advantages`` is the rule of the job's
-    objective, which each task prompt carries, or None for Slime's own. Purpose: the driver makes it;
+    ``DELAYED_ROWS_FILE``; it is 0 unless ``carries_samples``. ``advantage_rule`` is the rule of the job's
+    objective, which each task prompt carries, or None for Slime's own reward step. Purpose: the driver makes it;
     ``ReefDatasetSource`` and ``task_session`` read it from the record in the rollout manager's process.
     """
 
@@ -250,7 +256,7 @@ class TaskJobSource:
     skip_rollouts: int
     carries_samples: bool = False
     delayed_count: int = 0
-    rollout_advantages: GroupAdvantageRule | None = None
+    advantage_rule: GroupAdvantageRule | None = None
 
     def __post_init__(self) -> None:
         if not self.job_id or not self.token:
@@ -268,7 +274,8 @@ class TaskJobSource:
             raise ValueError("TaskJobSource.delayed_count is a non-negative count of a job that carries samples")
 
     def delayed_groups(self, group_size: int) -> int:
-        """The prompt groups of ``group_size`` entries that lead the job's first rollout: 0 unless it carries samples."""
+        """The prompt groups of ``group_size`` entries that lead the job's first rollout; 0 for a job that carries
+        no samples."""
         return delayed_group_count(self.delayed_count, group_size) if self.carries_samples else 0
 
     def skipped_task_prompts(self, rollout_batch_size: int, group_size: int) -> int:
@@ -283,8 +290,8 @@ class TaskJobSource:
     def task_metadata(self, name: str, path: str) -> dict[str, object]:
         """The metadata of the Slime prompt of the task ``name`` at ``path``: its task, path, driver and rule."""
         metadata: dict[str, object] = {"task": name, "path": path, "token": self.token}
-        if self.rollout_advantages is not None:
-            metadata[ADVANTAGE_RULE_KEY] = self.rollout_advantages.to_dict()
+        if self.advantage_rule is not None:
+            metadata[ADVANTAGE_RULE_KEY] = self.advantage_rule.to_dict()
         return metadata
 
     def delayed_metadata(self, position: int) -> dict[str, object]:
@@ -297,12 +304,12 @@ class TaskJobSource:
 
     def to_record(self) -> dict[str, Any]:
         """This value as the JSON object of ``DATASET_FILE``, which ``from_record`` reads back."""
-        rule = None if self.rollout_advantages is None else self.rollout_advantages.to_dict()
-        return {**asdict(self), "tasks": [list(task) for task in self.tasks], "rollout_advantages": rule}
+        rule = None if self.advantage_rule is None else self.advantage_rule.to_dict()
+        return {**asdict(self), "tasks": [list(task) for task in self.tasks], "advantage_rule": rule}
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> TaskJobSource:
-        rule = record["rollout_advantages"]
+        rule = record["advantage_rule"]
         return cls(
             record["job_id"],
             record["token"],
@@ -808,6 +815,7 @@ __all__ = [
     "check_rollout_can_train",
     "check_task_job_options",
     "delayed_group_count",
+    "delayed_sample_limit",
     "generate_delayed_samples",
     "generate_task_rollout",
     "read_delayed_rows",

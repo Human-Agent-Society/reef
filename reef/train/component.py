@@ -31,6 +31,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.config import ConfiguredFactory
 from reef.core.errors import RuntimeConfigError
+from reef.core.job_data import DelayedSampleLimit
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.storage.job_data import JobDataKind, JobDataRef
@@ -304,6 +305,17 @@ class TrainingComponent(ABC):
         component trains trajectories only. ``check_job`` still checks each job.
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
+
+    def delayed_sample_limit(self, parameters: Mapping[str, Any]) -> DelayedSampleLimit | None:
+        """The delayed samples (``JobData.delayed``) that a task job with ``parameters`` trains beside its tasks, or
+        None when it trains none. The default is None.
+
+        A recipe whose task jobs carry delayed samples calls it when it is built, so a deployment whose component or
+        objective trains none fails before any job, and its stages build only delayed samples that the limit keeps.
+        ``check_job`` refuses a job whose delayed samples are outside the limit. ``ValueError``: the parameters or the
+        component's options do not allow the delayed samples that the objective trains.
+        """
+        return None
 
     def check_artifact(self, files: ArtifactFiles) -> None:
         """Raise ``ValueError`` unless ``files`` are a snapshot in the layout of this component's snapshots.

@@ -192,6 +192,17 @@ def test_documents_are_written_once_and_trained_marks_name_published_train_tasks
     assert session.tasks.open("other").documents() == {}
 
 
+def test_a_reader_takes_the_documents_of_one_prefix_or_one_key(session):
+    store = session.tasks.open("tasks")
+    for key in ("rollout/alpha", "rollout/beta", "rollout%/gamma", "rollout_x", "delivered/0"):
+        store.write_document(key=key, document=key.upper())
+    assert store.documents(prefix="rollout/") == {"rollout/alpha": "ROLLOUT/ALPHA", "rollout/beta": "ROLLOUT/BETA"}
+    assert store.documents(prefix="rollout%") == {"rollout%/gamma": "ROLLOUT%/GAMMA"}, "the prefix is no pattern"
+    assert len(store.documents()) == 5
+    assert store.document("delivered/0") == "DELIVERED/0"
+    assert store.document("delivered/1") is None and session.tasks.open("other").document("delivered/0") is None
+
+
 def test_store_names_are_separate(session, tmp_path):
     alpha = session.tasks.open("alpha")
     alpha.begin_generation(generation=0, source_record_ids=("record-1",))

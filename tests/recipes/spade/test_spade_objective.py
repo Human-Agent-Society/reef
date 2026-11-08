@@ -16,8 +16,8 @@ def test_the_spade_objective_trains_task_jobs_on_the_slime_family_with_spades_ru
     objective = resolve_slime_objective("spade")
     assert isinstance(objective, SpadeObjective)
     assert (objective.loss_family, objective.carries_samples) == ("slime", True)
-    assert objective.rollout_advantages == GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
-    plays = group_advantages([1, 0, 0, 1, 1, 0, 0, 0], objective.rollout_advantages)
+    assert objective.advantage_rule == GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
+    plays = group_advantages([1, 0, 0, 1, 1, 0, 0, 0], objective.advantage_rule)
     assert (plays[0], plays[1]) == (pytest.approx(1.290994, abs=1e-6), pytest.approx(-0.774597, abs=1e-6))
 
 

@@ -1,4 +1,4 @@
-"""Job data directories for tests that build a ``TrainingJob`` without a job loop, and the delayed samples of job data."""
+"""Job data directories for tests that build a ``TrainingJob`` without a job loop, and delayed samples of job data."""
 
 from __future__ import annotations
 

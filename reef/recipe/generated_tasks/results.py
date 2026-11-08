@@ -1,5 +1,5 @@
 """The generated-task recipe's feedback state: each train task's first rollout, the generations delivered, and the
-Designer advantages.
+Designer replies that train.
 
 For a task store, let ``train(g)`` be the names of the train tasks that generation ``g`` published, and
 ``complete(g)`` say that every candidate of ``g`` has an outcome. Published names are unique, so a train task
@@ -11,10 +11,11 @@ store saves but does not read:
   written once.
 - ``Δ ⊆ {0, 1, 2, ...}``, the generations whose results reached the generator, under the key
   ``delivered/<g>``. ``g ∈ Δ`` implies ``complete(g)`` and ``train(g) ⊆ dom rollout``.
-- ``designer``, under the key ``designer/<g>``, only when the stage carries Designer replies: ``designer(g)`` maps
-  the ID of the inference record of each Designer reply of generation ``g`` that trains to its advantage, a finite
-  number, as the generator gave it after it took the results of ``g``. The stage writes ``designer(g)`` before it
-  adds ``g`` to ``Δ``; an empty mapping means that no reply of ``g`` trains.
+- ``designer``, under the key ``designer/<g>``, only when the stage carries Designer replies: ``designer(g)`` is the
+  ``DesignerReplies`` of generation ``g``, the advantages that the generator gave the Designer replies of ``g`` after
+  it took the results of ``g``, and the delayed sample of each such reply. The stage writes ``designer(g)`` before it
+  marks ``g`` delivered, so a delivered generation has ``designer(g)`` when the stage carried Designer replies at
+  that time.
 
 A generation ``g`` is deliverable when ``complete(g)``, ``train(g) ⊆ dom rollout`` and ``g ∉ Δ``.
 """
@@ -26,6 +27,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from reef.core.job_data import DelayedSample
 from reef.core.tasks import HarborTask
 from reef.recipe.generated_tasks.generator import FailedTask, RolledOutTask, check_rewards
 from reef.storage.tasks import TaskStore
@@ -100,8 +102,7 @@ def rollout_results(store: TaskStore) -> dict[str, TaskRolloutResult]:
     """Return ``rollout``: the saved rollout result of each train task, by task name."""
     return {
         key.removeprefix(ROLLOUT_KEY_PREFIX): TaskRolloutResult.from_document(document)
-        for key, document in store.documents().items()
-        if key.startswith(ROLLOUT_KEY_PREFIX)
+        for key, document in store.documents(prefix=ROLLOUT_KEY_PREFIX).items()
     }
 
 
@@ -113,9 +114,7 @@ def save_rollout_result(store: TaskStore, result: TaskRolloutResult) -> None:
 def delivered_generations(store: TaskStore) -> frozenset[int]:
     """Return ``Δ``: the generations whose results reached the generator."""
     return frozenset(
-        int(key.removeprefix(DELIVERED_KEY_PREFIX))
-        for key in store.documents()
-        if key.startswith(DELIVERED_KEY_PREFIX)
+        int(key.removeprefix(DELIVERED_KEY_PREFIX)) for key in store.documents(prefix=DELIVERED_KEY_PREFIX)
     )
 
 
@@ -139,17 +138,52 @@ def checked_advantages(advantages: object) -> dict[str, float]:
     return checked
 
 
-def designer_advantages(store: TaskStore) -> dict[int, dict[str, float]]:
-    """Return ``designer``: the saved advantages of each generation's Designer replies, by generation."""
-    return {
-        int(key.removeprefix(DESIGNER_KEY_PREFIX)): checked_advantages(json.loads(document))
-        for key, document in store.documents().items()
-        if key.startswith(DESIGNER_KEY_PREFIX)
-    }
+@dataclass(frozen=True)
+class DesignerReplies:
+    """The Designer replies of one generation that train: their advantages, and their delayed samples.
+
+    Values: ``advantages`` maps the ID of the inference record of each Designer reply that trains to its advantage, a
+    finite float, as the generator gave it. ``samples`` holds one ``DelayedSample`` for each reply of ``advantages``
+    whose record the stage held with its exact sample, in record ID order: the trajectory of that record alone,
+    which names the record as its only source, with the reply's advantage. A reply without a sample does not train.
+    The constructor refuses other values.
+    Purpose: ``GenerationRunner`` saves it as ``designer(g)`` when the generator took the results of ``g``;
+    ``GeneratedTaskJobData`` reads its samples into the data of the task job that carries them.
+    """
+
+    advantages: Mapping[str, float]
+    samples: tuple[DelayedSample, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "advantages", checked_advantages(self.advantages))
+        if not isinstance(self.samples, tuple) or not all(isinstance(item, DelayedSample) for item in self.samples):
+            raise TypeError("DesignerReplies.samples must be a tuple of DelayedSample values")
+        record_ids = [item.trajectory.source_agent_record_ids for item in self.samples]
+        if any(len(sources) != 1 or sources[0] not in self.advantages for sources in record_ids):
+            raise ValueError("each Designer sample names exactly one record that has an advantage")
+        if [sources[0] for sources in record_ids] != sorted({sources[0] for sources in record_ids}):
+            raise ValueError("the Designer samples are in record ID order, each record once")
+        if any(item.advantage != self.advantages[item.trajectory.source_agent_record_ids[0]] for item in self.samples):
+            raise ValueError("a Designer sample trains with the advantage of its reply")
+
+    def document(self) -> str:
+        """The replies as canonical JSON text: equal replies give the same text."""
+        fields = {"advantages": dict(self.advantages), "samples": [item.to_dict() for item in self.samples]}
+        return json.dumps(fields, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def from_document(cls, text: str) -> DesignerReplies:
+        """Read the text of :meth:`document`."""
+        fields = json.loads(text)
+        return cls(fields["advantages"], tuple(DelayedSample.from_dict(entry) for entry in fields["samples"]))
 
 
-def save_designer_advantages(store: TaskStore, generation: int, advantages: Mapping[str, float]) -> None:
-    """Set ``designer(generation) = advantages``, as canonical JSON text, so that a repeated call with the same
-    advantages changes nothing. Raises ``TaskStoreError`` if the generation has other advantages."""
-    document = json.dumps(checked_advantages(advantages), sort_keys=True, separators=(",", ":"))
-    store.write_document(key=f"{DESIGNER_KEY_PREFIX}{generation}", document=document)
+def designer_replies(store: TaskStore, generation: int) -> DesignerReplies | None:
+    """Return ``designer(generation)``, or None when the store has none."""
+    document = store.document(f"{DESIGNER_KEY_PREFIX}{generation}")
+    return None if document is None else DesignerReplies.from_document(document)
+
+
+def save_designer_replies(store: TaskStore, generation: int, replies: DesignerReplies) -> None:
+    """Set ``designer(generation) = replies``. Raises ``TaskStoreError`` if the generation has other replies."""
+    store.write_document(key=f"{DESIGNER_KEY_PREFIX}{generation}", document=replies.document())

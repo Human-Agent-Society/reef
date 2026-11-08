@@ -1,9 +1,9 @@
 """Group-relative advantages: each reward minus the mean of its group, optionally over the group's deviation.
 
 A GRPO-style method centers the reward of each rollout on the rewards of the other rollouts of the same prompt. Slime's
-batch builder divides by the unbiased sample deviation plus 1e-6 (``slime_rule``). SPADE's own trainer divides by the
-population deviation (NumPy's ``np.std``) plus 1e-8. A training objective declares its rule, and the training backend
-applies it with ``group_advantages``. This module imports only the standard library.
+batch builder divides by the unbiased sample deviation plus 1e-6; SPADE's own trainer divides by the population
+deviation (NumPy's ``np.std``) plus 1e-8. A training objective declares its rule, and the training backend applies it
+with ``group_advantages``. This module imports only the standard library.
 """
 
 from __future__ import annotations
@@ -15,10 +15,6 @@ from typing import Literal, get_args
 
 #: How a rule divides the squared deviations of a group of ``n`` rewards: by ``n`` or by ``n - 1``.
 DeviationKind = Literal["population", "sample"]
-#: The estimators for which Slime's batch builder centers each reward on its prompt group, at the Slime pin.
-SLIME_CENTERING_ESTIMATORS = ("grpo", "gspo", "cispo", "reinforce_plus_plus_baseline")
-#: The estimators for which Slime's batch builder also divides by the group's deviation, at the Slime pin.
-SLIME_DEVIATION_ESTIMATORS = ("grpo", "gspo", "cispo")
 
 
 @dataclass(frozen=True)
@@ -29,8 +25,8 @@ class GroupAdvantageRule:
     ``epsilon``. ``std`` is ``"population"``, the deviation that divides the squared deviations by the group size, or
     ``"sample"``, the unbiased one that divides them by the group size minus 1. ``epsilon`` is a positive finite
     float. ``std`` and ``epsilon`` take no part when ``divide_by_std`` is false. Purpose: a training objective
-    declares a rule (``SlimeObjective.rollout_advantages``) and ``slime_rule`` gives Slime's own; ``group_advantages``
-    applies it. ``to_dict`` and ``from_dict`` carry it in a task prompt's metadata.
+    declares a rule (``SlimeObjective.advantage_rule``), and ``group_advantages`` applies it. ``to_dict`` and
+    ``from_dict`` carry it in a task prompt's metadata.
     """
 
     divide_by_std: bool
@@ -88,30 +84,4 @@ def group_advantages(rewards: Sequence[float], rule: GroupAdvantageRule) -> list
     return [value / scale for value in centered]
 
 
-def slime_rule(
-    advantage_estimator: str, *, rewards_normalization: bool, std_normalization: bool
-) -> GroupAdvantageRule | None:
-    """The rule of Slime's own reward step (``BatchBuilder._post_process_rewards``) at the Slime pin, or None.
-
-    The arguments are Slime's ``--advantage-estimator``, its ``rewards_normalization`` and its
-    ``grpo_std_normalization``. None means that Slime trains the raw rewards: the estimator is not one that centers,
-    or ``--disable-rewards-normalization`` is set. Slime divides by the unbiased deviation plus 1e-6 for the
-    estimators of ``SLIME_DEVIATION_ESTIMATORS``, unless ``--disable-grpo-std-normalization`` is set.
-    """
-    if advantage_estimator not in SLIME_CENTERING_ESTIMATORS or not rewards_normalization:
-        return None
-    return GroupAdvantageRule(
-        divide_by_std=advantage_estimator in SLIME_DEVIATION_ESTIMATORS and std_normalization,
-        std="sample",
-        epsilon=1e-6,
-    )
-
-
-__all__ = [
-    "SLIME_CENTERING_ESTIMATORS",
-    "SLIME_DEVIATION_ESTIMATORS",
-    "DeviationKind",
-    "GroupAdvantageRule",
-    "group_advantages",
-    "slime_rule",
-]
+__all__ = ["DeviationKind", "GroupAdvantageRule", "group_advantages"]

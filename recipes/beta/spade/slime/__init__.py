@@ -1,19 +1,21 @@
 """SPADE's Slime objective: task jobs that center the plays by SPADE's rule and carry the Designer's replies.
 
-Only Slime's training driver and the workers resolve this module, through the reference that the package registers.
-It imports no torch, Ray or Slime.
+Only Slime's training driver and the workers resolve this package, through the reference that the method package
+registers. It imports no torch, Ray or Slime.
 """
+
+from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.job_data import JobData
 from reef.train.algos.group_advantages import GroupAdvantageRule
 from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.types import JobData
 
 #: SPADE's per-game z-score of the plays: the population deviation (``np.std``) plus 1e-8 (``game_utils.py``).
-SPADE_ROLLOUT_ADVANTAGES = GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
+SPADE_ADVANTAGE_RULE = GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
 
 
 @register_slime_objective
@@ -27,11 +29,11 @@ class SpadeObjective(SlimeObjective):
 
     name = "spade"
     loss_family = "slime"
-    rollout_advantages = SPADE_ROLLOUT_ADVANTAGES
+    advantage_rule = SPADE_ADVANTAGE_RULE
     carries_samples = True
 
     def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
         raise RuntimeError("a SPADE task job trains on Slime's own rollouts; Reef prepares no training signal for it")
 
 
-__all__ = ["SPADE_ROLLOUT_ADVANTAGES", "SpadeObjective"]
+__all__ = ["SPADE_ADVANTAGE_RULE", "SpadeObjective"]

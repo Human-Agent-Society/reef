@@ -16,10 +16,11 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import JobData, JobOutcome, TaskSample
+from reef.core.job_data import DelayedSampleLimit, JobData, JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, write_harbor_task
+from reef.core.training_capture import SamplingDistribution
 from reef.core.training_request import TrainingRequest
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
@@ -45,9 +46,10 @@ from reef.recipe.generated_tasks.processor import (
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import (
+    DesignerReplies,
     TaskRolloutResult,
     delivered_generations,
-    designer_advantages,
+    designer_replies,
     rollout_results,
 )
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
@@ -123,11 +125,16 @@ def stage_settings(config: Mapping[str, object]) -> tuple[GeneratedTaskSettings,
 BATCH_SIZE = 1
 
 
+#: The delayed samples that a task job of the tests' training component trains: up to 64, sampled as the Designer
+#: calls of ``designer_call`` are.
+DELAYED_LIMIT = DelayedSampleLimit(64, SamplingDistribution(0.6, 1.0, -1))
+
+
 def job_data_stage(
-    settings: Sample2JobSettings, context: PipelineContext, task_samples: GeneratedTaskSamples | None = None
+    settings: Sample2JobSettings, context: PipelineContext, designer_delay: int = 0
 ) -> GeneratedTaskJobData:
     return GeneratedTaskJobData(
-        context, buffer_size=settings.buffer_size, job_samples=settings.job_samples, task_samples=task_samples
+        context, buffer_size=settings.buffer_size, job_samples=settings.job_samples, designer_delay=designer_delay
     )
 
 
@@ -377,6 +384,7 @@ def rounds(
         task_storage=session.tasks,
         samples=samples.for_trainer(""),
         training_mode=str(config.pop("training_mode", "auto")),
+        delayed_sample_limit=DELAYED_LIMIT,
     )
     sample_settings, batch_settings = stage_settings(
         {"buffer_size": 2, "rounds": 3, "description": DESCRIPTION, **config}
@@ -388,7 +396,7 @@ def rounds(
         context,
         session,
         record2sample=generation,
-        sample2job=job_data_stage(batch_settings, context, generation),
+        sample2job=job_data_stage(batch_settings, context, sample_settings.designer_delay),
     )
     worker.generation = generation
     return built, service
@@ -1267,15 +1275,22 @@ def designer_tasks(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
     )
 
 
-def designer_call(record_id: str, *, artifact_id: str = "artifact-0", is_captured: bool = True) -> AgentRecord:
-    """A served Designer call of ``artifact_id``; ``is_captured`` keeps its sampled reply in ``response.training``."""
+def designer_call(
+    record_id: str,
+    *,
+    artifact_id: str = "artifact-0",
+    is_captured: bool = True,
+    distribution: Mapping[str, object] = DISTRIBUTION,
+) -> AgentRecord:
+    """A served Designer call of ``artifact_id``, sampled from ``distribution``; ``is_captured`` keeps its sampled
+    reply in ``response.training``."""
     response: dict[str, object] = {"choices": [{"message": {"role": "assistant", "content": "a task"}}]}
     if is_captured:
         response["training"] = {
             "tokens": [11, 12, 13, 14],
             "loss_mask": [1, 1],
             "rollout_log_probs": [-0.25, -0.5],
-            "distribution": dict(DISTRIBUTION),
+            "distribution": dict(distribution),
         }
     return AgentRecord.create(
         scenario="tasks",
@@ -1319,7 +1334,7 @@ def stage_of(p: TrainingPipeline) -> GeneratedTaskSamples:
     return stage
 
 
-def test_a_round_waits_for_the_designer_advantages_it_carries_and_its_first_job_trains_them(tmp_path: Path) -> None:
+def test_a_round_waits_for_the_designer_replies_it_carries_and_its_first_job_trains_them(tmp_path: Path) -> None:
     advantages = {0: {"designer-0-0": 1.5, "designer-0-1": -1.5}, 1: {"designer-1-0": 0.0}}
     task_generator = DesignerGenerator([designer_tasks(0, 0, 1), designer_tasks(1, 0)], advantages)
     p, _ = rounds(tmp_path, task_generator, rounds=2, buffer_size=1, refill_tasks=2, designer_delay=1)
@@ -1327,7 +1342,7 @@ def test_a_round_waits_for_the_designer_advantages_it_carries_and_its_first_job_
         p.push(designer_call(record_id))
     stage = stage_of(p)
     looked(p)
-    # The Designer's report on its reply ends the reply's record; the stage keeps it for the job that carries it.
+    # The Designer's report on its reply ends the reply's record; the stage holds it until the delivery saves it.
     p.push(report("designer-report-0", "designer-0-0", None, 0.5, arm=None))
     assert "designer-report-0" in stage.releasable_record_ids()
     assert not {"designer-0-0", "designer-0-1", "designer-1-0"} & stage.releasable_record_ids()
@@ -1342,10 +1357,14 @@ def test_a_round_waits_for_the_designer_advantages_it_carries_and_its_first_job_
     assert p.build_job_data(BATCH_SIZE).delayed == ()
     train_job(p)
     looked(p)
-    store = stage.task_store
-    assert designer_advantages(store)[0] == advantages[0]
-    assert store.documents()["designer/0"] == '{"designer-0-0":1.5,"designer-0-1":-1.5}', "a small document"
+    replies = designer_replies(stage.task_store, 0)
+    assert replies is not None and replies.advantages == advantages[0]
+    assert [item.trajectory.source_agent_record_ids for item in replies.samples] == [
+        ("designer-0-0",),
+        ("designer-0-1",),
+    ]
     assert handed_out_names(p) == ["harbor-00001-000"], "designer/0 exists, so round 1's task trains"
+    assert "designer-0-0" in stage.releasable_record_ids(), "the task store keeps its sample, so its report ends it"
 
     data = p.build_job_data(BATCH_SIZE)
     assert carried(data) == [("designer-0-0", 1.5), ("designer-0-1", -1.5)]
@@ -1353,11 +1372,32 @@ def test_a_round_waits_for_the_designer_advantages_it_carries_and_its_first_job_
     assert reply.metadata["reward"] == 1.5, "the reply's reward is the advantage that trains it"
     assert reply.training["tokens"] == [11, 12, 13, 14] and reply.training["distribution"] == DISTRIBUTION
     assert reply.artifact_id == "artifact-0"
-    assert not {"designer-0-0", "designer-0-1"} & stage.releasable_record_ids(), "no commit carried them yet"
     train_job(p)
-    assert {"designer-0-0", "designer-0-1"} <= stage.releasable_record_ids(), "the carrying job committed"
-    assert "designer-1-0" not in stage.releasable_record_ids(), "no later round carries generation 1 yet"
-    assert stage.operational_metrics()["carried_designer_samples"] == 2
+    assert "designer-1-0" not in stage.releasable_record_ids(), "generation 1 is not delivered, so the stage holds it"
+    assert stage.operational_metrics()["saved_designer_samples"] == 2
+
+
+def test_control_reads_the_carried_replies_from_the_task_store_without_the_records(tmp_path: Path) -> None:
+    task_generator = DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], {0: {"designer-0-0": 2.0}})
+    p, _ = rounds(tmp_path, task_generator, rounds=2, designer_delay=1)
+    p.push(designer_call("designer-0-0"))
+    looked(p)
+    train_job(p)
+    looked(p)
+    data = p.build_job_data(BATCH_SIZE)
+    assert carried(data) == [("designer-0-0", 2.0)]
+    # Control builds its own stages in another process: they read the scenario's store and no record.
+    session, samples = scenario_session(tmp_path)
+    context = PipelineContext(
+        "tasks", task_storage=session.tasks, samples=samples.for_trainer(""), delayed_sample_limit=DELAYED_LIMIT
+    )
+    control = GeneratedTaskJobData.from_config(
+        {"buffer_size": 1},
+        context=context,
+        record2sample=GeneratedTaskSamples(context, GeneratedTaskSettings(designer_delay=1)),
+        environ={},
+    )
+    assert control.make_job_data(data.samples, "tasks:data:9").delayed == data.delayed
 
 
 def test_a_round_that_published_no_train_task_passes_its_carry_to_the_next_round(tmp_path: Path) -> None:
@@ -1418,6 +1458,29 @@ def test_a_restart_before_the_carrying_commit_rebuilds_the_same_job_data(tmp_pat
     }
 
 
+def test_a_restart_before_the_delivery_holds_the_designer_records_for_it(tmp_path: Path) -> None:
+    advantages = {0: {"designer-0-0": 0.75}}
+    record = designer_call("designer-0-0")
+    first, _ = rounds(
+        tmp_path, DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], advantages), designer_delay=1
+    )
+    first.push(record)
+    looked(first)
+    first.push(report("designer-report-0", "designer-0-0", None, 0.5, arm=None))
+    assert "designer-0-0" not in stage_of(first).releasable_record_ids(), "generation 0 is not delivered"
+    # The job ends, and the process stops before the next look submits the delivery.
+    train_job(first)
+    assert designer_replies(stage_of(first).task_store, 0) is None
+    first.close()
+
+    restarted, _ = rounds(tmp_path, DesignerGenerator([designer_tasks(1, 0)], advantages), designer_delay=1)
+    restarted.push(record)
+    looked(restarted)
+    replies = designer_replies(stage_of(restarted).task_store, 0)
+    assert replies is not None and [item.advantage for item in replies.samples] == [0.75]
+    assert carried(restarted.build_job_data(BATCH_SIZE)) == [("designer-0-0", 0.75)]
+
+
 def test_a_failed_carrying_job_loses_its_replies_and_records_its_tasks_failures(tmp_path: Path) -> None:
     task_generator = DesignerGenerator(
         [designer_tasks(0, 0), designer_tasks(1, 0), designer_tasks(2, 0)],
@@ -1431,11 +1494,12 @@ def test_a_failed_carrying_job_loses_its_replies_and_records_its_tasks_failures(
     looked(p)
     assert carried(p.build_job_data(BATCH_SIZE)) == [("designer-0-0", 1.0)]
     assert train_job(p, error="the sandbox provider is down") == ["harbor-00001-000"]
+    # The next look submits the delivery that the job's end asked for.
+    looked(p)
     assert task_generator.results[1] == (
         FailedTask(task_generator.results[1][0].task, "the sandbox provider is down", True),
     )
-    assert "designer-0-0" in stage_of(p).releasable_record_ids(), "the failed job's commit took the replies"
-    looked(p)
+    assert "designer-0-0" not in stage_of(p).held_designer_record_ids(), "the task store keeps its sample"
     data = p.build_job_data(BATCH_SIZE)
     assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00002-000"]
     assert carried(data) == [("designer-1-0", -1.0)], "generation 0's replies are not carried again"
@@ -1455,8 +1519,25 @@ def test_a_designer_record_without_its_sample_is_skipped_and_counted(tmp_path: P
     assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00001-000"]
     assert data.delayed == ()
     metrics = stage_of(p).operational_metrics()
-    assert (metrics["carried_designer_samples"], metrics["uncaptured_designer_records"]) == (0, 1)
+    assert (metrics["saved_designer_samples"], metrics["uncaptured_designer_records"]) == (0, 1)
     assert metrics["missing_designer_records"] == 1
+
+
+def test_the_job_data_holds_only_the_replies_that_the_training_component_trains(tmp_path: Path) -> None:
+    advantages = {0: {f"designer-0-{index}": float(index) for index in range(3)}}
+    task_generator = DesignerGenerator([designer_tasks(0, 0, 1, 2), designer_tasks(1, 0)], advantages)
+    p, _ = rounds(tmp_path, task_generator, rounds=2, buffer_size=3, designer_delay=1)
+    p.push(designer_call("designer-0-0", distribution={"temperature": 1.0, "top_p": 1.0, "top_k": -1}))
+    for record_id in ("designer-0-1", "designer-0-2"):
+        p.push(designer_call(record_id))
+    looked(p)
+    train_job(p)
+    looked(p)
+    stage = p.sample2job
+    assert isinstance(stage, GeneratedTaskJobData)
+    stage.delayed_sample_limit = DelayedSampleLimit(1, SamplingDistribution(0.6, 1.0, -1))
+    # The first reply came from another distribution; of the others, the limit takes the first.
+    assert carried(p.build_job_data(BATCH_SIZE)) == [("designer-0-1", 1.0)]
 
 
 def test_the_pipeline_leaves_out_a_carried_reply_whose_data_is_stale(tmp_path: Path) -> None:
@@ -1491,7 +1572,7 @@ def test_a_delivery_that_fails_lets_the_round_train_without_the_replies(tmp_path
     looked(p)
     assert handed_out_names(p) == ["harbor-00001-000"], "no round waits for a delivery that failed"
     assert p.build_job_data(BATCH_SIZE).delayed == ()
-    assert 0 not in designer_advantages(stage_of(p).task_store)
+    assert designer_replies(stage_of(p).task_store, 0) is None
 
 
 def test_a_generator_that_gives_no_advantages_trains_no_reply_of_the_generation(tmp_path: Path) -> None:
@@ -1504,7 +1585,7 @@ def test_a_generator_that_gives_no_advantages_trains_no_reply_of_the_generation(
     train_job(p)
     looked(p)
     store = stage_of(p).task_store
-    assert designer_advantages(store)[0] == {} and 0 in delivered_generations(store)
+    assert designer_replies(store, 0) == DesignerReplies({}) and 0 in delivered_generations(store)
     assert p.build_job_data(BATCH_SIZE).delayed == ()
 
 
@@ -1517,20 +1598,24 @@ def test_without_a_designer_delay_no_round_waits_and_no_job_carries_a_reply(tmp_
     looked(p)
     assert p.build_job_data(BATCH_SIZE).delayed == ()
     store = stage_of(p).task_store
-    assert designer_advantages(store) == {} and 0 in delivered_generations(store)
-    assert "carried_designer_samples" not in stage_of(p).operational_metrics()
+    assert designer_replies(store, 0) is None and 0 in delivered_generations(store)
+    assert "saved_designer_samples" not in stage_of(p).operational_metrics()
 
 
-def test_the_sample_to_job_stage_takes_the_generated_task_stage_and_a_negative_delay_is_refused() -> None:
+def test_the_sample_to_job_stage_takes_the_delay_and_refuses_it_without_a_limit() -> None:
     context = PipelineContext("tasks")
     stage = GeneratedTaskSamples(context, GeneratedTaskSettings())
     built = GeneratedTaskJobData.from_config({}, context=context, record2sample=stage, environ={})
-    assert built.task_samples is stage
+    assert built.designer_delay == 0 and built.task_store is None
+    with pytest.raises(PluginConfigError, match="whose task jobs train delayed samples"):
+        GeneratedTaskJobData(context, designer_delay=1)
+    with pytest.raises(PluginConfigError, match="task storage and the samples"):
+        GeneratedTaskJobData(PipelineContext("tasks", delayed_sample_limit=DELAYED_LIMIT), designer_delay=1)
     with pytest.raises(ValueError, match="designer_delay must be a non-negative integer"):
         GeneratedTaskSettings(designer_delay=-1)
 
 
-def test_the_last_generations_designer_records_wait_for_a_run_that_continues(tmp_path: Path) -> None:
+def test_the_last_generations_replies_wait_in_the_task_store_for_a_run_that_continues(tmp_path: Path) -> None:
     advantages = {0: {"designer-0-0": 1.0}, 1: {"designer-1-0": -1.0}}
     task_generator = DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], advantages)
     p, _ = rounds(tmp_path, task_generator, rounds=2, designer_delay=1)
@@ -1545,11 +1630,13 @@ def test_the_last_generations_designer_records_wait_for_a_run_that_continues(tmp
     for _ in range(5):
         looked(p)
     stage = stage_of(p)
-    assert stage.rounds_stopped and 1 in stage.designer_documents
+    assert stage.rounds_stopped and stage.held_designer_record_ids() == frozenset()
+    # Generation 1 has no carrier round. Its reply waits in the task store, so its record ends.
+    assert {"designer-0-0", "designer-1-0"} <= stage.releasable_record_ids()
+    p.close()
 
-    releasable = stage.releasable_record_ids()
-
-    # Round 1 carried generation 0. Generation 1 has no carrier round: its record waits, so a run that continues
-    # with more rounds still carries the reply.
-    assert "designer-0-0" in releasable and "designer-1-0" not in releasable
-    assert stage.held_designer_record_ids() == frozenset({"designer-1-0"})
+    continued, _ = rounds(tmp_path, DesignerGenerator([designer_tasks(2, 0)], advantages), rounds=3, designer_delay=1)
+    looked(continued)
+    data = continued.build_job_data(BATCH_SIZE)
+    assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00002-000"]
+    assert carried(data) == [("designer-1-0", -1.0)], "the continued run carries the reply without its record"

@@ -252,13 +252,22 @@ class SQLTaskStore(TaskStore):
             elif existing != document:
                 raise TaskStoreError(f"document {key!r} is already saved with other text")
 
-    def documents(self) -> Mapping[str, str]:
+    def documents(self, *, prefix: str = "") -> Mapping[str, str]:
         documents = self.tables.documents
         with self.database._transaction(write=False) as connection:
             rows = connection.execute(
-                select(documents.c.document_key, documents.c.document).where(self.matching(documents))
+                select(documents.c.document_key, documents.c.document).where(
+                    self.matching(documents), documents.c.document_key.startswith(prefix, autoescape=True)
+                )
             )
             return {row.document_key: row.document for row in rows}
+
+    def document(self, key: str) -> str | None:
+        documents = self.tables.documents
+        with self.database._transaction(write=False) as connection:
+            return connection.execute(
+                select(documents.c.document).where(self.matching(documents, document_key=key))
+            ).scalar()
 
     def published_tasks(self, connection: Connection, **columns: object) -> tuple[StoredTask, ...]:
         """Read the published tasks of this store whose candidates have the given column values, in generation and

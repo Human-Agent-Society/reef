@@ -83,7 +83,6 @@ class SlimeArguments(Namespace):
     sglang_router_port: int
     # Slime's reward step, which the slime family names (reef.train.slime_backend.task_advantages).
     custom_reward_post_process_path: str | None
-    grpo_std_normalization: bool
     # The options that a task job that carries delayed samples checks.
     use_tis: bool
     normalize_advantages: bool
