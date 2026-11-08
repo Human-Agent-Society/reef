@@ -18,7 +18,7 @@ from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos.schedule import StepScheduling
 from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob
-from reef.train.task_rollouts import ChatEndpoint, TaskJobRollouts
+from reef.train.task_rollouts import ChatEndpoint, RolloutTokens, TaskJobRollouts
 from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.config import ScoreCentering, SpindleFullConfig
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
@@ -259,8 +259,9 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
     def fake_roll_out(tasks, settings, rollout_chat, **options):
         widths.append(rollout_chat.topk_logprobs)
         samples = (trajectory("add", 1.0, **HEADS), trajectory("add", 0.0, **HEADS))
+        tokens = tuple(RolloutTokens("add", 2, 2, assembled=True) for _ in samples)
         return TaskJobRollouts(
-            samples, RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
+            samples, RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),)), tokens
         )
 
     monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)

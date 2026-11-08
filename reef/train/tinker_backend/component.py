@@ -74,8 +74,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     groups. The tasks of a job have distinct names (``task_name``), each of
     which names its group. The component keeps the rollouts in
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
-    samples, and reports in the job's metrics each task's rewards of the
-    rollouts that ran (``rollout_rewards``, by task name).
+    samples, and reports the rollouts' metrics (``TaskJobRollouts.metrics``)
+    in the job's metrics.
 
     A sample that cannot render, or whose tokens after the first are more than
     the model's context window (``TinkerClient.context_window``), does not
@@ -276,7 +276,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             return TaskJobRollouts(
                 trajectories(JobData(job.data_id, samples)),
                 RolloutScores.from_json(kept["scores"]),
-                tuple(RolloutTokens(**item) for item in kept.get("tokens", [])),
+                tuple(RolloutTokens(**item) for item in kept["tokens"]),
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")

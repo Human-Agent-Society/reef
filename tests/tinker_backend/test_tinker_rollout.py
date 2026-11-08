@@ -117,6 +117,7 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
         {"task": "sort", "scores": [0.0, 0.0]},
         {"task": "broken", "scores": ["failed", "failed"]},
     ]
+    assert rollouts.metrics()["removed_rollouts"] == 2, "a rollout whose sandbox failed gives no sample"
     training = rollouts.samples[0].training
     assert (training["tokens"], training["rollout_log_probs"]) == ([1, 2, 3, 7, 8], [-0.1, -0.2])
     # Every call sampled the job's start, so the sample names it as the policy that produced its tokens.
@@ -185,10 +186,10 @@ def test_a_rollout_counts_its_response_tokens_and_the_tokens_that_train(tmp_path
     # does not assemble.
     assert [sample.group_id for sample in rollouts.samples] == ["add", "add"]
     assert rollouts.tokens == (
-        RolloutTokens("add", 4, 4),
-        RolloutTokens("add", 4, 4),
-        RolloutTokens("half", 4, 0),
-        RolloutTokens("half", 4, 0, is_assembly_failure=True),
+        RolloutTokens("add", 4, 4, assembled=True),
+        RolloutTokens("add", 4, 4, assembled=True),
+        RolloutTokens("half", 4, 0, assembled=True),
+        RolloutTokens("half", 4, 0, assembled=False),
     )
     metrics = rollouts.metrics()
     assert metrics["rollout_tokens"] == {
@@ -196,7 +197,7 @@ def test_a_rollout_counts_its_response_tokens_and_the_tokens_that_train(tmp_path
         "half": [{"response_tokens": 4, "trained_tokens": 0}] * 2,
     }
     assert (metrics["rollout_response_tokens"], metrics["rollout_trained_tokens"]) == (16, 8)
-    assert metrics["unassembled_rollouts"] == 1
+    assert (metrics["rollout_samples"], metrics["removed_rollouts"]) == (2, 1)
 
 
 @pytest.mark.unit
@@ -291,7 +292,8 @@ def grouped(tmp_path: Path) -> TaskJobRollouts:
         return TrajectorySample(trajectory, group_id=name)
 
     scores = RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
-    return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), scores)
+    tokens = (RolloutTokens("add", 2, 2, assembled=True), RolloutTokens("add", 2, 2, assembled=True))
+    return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), scores, tokens)
 
 
 class RewardObjective(TinkerObjective):
@@ -374,7 +376,10 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
 
 @pytest.mark.unit
 def test_a_task_job_reports_its_rollout_tokens_and_a_resumed_job_keeps_them(tmp_path, monkeypatch):
-    counted = replace(grouped(tmp_path), tokens=(RolloutTokens("add", 2, 2), RolloutTokens("add", 3, 2)))
+    counted = replace(
+        grouped(tmp_path),
+        tokens=(RolloutTokens("add", 2, 2, assembled=True), RolloutTokens("add", 3, 2, assembled=True)),
+    )
     monkeypatch.setattr(component_module, "run_train_tasks", lambda tasks, settings, chat, **options: counted)
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
@@ -397,7 +402,7 @@ def test_a_task_job_reports_its_rollout_tokens_and_a_resumed_job_keeps_them(tmp_
             "add": [{"response_tokens": 2, "trained_tokens": 2}, {"response_tokens": 3, "trained_tokens": 2}]
         }
         assert (status.metrics["rollout_response_tokens"], status.metrics["rollout_trained_tokens"]) == (5, 4)
-        assert status.metrics["unassembled_rollouts"] == 0
+        assert status.metrics["removed_rollouts"] == 0
         settings = component.job_parameters(parameters).rollout
         assert component.task_rollouts(job, component.job_directory("job-0"), component._base, settings) == counted
     finally:

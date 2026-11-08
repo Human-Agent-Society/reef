@@ -2115,7 +2115,13 @@ samples train.
    ``rollout.scaffold_tolerance`` : 8
        tokens at the end of a prompt that the next prompt's history may drop, such as the empty think block of a thinking template with thinking off; the sample keeps them, and the response after them trains
 
-The job's metrics report each task's rollout rewards (``rollout_rewards``), the samples that train (``rollout_samples``), each rollout's response tokens and the tokens of them that train (``rollout_tokens``), their sums (``rollout_response_tokens`` and ``rollout_trained_tokens``), and the count of rollouts that do not assemble into a sample (``unassembled_rollouts``).
+The job's metrics report each task's rewards of the rollouts that ran
+(``rollout_rewards``), the samples that train (``rollout_samples``), and the
+rollouts that give no sample because they fail in the infrastructure or their
+model calls do not assemble into one (``removed_rollouts``). A Tinker task job
+also reports each rollout's response tokens and the tokens of them that train
+(``rollout_tokens``), and their sums (``rollout_response_tokens`` and
+``rollout_trained_tokens``).
 
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~
@@ -2202,8 +2208,11 @@ its reward out of its group's mean and deviation, so the group's other rollouts
 train against each other. A group with one sample left has advantage 0. When
 no group of a Slime rollout can train, the job fails before the workers train it,
 with the first rollout's error. Slime's metrics such as ``rollout/raw_reward``
-count a removed sample with reward 0. The job's metrics report
-``rollout_rewards``, by task, ``rollout_samples`` and ``removed_rollouts``.
+count a removed sample with reward 0. The job's metrics report each task's
+rewards of the rollouts that ran (``rollout_rewards``), the samples that train
+(``rollout_samples``), and the rollouts that give no sample because they fail
+in the infrastructure or their model calls do not assemble into one
+(``removed_rollouts``).
 
 The driver refuses a task job, when it is submitted, in these cases:
 
