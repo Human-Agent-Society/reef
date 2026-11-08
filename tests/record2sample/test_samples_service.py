@@ -37,9 +37,9 @@ class Producers(SampleProducers):
         self.error = error
         self.changed = changed
 
-    def produce(self, scenario: str, component: str, progress) -> ProducedSamples:
+    def produce(self, scenario: str, component: str, selection) -> ProducedSamples:
         self.calls.append((scenario, component))
-        progress(4, 0)
+        selection.progress(4, 0)
         if self.error is not None:
             raise self.error
         return ProducedSamples(
@@ -86,6 +86,7 @@ def test_the_worker_makes_the_samples_and_comes_back_while_background_work_runs(
         "records_read": 4,
         "samples_created": 2,
         "due_in_seconds": None,
+        "record_sequences": None,
     }
     assert items[1].available_at > items[0].created_at
     producers.background = False
@@ -184,10 +185,11 @@ def test_a_running_selection_writes_its_counts_so_far_for_its_attempt():
     seen = []
 
     class Watching(Producers):
-        def produce(self, scenario, component, progress):
-            progress(4, 0)
+        def produce(self, scenario, component, selection):
+            assert selection.task_id == item.id
+            selection.progress(4, 0)
             seen.append(queue.get(SAMPLES_QUEUE, item.id).metadata["progress"])
-            progress(5, 1)  # within the interval: no write
+            selection.progress(5, 1)  # within the interval: no write
             seen.append(queue.get(SAMPLES_QUEUE, item.id).metadata["progress"])
             return ProducedSamples(changed=True, background=False, records_read=5, samples_created=1)
 

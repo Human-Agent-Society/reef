@@ -300,10 +300,17 @@ class TrainerSamples:
         return self.store.imported_tasks(split)
 
     def add_record_samples(
-        self, group: str | None, record_ids: Sequence[str], samples: Sequence[tuple[str, Sample]]
+        self,
+        group: str | None,
+        record_ids: Sequence[str],
+        samples: Sequence[tuple[str, Sample]],
+        *,
+        lineage: Mapping[str, str] | None = None,
     ) -> int:
         """Save the samples that the stages of ``trainer`` made from ``record_ids`` as items that the scenario uses,
-        then mark the records consumed; return the number of new items.
+        then mark the records consumed; return the number of new items. ``lineage`` adds top-level metadata that
+        names the sample processing tasks of the samples (``TrainingPipeline.lineage``), so a query by group finds
+        them.
 
         The sample named ``name`` is the item ``stage_item_id(scenario, name)``. An item that exists stays as it is,
         so a stage that makes a sample again, after a restart, changes nothing. ``record_ids`` is empty for samples
@@ -324,6 +331,7 @@ class TrainerSamples:
                 "scenarios": {store.scenario: "train"},
                 "origin": origin,
                 **({"group": group} if group is not None else {}),
+                **(lineage or {}),
             }
             try:
                 if isinstance(sample, TrajectorySample):
