@@ -21,7 +21,7 @@ SERVICE_CONFIGS = (
     "recipes/openclawrl/examples/openclawrl/serve.yaml",
     "recipes/sao/examples/imo_answerbench/serve.yaml",
     "recipes/beta/coral/examples/coral_demo/serve.yaml",
-    "recipes/beta/autoenvscaling/examples/tmax_seeds/serve-slime.yaml",
+    "recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",
     "tutorials/evolve-your-harness/configs/serve.yaml",

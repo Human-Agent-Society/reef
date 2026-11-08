@@ -33,7 +33,7 @@ On the 15 sessions that both arms ran, the arms give 5 and 6 fair tasks. The che
 Qwen3.5-9B trained on TMax seed tasks and Claude Code's variants of them, with [#1215](#fixes-that-are-not-merged-yet). The runs used the `examples/tmax_seeds/` deployments with these changes:
 
 - Tinker: steps 1 to 8 ran `serve-tinker.yaml` as written. Steps 9 to 50 ran 11 tasks of 32 rollouts per job (`count` 11, `rollouts_per_task` 32, `batch-size` 256), `jobs_per_round: 0` with `refill_tasks` 16, and the Harbor release of TMax v1.1 as seeds.
-- Slime: steps 1 to 6 ran `serve-slime.yaml` on 8 GPUs. From step 7, 2 rollout engines on 7 GPUs trained, so that the eighth GPU could run the evaluations. The run's image had Slime 540ea919 on Megatron core 0.19.2, built before Reef pinned Slime 8a53b680; this example has not run on the pinned Slime yet.
+- Slime: steps 1 to 6 ran `serve.yaml` on 8 GPUs. From step 7, 2 rollout engines on 7 GPUs trained, so that the eighth GPU could run the evaluations. The run's image had Slime 540ea919 on Megatron core 0.19.2, built before Reef pinned Slime 8a53b680; this example has not run on the pinned Slime yet.
 
 Each checkpoint ran Terminal-Bench 2.0 (89 tasks, 5 attempts each) with the training agent: `VerifiedTerminus2` with thinking off, as in training. avg@5 is the mean over the 89 tasks of each task's mean reward, with a 95% interval over tasks; attempts that failed for an infrastructure reason are left out (3 for the Tinker base model). The difference to the base model is paired over tasks, with a bootstrap 95% interval. Each backend measured its own base model: on Tinker through Reef's artifact evaluation, on Slime with Harbor against an SGLang engine outside Reef. The two base results differ by 1.9 points. The serving differs too: SGLang ends a rollout at a shorter history than Tinker ([settings](#settings-the-examples-depend-on)).
 
@@ -63,7 +63,7 @@ beta/autoenvscaling/
   tinker.py           the Tinker objective of a task job: each rollout's reward minus its task's mean reward
   examples/recorded_sessions/serve-tinker.yaml   on Tinker, the agent rebuilds recorded sessions as tasks: the generator service and the generated-task recipe
   examples/tmax_seeds/serve-tinker.yaml          on Tinker, the policy trains on TMax seeds and on Claude Code's variants of them (LoRA)
-  examples/tmax_seeds/serve-slime.yaml           the same seed pool on Slime: all weights of the policy train, on one node of 8 GPUs
+  examples/tmax_seeds/serve.yaml                 on Slime, the same seed tasks: all weights of the policy train, on one node of 8 GPUs
 ```
 
 AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
@@ -450,7 +450,7 @@ hf download Qwen/Qwen3.5-9B --local-dir /models/Qwen3.5-9B
 export REEF_AUTOENVSCALING_MODEL_PATH=/models/Qwen3.5-9B PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export REEF_TOKEN=reef-local REEF_AUTOENVSCALING_STATE_DIR="$PWD/work/autoenvscaling-slime"   # and E2B_API_KEY
 export REEF_AUTOENVSCALING_SEEDS_PATH=/data/tmax-seeds CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-reef serve -c recipes/beta/autoenvscaling/examples/tmax_seeds/serve-slime.yaml
+reef serve -c recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml
 curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
   -d '{"name": "autoenvscaling"}' http://127.0.0.1:8900/reef/scenarios
 ```

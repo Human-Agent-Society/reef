@@ -78,7 +78,7 @@ from reef.train.tinker_backend.objectives import resolve_tinker_objective
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
 TINKER_EXAMPLES = ("recorded_sessions/serve-tinker.yaml", "tmax_seeds/serve-tinker.yaml")
-SLIME_EXAMPLE = "tmax_seeds/serve-slime.yaml"
+SLIME_EXAMPLE = "tmax_seeds/serve.yaml"
 
 
 @pytest.fixture(autouse=True)

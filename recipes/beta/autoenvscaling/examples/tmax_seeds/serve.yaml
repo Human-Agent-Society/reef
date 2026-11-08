@@ -139,9 +139,15 @@ training:
   ready-timeout: 3600
   config:
     checkpoint_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/checkpoints
+    # Keep only the latest Megatron checkpoints. One is about 135 GB with the optimizer state.
+    checkpoint_retention:
+      max_storage_fraction: 0.8
+      min_free_space_fraction: 0.1
+      policy: latest
   options:
-    # Keep only the latest Megatron checkpoints. One is about 135 GB with the optimizer state; the run held three at once.
-    reef-checkpoint-policy: latest
+    reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
+    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
     megatron-to-hf-mode: bridge
     hf-checkpoint: ${inference.model-path}
     load: ${training.config.checkpoint_dir}/megatron
@@ -167,8 +173,6 @@ training:
     sequence-parallel: true
     context-parallel-size: "2"
     pipeline-model-parallel-size: "1"
-    attention-dropout: "0.0"
-    hidden-dropout: "0.0"
     accumulate-allreduce-grads-in-fp32: true
     attention-softmax-in-fp32: true
     attention-backend: flash
@@ -180,29 +184,20 @@ training:
     # expandable segments.
     sglang-context-length: "65536"
     rollout-temperature: "1.0"
-    # The Qwen3.5-9B model: Slime's spec and the model's shape.
+    # The Qwen3.5-9B model. Reef fills its shape (layers, sizes, heads, norm epsilon, rotary base, dropouts, untied
+    # embeddings) from the model's config; these are the flags that it does not fill.
     spec:
       - slime_plugins.models.qwen3_5
       - get_qwen3_5_spec
     disable-bias-linear: true
     qk-layernorm: true
-    group-query-attention: true
-    num-attention-heads: "16"
-    num-query-groups: "4"
-    kv-channels: "256"
-    num-layers: "32"
-    hidden-size: "4096"
-    ffn-hidden-size: "12288"
     use-gated-attention: true
     attention-output-gate: true
     normalization: RMSNorm
     apply-layernorm-1p: true
     position-embedding-type: rope
-    norm-epsilon: 1e-6
     rotary-percent: "0.25"
-    rotary-base: "10000000"
     swiglu: true
-    untie-embeddings-and-output-weights: true
     vocab-size: "248320"
     recompute-granularity: full
     recompute-method: uniform
