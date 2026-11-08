@@ -23,9 +23,11 @@ Each request names its trigger (``TRIGGERS``). The item records the time of the 
 ``metadata["trigger:<name>"]``, so a reader can tell why the selection ran (RFC #1267). While a selection runs, its
 counts so far are in ``metadata["progress"]``. The worker keeps the log of each attempt (``QueueWorker.keeps_log``).
 
-While only background work runs, the next selection waits twice as long as the last one, from
-``BACKGROUND_POLL_SECONDS`` up to ``MAX_BACKGROUND_POLL_SECONDS``. A selection that changed something resets the wait.
-The wait is in ``metadata["background_poll_seconds"]`` of the next selection.
+A background job that a selection submits asks for the next selection when it ends (``SelectionRequest``), so its
+result does not wait for a look. While background work runs, the worker also looks again as a fallback: the next
+selection waits twice as long as the last one, from ``BACKGROUND_POLL_SECONDS`` up to ``MAX_BACKGROUND_POLL_SECONDS``.
+A selection that changed something resets the wait. The wait is in ``metadata["background_poll_seconds"]`` of the
+next selection.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
+from reef.execution.jobs import JOB_LISTENER, JobListener
 from reef.execution.workers import QueueWorker
 from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
@@ -45,10 +48,11 @@ from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 SAMPLES_QUEUE = "samples"
 #: The kind of the item that makes samples of a trainer's new records.
 RECORD_SELECTION_KIND = "record_selection"
-#: The first wait, in seconds, until a worker looks again at a trainer whose stages still run background work.
+#: The first wait, in seconds, until a worker looks again at a trainer whose stages still run background work. A
+#: ``BackgroundJobWorker`` job that ends asks for a selection at once; this look is for other background work.
 BACKGROUND_POLL_SECONDS = 1.0
-#: The longest wait, in seconds, between two looks at background work that changed nothing.
-MAX_BACKGROUND_POLL_SECONDS = 30.0
+#: The longest wait, in seconds, between two fallback looks at background work that changed nothing.
+MAX_BACKGROUND_POLL_SECONDS = 300.0
 #: The sources that request a selection: accepted records, a data sync, a commit, a scenario reload, background
 #: work that still runs, and a set that waits for time.
 TRIGGERS = ("records", "data", "commit", "reload", "background", "due")
@@ -189,6 +193,22 @@ class SampleProducers(ABC):
         scenario that is gone, or a trainer that trains nothing, makes nothing."""
 
 
+class SelectionRequest(JobListener):
+    """Asks for the next selection of the trainer of ``component`` in ``scenario`` when a background job that a
+    selection submitted ends, with the trigger ``background``.
+
+    Purpose: the samples worker sets one in ``JOB_LISTENER`` while a selection runs.
+    """
+
+    def __init__(self, queue: WorkQueue, scenario: str, component: str) -> None:
+        self.queue = queue
+        self.scenario = scenario
+        self.component = component
+
+    def job_ended(self) -> None:
+        request_selection(self.queue, self.scenario, self.component, trigger="background")
+
+
 class SamplesWorker(QueueWorker):
     """One worker of the samples service.
 
@@ -212,7 +232,11 @@ class SamplesWorker(QueueWorker):
         component = item.payload.get("component")
         if not isinstance(component, str) or not component:
             raise ValueError("a record selection names its component")
-        produced = self.producers.produce(item.scenario, component, ItemSelection(self.queue, item))
+        token = JOB_LISTENER.set(SelectionRequest(self.queue, item.scenario, component))
+        try:
+            produced = self.producers.produce(item.scenario, component, ItemSelection(self.queue, item))
+        finally:
+            JOB_LISTENER.reset(token)
         sequences = produced.record_sequences
         return {
             "changed": produced.changed,
@@ -258,6 +282,7 @@ __all__ = [
     "SampleProducers",
     "SamplesWorker",
     "Selection",
+    "SelectionRequest",
     "background_poll_seconds",
     "request_selection",
     "selection_key",
