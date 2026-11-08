@@ -19,7 +19,7 @@ from sqlalchemy.engine import Connection
 from reef.storage.commit_history import CommitHistory, same_commit
 from reef.storage.commits import CommitHistoryError, CommitRecord, encode_commit
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase, batches
 
 
 def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -154,15 +154,16 @@ class SQLCommitHistory(CommitHistory):
                         for sample_id in sample_ids
                     ],
                 )
-                connection.execute(
-                    update(counts)
-                    .where(
-                        self.train_counts.condition(),
-                        counts.c.component == component,
-                        counts.c.sample_id.in_(sample_ids),
+                for batch in batches(sample_ids):
+                    connection.execute(
+                        update(counts)
+                        .where(
+                            self.train_counts.condition(),
+                            counts.c.component == component,
+                            counts.c.sample_id.in_(batch),
+                        )
+                        .values(train_count=counts.c.train_count + 1)
                     )
-                    .values(train_count=counts.c.train_count + 1)
-                )
 
     @contextmanager
     def _transaction(self, *, write: bool) -> Iterator[Connection]:
