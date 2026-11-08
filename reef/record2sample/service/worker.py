@@ -18,6 +18,14 @@ A selection reads every record that its trainer has not used yet when it runs. S
 selection of the same trainer waits in the queue; it adds one when the trainer's selections are final or running.
 A stage can also make samples without a new record: when background work ends, or when a set that waits for time
 is due. The worker then asks for the next selection at that time.
+
+Each request names its trigger (``TRIGGERS``). The item records the time of the first request of each trigger in
+``metadata["trigger:<name>"]``, so a reader can tell why the selection ran (RFC #1267). While a selection runs, its
+counts so far are in ``metadata["progress"]``.
+
+While only background work runs, the next selection waits twice as long as the last one, from
+``BACKGROUND_POLL_SECONDS`` up to ``MAX_BACKGROUND_POLL_SECONDS``. A selection that changed something resets the wait.
+The wait is in ``metadata["background_poll_seconds"]`` of the next selection.
 """
 
 from __future__ import annotations
@@ -26,7 +34,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -37,8 +45,18 @@ from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 SAMPLES_QUEUE = "samples"
 #: The kind of the item that makes samples of a trainer's new records.
 RECORD_SELECTION_KIND = "record_selection"
-#: The seconds until a worker looks again at a trainer whose stages still run background work.
+#: The first wait, in seconds, until a worker looks again at a trainer whose stages still run background work.
 BACKGROUND_POLL_SECONDS = 1.0
+#: The longest wait, in seconds, between two looks at background work that changed nothing.
+MAX_BACKGROUND_POLL_SECONDS = 30.0
+#: The sources that request a selection: accepted records, a data sync, a commit, a scenario reload, background
+#: work that still runs, and a set that waits for time.
+TRIGGERS = ("records", "data", "commit", "reload", "background", "due")
+#: The shortest time, in seconds, between two progress writes of one selection.
+PROGRESS_INTERVAL_SECONDS = 1.0
+
+#: Reports the counts of a running selection so far: the records read and the samples created.
+SampleProgress = Callable[[int, int], None]
 
 
 def selection_key(scenario: str, component: str) -> str:
@@ -47,12 +65,14 @@ def selection_key(scenario: str, component: str) -> str:
 
 
 def request_selection(
-    queue: WorkQueue, scenario: str, component: str, *, available_at: float | None = None
+    queue: WorkQueue, scenario: str, component: str, *, trigger: str, available_at: float | None = None
 ) -> WorkItem:
-    """Ask for a selection of the new records of the trainer of ``component`` in ``scenario``; return the item that
-    will read them: a queued one, or a new one."""
+    """Ask for a selection of the new records of the trainer of ``component`` in ``scenario`` because of ``trigger``
+    (one of ``TRIGGERS``); return the item that will read them: a queued one, or a new one."""
+    if trigger not in TRIGGERS:
+        raise ValueError(f"a selection trigger is one of {TRIGGERS}, not {trigger!r}")
     payload = cast(dict[str, JsonValue], {"scenario": scenario, "component": component})
-    return queue.request(
+    item = queue.request(
         SAMPLES_QUEUE,
         scenario,
         RECORD_SELECTION_KIND,
@@ -60,6 +80,20 @@ def request_selection(
         payload,
         available_at=available_at,
     )
+    key = f"trigger:{trigger}"
+    if key in item.metadata:
+        return item
+    return queue.set_metadata(SAMPLES_QUEUE, item.id, key, time.time()) or item
+
+
+def selection_triggers(item: WorkItem) -> list[JsonValue]:
+    """The triggers of the selection ``item``, each ``{"name", "at"}``, oldest first; empty for an older item."""
+    found = sorted(
+        (at, name.removeprefix("trigger:"))
+        for name, at in item.metadata.items()
+        if name.startswith("trigger:") and isinstance(at, (int, float))
+    )
+    return [{"name": name, "at": at} for at, name in found]
 
 
 @dataclass(frozen=True)
@@ -104,10 +138,10 @@ class SampleProducers(ABC):
     """
 
     @abstractmethod
-    def produce(self, scenario: str, component: str) -> ProducedSamples:
+    def produce(self, scenario: str, component: str, progress: SampleProgress) -> ProducedSamples:
         """Make samples of the records that the trainer of ``component`` in ``scenario`` has not used yet, and store
-        them; return what the selection did. A scenario that is gone, or a trainer that trains nothing, makes
-        nothing."""
+        them; return what the selection did. Call ``progress`` with the counts so far while the work runs. A
+        scenario that is gone, or a trainer that trains nothing, makes nothing."""
 
 
 class SamplesWorker(QueueWorker):
@@ -117,8 +151,8 @@ class SamplesWorker(QueueWorker):
     A selection that names no component fails for good.
 
     Purpose: the samples service starts one or more (``start``) and stops them (``stop``). A selection that left
-    work in the background asks for the next selection after ``BACKGROUND_POLL_SECONDS``. A selection that left
-    only a set that waits for time asks for the next selection after ``due_in_seconds``.
+    work in the background asks for the next selection after the backoff wait (``background_poll_seconds``). A
+    selection that left only a set that waits for time asks for the next selection after ``due_in_seconds``.
     """
 
     def __init__(
@@ -131,7 +165,7 @@ class SamplesWorker(QueueWorker):
         component = item.payload.get("component")
         if not isinstance(component, str) or not component:
             raise ValueError("a record selection names its component")
-        produced = self.producers.produce(item.scenario, component)
+        produced = self.producers.produce(item.scenario, component, self.progress_writer(item))
         return {
             "changed": produced.changed,
             "background": produced.background,
@@ -140,26 +174,63 @@ class SamplesWorker(QueueWorker):
             "due_in_seconds": produced.due_in_seconds,
         }
 
+    def progress_writer(self, item: WorkItem) -> SampleProgress:
+        """A ``SampleProgress`` that writes the counts of this attempt of ``item`` to its metadata, at most once in
+        ``PROGRESS_INTERVAL_SECONDS``. The result holds the final counts."""
+        last_write = -math.inf
+
+        def write(records_read: int, samples_created: int) -> None:
+            nonlocal last_write
+            now = time.monotonic()
+            if now - last_write < PROGRESS_INTERVAL_SECONDS:
+                return
+            last_write = now
+            progress: dict[str, JsonValue] = {
+                "attempt": item.attempt_count,
+                "records_read": records_read,
+                "samples_created": samples_created,
+                "at": time.time(),
+            }
+            self.queue.set_metadata(SAMPLES_QUEUE, item.id, "progress", progress)
+
+        return write
+
     def item_finished(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
         # The next selection is a new item: the finished one keeps its ID until it ends, and an add of the same ID
         # changes nothing.
+        component = cast(str, item.payload["component"])
         if result["background"]:
-            delay = BACKGROUND_POLL_SECONDS
+            delay = background_poll_seconds(item, changed=bool(result["changed"]))
+            next_item = request_selection(
+                self.queue, item.scenario, component, trigger="background", available_at=time.time() + delay
+            )
+            self.queue.set_metadata(SAMPLES_QUEUE, next_item.id, "background_poll_seconds", delay)
         elif result["due_in_seconds"] is not None:
             delay = cast(float, result["due_in_seconds"])
-        else:
-            return
-        component = cast(str, item.payload["component"])
-        request_selection(self.queue, item.scenario, component, available_at=time.time() + delay)
+            request_selection(self.queue, item.scenario, component, trigger="due", available_at=time.time() + delay)
+
+
+def background_poll_seconds(item: WorkItem, *, changed: bool) -> float:
+    """The wait before the next look at background work after the selection ``item``: ``BACKGROUND_POLL_SECONDS``
+    after a change, else twice the wait before ``item``, at most ``MAX_BACKGROUND_POLL_SECONDS``."""
+    last = item.metadata.get("background_poll_seconds")
+    if changed or not isinstance(last, (int, float)):
+        return BACKGROUND_POLL_SECONDS
+    return min(2 * float(last), MAX_BACKGROUND_POLL_SECONDS)
 
 
 __all__ = [
     "BACKGROUND_POLL_SECONDS",
+    "MAX_BACKGROUND_POLL_SECONDS",
     "RECORD_SELECTION_KIND",
     "SAMPLES_QUEUE",
+    "TRIGGERS",
     "ProducedSamples",
     "SampleProducers",
+    "SampleProgress",
     "SamplesWorker",
+    "background_poll_seconds",
     "request_selection",
     "selection_key",
+    "selection_triggers",
 ]
