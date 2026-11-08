@@ -2953,8 +2953,11 @@ Optional query parameters are ``state``, ``before``, ``limit`` and ``changed``.
 With ``true``, the page omits finished tasks that gave the trainer nothing new.
 It reads at most 5,000 tasks to fill the page.
 
-The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``counts``, ``tasks``,
-``hidden`` and ``next``.
+The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``records_waiting``,
+``counts``, ``tasks``, ``hidden`` and ``next``.
+``records_waiting`` is the number of the scenario's records after the last record that a trainer read, for the
+trainer furthest behind. Each trainer's newest finished task with ``record_sequences`` gives that record.
+It is null when a trainer has no such task in the retained history.
 ``enabled`` means the scenario has a trainer that generates samples.
 It does not report worker health. ``counts`` covers all retained tasks, independent of pagination and state filters.
 ``hidden`` lists each run of omitted tasks, and is empty without ``changed=true``.
@@ -2972,6 +2975,8 @@ Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at`
 Times are Unix seconds. Unavailable fields are null.
 ``triggers`` lists why the task ran, oldest first. Each entry has ``name`` and ``at``, the time of the first request.
 A name is ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``.
+``background`` comes from a background job of a stage that ended, or from a fallback look while such jobs run.
+The fallback waits 1 second, then twice as long after each look that changed nothing, up to 300 seconds.
 Only ``records`` and ``data`` bring new records. The others let a stage make samples without a new record.
 A task from an older Reef has no triggers.
 ``progress`` holds the counts so far of the attempt that runs now: ``attempt``, ``records_read``,

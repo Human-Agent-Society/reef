@@ -6,6 +6,7 @@ import time
 
 from reef.dispatcher import Dispatcher
 from reef.record2sample.service import SAMPLES_QUEUE, selection_triggers
+from reef.storage.records import RecordStore
 from reef.storage.work_queue import HELD_STATES, JsonValue, WorkItem
 
 #: The most tasks that one page with ``changed=True`` reads to fill the page.
@@ -119,7 +120,8 @@ def list_processing(
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     with dispatcher.locked_scenario(scenario) as current:
-        enabled = any(component.trainer.trains for component in current.trainers)
+        trains = frozenset(component.component for component in current.trainers if component.trainer.trains)
+        records = current.store.records
     rows, hidden, next_cursor = (
         changed_page(dispatcher, scenario, state, before, limit)
         if changed
@@ -127,7 +129,8 @@ def list_processing(
     )
     return {
         "scenario": scenario,
-        "enabled": enabled,
+        "enabled": bool(trains),
+        "records_waiting": records_waiting(dispatcher, scenario, trains, records),
         "read_at": time.time(),
         "retention_seconds": dispatcher.work_retention_seconds,
         "counts": dict(dispatcher.queue.counts(SAMPLES_QUEUE, scenario=scenario)),
@@ -135,6 +138,39 @@ def list_processing(
         "hidden": hidden,
         "next": next_cursor,
     }
+
+
+def records_waiting(dispatcher: Dispatcher, scenario: str, trains: frozenset[str], records: RecordStore) -> int | None:
+    """The number of the scenario's records after the last record that a trainer read, for the trainer furthest
+    behind; None when a trainer that trains has no retained task with ``record_sequences``.
+
+    The newest such task of each trainer gives its cursor. A page reads at most ``MAX_SCANNED_TASKS`` tasks for them.
+    """
+    if not trains:
+        return None
+    cursors: dict[str, int] = {}
+    before: int | None = None
+    for _ in range(MAX_SCANNED_TASKS // SCAN_BATCH):
+        batch = dispatcher.queue.page(
+            SAMPLES_QUEUE, scenario=scenario, state="finished", before_sequence=before, limit=SCAN_BATCH
+        )
+        for item in batch:
+            component = item.payload.get("component")
+            sequences = (item.result or {}).get("record_sequences")
+            if (
+                isinstance(component, str)
+                and component in trains
+                and component not in cursors
+                and isinstance(sequences, list)
+                and isinstance(sequences[-1], int)
+            ):
+                cursors[component] = sequences[-1]
+        if set(cursors) == trains:
+            return records.count(scenario, after_sequence=min(cursors.values()))
+        if len(batch) < SCAN_BATCH:
+            return None
+        before = batch[-1].created_sequence
+    return None
 
 
 def plain_page(

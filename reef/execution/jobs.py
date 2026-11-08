@@ -14,6 +14,7 @@ import logging
 import queue
 import time
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
 
@@ -114,6 +115,22 @@ class JobContext(Execution):
             self.finished.set()
 
 
+class JobListener(ABC):
+    """Hears that a background job of the work that set it ended.
+
+    Purpose: work sets one in ``JOB_LISTENER`` before it submits jobs; ``BackgroundJobWorker`` calls ``job_ended`` on
+    its loop thread after it puts the job's result, so ``job_ended`` must be quick and must not block on the loop.
+    """
+
+    @abstractmethod
+    def job_ended(self) -> None:
+        """A job that the work submitted has a result to poll."""
+
+
+#: The listener of the work that runs in this context, or None. A job keeps the one of its submit call.
+JOB_LISTENER: ContextVar[JobListener | None] = ContextVar("reef_job_listener", default=None)
+
+
 class BackgroundJobRunner(ABC):
     """An asynchronous job implementation consumed by BackgroundJobWorker.
 
@@ -146,7 +163,8 @@ class BackgroundJobWorker(Execution):
     A runner that refuses cancellation can keep wait_closed returning False.
     Each job runs in a copy of the context variables of its submit call, so that
     what the job logs goes to the log of the work that submitted it
-    (reef.execution.work_logs).
+    (reef.execution.work_logs). After a job's result, the worker calls the
+    ``JOB_LISTENER`` of that context.
     """
 
     def __init__(self, runner: BackgroundJobRunner, *, thread_name: str, concurrency: int = 8) -> None:
@@ -269,6 +287,12 @@ class BackgroundJobWorker(Execution):
                 logger.exception("background job cleanup failed for receipt %s", submitted.receipt)
                 result = Failed(submitted.receipt)
             self.results.put(result)
+            listener = task.get_context().get(JOB_LISTENER)
+            if listener is not None:
+                try:
+                    listener.job_ended()
+                except Exception:
+                    logger.exception("the listener of receipt %s failed", submitted.receipt)
 
         try:
             while True:
