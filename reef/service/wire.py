@@ -25,6 +25,10 @@ SCENARIO_HEADER = "x-reef-scenario"
 #: fallback; a tag is what a harness offers when its agent does not resend
 #: the transcript it is continuing.
 TAG_HEADER_PREFIX = "x-reef-tag-"
+#: ``1`` or ``true`` asks the inference service to keep the call's exact sample (``response.training``,
+#: ``reef.core.training_capture``) in its record, so that a recipe can train the call as sampled; ``0``, ``false``
+#: or no header keeps none.
+RECORD_TRAINING_HEADER = "x-reef-record-training"
 
 
 class HeaderError(ReefError):
@@ -70,6 +74,8 @@ class RequestHeaders:
     request_type: RequestType
     #: ``x-reef-tag-<name>`` pairs, lowercased names, opaque values.
     tags: Mapping[str, str] = field(default_factory=dict)
+    #: Whether the call asks to keep its exact sample in its record (``RECORD_TRAINING_HEADER``).
+    is_recording_training: bool = False
 
 
 def scenario_header(headers: Mapping[str, str]) -> str:
@@ -91,10 +97,15 @@ def parse_request_headers(headers: Mapping[str, str], request_type: RequestType)
         if key.startswith(TAG_HEADER_PREFIX) and len(key) > len(TAG_HEADER_PREFIX) and value.strip()
     }
 
+    recording = normalized.get(RECORD_TRAINING_HEADER, "").strip().lower()
+    if recording not in ("", "0", "1", "false", "true"):
+        raise HeaderError(f"{RECORD_TRAINING_HEADER} must be 1, true, 0 or false")
+
     return RequestHeaders(
         scenario=scenario,
         request_type=request_type,
         tags=tags,
+        is_recording_training=recording in ("1", "true"),
     )
 
 

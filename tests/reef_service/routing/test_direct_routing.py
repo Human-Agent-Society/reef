@@ -394,6 +394,17 @@ def test_domain_rule_selections_are_served_and_recorded_per_scenario_like_keywor
 
 
 @pytest.mark.parametrize("managed", [False, True])
+def test_routed_calls_that_record_their_sample_are_refused_before_selection(tmp_path: Path, managed: bool) -> None:
+    async def run() -> None:
+        async with routed_service(tmp_path, managed=managed) as service:
+            status, text, _ = await service.chat(REQUEST, **{"x-reef-record-training": "1"})
+            assert status == 400 and "unsupported_record_training" in text
+            assert service.router.selections == [] and service.provider.received == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("managed", [False, True])
 @pytest.mark.parametrize("rollout", ["1", "TrUe"])
 def test_routed_rollout_calls_are_refused_before_selection(tmp_path: Path, managed: bool, rollout: str) -> None:
     async def run() -> None:

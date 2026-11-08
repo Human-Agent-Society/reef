@@ -318,3 +318,110 @@ def test_inference_records_do_not_need_snapshot_history(tmp_path):
     finally:
         storage.close()
         coordination.close()
+
+
+SAMPLE = {
+    "tokens": [10, 11, 20, 21],
+    "loss_mask": [1, 1],
+    "rollout_log_probs": [-0.25, -0.5],
+    "prompt_length": 2,
+    "response_length": 2,
+    "runtime_load_id": "e:3",
+    "finish_reason": "stop",
+    "distribution": {"temperature": 0.6, "top_p": 1.0, "top_k": -1},
+}
+UNKNOWN_DISTRIBUTION = {key: value for key, value in SAMPLE.items() if key != "distribution"}
+SAMPLED = {"model": "any", "messages": [{"role": "user"}], "temperature": 0.6, "top_p": 1.0, "top_k": -1}
+
+
+class SampleHandler(HttpInferenceHandler):
+    """An HTTP handler of an engine that sends its exact sample as ``training``, as a token-native chat engine does."""
+
+    async def inference_with_sample(self, artifact, path, payload):
+        return await self.inference(artifact, path, payload)
+
+
+class SampleEngines(EngineClients):
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        return SampleHandler(served.url)
+
+
+async def ask_recording(
+    tmp_path: Path, body: dict[str, Any], *, engines: EngineClients, header: str = "1", sample: Any = SAMPLE
+) -> tuple[int, Any, Any, int]:
+    """A call with ``x-reef-record-training: header``: the status, the client's body, the record store, and the
+    number of calls that reached the engine."""
+    storage = SQLiteScenarioStorage(tmp_path / "records")
+    store = storage.open("math")
+    store.commit_step(expected_step=0, commit=commit("release-1"))
+    coordination = memory_coordination()
+    number = coordination.control_lease.acquire("control-1").number
+    calls = []
+    engine = web.Application()
+
+    async def complete(request: web.Request) -> web.Response:
+        calls.append(await request.json())
+        answer: dict[str, Any] = {"model": "math-v1", "choices": [{"message": {"role": "assistant", "content": "4"}}]}
+        return web.json_response(answer if sample is None else {**answer, "training": sample})
+
+    engine.router.add_post("/v1/chat/completions", complete)
+    async with TestServer(engine) as server:
+        served = ServedArtifact("release-1", str(server.make_url("/")), "math-v1")
+        coordination.served_models.write(ScenarioModel("math", ACTIVE), served, control_lease_number=number)
+        app = build_inference_app(coordination.served_models, storage, engines, tokens=TOKEN)
+        async with TestClient(TestServer(app)) as client:
+            headers = {**HEADERS, "x-reef-record-training": header}
+            response = await client.post("/v1/chat/completions", headers=headers, json=body)
+            answer = await response.json() if response.status == 200 else await response.text()
+            return response.status, answer, store.records, len(calls)
+
+
+@pytest.mark.unit
+def test_a_call_that_records_its_sample_keeps_it_in_the_record_and_never_returns_it(tmp_path: Path) -> None:
+    status, answer, records, calls = asyncio.run(ask_recording(tmp_path, SAMPLED, engines=SampleEngines()))
+
+    assert status == 200 and calls == 1
+    assert "training" not in answer
+    (item,) = inference_records(records)
+    assert item.payload["response"]["training"] == SAMPLE
+    assert item.payload["metadata"]["tags"] == {"session": "s1"}
+
+
+@pytest.mark.unit
+def test_a_call_without_the_header_keeps_no_sample(tmp_path: Path) -> None:
+    status, answer, records, _ = asyncio.run(ask_recording(tmp_path, SAMPLED, engines=SampleEngines(), header="0"))
+
+    assert status == 200 and "training" not in answer
+    (item,) = inference_records(records)
+    assert "training" not in item.payload["response"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("body", "engines", "sample", "header", "calls", "message"),
+    [
+        ({**SAMPLED, "stream": True}, SampleEngines(), SAMPLE, "1", 0, "without stream"),
+        (
+            {"model": "any", "messages": [{"role": "user"}], "temperature": 0.6},
+            SampleEngines(),
+            SAMPLE,
+            "1",
+            0,
+            "top_p",
+        ),
+        (SAMPLED, Engines(), SAMPLE, "1", 0, "cannot record its sample"),
+        (SAMPLED, SampleEngines(), UNKNOWN_DISTRIBUTION, "1", 1, "no exact sample"),
+        (SAMPLED, SampleEngines(), None, "1", 1, "no exact sample"),
+        (SAMPLED, SampleEngines(), SAMPLE, "yes", 0, "must be 1, true, 0 or false"),
+    ],
+)
+def test_a_call_that_cannot_record_its_sample_is_refused_without_a_record(
+    tmp_path: Path, body, engines, sample, header, calls, message
+) -> None:
+    status, answer, records, reached = asyncio.run(
+        ask_recording(tmp_path, body, engines=engines, header=header, sample=sample)
+    )
+
+    assert status == 400 and message in answer
+    assert reached == calls
+    assert inference_records(records) == ()

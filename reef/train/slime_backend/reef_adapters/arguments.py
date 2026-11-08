@@ -81,6 +81,16 @@ class SlimeArguments(Namespace):
     rollout_max_response_len: int | None
     sglang_router_ip: str
     sglang_router_port: int
+    # Slime's reward step, which the slime family names (reef.train.slime_backend.task_advantages).
+    custom_reward_post_process_path: str | None
+    grpo_std_normalization: bool
+    # The options that a task job that carries delayed samples checks.
+    use_tis: bool
+    normalize_advantages: bool
+    custom_advantage_function_path: str | None
+    use_dynamic_batch_size: bool
+    custom_tis_function_path: str | None
+    use_rollout_logprobs: bool
     reef_rollout_tensor_dtypes: dict[str, str]
     reef_external_batch_keys: tuple[str, ...]
     reef_rollout_log_skip_keys: tuple[str, ...]

@@ -13,10 +13,10 @@ from pathlib import Path
 import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_steps import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_backend, harness_recipe
-from tests.support.job_data import job_data_ref
+from tests.support.job_data import delayed_sample, job_data_ref
 
 from reef.artifact.files import DirectoryFiles
-from reef.core.job_data import JobData
+from reef.core.job_data import JobData, TaskSample
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.train.component import JobStatus, TrainingJob
 from reef.train.harness_backend.backend import StepProgress
@@ -192,6 +192,18 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     ):
         with pytest.raises(ValueError, match=message):
             component.check_job(broken_job)
+    component.close()
+
+
+@pytest.mark.unit
+def test_a_task_job_with_delayed_samples_is_refused(tmp_path: Path) -> None:
+    component = component_of(tmp_path, lambda workspace, services: None)
+    task = tmp_path / "tasks" / "add"
+    task.mkdir(parents=True)
+    carried = job_data_ref(JobData("carried", (TaskSample(task),), delayed=(delayed_sample(),)))
+    valid = job(component, "valid", start=seed_start(component, tmp_path))
+    with pytest.raises(ValueError, match="trains no delayed samples"):
+        component.check_job(replace(valid, data=carried))
     component.close()
 
 

@@ -12,16 +12,21 @@ and removes it again: the generated-task recipe writes the valid task once more 
 generations started or after a restart. For each train task that the recipe ran and that has
 ``solution/hint.txt``, it plays the task ``hint_plays`` more times through the generator service, with that
 file appended to the instruction. These plays report on the ``hint`` arm, so the recipe does not train on
-them. It reports each proposal's regret against the Designer's receipt (0 for a refused one) and keeps the
-generation report under ``state_dir``. Eval tasks and tasks that could not run get no hint plays and no
-Designer report, and do not go into the experience. A second call for a closed generation does nothing.
-A restart reads the last report for the experience, and continues numbering after the reports and open
-generations.
+them. It reports each proposal's score against the Designer's receipt: the blend of the task's plateau reward and
+its floored regret (``blend_score``), 0 for a refused one. It keeps the generation report under ``state_dir``,
+with the advantage of each Designer reply that trains (``centered_advantages``). Eval tasks and tasks that could
+not run get no hint plays and no Designer report, and do not go into the experience. A second call for a closed
+generation does nothing. A restart reads the last report for the experience, and continues numbering after the
+reports and open generations.
+
+With ``train_designer``, each Designer call asks the generator service to keep the reply's sampled tokens in its
+inference record, and ``designer_advantages`` gives the recipe the advantages that the generation's report keeps.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -31,17 +36,22 @@ from typing import Any, Self
 from pydantic import TypeAdapter
 
 from recipes.beta.spade.generation import (
+    DEFAULT_MAX_DESIGNER_SCALE,
     RECORDED_EXCERPT_CHARS,
+    BlendSettings,
     GenerationRecord,
     PlayRecord,
     ProposalRecord,
     TaskMeasure,
+    blend_score,
+    centered_advantages,
     experience_for,
     experience_text,
     load_experience,
     mean_reward,
     recorded_generations,
     report_path_for,
+    saved_designer_advantages,
     skill_tag,
     write_generation_report,
 )
@@ -76,6 +86,7 @@ HINT_FILE = "solution/hint.txt"
 HINT_NAME = "hint.txt"
 HINT_ARM = "hint"
 OPEN_PREFIX = "open-"
+DEFAULT_BLEND = BlendSettings()
 CONFIG_KEYS = frozenset(
     {
         "generator_url",
@@ -88,6 +99,14 @@ CONFIG_KEYS = frozenset(
         "hint_plays",
         "designer_report",
         "served_model",
+        "plateau_low",
+        "plateau_high",
+        "plateau_ramp",
+        "plateau_weight",
+        "regret_weight",
+        "regret_scale",
+        "max_designer_scale",
+        "train_designer",
     }
 )
 
@@ -125,7 +144,12 @@ OPEN_GENERATION = TypeAdapter(OpenGeneration)
 
 
 class SpadeTaskGenerator(TaskGenerator):
-    """The Designer's generations through the generator service, adapted by the regret of the last one."""
+    """The Designer's generations through the generator service, adapted by the regret of the last one.
+
+    ``blend`` scores each train task that ran (``blend_score``), and ``max_designer_scale`` caps the scale of the
+    advantages of a generation's replies (``centered_advantages``). With ``is_training_designer``, each Designer
+    call keeps its sample, and ``designer_advantages`` gives the recipe the advantages of a closed generation.
+    """
 
     def __init__(
         self,
@@ -141,9 +165,19 @@ class SpadeTaskGenerator(TaskGenerator):
         hint_plays: int = DEFAULT_HINT_PLAYS,
         is_reporting_designer: bool = True,
         served_model: str | None = None,
+        blend: BlendSettings = DEFAULT_BLEND,
+        max_designer_scale: float = DEFAULT_MAX_DESIGNER_SCALE,
+        is_training_designer: bool = False,
     ) -> None:
         if count < 1 or hint_plays < 0:
             raise ValueError("count must be positive and hint_plays non-negative")
+        if (
+            isinstance(max_designer_scale, bool)
+            or not isinstance(max_designer_scale, (int, float))
+            or not math.isfinite(max_designer_scale)
+            or max_designer_scale <= 0
+        ):
+            raise ValueError("max_designer_scale must be a positive finite number")
         if difficulty not in DIFFICULTIES:
             raise ValueError(f"difficulty must be one of {DIFFICULTIES}")
         if turn_limit < 2:
@@ -159,6 +193,9 @@ class SpadeTaskGenerator(TaskGenerator):
         self.hint_plays = hint_plays
         self.is_reporting_designer = is_reporting_designer
         self.served_model = served_model
+        self.blend = blend
+        self.max_designer_scale = float(max_designer_scale)
+        self.is_training_designer = is_training_designer
         # What the last generation measured, for the next prompt; read back from the state directory.
         recorded = recorded_generations(state_dir)
         self.experience: tuple[PlayRecord, ...] = (
@@ -203,6 +240,16 @@ class SpadeTaskGenerator(TaskGenerator):
                 hint_plays=int(config.get("hint_plays", DEFAULT_HINT_PLAYS)),
                 is_reporting_designer=bool(config.get("designer_report", True)),
                 served_model=str(served_model) if served_model else None,
+                blend=BlendSettings(
+                    plateau_low=float(config.get("plateau_low", BlendSettings.plateau_low)),
+                    plateau_high=float(config.get("plateau_high", BlendSettings.plateau_high)),
+                    plateau_ramp=float(config.get("plateau_ramp", BlendSettings.plateau_ramp)),
+                    plateau_weight=float(config.get("plateau_weight", BlendSettings.plateau_weight)),
+                    regret_weight=float(config.get("regret_weight", BlendSettings.regret_weight)),
+                    regret_scale=float(config.get("regret_scale", BlendSettings.regret_scale)),
+                ),
+                max_designer_scale=float(config.get("max_designer_scale", DEFAULT_MAX_DESIGNER_SCALE)),
+                is_training_designer=bool(config.get("train_designer", False)),
             )
         except (OSError, ValueError) as exc:
             raise PluginConfigError(f"invalid SpadeTaskGenerator config: {exc}") from exc
@@ -260,6 +307,7 @@ class SpadeTaskGenerator(TaskGenerator):
             index=index,
             tags=tags,
             model=self.served_model,
+            is_recording_training=self.is_training_designer,
         )
 
     def save_error(self, task_name: str, error: str) -> None:
@@ -361,6 +409,7 @@ class SpadeTaskGenerator(TaskGenerator):
                 plain_rewards=plain,
                 hint_rewards=hint,
                 record=play_record,
+                blend=blend_score(play_record.regret, play_record.return_without_hint, self.blend),
             )
             proposals.append((replace(proposal, task_name=result.task.name), measure))
         proposals.sort(key=lambda entry: entry[0].index)
@@ -377,7 +426,14 @@ class SpadeTaskGenerator(TaskGenerator):
                 state = replace(state, reports={**state.reports, entry.index: entry.designer_report_id})
                 self.save_open(generation, state)
         measures = tuple(measure for _, measure in proposals if measure is not None)
-        generation_record = GenerationRecord(state.number, tuple(reported), measures, error)
+        generation_record = GenerationRecord(
+            state.number,
+            tuple(reported),
+            measures,
+            error,
+            recipe_generation=generation,
+            designer_advantages=centered_advantages(reported, measures, max_scale=self.max_designer_scale),
+        )
         report_path = write_generation_report(self.state_dir, generation_record)
         logger.info(
             "SPADE generation %d on scenario %r: %d tasks of %d proposals under %s",
@@ -393,10 +449,18 @@ class SpadeTaskGenerator(TaskGenerator):
             self.experience_generation = state.number
         path.unlink()
 
+    def designer_advantages(self, generation: int) -> Mapping[str, float]:
+        """The advantages that the report of the recipe's ``generation`` keeps, by Designer record ID; with
+        ``train_designer`` off, none. The report does not change once written, so a repeated call gives the same
+        answer."""
+        if not self.is_training_designer:
+            return {}
+        return saved_designer_advantages(self.state_dir, generation)
+
     async def reported(
         self, proposal: ProposalRecord, measure: TaskMeasure | None, *, generation: int
     ) -> ProposalRecord:
-        """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""
+        """The Designer's report for one proposal: the task's blend score, 0 for a refused one."""
         if not self.is_reporting_designer or proposal.split == "eval" or proposal.infrastructure_failure:
             return proposal
         metadata: dict[str, object] = {"generation": generation, **skill_tag(proposal.skill)}
@@ -404,7 +468,7 @@ class SpadeTaskGenerator(TaskGenerator):
             score = 0.0
             metadata["refusal"] = proposal.refusal
         else:
-            score = max(measure.regret, 0.0)
+            score = measure.blend
             metadata["task"] = {"name": measure.name, "digest": measure.digest}
             metadata["outcome"] = measure.outcome
             metadata["regret"] = measure.regret

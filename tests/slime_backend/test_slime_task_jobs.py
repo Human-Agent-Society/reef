@@ -12,16 +12,22 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.slime_backend.test_slime_component import Stack, batch_for, parameters
-from tests.support.job_data import job_data_ref
+from tests.support.job_data import delayed_sample, job_data_ref
 from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData, TaskSample
 from reef.execution.executor.placement import GpuBundles
 from reef.storage.durable_files import read_json
+from reef.train.algos.group_advantages import GroupAdvantageRule
 from reef.train.component import TrainingJob
 from reef.train.slime_backend import rollout_group as rollout_group_module
 from reef.train.slime_backend.dataset import DATASET_FILE
-from reef.train.slime_backend.harbor_rollouts import TASK_ROLLOUTS_FILE, TaskJobSource
+from reef.train.slime_backend.harbor_rollouts import (
+    DELAYED_ROWS_FILE,
+    TASK_ROLLOUTS_FILE,
+    TaskJobSource,
+    read_delayed_rows,
+)
 from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective, unregister_slime_objective
 from reef.train.slime_backend.rollout_group import SlimeRolloutGroup
 
@@ -357,3 +363,108 @@ def test_closing_the_rollout_group_detaches_the_driver_and_keeps_the_session() -
     group.close()
     # Slime's failure cleanup detaches the driver; its success cleanup would dispose the session.
     assert closes == [True]
+
+
+class CarryingObjective(SlimeObjective):
+    """A method on the slime family that centers by SPADE's rule and carries delayed samples."""
+
+    name = "test-carrying"
+    loss_family = "slime"
+    rollout_advantages = GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
+    carries_samples = True
+
+    def prepare(self, data, state):
+        raise AssertionError("a task job prepares nothing")
+
+
+CARRYING = f"{__name__}:CarryingObjective"
+#: Slime's options that a task job that carries samples needs.
+CARRYING_OPTIONS = {
+    "rollout_batch_size": 4,
+    "global_batch_size": 7,
+    "use_tis": True,
+    "normalize_advantages": False,
+    "custom_advantage_function_path": None,
+    "use_dynamic_batch_size": True,
+    "use_score_centering": False,
+    "custom_tis_function_path": None,
+    "use_rollout_logprobs": False,
+    "rollout_temperature": 0.6,
+    "rollout_top_k": -1,
+}
+
+
+@pytest.mark.unit
+def test_a_task_job_that_carries_samples_leads_its_first_rollout_with_them(tmp_path, task_stack) -> None:
+    stack, _, group = task_stack
+    for name, value in CARRYING_OPTIONS.items():
+        setattr(stack.args, name, value)
+    tasks = tuple(task(tmp_path / "tasks", f"task-{index}") for index in range(3))
+    data = JobData("tasks", tasks, delayed=(delayed_sample(2.0), delayed_sample(-2.0), delayed_sample(0.5)))
+    job = TrainingJob(
+        "job-0", "slime", stack.start, job_data_ref(data), {"objective": CARRYING, "harbor": HARBOR}, scenario="s"
+    )
+    stack.component.submit(job)
+    status = finished(stack.component, "job-0")
+    assert status.state == "finished", status.error
+
+    # Three delayed samples in groups of two take two prompts: with three tasks, two rollouts of four prompts.
+    assert status.metrics["task_rollouts"] == 2 and status.metrics["delayed_samples"] == 3
+    record = group.records[0]
+    assert (record["carries_samples"], record["delayed_count"]) == (True, 3)
+    assert record["rollout_advantages"] == {"divide_by_std": True, "std": "population", "epsilon": 1e-8}
+    rows = read_delayed_rows(Path(record["job_directory"]) / DELAYED_ROWS_FILE)
+    assert [advantage for _, advantage in rows] == [2.0, -2.0, 0.5]
+    # Slime's raw reward counts the delayed rows, so retention ranks the checkpoint by the task rollouts' rewards.
+    stored = json.loads(stack.storage._record_path(1).read_text())
+    assert stored["reward"] == 1.0
+
+
+@pytest.mark.unit
+def test_a_resumed_carrying_job_keeps_the_delayed_samples_that_its_first_driver_chose(
+    tmp_path, task_stack, monkeypatch
+) -> None:
+    stack, _, group = task_stack
+    for name, value in CARRYING_OPTIONS.items():
+        setattr(stack.args, name, value)
+    tasks = tuple(task(tmp_path / "tasks", f"task-{index}") for index in range(4))
+    data = JobData("tasks", tasks, delayed=tuple(delayed_sample(float(index)) for index in range(6)))
+    parameters = {"objective": CARRYING, "harbor": HARBOR, "save_interval": 1}
+    job = TrainingJob("job-0", "slime", stack.start, job_data_ref(data), parameters, scenario="s")
+    directory = stack.component.job_directory("job-0")
+    directory.mkdir(parents=True)
+    # Six samples in groups of two lead the first rollout of four prompts with one task; the first driver stops
+    # after that rollout.
+    monkeypatch.setattr(stack.component, "stopping", lambda directory: len(stack.group.saved) == 1)
+    stack.component.run(job, directory)
+    assert group.records[0]["delayed_count"] == 6
+    # The job resumes with a step that would keep only three samples; it keeps the six, so the task offsets hold.
+    stack.args.global_batch_size = 3
+    monkeypatch.setattr(stack.component, "stopping", lambda directory: False)
+    group.records.clear()
+    stack.component.run(job, directory)
+    assert [(record["skip_rollouts"], record["delayed_count"]) for record in group.records] == [(1, 6)]
+
+
+@pytest.mark.unit
+def test_a_carrying_job_without_tis_is_refused_and_another_objective_leaves_the_samples_out(
+    tmp_path, task_stack
+) -> None:
+    stack, events, _ = task_stack
+    for name, value in {**CARRYING_OPTIONS, "use_tis": False}.items():
+        setattr(stack.args, name, value)
+    data = JobData("tasks", (task(tmp_path / "tasks", "add"),), delayed=(delayed_sample(),))
+
+    def job(job_id: str, objective: str) -> TrainingJob:
+        parameters = {"objective": objective, "harbor": HARBOR}
+        return TrainingJob(job_id, "slime", stack.start, job_data_ref(data), parameters, scenario="s")
+
+    with pytest.raises(ValueError, match="without --use-tis"):
+        stack.component.submit(job("refused", CARRYING))
+    assert events == []
+    # An objective that carries no samples trains the tasks and leaves the delayed samples out, so the stage, which
+    # builds the same job data after a refusal, cannot stop the scenario's training.
+    stack.component.submit(job("trained", OBJECTIVE))
+    status = finished(stack.component, "trained")
+    assert status.state == "finished", status.error
+    assert status.metrics["delayed_left_out"] == {"objective": 1}

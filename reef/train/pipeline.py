@@ -34,6 +34,10 @@ sample. It waits in the store with the other samples, in store order.
 A record-to-sample stage can also make samples from no record set, such as the
 generated-task recipe's tasks (``Record2Sample.made_samples``). The pipeline
 stores them like the samples of a unit, and they train like any other sample. The stage reads each job's end (``Record2Sample.job_ended``).
+
+A sample-to-job stage can add delayed samples to a task job's data (``JobData.delayed``), such as the generated-task
+recipe's Designer replies. They are not stored samples, so the pipeline runs the staleness check on them when it
+builds the job data.
 """
 
 from __future__ import annotations
@@ -598,11 +602,30 @@ class TrainingPipeline:
             self.reserved_sample_ids = tuple(stored.sample_id for stored, _ in entries)
             samples = tuple(grouped(stored, sample) for stored, sample in entries)
             if request is None:
-                self.pending = self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
+                data = self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
+                self.pending = self.without_stale_delayed(data)
             else:
                 data = self.sample2job.make_job_data(samples, f"{self.scenario}:request:{request.id}")
-                self.pending = replace(data, request=request)
+                self.pending = replace(self.without_stale_delayed(data), request=request)
         return self.pending
+
+    def without_stale_delayed(self, data: JobData) -> JobData:
+        """``data`` without the delayed samples whose data is stale (``Record2Sample.is_stale``).
+
+        A delayed sample reaches job data from the sample-to-job stage, not from the store, so ``auto_entries``
+        never checks it; this check runs on it in both training modes, since no request names it.
+        """
+        served = self.served_artifacts.artifact_ids
+        fresh = tuple(item for item in data.delayed if not self.record2sample.is_stale((item.trajectory,), served))
+        if len(fresh) == len(data.delayed):
+            return data
+        logger.warning(
+            "job data %s of scenario %s leaves out %d stale delayed samples",
+            data.data_id,
+            self.scenario,
+            len(data.delayed) - len(fresh),
+        )
+        return replace(data, delayed=fresh)
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
         """The commit that submits the job data's job consumed it: return the consumed IDs, ``sample:<id>`` for each

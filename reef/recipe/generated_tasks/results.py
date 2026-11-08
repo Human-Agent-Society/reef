@@ -1,8 +1,9 @@
-"""The generated-task recipe's feedback state: each train task's first rollout, and the generations delivered.
+"""The generated-task recipe's feedback state: each train task's first rollout, the generations delivered, and the
+Designer advantages.
 
 For a task store, let ``train(g)`` be the names of the train tasks that generation ``g`` published, and
 ``complete(g)`` say that every candidate of ``g`` has an outcome. Published names are unique, so a train task
-name ``n`` belongs to exactly one generation. The recipe keeps two values in the store's documents, which the
+name ``n`` belongs to exactly one generation. The recipe keeps these values in the store's documents, which the
 store saves but does not read:
 
 - ``rollout : N ⇀ TaskRolloutResult``, the result of the first rollout of train task ``n`` that ended, under
@@ -10,6 +11,10 @@ store saves but does not read:
   written once.
 - ``Δ ⊆ {0, 1, 2, ...}``, the generations whose results reached the generator, under the key
   ``delivered/<g>``. ``g ∈ Δ`` implies ``complete(g)`` and ``train(g) ⊆ dom rollout``.
+- ``designer``, under the key ``designer/<g>``, only when the stage carries Designer replies: ``designer(g)`` maps
+  the ID of the inference record of each Designer reply of generation ``g`` that trains to its advantage, a finite
+  number, as the generator gave it after it took the results of ``g``. The stage writes ``designer(g)`` before it
+  adds ``g`` to ``Δ``; an empty mapping means that no reply of ``g`` trains.
 
 A generation ``g`` is deliverable when ``complete(g)``, ``train(g) ⊆ dom rollout`` and ``g ∉ Δ``.
 """
@@ -17,6 +22,8 @@ A generation ``g`` is deliverable when ``complete(g)``, ``train(g) ⊆ dom rollo
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from reef.core.tasks import HarborTask
@@ -25,6 +32,7 @@ from reef.storage.tasks import TaskStore
 
 ROLLOUT_KEY_PREFIX = "rollout/"
 DELIVERED_KEY_PREFIX = "delivered/"
+DESIGNER_KEY_PREFIX = "designer/"
 
 
 @dataclass(frozen=True)
@@ -114,3 +122,34 @@ def delivered_generations(store: TaskStore) -> frozenset[int]:
 def mark_delivered(store: TaskStore, generation: int) -> None:
     """Add ``generation`` to ``Δ``; a repeated call changes nothing."""
     store.write_document(key=f"{DELIVERED_KEY_PREFIX}{generation}", document=json.dumps({"generation": generation}))
+
+
+def checked_advantages(advantages: object) -> dict[str, float]:
+    """Return ``advantages`` as a dict of floats; raise ``ValueError`` unless it maps non-empty record IDs to finite
+    numbers."""
+    if not isinstance(advantages, Mapping):
+        raise ValueError("Designer advantages must map record IDs to numbers")
+    checked: dict[str, float] = {}
+    for record_id, advantage in advantages.items():
+        if not isinstance(record_id, str) or not record_id:
+            raise ValueError("a Designer advantage needs the ID of its inference record")
+        if isinstance(advantage, bool) or not isinstance(advantage, (int, float)) or not math.isfinite(advantage):
+            raise ValueError(f"the Designer advantage of record {record_id!r} must be a finite number")
+        checked[record_id] = float(advantage)
+    return checked
+
+
+def designer_advantages(store: TaskStore) -> dict[int, dict[str, float]]:
+    """Return ``designer``: the saved advantages of each generation's Designer replies, by generation."""
+    return {
+        int(key.removeprefix(DESIGNER_KEY_PREFIX)): checked_advantages(json.loads(document))
+        for key, document in store.documents().items()
+        if key.startswith(DESIGNER_KEY_PREFIX)
+    }
+
+
+def save_designer_advantages(store: TaskStore, generation: int, advantages: Mapping[str, float]) -> None:
+    """Set ``designer(generation) = advantages``, as canonical JSON text, so that a repeated call with the same
+    advantages changes nothing. Raises ``TaskStoreError`` if the generation has other advantages."""
+    document = json.dumps(checked_advantages(advantages), sort_keys=True, separators=(",", ":"))
+    store.write_document(key=f"{DESIGNER_KEY_PREFIX}{generation}", document=document)

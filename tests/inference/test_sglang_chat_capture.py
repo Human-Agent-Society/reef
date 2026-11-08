@@ -1281,3 +1281,69 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_rea
         assert "training" not in response
 
     asyncio.run(run())
+
+
+async def answer_with_sample(tmp_path, meta_info: dict, request: dict, path: str = "/v1/chat/completions") -> dict:
+    """``inference_with_sample`` of a stub SGLang engine that answers with ``meta_info``."""
+
+    async def generate(native_request):
+        return web.json_response({"text": "env", "meta_info": {"finish_reason": {"type": "stop"}, **meta_info}})
+
+    app = web.Application()
+    app.router.add_post("/generate", generate)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        backend = SGLangInferenceHandler(
+            str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+        )
+        return await backend.inference_with_sample(_artifact(tmp_path), path, request)
+    finally:
+        await server.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_a_call_that_records_its_sample_gets_the_exact_ids_log_probs_and_distribution(tmp_path, path) -> None:
+    request = {
+        "model": "served-model",
+        "messages": [{"role": "user", "content": "write an environment"}],
+        "max_tokens": 2,
+        "temperature": 0.6,
+        "top_p": 1.0,
+        "top_k": -1,
+    }
+    meta_info = {"output_token_logprobs": [[-0.25, 20], [-0.5, 21]], "_reef_token_runtime_load_ids": ["e:3", "e:3"]}
+
+    response = asyncio.run(answer_with_sample(tmp_path, meta_info, request, path))
+
+    assert response["training"] == {
+        "tokens": [10, 11, 20, 21],
+        "loss_mask": [1, 1],
+        "rollout_log_probs": [-0.25, -0.5],
+        "prompt_length": 2,
+        "response_length": 2,
+        "runtime_load_id": "e:3",
+        "finish_reason": "stop",
+        "distribution": {"temperature": 0.6, "top_p": 1.0, "top_k": -1},
+    }
+    assert ("content" in response) == (path == "/v1/messages")
+
+
+@pytest.mark.unit
+def test_a_recorded_sample_has_no_distribution_without_one_and_no_block_across_two_versions(tmp_path) -> None:
+    request = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 2, "temperature": 0.6}
+    one_version = {"output_token_logprobs": [[-0.1, 20], [-0.2, 21]], "_reef_token_runtime_load_ids": ["e:3", "e:3"]}
+    two_versions = {**one_version, "_reef_token_runtime_load_ids": ["e:3", "e:4"]}
+
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    assert "distribution" not in asyncio.run(answer_with_sample(tmp_path / "one", one_version, request))["training"]
+    assert "training" not in asyncio.run(answer_with_sample(tmp_path / "two", two_versions, request))
+
+
+@pytest.mark.unit
+def test_only_a_chat_call_records_its_sample(tmp_path) -> None:
+    request = {"messages": [{"role": "user", "content": "hello"}]}
+    with pytest.raises(ValueError, match="record their sample"):
+        asyncio.run(answer_with_sample(tmp_path, {}, request, "/v1/messages/count_tokens"))

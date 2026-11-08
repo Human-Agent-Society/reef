@@ -16,7 +16,7 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import JobOutcome, TaskSample
+from reef.core.job_data import JobData, JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, write_harbor_task
@@ -44,7 +44,12 @@ from reef.recipe.generated_tasks.processor import (
     GenerationOutcome,
     train_task_names,
 )
-from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
+from reef.recipe.generated_tasks.results import (
+    TaskRolloutResult,
+    delivered_generations,
+    designer_advantages,
+    rollout_results,
+)
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2JobSettings
@@ -118,8 +123,12 @@ def stage_settings(config: Mapping[str, object]) -> tuple[GeneratedTaskSettings,
 BATCH_SIZE = 1
 
 
-def job_data_stage(settings: Sample2JobSettings, context: PipelineContext) -> GeneratedTaskJobData:
-    return GeneratedTaskJobData(context, buffer_size=settings.buffer_size, job_samples=settings.job_samples)
+def job_data_stage(
+    settings: Sample2JobSettings, context: PipelineContext, task_samples: GeneratedTaskSamples | None = None
+) -> GeneratedTaskJobData:
+    return GeneratedTaskJobData(
+        context, buffer_size=settings.buffer_size, job_samples=settings.job_samples, task_samples=task_samples
+    )
 
 
 def processor(**config: object) -> TrainingPipeline:
@@ -379,7 +388,7 @@ def rounds(
         context,
         session,
         record2sample=generation,
-        sample2job=job_data_stage(batch_settings, context),
+        sample2job=job_data_stage(batch_settings, context, generation),
     )
     worker.generation = generation
     return built, service
@@ -1238,3 +1247,309 @@ def test_a_generation_outcome_that_is_incomplete_holds_no_task_and_names_its_err
         GenerationOutcome(receipt="generation-00000", generation=0, tasks=(), is_complete=False, error="")
     with pytest.raises(ValueError, match="non-negative"):
         GenerationJob(receipt="generation-x", generation=-1)
+
+
+# ------------------------------------------------------------------------------------------- Designer replies
+
+#: The sampling distribution of a served Designer call that kept its sample.
+DISTRIBUTION = {"temperature": 0.6, "top_p": 1.0, "top_k": -1}
+
+
+def designer_tasks(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
+    """Tasks of one round, each written by the Designer reply that the record ``designer-<round>-<index>`` holds."""
+    return tuple(
+        task_for(
+            f"harbor-{round_number:05d}-{index:03d}",
+            f"designer-{round_number}-{index}",
+            9500 + 10 * round_number + index,
+        )
+        for index in indices
+    )
+
+
+def designer_call(record_id: str, *, artifact_id: str = "artifact-0", is_captured: bool = True) -> AgentRecord:
+    """A served Designer call of ``artifact_id``; ``is_captured`` keeps its sampled reply in ``response.training``."""
+    response: dict[str, object] = {"choices": [{"message": {"role": "assistant", "content": "a task"}}]}
+    if is_captured:
+        response["training"] = {
+            "tokens": [11, 12, 13, 14],
+            "loss_mask": [1, 1],
+            "rollout_log_probs": [-0.25, -0.5],
+            "distribution": dict(DISTRIBUTION),
+        }
+    return AgentRecord.create(
+        scenario="tasks",
+        request_type=RequestType.INFERENCE,
+        payload={"messages": [{"role": "user", "content": "write a task"}], "response": response},
+        agent_record_id=record_id,
+        created_at=1000.0,
+        artifact_id=artifact_id,
+    )
+
+
+class DesignerGenerator(ScriptedGenerator):
+    """A scripted generator that gives scripted advantages to the Designer replies of each generation."""
+
+    def __init__(
+        self,
+        rounds: list[tuple[HarborTask, ...]],
+        advantages: Mapping[int, Mapping[str, float]],
+        *,
+        failing_advantages: bool = False,
+        **fields: Any,
+    ) -> None:
+        super().__init__(rounds, **fields)
+        self.advantages = {generation: dict(values) for generation, values in advantages.items()}
+        self.failing_advantages = failing_advantages
+
+    def designer_advantages(self, generation: int) -> Mapping[str, float]:
+        if self.failing_advantages:
+            raise RuntimeError("the generation report is unreadable")
+        return self.advantages.get(generation, {})
+
+
+def carried(data: JobData) -> list[tuple[str, float]]:
+    """The Designer record and the advantage of each reply that the job data carries, in order."""
+    return [(item.trajectory.source_agent_record_ids[0], item.advantage) for item in data.delayed]
+
+
+def stage_of(p: TrainingPipeline) -> GeneratedTaskSamples:
+    stage = p.record2sample
+    assert isinstance(stage, GeneratedTaskSamples)
+    return stage
+
+
+def test_a_round_waits_for_the_designer_advantages_it_carries_and_its_first_job_trains_them(tmp_path: Path) -> None:
+    advantages = {0: {"designer-0-0": 1.5, "designer-0-1": -1.5}, 1: {"designer-1-0": 0.0}}
+    task_generator = DesignerGenerator([designer_tasks(0, 0, 1), designer_tasks(1, 0)], advantages)
+    p, _ = rounds(tmp_path, task_generator, rounds=2, buffer_size=1, refill_tasks=2, designer_delay=1)
+    for record_id in ("designer-0-0", "designer-0-1", "designer-1-0"):
+        p.push(designer_call(record_id))
+    stage = stage_of(p)
+    looked(p)
+    # The Designer's report on its reply ends the reply's record; the stage keeps it for the job that carries it.
+    p.push(report("designer-report-0", "designer-0-0", None, 0.5, arm=None))
+    assert "designer-report-0" in stage.releasable_record_ids()
+    assert not {"designer-0-0", "designer-0-1", "designer-1-0"} & stage.releasable_record_ids()
+    assert p.build_job_data(BATCH_SIZE).delayed == (), "round 0 carries no Designer reply"
+    assert train_job(p) == ["harbor-00000-000"]
+    looked(p)
+    assert handed_out_names(p) == ["harbor-00000-001"]
+    assert [stored.sample.metadata["task"]["name"] for stored in p.store.page(kind="task")] == [
+        "harbor-00000-000",
+        "harbor-00000-001",
+    ], "round 1's task waits for designer/0, which needs the result of harbor-00000-001"
+    assert p.build_job_data(BATCH_SIZE).delayed == ()
+    train_job(p)
+    looked(p)
+    store = stage.task_store
+    assert designer_advantages(store)[0] == advantages[0]
+    assert store.documents()["designer/0"] == '{"designer-0-0":1.5,"designer-0-1":-1.5}', "a small document"
+    assert handed_out_names(p) == ["harbor-00001-000"], "designer/0 exists, so round 1's task trains"
+
+    data = p.build_job_data(BATCH_SIZE)
+    assert carried(data) == [("designer-0-0", 1.5), ("designer-0-1", -1.5)]
+    reply = data.delayed[0].trajectory
+    assert reply.metadata["reward"] == 1.5, "the reply's reward is the advantage that trains it"
+    assert reply.training["tokens"] == [11, 12, 13, 14] and reply.training["distribution"] == DISTRIBUTION
+    assert reply.artifact_id == "artifact-0"
+    assert not {"designer-0-0", "designer-0-1"} & stage.releasable_record_ids(), "no commit carried them yet"
+    train_job(p)
+    assert {"designer-0-0", "designer-0-1"} <= stage.releasable_record_ids(), "the carrying job committed"
+    assert "designer-1-0" not in stage.releasable_record_ids(), "no later round carries generation 1 yet"
+    assert stage.operational_metrics()["carried_designer_samples"] == 2
+
+
+def test_a_round_that_published_no_train_task_passes_its_carry_to_the_next_round(tmp_path: Path) -> None:
+    task_generator = DesignerGenerator(
+        [designer_tasks(0, 0), designer_tasks(1, 0), designer_tasks(2, 0)],
+        {0: {"designer-0-0": 2.0}},
+        invalid={"harbor-00001-000": "oracle check refused: the oracle scored 0"},
+    )
+    p, _ = rounds(tmp_path, task_generator, rounds=3, designer_delay=1)
+    p.push(designer_call("designer-0-0"))
+    looked(p)
+    assert train_job(p) == ["harbor-00000-000"]
+    looked(p)
+    data = p.build_job_data(BATCH_SIZE)
+    assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00002-000"]
+    assert carried(data) == [("designer-0-0", 2.0)]
+
+
+def test_only_the_first_job_of_the_carrier_round_carries_the_replies(tmp_path: Path) -> None:
+    task_generator = DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0, 1)], {0: {"designer-0-0": 1.0}})
+    p, _ = rounds(tmp_path, task_generator, rounds=2, buffer_size=1, designer_delay=1)
+    p.push(designer_call("designer-0-0"))
+    looked(p)
+    train_job(p)
+    looked(p)
+    assert carried(p.build_job_data(BATCH_SIZE)) == [("designer-0-0", 1.0)]
+    assert train_job(p) == ["harbor-00001-000"]
+    looked(p)
+    data = p.build_job_data(BATCH_SIZE)
+    assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00001-001"]
+    assert data.delayed == (), "a committed job of round 1 carried them already"
+
+
+def test_a_restart_before_the_carrying_commit_rebuilds_the_same_job_data(tmp_path: Path) -> None:
+    advantages = {0: {"designer-0-0": 0.75}}
+    records = [designer_call("designer-0-0")]
+    first, _ = rounds(
+        tmp_path, DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], advantages), designer_delay=1
+    )
+    first.push(records[0])
+    looked(first)
+    train_job(first)
+    looked(first)
+    data = first.build_job_data(BATCH_SIZE)
+    assert carried(data) == [("designer-0-0", 0.75)]
+    # The process stops before the submission's commit.
+    TrainingPipeline.acknowledge(first, data.data_id)
+    first.close()
+
+    restarted, _ = rounds(tmp_path, DesignerGenerator([], advantages), designer_delay=1)
+    # The trainer replays the retained records that no commit consumed before it selects the next job.
+    restarted.push(records[0])
+    looked(restarted)
+    again = restarted.build_job_data(BATCH_SIZE)
+    assert (again.samples, again.delayed) == (data.samples, data.delayed)
+    assert {key: value for key, value in again.to_dict().items() if key != "data_id"} == {
+        key: value for key, value in data.to_dict().items() if key != "data_id"
+    }
+
+
+def test_a_failed_carrying_job_loses_its_replies_and_records_its_tasks_failures(tmp_path: Path) -> None:
+    task_generator = DesignerGenerator(
+        [designer_tasks(0, 0), designer_tasks(1, 0), designer_tasks(2, 0)],
+        {0: {"designer-0-0": 1.0}, 1: {"designer-1-0": -1.0}},
+    )
+    p, _ = rounds(tmp_path, task_generator, rounds=3, designer_delay=1)
+    for record_id in ("designer-0-0", "designer-1-0"):
+        p.push(designer_call(record_id))
+    looked(p)
+    train_job(p)
+    looked(p)
+    assert carried(p.build_job_data(BATCH_SIZE)) == [("designer-0-0", 1.0)]
+    assert train_job(p, error="the sandbox provider is down") == ["harbor-00001-000"]
+    assert task_generator.results[1] == (
+        FailedTask(task_generator.results[1][0].task, "the sandbox provider is down", True),
+    )
+    assert "designer-0-0" in stage_of(p).releasable_record_ids(), "the failed job's commit took the replies"
+    looked(p)
+    data = p.build_job_data(BATCH_SIZE)
+    assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00002-000"]
+    assert carried(data) == [("designer-1-0", -1.0)], "generation 0's replies are not carried again"
+
+
+def test_a_designer_record_without_its_sample_is_skipped_and_counted(tmp_path: Path) -> None:
+    advantages = {0: {"designer-0-0": 1.0, "designer-0-9": 2.0}}
+    p, _ = rounds(
+        tmp_path, DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], advantages), designer_delay=1
+    )
+    # The served call kept no sample, and the stage never read the record of designer-0-9.
+    p.push(designer_call("designer-0-0", is_captured=False))
+    looked(p)
+    train_job(p)
+    looked(p)
+    data = p.build_job_data(BATCH_SIZE)
+    assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00001-000"]
+    assert data.delayed == ()
+    metrics = stage_of(p).operational_metrics()
+    assert (metrics["carried_designer_samples"], metrics["uncaptured_designer_records"]) == (0, 1)
+    assert metrics["missing_designer_records"] == 1
+
+
+def test_the_pipeline_leaves_out_a_carried_reply_whose_data_is_stale(tmp_path: Path) -> None:
+    p, _ = rounds(
+        tmp_path,
+        DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], {0: {"designer-0-0": 1.0}}),
+        designer_delay=1,
+        max_staleness=1,
+    )
+    p.push(designer_call("designer-0-0", artifact_id="artifact-0"))
+    looked(p)
+    train_job(p)
+    looked(p)
+    for artifact_id in ("artifact-0", "artifact-1"):
+        p.observe_serving_artifact_id(artifact_id)
+    data = p.build_job_data(BATCH_SIZE)
+    assert carried(data) == [("designer-0-0", 1.0)], "one artifact behind, within max_staleness"
+    p.release_job_data(data.data_id)
+    p.observe_serving_artifact_id("artifact-2")
+    data = p.build_job_data(BATCH_SIZE)
+    assert data.delayed == () and [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00001-000"]
+
+
+def test_a_delivery_that_fails_lets_the_round_train_without_the_replies(tmp_path: Path) -> None:
+    task_generator = DesignerGenerator(
+        [designer_tasks(0, 0), designer_tasks(1, 0)], {0: {"designer-0-0": 1.0}}, failing_results=True
+    )
+    p, _ = rounds(tmp_path, task_generator, rounds=2, designer_delay=1)
+    p.push(designer_call("designer-0-0"))
+    looked(p)
+    train_job(p)
+    looked(p)
+    assert handed_out_names(p) == ["harbor-00001-000"], "no round waits for a delivery that failed"
+    assert p.build_job_data(BATCH_SIZE).delayed == ()
+    assert 0 not in designer_advantages(stage_of(p).task_store)
+
+
+def test_a_generator_that_gives_no_advantages_trains_no_reply_of_the_generation(tmp_path: Path) -> None:
+    task_generator = DesignerGenerator(
+        [designer_tasks(0, 0), designer_tasks(1, 0)], {0: {"designer-0-0": 1.0}}, failing_advantages=True
+    )
+    p, _ = rounds(tmp_path, task_generator, rounds=2, designer_delay=1)
+    p.push(designer_call("designer-0-0"))
+    looked(p)
+    train_job(p)
+    looked(p)
+    store = stage_of(p).task_store
+    assert designer_advantages(store)[0] == {} and 0 in delivered_generations(store)
+    assert p.build_job_data(BATCH_SIZE).delayed == ()
+
+
+def test_without_a_designer_delay_no_round_waits_and_no_job_carries_a_reply(tmp_path: Path) -> None:
+    task_generator = DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], {0: {"designer-0-0": 1.0}})
+    p, _ = rounds(tmp_path, task_generator, rounds=2)
+    p.push(designer_call("designer-0-0"))
+    looked(p)
+    train_job(p)
+    looked(p)
+    assert p.build_job_data(BATCH_SIZE).delayed == ()
+    store = stage_of(p).task_store
+    assert designer_advantages(store) == {} and 0 in delivered_generations(store)
+    assert "carried_designer_samples" not in stage_of(p).operational_metrics()
+
+
+def test_the_sample_to_job_stage_takes_the_generated_task_stage_and_a_negative_delay_is_refused() -> None:
+    context = PipelineContext("tasks")
+    stage = GeneratedTaskSamples(context, GeneratedTaskSettings())
+    built = GeneratedTaskJobData.from_config({}, context=context, record2sample=stage, environ={})
+    assert built.task_samples is stage
+    with pytest.raises(ValueError, match="designer_delay must be a non-negative integer"):
+        GeneratedTaskSettings(designer_delay=-1)
+
+
+def test_the_last_generations_designer_records_wait_for_a_run_that_continues(tmp_path: Path) -> None:
+    advantages = {0: {"designer-0-0": 1.0}, 1: {"designer-1-0": -1.0}}
+    task_generator = DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], advantages)
+    p, _ = rounds(tmp_path, task_generator, rounds=2, designer_delay=1)
+    for record_id in ("designer-0-0", "designer-1-0"):
+        p.push(designer_call(record_id))
+    looked(p)
+    assert train_job(p) == ["harbor-00000-000"]
+    looked(p)
+    assert train_job(p) == ["harbor-00001-000"]
+    p.push(report("designer-report-0", "designer-0-0", None, 0.5, arm=None))
+    p.push(report("designer-report-1", "designer-1-0", None, 0.5, arm=None))
+    for _ in range(5):
+        looked(p)
+    stage = stage_of(p)
+    assert stage.rounds_stopped and 1 in stage.designer_documents
+
+    releasable = stage.releasable_record_ids()
+
+    # Round 1 carried generation 0. Generation 1 has no carrier round: its record waits, so a run that continues
+    # with more rounds still carries the reply.
+    assert "designer-0-0" in releasable and "designer-1-0" not in releasable
+    assert stage.held_designer_record_ids() == frozenset({"designer-1-0"})

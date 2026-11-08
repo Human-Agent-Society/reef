@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from reef.core.training_capture import sample_training, sampling_distribution
 from reef.train.task_rollouts import CHAT_COMPLETIONS_PATH, RolloutChat
 
 #: The OpenAI chat sampling options that the engines take, and SGLang's name of each.
@@ -51,8 +52,9 @@ class EngineChat(RolloutChat):
     response token, for score centering. ``distribution`` holds SGLang's ``temperature``, ``top_p`` and ``top_k`` of
     the distribution that the trainer reads: each call samples it, whatever the agent asks. ``max_response_tokens``
     is a positive bound on the response tokens of one call, or None. Each answer is a chat completion whose
-    ``training`` block holds the prompt and response token IDs, the response's loss mask and sampled log-probs,
-    ``runtime_load_id``, the weights the engines hold for the job, the engines' ``weight_version`` when they give it,
+    ``training`` block (``reef.core.training_capture.sample_training``) holds the prompt and response token IDs, the
+    response's loss mask and sampled log-probs, ``runtime_load_id``, the weights the engines hold for the job, the
+    ``distribution`` it samples, the request and response messages, the engines' ``weight_version`` when they give it,
     and with ``topk_logprobs`` the heads ``topk_indices`` and ``topk_log_probs``, one list of ``topk_logprobs`` per
     response token. Another path gets 404, a request outside text system, user and assistant messages (or with ``n``
     other than 1) 400, an engine error status its own status, and an unusable engine answer 502.
@@ -163,15 +165,16 @@ class EngineChat(RolloutChat):
                 "total_tokens": len(prompt) + len(tokens),
             },
             "training": {
-                "tokens": [*prompt, *tokens],
-                "loss_mask": [1] * len(tokens),
-                "rollout_log_probs": log_probs,
-                "prompt_length": len(prompt),
-                "response_length": len(tokens),
-                "runtime_load_id": self.runtime_load_id,
+                **sample_training(
+                    prompt_ids=prompt,
+                    output_ids=tokens,
+                    rollout_log_probs=log_probs,
+                    runtime_load_id=self.runtime_load_id,
+                    finish_reason=finish,
+                    distribution=sampling_distribution(self.distribution),
+                ),
                 "request_messages": messages,
                 "response_message": message,
-                "finish_reason": finish,
                 **({} if weight_version is None else {"weight_version": str(weight_version)}),
                 **({} if heads is None else {"topk_indices": heads[0], "topk_log_probs": heads[1]}),
             },

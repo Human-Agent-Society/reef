@@ -11,10 +11,12 @@ Format 1 of a directory:
 - ``samples.jsonl``: one sample per line, in job order, as ``JobData.to_dict`` gives it, except that a task's
   ``task_path`` is relative to the directory: ``tasks/<n>/<directory name>``.
 - ``tasks/<n>/<directory name>/``: the directory of the ``n``-th task, where ``n`` counts the tasks from 0.
+- ``delayed.jsonl``, only for data with delayed samples (``JobData.delayed``): one delayed sample per line, in order,
+  as the ``delayed`` entries of ``JobData.to_dict``.
 
-``key`` is ``job_data_key`` of the samples, so two jobs of the same samples share one directory. A directory does
-not change after it is written. The data store keeps the directories (``DataStore.write_job_directory``), and deletes a
-directory that no job used for the time to live.
+``key`` is ``job_data_key`` of the samples and the delayed samples, so two jobs of the same data share one directory.
+A directory does not change after it is written. The data store keeps the directories
+(``DataStore.write_job_directory``), and deletes a directory that no job used for the time to live.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from reef.core.job_data import JobData, TaskSample
 JOB_DATA_FORMAT = 1
 JOB_FILE = "job.json"
 SAMPLES_FILE = "samples.jsonl"
+DELAYED_FILE = "delayed.jsonl"
 TASKS_DIR = "tasks"
 #: The data store's segment store keeps the directory of the key ``k`` as ``job-data/<k>``.
 JOB_DATA_PREFIX = "job-data"
@@ -52,16 +55,20 @@ def job_data_kind(data: JobData) -> JobDataKind | None:
 
 
 def job_data_key(data: JobData) -> str:
-    """The SHA-256 of the samples of ``data`` and of the files of its tasks: equal for two jobs of the same samples,
-    whatever their data IDs and requests."""
+    """The SHA-256 of the samples of ``data``, of the files of its tasks and of its delayed samples: equal for two jobs
+    of the same data, whatever their data IDs and requests. Data without delayed samples has the key of its samples
+    alone."""
+    value = data.to_dict()
     digest = hashlib.sha256()
-    for entry, sample in zip(data.to_dict()["samples"], data.samples, strict=True):
+    for entry, sample in zip(value["samples"], data.samples, strict=True):
         if isinstance(sample, TaskSample):
             entry = {**entry, "task_path": sample.task_path.name}
             for path in sorted(item for item in sample.task_path.rglob("*") if item.is_file()):
                 digest.update(path.relative_to(sample.task_path).as_posix().encode())
                 digest.update(hashlib.sha256(path.read_bytes()).digest())
         digest.update(json.dumps(entry, sort_keys=True, separators=(",", ":")).encode())
+    if data.delayed:
+        digest.update(json.dumps({"delayed": value["delayed"]}, sort_keys=True, separators=(",", ":")).encode())
     return digest.hexdigest()
 
 
@@ -69,15 +76,17 @@ def write_job_data(data: JobData, directory: Path) -> None:
     """Write ``data`` as a job data directory at ``directory``, which must not exist.
 
     The function writes a sibling temporary directory and renames it, so a reader never sees part of a directory.
-    It copies each task's directory. ``ValueError`` for data with both kinds of samples.
+    It copies each task's directory, and writes ``DELAYED_FILE`` only for data with delayed samples. ``ValueError``
+    for data with both kinds of samples.
     """
     kind = job_data_kind(data)
+    value = data.to_dict()
     directory.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{directory.name}.", dir=directory.parent))
     try:
         lines: list[str] = []
         tasks = 0
-        for entry, sample in zip(data.to_dict()["samples"], data.samples, strict=True):
+        for entry, sample in zip(value["samples"], data.samples, strict=True):
             if isinstance(sample, TaskSample):
                 relative = f"{TASKS_DIR}/{tasks}/{sample.task_path.name}"
                 shutil.copytree(sample.task_path, staged / relative)
@@ -85,6 +94,9 @@ def write_job_data(data: JobData, directory: Path) -> None:
                 tasks += 1
             lines.append(json.dumps(entry, allow_nan=False, separators=(",", ":")))
         (staged / SAMPLES_FILE).write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+        if data.delayed:
+            delayed = (json.dumps(entry, allow_nan=False, separators=(",", ":")) for entry in value["delayed"])
+            (staged / DELAYED_FILE).write_text("".join(f"{line}\n" for line in delayed), encoding="utf-8")
         header = {"format": JOB_DATA_FORMAT, "key": job_data_key(data), "sample_count": len(lines), "kind": kind}
         (staged / JOB_FILE).write_text(json.dumps(header), encoding="utf-8")
         os.replace(staged, directory)
@@ -95,7 +107,8 @@ def write_job_data(data: JobData, directory: Path) -> None:
 
 def read_job_data(directory: Path, data_id: str | None = None) -> JobData:
     """The ``JobData`` of the job data directory ``directory``, without a request; each task path is absolute,
-    under ``directory``. Its ID is ``data_id``, or the directory's key. ``ValueError`` for another format."""
+    under ``directory``. Its ID is ``data_id``, or the directory's key. Its delayed samples are those of
+    ``DELAYED_FILE``, or none without that file. ``ValueError`` for another format."""
     header = json.loads((directory / JOB_FILE).read_text(encoding="utf-8"))
     if not isinstance(header, Mapping) or header.get("format") != JOB_DATA_FORMAT:
         raise ValueError(f"{directory} is no job data directory of format {JOB_DATA_FORMAT}")
@@ -106,7 +119,12 @@ def read_job_data(directory: Path, data_id: str | None = None) -> JobData:
             if entry.get("kind") == "task":
                 entry = {**entry, "task_path": str(directory / entry["task_path"])}
             samples.append(entry)
-    return JobData.from_dict({"data_id": data_id or header["key"], "samples": samples, "request": None})
+    value: dict[str, Any] = {"data_id": data_id or header["key"], "samples": samples, "request": None}
+    if (directory / DELAYED_FILE).is_file():
+        value["delayed"] = [
+            json.loads(line) for line in (directory / DELAYED_FILE).read_text(encoding="utf-8").splitlines()
+        ]
+    return JobData.from_dict(value)
 
 
 @dataclass(frozen=True)
@@ -152,6 +170,7 @@ class JobDataRef:
 
 
 __all__ = [
+    "DELAYED_FILE",
     "JOB_DATA_FORMAT",
     "JOB_DATA_PREFIX",
     "JOB_FILE",

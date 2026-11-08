@@ -296,8 +296,16 @@ class Designer(ABC):
 
     @abstractmethod
     def answer(
-        self, messages: Sequence[Mapping[str, str]], *, scenario: str, model: str, tags: Mapping[str, str]
-    ) -> DesignerAnswer: ...
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        scenario: str,
+        model: str,
+        tags: Mapping[str, str],
+        is_recording_training: bool = False,
+    ) -> DesignerAnswer:
+        """Answer one designer prompt; with ``is_recording_training`` the call's record keeps its exact sample, so
+        that a recipe can train the Designer on it."""
 
     @abstractmethod
     def report(self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]) -> str: ...
@@ -326,9 +334,18 @@ class ReefDesigner(Designer):
         self.client = ReefClient(reef_url, token=token, timeout_s=float(timeout_s))
 
     def answer(
-        self, messages: Sequence[Mapping[str, str]], *, scenario: str, model: str, tags: Mapping[str, str]
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        scenario: str,
+        model: str,
+        tags: Mapping[str, str],
+        is_recording_training: bool = False,
     ) -> DesignerAnswer:
         headers = {f"x-reef-tag-{name}": value for name, value in tags.items()}
+        if is_recording_training:
+            # reef.service.wire.RECORD_TRAINING_HEADER: the record keeps the sampled tokens and their log-probs.
+            headers["x-reef-record-training"] = "1"
         if self.api == "responses":
             # Responses takes the system turns as instructions and every other turn as typed input.
             path = RESPONSES_PATH

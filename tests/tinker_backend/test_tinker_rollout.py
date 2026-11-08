@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.chat_templates import CharTemplate
-from tests.support.job_data import job_data_ref
+from tests.support.job_data import delayed_sample, job_data_ref
 
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample, trajectories
@@ -338,6 +338,29 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
                         scenario="s",
                     )
                 )
+    finally:
+        component.close()
+
+
+@pytest.mark.unit
+def test_a_task_job_with_delayed_samples_is_refused_at_submit(tmp_path):
+    component = TinkerTrainingComponent(
+        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+    )
+    component.start_jobs()
+    try:
+        data = JobData("d", (harbor_task(tmp_path, "add"),), delayed=(delayed_sample(),))
+        with pytest.raises(ValueError, match="Tinker trains no delayed samples"):
+            component.submit(
+                TrainingJob(
+                    "j",
+                    "tinker",
+                    component.base_start,
+                    job_data_ref(data),
+                    {"objective": TASK_OBJECTIVE, "rollout": ROLLOUT},
+                    scenario="s",
+                )
+            )
     finally:
         component.close()
 

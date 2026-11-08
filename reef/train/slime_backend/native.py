@@ -8,8 +8,13 @@ customize the rest, for example ``--rollout-data-postprocess-path``, which sees
 the rollout data after the advantages and before the loss. A task job
 (``reef.train.slime_backend.harbor_rollouts``) differs only in its prompts and its
 generate step: a Harbor rollout gives each sample and the verifier its reward.
-The built-in dataset recipe (``reef.recipe.dataset``) registers this family by
-reference, so only the training driver and the workers import the Slime code.
+The family installs Reef's reward step as Slime's
+``--custom-reward-post-process-path``
+(``reef.train.slime_backend.task_advantages``): it keeps Slime's own group
+rule, except for a task job whose objective declares its own rule or carries
+delayed samples. The built-in dataset recipe (``reef.recipe.dataset``)
+registers this family by reference, so only the training driver and the
+workers import the Slime code.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from __future__ import annotations
 from argparse import Namespace
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
+from reef.train.slime_backend.task_advantages import TASK_ADVANTAGES_PATH
 
 #: The data source that serves a dataset job's or a task job's prompts to Slime's rollout manager.
 DATASET_SOURCE_PATH = "reef.train.slime_backend.dataset_source.ReefDatasetSource"
@@ -37,6 +43,15 @@ class SlimeNativeAlgorithm(SlimeAlgorithm):
     allows_slime_advantage_computation = True
     # Slime's own engines roll the job out and record the log-probabilities of each sampled token.
     accepts_rollout_logprobs = True
+
+    def apply_driver_options(self, args: Namespace, options: object) -> None:
+        super().apply_driver_options(args, options)
+        # The reward step is Reef's: it applies Slime's own rule unless a task job's objective declares another.
+        if args.custom_reward_post_process_path not in (None, TASK_ADVANTAGES_PATH):
+            raise ValueError(
+                "the slime family computes the rewards' advantages itself; remove --custom-reward-post-process-path"
+            )
+        args.custom_reward_post_process_path = TASK_ADVANTAGES_PATH
 
     def configure_backend_args(self, args: Namespace) -> None:
         # The serving session's rollout manager outlives the drivers, so the data source is the deployment's.

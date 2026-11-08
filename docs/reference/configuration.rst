@@ -2056,6 +2056,9 @@ which are not records.
    ``pipeline.record2sample.config.generation_deadline_seconds`` : 1800
        seconds that all attempts of one generation may take
 
+   ``pipeline.record2sample.config.designer_delay`` : 0
+       rounds after which the Designer replies of a generation train, in the first task job of the later round; 0 trains no Designer reply
+
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
 The task files go in the task file store; see `Choose the task file store
@@ -2064,6 +2067,16 @@ Related source sessions keep the same split across generations.
 A task that joins existing train and eval source groups is rejected.
 Eval tasks are saved without rollouts or Designer rewards.
 The generator's pass-rate band does not filter the store.
+
+With ``designer_delay`` d above 0, the task jobs also train the Designer's replies:
+
+- When the generator has taken the results of generation g, it gives the advantage of each Designer reply of g that trains (``TaskGenerator.designer_advantages``). The stage saves them in the task store.
+- The tasks of round g + d wait for these advantages. The first task job that holds a task of that round carries the replies of g, with their advantages, beside its tasks. A round that published no train task passes them to the next round that did.
+- A carrying job that fails, or that a new training start cancels, does not train them again. A reply whose data is more than ``max_staleness`` versions behind does not train.
+- Each reply trains from the sample that its served call kept, so the generator must ask for it (SPADE's ``train_designer``). A reply without its sample is skipped. The operational metrics count the carried replies and the skipped records.
+- The stage keeps the Designer's inference records in memory until the carrying job's submission commits. Run control and the samples service in one process.
+- The last d generations of a run have no carrying round. Their records stay held, so a run that continues with more rounds trains their replies.
+- The training component must train delayed samples beside a task job's rollouts.
 
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.

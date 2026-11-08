@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
-from recipes.beta.spade import SpadeTaskGenerator
+from recipes.beta.spade import BlendSettings, SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
@@ -357,3 +358,94 @@ def test_a_delivery_that_stopped_part_way_does_not_report_a_proposal_twice(tmp_p
         asyncio.run(generator.record_results(results, generation=0))
     asyncio.run(generator.record_results(results, generation=0))
     assert [report["record_id"] for report in service.reports] == ["designer-1", "designer-2"]
+
+
+#: The reference code's Qwen3-4B paper run: 0.6 * plateau on [0.2, 0.4] with ramp 0.2, plus 0.4 * floored regret.
+PAPER_4B = BlendSettings(
+    plateau_low=0.2, plateau_high=0.4, plateau_ramp=0.2, plateau_weight=0.6, regret_weight=0.4, regret_scale=0.15
+)
+
+
+def test_the_designer_trains_on_the_per_skill_centered_blend_of_the_train_tasks_that_ran(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
+    generator = spade(tmp_path, service, blend=PAPER_4B, is_training_designer=True)
+    first, third = asyncio.run(generator.generate(REQUEST))
+    assert [call["is_recording_training"] for call in service.proposals] == [True, True, True]
+    # Plain 0.25 with hint 0.75: in the band, regret 0.5 clipped to 1, blend 1.0. Plain 1.0 with hint 0.75: mastered,
+    # regret floored at 0, blend 0.0.
+    results = (RolledOutTask(first, (0.25, 0.25)), RolledOutTask(third, (1.0, 1.0)))
+    asyncio.run(generator.record_results(results, generation=0))
+    assert [(r["record_id"], r["score"]) for r in service.reports] == [
+        ("designer-1", pytest.approx(1.0)),
+        ("designer-2", 0.0),
+        ("designer-3", pytest.approx(0.0)),
+    ]
+    # Four plays over two replies: scale 2. The refused reply gets no entry.
+    expected = {"designer-1": pytest.approx(1.0), "designer-3": pytest.approx(-1.0)}
+    assert generator.designer_advantages(0) == expected
+    document = report(tmp_path, 0)
+    assert document["recipe_generation"] == 0 and [task["blend"] for task in document["tasks"]] == [
+        pytest.approx(1.0),
+        pytest.approx(0.0),
+    ]
+    asyncio.run(generator.record_results(results, generation=0))
+    restarted = spade(tmp_path, StandInGenerator(tmp_path / "tasks"), blend=PAPER_4B, is_training_designer=True)
+    assert restarted.designer_advantages(0) == expected, "a repeated call after a restart gives the same answer"
+
+
+def test_without_train_designer_the_calls_keep_no_sample_and_no_reply_trains(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    generator = spade(tmp_path, service, count=1)
+    asyncio.run(generator.record_results(run_tasks(generator), generation=0))
+    assert service.proposals[0]["is_recording_training"] is False
+    assert generator.designer_advantages(0) == {}
+    assert report(tmp_path, 0)["designer_advantages"] == {"designer-1": 0.0}, "the report keeps them all the same"
+
+
+def test_the_advantages_belong_to_the_recipes_generation_number(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    generator = spade(tmp_path, service, count=1, is_training_designer=True)
+    (task,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=7)))
+    asyncio.run(generator.record_results((RolledOutTask(task, (0.25,)),), generation=7))
+    assert report(tmp_path, 0)["recipe_generation"] == 7, "SPADE numbers it 0; the recipe numbers it 7"
+    assert generator.designer_advantages(7) == {"designer-1": 0.0} and generator.designer_advantages(0) == {}
+
+
+def test_from_config_reads_the_blend_the_scale_cap_and_train_designer(tmp_path: Path) -> None:
+    base = {"generator_url": "http://127.0.0.1:8910", "state_dir": str(tmp_path)}
+    generator = SpadeTaskGenerator.from_config(
+        {
+            **base,
+            "plateau_low": 0.2,
+            "plateau_high": 0.4,
+            "plateau_ramp": 0.2,
+            "plateau_weight": 0.6,
+            "regret_weight": 0.4,
+            "regret_scale": 0.15,
+            "max_designer_scale": 32,
+            "train_designer": True,
+        },
+        scenario="one",
+        environ={},
+    )
+    assert generator.blend == PAPER_4B and generator.max_designer_scale == 32.0 and generator.is_training_designer
+    defaults = SpadeTaskGenerator.from_config(base, scenario="one", environ={})
+    assert defaults.blend == BlendSettings() and defaults.max_designer_scale == 50.0
+    assert not defaults.is_training_designer
+    for config, message in (
+        ({**base, "plateau_low": 0.5, "plateau_high": 0.4}, "plateau band"),
+        ({**base, "max_designer_scale": 0}, "max_designer_scale"),
+    ):
+        with pytest.raises(PluginConfigError, match=message):
+            SpadeTaskGenerator.from_config(config, scenario="one", environ={})
+
+
+def test_the_slime_example_trains_the_designer_with_the_paper_blend(tmp_path: Path) -> None:
+    example = Path(__file__).parents[3] / "recipes/beta/spade/examples/slime/serve.yaml"
+    text = example.read_text().replace("${endpoints.generator}", "http://127.0.0.1:8910")
+    stage_config = yaml.safe_load(text.replace("${REEF_SPADE_STATE_DIR}", str(tmp_path)))["pipeline"]["record2sample"]
+    settings = GeneratedTaskSettings.parse(stage_config["config"], plugin_class=GeneratedTaskSamples)
+    assert (settings.designer_delay, settings.jobs_per_round, settings.max_staleness) == (1, 1, 2)
+    generator = SpadeTaskGenerator.from_config(stage_config["config"]["generator"]["config"], scenario="s", environ={})
+    assert generator.blend == PAPER_4B and generator.is_training_designer
+    assert (generator.count, generator.hint_plays, len(generator.skills)) == (24, 16, 3)

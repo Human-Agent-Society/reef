@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any, overload
 
 from reef.core.job_data import JobData, trajectories
+from reef.train.algos.group_advantages import GroupAdvantageRule
 from reef.train.algos.helpers import next_steps
 from reef.train.algos.registry import objective_refs, register_loss_family_ref
 from reef.train.algos.schedule import RolloutUnit, StepScheduling
@@ -33,18 +34,28 @@ class SlimeObjective(ABC):
     before the first pass, so later passes are off-policy: a clipped PPO-style
     ratio tolerates that, an unclipped one does not. ``rollout_unit`` is the
     rows that one optimizer step keeps together: ``"sample"`` or
-    ``"comparison_set"``.
+    ``"comparison_set"``. Two attributes apply to task jobs only, so an
+    objective that sets either has the ``slime`` loss family.
+    ``rollout_advantages`` is the rule that turns the rewards of each prompt
+    group of a task job into advantages, or None for Slime's own rule
+    (``reef.train.slime_backend.task_advantages``). ``carries_samples`` says
+    whether a task job of the objective trains the job data's delayed samples
+    (``JobData.delayed``) in its first optimizer step.
 
     Purpose: ``SlimeJobRunner`` calls ``prepare`` with a job's complete data, so
     group-relative statistics do not depend on the data-parallel partitioning.
     ``prepare`` returns the proposed objective state; the component commits it
     with the job's last checkpoint. Model-dependent terms stay in the loss family.
+    A task job calls no ``prepare``: its driver reads ``rollout_advantages`` and
+    ``carries_samples``.
     """
 
     name: str = ""
     loss_family: str = ""
     supports_multiple_epochs: bool = False
     rollout_unit: RolloutUnit = "sample"
+    rollout_advantages: GroupAdvantageRule | None = None
+    carries_samples: bool = False
 
     def validate_scheduling(self, scheduling: StepScheduling) -> None:
         """Raise ``ValueError`` for a job schedule whose passes this objective's loss cannot train correctly."""
@@ -73,6 +84,14 @@ def add_slime_objective(objective: SlimeObjective) -> SlimeObjective:
         raise ValueError("an objective must declare a non-empty loss_family")
     if not isinstance(objective.supports_multiple_epochs, bool):
         raise ValueError("an objective must declare supports_multiple_epochs as a bool")
+    if objective.rollout_advantages is not None and not isinstance(objective.rollout_advantages, GroupAdvantageRule):
+        raise ValueError("an objective's rollout_advantages must be a GroupAdvantageRule or None")
+    if not isinstance(objective.carries_samples, bool):
+        raise ValueError("an objective must declare carries_samples as a bool")
+    if (objective.rollout_advantages is not None or objective.carries_samples) and objective.loss_family != "slime":
+        raise ValueError(
+            "an objective with rollout_advantages or carries_samples trains task jobs, which need the 'slime' loss family"
+        )
     existing = SLIME_OBJECTIVES.get(objective.name)
     if existing is objective:
         return objective

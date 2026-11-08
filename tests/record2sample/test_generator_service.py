@@ -97,8 +97,16 @@ class StandInDesigner(Designer):
         self.calls: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
 
-    def answer(self, messages, *, scenario, model, tags) -> DesignerAnswer:
-        self.calls.append({"messages": list(messages), "scenario": scenario, "model": model, "tags": dict(tags)})
+    def answer(self, messages, *, scenario, model, tags, is_recording_training=False) -> DesignerAnswer:
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "scenario": scenario,
+                "model": model,
+                "tags": dict(tags),
+                "is_recording_training": is_recording_training,
+            }
+        )
         text = self.scripted.pop(0) if self.scripted else reply_for(8471 + len(self.calls))
         return DesignerAnswer(text=text, record_id=f"designer-{len(self.calls)}")
 
@@ -242,6 +250,23 @@ def test_a_proposal_comes_back_as_a_task_with_the_designers_record_id(tmp_path: 
     call = designer.calls[0]
     assert call["scenario"] == "spade" and call["model"] == "m" and call["tags"] == {"role": "designer"}
     assert "LAST TIME: ok" in call["messages"][1]["content"] and "inspection" in call["messages"][1]["content"]
+
+
+def test_a_proposal_that_records_the_designer_sample_asks_the_designer_to(tmp_path: Path) -> None:
+    built, designer, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+        await generator.propose(
+            request(), scenario="spade", generation=0, index=1, tags={}, is_recording_training=True
+        )
+        status, _ = await generator.request(
+            "POST", "/proposals", body={"scenario": "spade", "request": {"target": "x"}, "record_training": "yes"}
+        )
+        return status
+
+    assert run_with(built, body) == 400
+    assert [call["is_recording_training"] for call in designer.calls] == [False, True]
 
 
 def test_a_reply_that_is_no_task_is_a_refusal_with_the_record_id(tmp_path: Path) -> None:

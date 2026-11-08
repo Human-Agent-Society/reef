@@ -1,0 +1,182 @@
+# SPADE on Slime: the served model writes tasks as the Designer and trains on them as the Reasoning Agent, and each
+# task job also trains the Designer's replies of the generation before (designer_delay 1, train_designer).
+# The method settings follow the reference code's Qwen3-4B paper run (cmd/slime/qwen3_4b_instruct/0617/
+# train_plateau_6skill.sh): 24 environments a generation over three skills, the plateau band 0.2 to 0.4 with ramp
+# 0.2, the weights 0.6 and 0.4, regret_scale 0.15, 16 hint plays, temperature 0.6, TIS clipped at 2, and eps-clip
+# 0.2/0.28. See the README for what differs from the paper.
+# Eight GPUs: one for Reef's serving engine, which answers the Designer and the hint plays, and four actor GPUs whose
+# Slime engines run the task rollouts (colocated). REEF_SPADE_STATE_DIR is where this deployment keeps its state.
+# The generator service runs under the same interpreter as Reef; its host needs Docker and the harbor command line.
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_SPADE_STATE_DIR}/stack
+  ready-timeout: 3600
+inference:
+  model-path: Qwen/Qwen3-4B-Instruct-2507
+  # A task rollout is many turns, and a Designer call is one long reply.
+  timeout-s: 1800
+  num-gpus: 1
+  tensor-parallel-size: 1
+  options:
+    router-port: 23000
+    context-length: 49152
+    dtype: bfloat16
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
+    # The trainer's distribution: the Designer's replies train from the sample of its served call.
+    sampling_defaults:
+      temperature: 0.6
+      top_p: 1.0
+      top_k: -1
+      max_new_tokens: 16384
+# The generator service: writes and checks the Designer's tasks and plays their hint arms.
+generator:
+  tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
+  concurrency: 8
+  designer-options:
+    temperature: 0.6
+  # The agent of the generator service's own rollouts, the hint plays.
+  agent:
+    name: terminus-2
+    model_name: openai/{model}
+    kwargs:
+      api_base: "{base_url}/v1"
+      llm_kwargs:
+        api_key: "{api_key}"
+recipe:
+  implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+  config:
+    job_parameters:
+      # The task rollouts with their group z-scores, and the carried Designer replies with their advantages.
+      objective: recipes.beta.spade.slime:SpadeObjective
+      # Slime's own rollout of each task job: n-samples-per-prompt rollouts of each task form its group.
+      harbor:
+        concurrency: 8
+        environment: docker
+        # Qwen3-4B-Instruct-2507 does not think, so its turns assemble into one sample.
+        agent:
+          name: terminus-2
+          model_name: openai/{model}
+          kwargs:
+            api_base: "{base_url}/v1"
+            llm_kwargs:
+              api_key: "{api_key}"
+pipeline:
+  record2sample:
+    config:
+      # One generation for each task job; the next round starts when the job ends.
+      jobs_per_round: 1
+      generator_url: ${endpoints.generator}
+      rounds: 100
+      description: shell tasks with hidden state under /var and /etc
+      # The Designer replies of generation g train in the first task job of round g + 1.
+      designer_delay: 1
+      # A carried reply is one artifact behind the job that trains it.
+      max_staleness: 2
+      generator:
+        module: recipes.beta.spade:SpadeTaskGenerator
+        config:
+          generator_url: ${endpoints.generator}
+          count: 24
+          skills: [inspection, repair, configuration]
+          hint_plays: 16
+          plateau_low: 0.2
+          plateau_high: 0.4
+          plateau_ramp: 0.2
+          plateau_weight: 0.6
+          regret_weight: 0.4
+          regret_scale: 0.15
+          train_designer: true
+          state_dir: ${REEF_SPADE_STATE_DIR}/generations
+  # One task job holds one generation's train tasks.
+  sample2job:
+    config:
+      buffer_size: 24
+training:
+  backend: slime
+  ready-timeout: 1800
+  ray-namespace: reef-spade
+  timeout-s: 14400
+  config:
+    checkpoint_dir: ${REEF_SPADE_STATE_DIR}/checkpoints
+    checkpoint_retention:
+      max_storage_fraction: 0.8
+      min_free_space_fraction: 0.1
+      policy: latest
+  options:
+    reef-checkpoint-max-storage-fraction: ${training.config.checkpoint_retention.max_storage_fraction}
+    reef-checkpoint-min-free-space-fraction: ${training.config.checkpoint_retention.min_free_space_fraction}
+    reef-checkpoint-policy: ${training.config.checkpoint_retention.policy}
+    megatron-to-hf-mode: bridge
+    hf-checkpoint: ${inference.model-path}
+    # Qwen3 checkpoints pad the embedding to 151936 rows beyond the tokenizer's ids.
+    vocab-size: 151936
+    load: ${training.config.checkpoint_dir}/megatron
+    save: ${training.config.checkpoint_dir}/megatron
+    save-interval: 1
+    save-hf: ${training.config.checkpoint_dir}/hf/{rollout_id}
+    num-rollout: '100000000'
+    # One Slime rollout is one optimizer step: the 24 tasks of a generation and the carried replies, one reply to a
+    # row, in ceil(24 / 8) = 3 prompt groups.
+    rollout-batch-size: 27
+    n-samples-per-prompt: 8
+    # The 24 carried replies and the first 168 task rollouts. The last 24 task rollouts play and feed the Designer's
+    # score, but do not train, as in SPADE.
+    global-batch-size: 192
+    micro-batch-size: '1'
+    actor-num-nodes: '1'
+    actor-num-gpus-per-node: 4
+    num-gpus-per-node: 8
+    colocate: true
+    rollout-num-gpus-per-engine: 1
+    tensor-model-parallel-size: 2
+    context-parallel-size: 2
+    pipeline-model-parallel-size: '1'
+    sequence-parallel: true
+    seq-length: 49152
+    rollout-max-response-len: 8192
+    rollout-max-context-len: 49152
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: 8192
+    recompute-granularity: full
+    recompute-method: uniform
+    recompute-num-layers: '1'
+    disable-bias-linear: true
+    qk-layernorm: true
+    group-query-attention: true
+    normalization: RMSNorm
+    norm-epsilon: 1e-6
+    position-embedding-type: rope
+    rotary-percent: 1.0
+    rotary-base: 5000000
+    swiglu: true
+    attention-dropout: '0.0'
+    hidden-dropout: '0.0'
+    attention-softmax-in-fp32: true
+    accumulate-allreduce-grads-in-fp32: true
+    attention-backend: flash
+    optimizer: adam
+    lr: 1e-6
+    lr-decay-style: constant
+    weight-decay: '0.0'
+    clip-grad: '1.0'
+    loss-type: policy_loss
+    advantage-estimator: grpo
+    # The carried replies were sampled by an earlier artifact: TIS weighs each token by min(p_old / q, 2).
+    use-tis: true
+    eps-clip: 0.2
+    eps-clip-high: 0.28
+    entropy-coef: '0.0'
+    rollout-temperature: 0.6
+    rollout-top-p: 1.0
+    rollout-top-k: -1
+storage:
+  artifact-repository: ${REEF_SPADE_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${REEF_SPADE_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${REEF_SPADE_STATE_DIR}/artifact-cache
+  agent-record-dir: ${REEF_SPADE_STATE_DIR}/agent-record
+execution:
+  training: ray
+  rollout: ray

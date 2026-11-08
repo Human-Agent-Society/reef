@@ -164,7 +164,8 @@ def make_policy_trajectory(
     artifact_id = item.artifact_id or training.get("artifact_id")
     topk_indices = field("topk_indices") or ()
     topk_log_probs = field("topk_log_probs") or ()
-    return make_trajectory((item,), reward).with_training(
+    distribution = training.get("distribution")
+    sample = make_trajectory((item,), reward).with_training(
         tokens=[int(token) for token in tokens],
         loss_mask=[int(value) for value in loss_mask],
         rollout_log_probs=[float(value) for value in rollout_log_probs],
@@ -172,6 +173,8 @@ def make_policy_trajectory(
         topk_indices=[[int(v) for v in row] for row in topk_indices],
         topk_log_probs=[[float(v) for v in row] for row in topk_log_probs],
     )
+    # The sampling distribution of a served call that recorded its sample (``x-reef-record-training``).
+    return sample if not isinstance(distribution, Mapping) else sample.with_training(distribution=dict(distribution))
 
 
 def make_multi_turn_policy_trajectory(

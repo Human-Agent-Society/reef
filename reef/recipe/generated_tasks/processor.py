@@ -22,6 +22,13 @@ that made no train task, a failed task job, and no unfinished task are followed 
 the task store and the scenario's items: the scenario still uses the train tasks that did not train, and a later job takes
 them again.
 
+With ``designer_delay`` d above 0, the task jobs also train the Designer's replies. When the generator has taken the
+results of generation g, it gives the advantage of each Designer reply of g that trains
+(``TaskGenerator.designer_advantages``), and the stage saves them as ``designer/<g>``. The replies of g train in the
+first task job that holds a task of round g + d, beside its task rollouts (``JobData.delayed``). A round that published
+no train task passes them to the next round that did. The tasks of that round wait for ``designer/<g>``. The stage
+keeps the Designer's inference records until a committed job trained a task of that round.
+
 The stage trains on no report. It holds the reports that are source sessions for the rounds, and releases the
 others, such as a generator's own reports.
 """
@@ -40,7 +47,7 @@ from typing import Any, Self
 
 from reef.core import AgentRecord
 from reef.core.config import config_option
-from reef.core.job_data import JobOutcome, TaskSample
+from reef.core.job_data import DelayedSample, JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
@@ -49,15 +56,19 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
 from reef.recipe.generated_tasks.results import (
     TaskRolloutResult,
+    checked_advantages,
     delivered_generations,
+    designer_advantages,
     mark_delivered,
     rollout_results,
+    save_designer_advantages,
     save_rollout_result,
 )
 from reef.record2sample import Record2Sample, Record2SampleSettings, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.generator.client import Generator, HttpGenerator
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.reports import report_score
+from reef.record2sample.samples import make_policy_trajectory
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.samples import StoredSample, TrainerSamples
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
@@ -226,6 +237,35 @@ def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskSamp
     )
 
 
+def task_round(sample: Sample) -> int | None:
+    """The generation of a generated train task, its metadata ``task.round``; None for any other sample."""
+    if not isinstance(sample, TaskSample):
+        return None
+    task = sample.metadata.get("task")
+    generation = task.get("round") if isinstance(task, Mapping) else None
+    return generation if isinstance(generation, int) and not isinstance(generation, bool) else None
+
+
+def carrier_round(generation: int, train_rounds: tuple[int, ...], designer_delay: int) -> int | None:
+    """The round whose first task job carries the Designer replies of ``generation``, or None while there is none.
+
+    ``train_rounds`` holds the complete generations that published a train task, in increasing order. The carrier
+    is the first of them at or after ``generation + designer_delay``, so a round without a train task passes the
+    replies on.
+    """
+    return next((number for number in train_rounds if number >= generation + designer_delay), None)
+
+
+def designer_record_ids(task: HarborTask) -> frozenset[str]:
+    """The records that can hold the Designer reply that wrote ``task``: its ``designer_record_id`` and its sources.
+
+    A task that the Designer wrote from the description alone has that reply as its only source.
+    """
+    designer_record_id = task.metadata.get("designer_record_id")
+    named = {designer_record_id} if isinstance(designer_record_id, str) and designer_record_id else set()
+    return frozenset({*task.source_agent_record_ids, *named})
+
+
 # ---------------------------------------------------------------- rounds and jobs
 
 
@@ -305,6 +345,7 @@ class GenerationOutcome(SupportsReceipt):
     is complete in the task store. A complete generation holds in ``tasks`` its published train tasks, and its
     ``error`` is empty or names a delivery to the generator that failed. An
     incomplete generation ran out of attempts: it holds no task, and ``error`` names the last failure.
+    ``undelivered`` holds the generations whose delivery failed in the job's last delivery, in increasing order.
     Purpose: the worker hands it back from ``run``; ``GeneratedTaskSamples.finished_rounds`` turns it into a
     ``RoundResult``.
     """
@@ -313,6 +354,7 @@ class GenerationOutcome(SupportsReceipt):
     tasks: tuple[TaskSample, ...]
     is_complete: bool
     error: str
+    undelivered: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.is_complete and (self.tasks or not self.error):
@@ -333,11 +375,14 @@ class DeliveryOutcome(SupportsReceipt):
     """How a delivery job ended.
 
     Values: ``receipt`` is ``DELIVERY_RECEIPT``. ``error`` is the error of the last generation whose delivery
-    failed, or empty when every deliverable generation reached the generator.
-    Purpose: the worker hands it back; ``GeneratedTaskSamples.finished_rounds`` reads ``error`` into its status.
+    failed, or empty when every deliverable generation reached the generator. ``undelivered`` holds the
+    generations whose delivery failed, in increasing order; it is empty when ``error`` is empty.
+    Purpose: the worker hands it back; ``GeneratedTaskSamples.finished_rounds`` reads ``error`` into its status,
+    and ``undelivered`` into the rounds whose tasks stop waiting for Designer advantages.
     """
 
     error: str
+    undelivered: tuple[int, ...] = ()
 
 
 def source_tag_of(setting: str) -> tuple[str, str] | None:
@@ -395,6 +440,7 @@ class GeneratedTaskSettings(Record2SampleSettings):
     * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
     * ``eval_fraction`` is a number in [0, 1]; ``split_seed`` an int.
     * ``generation_attempts`` and ``generation_deadline_seconds`` are positive.
+    * ``designer_delay`` is a non-negative int; 0 trains no Designer reply.
     * ``max_staleness`` is as in ``Record2SampleSettings``.
 
     The constructor refuses other values.
@@ -426,6 +472,13 @@ class GeneratedTaskSettings(Record2SampleSettings):
     generation_deadline_seconds: float = config_option(
         DEFAULT_GENERATION_DEADLINE_SECONDS, help="The seconds that all attempts of one generation may take."
     )
+    designer_delay: int = config_option(
+        0,
+        help=(
+            "The rounds after which the Designer replies of a generation train, beside the task rollouts of "
+            "the first job of that later round; 0 trains no Designer reply."
+        ),
+    )
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -446,6 +499,12 @@ class GeneratedTaskSettings(Record2SampleSettings):
             raise ValueError("eval_fraction must be between 0 and 1")
         if isinstance(self.split_seed, bool) or not isinstance(self.split_seed, int):
             raise ValueError("split_seed must be an integer")
+        if (
+            isinstance(self.designer_delay, bool)
+            or not isinstance(self.designer_delay, int)
+            or self.designer_delay < 0
+        ):
+            raise ValueError("designer_delay must be a non-negative integer")
         if self.rounds > 0 and not self.description.strip():
             raise ValueError("rounds need a description (what the tasks are about)")
         if self.generator is not None:
@@ -462,12 +521,14 @@ class GenerationRunner(BackgroundJobRunner):
     ``generation_attempts`` is a positive int.
     ``generation_deadline_seconds`` is a positive number, including infinity for no time limit.
     ``eval_fraction`` is a number in [0, 1], and
-    ``split_seed`` is a non-bool int. ``unsaved_results`` is a FIFO queue of TaskRolloutResult values whose saves
-    failed; it may be empty and contain repeated task names, since the store keeps only each task's first result.
+    ``split_seed`` is a non-bool int. ``designer_delay`` is a non-negative int; above 0, each delivery saves the
+    generation's Designer advantages (``designer/<g>``) before its delivery marker. ``unsaved_results`` is a FIFO
+    queue of TaskRolloutResult values whose saves failed; it may be empty and contain repeated task names, since
+    the store keeps only each task's first result.
 
     Purpose: GeneratedTaskSamples submits jobs to this runner on one background worker. The runner writes
-    candidates, validation results, task publications and delivery markers. The stage reads them to schedule
-    rounds and emit samples. The trainer's job-end path also calls save_result. Both paths write the shared task
+    candidates, validation results, task publications, Designer advantages and delivery markers. The stage reads
+    them to schedule rounds and emit samples. The trainer's job-end path also calls save_result. Both paths write the shared task
     store through its existing operations. The retry queue is the runner's only mutable in-memory state shared
     between them. The scenario session owns and closes the store
     after the stage has stopped its worker.
@@ -484,6 +545,7 @@ class GenerationRunner(BackgroundJobRunner):
         generation_deadline_seconds: float,
         eval_fraction: float,
         split_seed: int,
+        designer_delay: int = 0,
     ) -> None:
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be non-empty text")
@@ -505,6 +567,8 @@ class GenerationRunner(BackgroundJobRunner):
             raise ValueError("eval_fraction must be between 0 and 1")
         if isinstance(split_seed, bool) or not isinstance(split_seed, int):
             raise ValueError("split_seed must be an integer")
+        if isinstance(designer_delay, bool) or not isinstance(designer_delay, int) or designer_delay < 0:
+            raise ValueError("designer_delay must be a non-negative integer")
         self.scenario = scenario
         self.task_store = task_store
         self.task_generator = task_generator
@@ -513,6 +577,7 @@ class GenerationRunner(BackgroundJobRunner):
         self.generation_deadline_seconds = generation_deadline_seconds
         self.eval_fraction = eval_fraction
         self.split_seed = split_seed
+        self.designer_delay = designer_delay
         self.unsaved_results: queue.SimpleQueue[TaskRolloutResult] = queue.SimpleQueue()
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
@@ -520,14 +585,18 @@ class GenerationRunner(BackgroundJobRunner):
         if self.task_generator is None or self.task_store is None:
             raise RuntimeError("a job needs a task generator and a task store")
         self.save_unsaved_results()
-        delivery_error = await self.deliver_results()
+        delivery = await self.deliver()
         if isinstance(job, DeliveryJob):
-            return DeliveryOutcome(receipt=job.receipt, error=delivery_error)
+            return delivery
         if isinstance(job, GenerationJob):
             generation = await self.run_generation(job)
             # A generation without train tasks has its complete results now.
-            delivery_error = await self.deliver_results() or delivery_error
-            return replace(generation, error=generation.error or delivery_error)
+            last_delivery = await self.deliver()
+            return replace(
+                generation,
+                error=generation.error or last_delivery.error or delivery.error,
+                undelivered=last_delivery.undelivered,
+            )
         raise TypeError(f"the round worker takes GenerationJob or DeliveryJob, not {type(job).__name__}")
 
     async def run_generation(self, job: GenerationJob) -> GenerationOutcome:
@@ -640,24 +709,56 @@ class GenerationRunner(BackgroundJobRunner):
             self.save_result(result)
 
     async def deliver_results(self) -> str:
+        """Send each generation whose train tasks all have results to the generator, oldest first (``deliver``).
+
+        Returns the error of the last delivery that failed.
+        """
+        return (await self.deliver()).error
+
+    async def deliver(self) -> DeliveryOutcome:
         """Send each generation whose train tasks all have results to the generator, oldest first.
 
-        Returns the error of the last delivery that failed; a failed generation waits for the next job, and later
-        generations still go out.
+        A failed generation waits for the next job, and later generations still go out. With ``designer_delay``
+        above 0, a generation that the generator took gets its Designer advantages saved before its delivery
+        marker (``save_designer_advantages``). The outcome names the error of the last failure and the generations
+        that the generator did not take.
         """
         if self.task_generator is None or self.task_store is None:
             raise RuntimeError("delivering results needs a task generator and a task store")
         error = ""
+        undelivered: list[int] = []
         for state in deliverable_generations(self.task_store):
             try:
                 await self.task_generator.record_results(
                     task_results(self.task_store, state), generation=state.generation
                 )
+                if self.designer_delay > 0:
+                    error = self.save_designer_advantages(state.generation) or error
             except Exception as exc:
                 logger.exception("the task generator did not take the results of generation %d", state.generation)
                 error = str(exc) or type(exc).__name__
+                undelivered.append(state.generation)
                 continue
             mark_delivered(self.task_store, state.generation)
+        return DeliveryOutcome(receipt=DELIVERY_RECEIPT, error=error, undelivered=tuple(undelivered))
+
+    def save_designer_advantages(self, generation: int) -> str:
+        """Save ``designer(generation)``: the advantages that the generator gives the generation's Designer replies.
+
+        A generator that fails to give them, or gives a value that is not a finite number by a record ID, trains
+        no reply of the generation: the saved mapping is empty, and the result is the error. Otherwise the result
+        is empty. A store that fails to save the mapping raises, so the delivery fails and runs again later.
+        """
+        if self.task_generator is None or self.task_store is None:
+            raise RuntimeError("Designer advantages need a task generator and a task store")
+        # The generator is a deployment's plugin: whatever it raises leaves the generation's replies untrained.
+        try:
+            advantages = checked_advantages(self.task_generator.designer_advantages(generation))
+            error = ""
+        except Exception as exc:
+            logger.exception("the task generator gave no Designer advantages for generation %d", generation)
+            advantages, error = {}, str(exc) or type(exc).__name__
+        save_designer_advantages(self.task_store, generation, advantages)
         return error
 
 
@@ -701,6 +802,19 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     a committed job trained and that has no result. When every train task of a generation has a result, the next
     job sends the generation's results to the generator. A restart sends the results that the generator did not
     receive.
+
+    **Designer replies.** With ``designer_delay`` d above 0, each delivery of generation g also saves
+    ``designer(g)`` of :mod:`reef.recipe.generated_tasks.results`, the generator's advantages of g's Designer
+    replies. Let the carrier round of g be the first complete generation at or after g + d that published a train
+    task (``carrier_round``). The stage hands the tasks of a round to the pipeline only when each generation that the
+    round carries has ``designer(g)``, reached the generator, or failed to reach it since this start. The job data
+    of the first task job that holds a task of the carrier round carries g's replies (``delayed_samples``); a
+    later job of that round carries none. The stage keeps g's Designer records from the publication of g's train
+    tasks until a committed job trained a task of the carrier round, so a restart before that commit rebuilds the
+    same replies; then it releases the records that ``designer(g)`` names. A carrying job that fails, or that a new
+    training start cancels, loses the replies. The pipeline leaves out a reply whose data is stale
+    (``TrainingPipeline.build_job_data``). The Designer records are in memory only where the stage reads the
+    scenario's records, so a carrying job needs control and the samples service in one process.
     """
 
     def __init__(
@@ -756,6 +870,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             generation_deadline_seconds=settings.generation_deadline_seconds,
             eval_fraction=settings.eval_fraction,
             split_seed=settings.split_seed,
+            designer_delay=settings.designer_delay,
         )
         if self.worker is None and self.rounds > 0:
             self.worker = BackgroundJobWorker(
@@ -772,6 +887,27 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         #: The generation that runs on the worker. One generation runs at a time.
         self.generation_in_flight: int | None = None
         self.last_error = ""
+        #: The rounds after which a generation's Designer replies train; 0 trains none.
+        self.designer_delay = settings.designer_delay
+        #: ``designer`` of the task store, by generation, as ``refresh_designer_state`` last read it.
+        self.designer_documents: dict[int, dict[str, float]] = {}
+        #: The generations whose results reached the generator, as ``refresh_designer_state`` last read them.
+        self.delivered: frozenset[int] = frozenset()
+        #: The complete generations that published a train task, in increasing order, as last read.
+        self.train_rounds: tuple[int, ...] = ()
+        #: The generations whose delivery failed since this start; the tasks of their carrier rounds do not wait.
+        self.undelivered: set[int] = set()
+        #: The generations whose carrier round has a task that a committed job trained.
+        self.carried: set[int] = set()
+        #: The records that can hold the Designer replies of each complete generation's train tasks.
+        self.generation_designer_records: dict[int, frozenset[str]] = {}
+        #: The delivery jobs on the worker whose outcome the stage has not read; counted only with designer_delay.
+        self.deliveries_in_flight = 0
+        #: Since this start: the Designer replies that job data carried, and the records that it skipped because
+        #: they had no usable training block or because the stage did not hold them.
+        self.carried_designer_samples = 0
+        self.uncaptured_designer_records = 0
+        self.missing_designer_records = 0
         store = self.task_store
         self.next_round = next_generation(store) if store is not None else 0
         self.completed_rounds = complete_generation_count(store) if store is not None else 0
@@ -784,10 +920,12 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                 # A stop can fall between the generation's end and the pipeline storing its tasks.
                 if published.name not in stored:
                     self.made.append(task_item(store, generation, published))
+        if self.designer_delay > 0:
+            self.refresh_designer_state()
         # A trained task without a result waits for the end of its task job (job_ended).
         # Results that a stop kept from the generator go out now, even when no other job is due.
         if store is not None and self.worker is not None and deliverable_generations(store):
-            self.worker.submit(DeliveryJob(receipt=DELIVERY_RECEIPT))
+            self.deliver_later()
 
     @classmethod
     def from_config(
@@ -883,16 +1021,167 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         }
         if self.running_round is not None:
             held |= self.running_round.record_ids()
-        return super().releasable_record_ids() - held
+        held_designer_records = self.held_designer_record_ids()
+        # A carried reply's record ends with its carrying commit, unless a live report or a round still needs it.
+        carried_designer_records = self.carried_designer_record_ids() - self.live_references() - held
+        return (super().releasable_record_ids() - held - held_designer_records) | carried_designer_records
 
     def background_jobs_running(self) -> bool:
-        """Return True while a round runs: its end can start the next round without a new record."""
-        return self.running_round is not None or super().background_jobs_running()
+        """Return True while a round runs: its end can start the next round without a new record. With
+        ``designer_delay`` above 0, also while a delivery runs: its end can release the tasks that wait for it."""
+        return self.running_round is not None or self.deliveries_in_flight > 0 or super().background_jobs_running()
 
     def made_samples(self) -> tuple[tuple[str, TaskSample], ...]:
-        """The published train tasks that the pipeline has not stored, each named ``generated-tasks/<task name>``."""
-        made, self.made = self.made, []
-        return tuple((f"{TASK_STORE_NAME}/{task.metadata['task']['name']}", task) for task in made)
+        """The published train tasks that the pipeline has not stored and that do not wait for Designer advantages
+        (``is_released``), each named ``generated-tasks/<task name>``."""
+        released: list[TaskSample] = []
+        waiting: list[TaskSample] = []
+        for task in self.made:
+            (released if self.is_released(task) else waiting).append(task)
+        self.made = waiting
+        return tuple((f"{TASK_STORE_NAME}/{task.metadata['task']['name']}", task) for task in released)
+
+    # ------------------------------------------------------------- Designer replies
+
+    def refresh_designer_state(self) -> None:
+        """Read the delivered generations, ``designer`` and the generations that published a train task again.
+
+        The delivered generations are read first: a delivery saves ``designer(g)`` before it marks g delivered, so
+        a generation read as delivered has its advantages in the later read.
+        """
+        if self.task_store is None:
+            return
+        self.delivered = delivered_generations(self.task_store)
+        self.designer_documents = designer_advantages(self.task_store)
+        self.train_rounds = tuple(sorted({generation for generation, _ in published_train_tasks(self.task_store)}))
+
+    def carried_by(self, round_number: int) -> tuple[int, ...]:
+        """The generations whose carrier round is ``round_number``, in increasing order."""
+        return tuple(
+            generation
+            for generation in self.train_rounds
+            if carrier_round(generation, self.train_rounds, self.designer_delay) == round_number
+        )
+
+    def is_released(self, task: TaskSample) -> bool:
+        """Whether the pipeline may store ``task``: with ``designer_delay`` above 0, each generation that its round
+        carries has ``designer(g)``, reached the generator, or failed to reach it since this start."""
+        round_number = task_round(task)
+        if self.designer_delay == 0 or round_number is None:
+            return True
+        return all(
+            generation in self.designer_documents or generation in self.delivered or generation in self.undelivered
+            for generation in self.carried_by(round_number)
+        )
+
+    def trained_rounds(self) -> frozenset[int]:
+        """The rounds that have a task that a committed job of this trainer trained."""
+        if self.samples is None:
+            return frozenset()
+        trainer = self.samples.trainer
+        return frozenset(
+            number
+            for stored in self.stored_tasks().values()
+            if stored.train_count(trainer) > 0 and (number := task_round(stored.sample)) is not None
+        )
+
+    def designer_records_of(self, generation: int) -> frozenset[str]:
+        """The records that can hold the Designer replies of the train tasks of the complete ``generation``."""
+        cached = self.generation_designer_records.get(generation)
+        if cached is not None:
+            return cached
+        store = self.task_store
+        state = None if store is None else store.generation(generation)
+        if store is None or state is None:
+            return frozenset()
+        published = {stored.name: stored for stored in store.tasks(split="train")}
+        found = frozenset(
+            record_id
+            for name in train_task_names(state)
+            if name in published
+            for record_id in designer_record_ids(read_harbor_task(store.path(published[name].files_digest)))
+        )
+        self.generation_designer_records[generation] = found
+        return found
+
+    def held_designer_record_ids(self) -> frozenset[str]:
+        """The Designer records that the stage keeps, so that the job that carries their replies can read them.
+
+        For each generation g that published a train task and whose carrier round has no task that a committed job
+        trained: before ``designer(g)`` exists, every record that can hold a reply of g's train tasks; after, the
+        records that ``designer(g)`` names. The last ``designer_delay`` generations of a run that ended have no
+        carrier round, and their records wait for a run that continues with more rounds. A generation that reached
+        the generator without ``designer(g)``, before the stage carried Designer replies, keeps nothing.
+        """
+        if self.designer_delay == 0 or self.task_store is None:
+            return frozenset()
+        held: set[str] = set()
+        trained: frozenset[int] | None = None
+        for generation in self.train_rounds:
+            if generation in self.carried:
+                continue
+            advantages = self.designer_documents.get(generation)
+            if advantages is None:
+                if generation not in self.delivered:
+                    held |= self.designer_records_of(generation)
+                continue
+            # Without a carrier round yet, the records wait: a run that continues with more rounds carries them.
+            carrier = carrier_round(generation, self.train_rounds, self.designer_delay)
+            if carrier is not None:
+                trained = self.trained_rounds() if trained is None else trained
+                if carrier in trained:
+                    self.carried.add(generation)
+                    continue
+            held |= set(advantages)
+        return frozenset(held)
+
+    def carried_designer_record_ids(self) -> frozenset[str]:
+        """The records that ``designer(g)`` names for each carried generation g and that the stage still holds: the
+        commit of the job that carried them is durable, so they are released."""
+        return frozenset(
+            record_id
+            for generation in self.carried
+            for record_id in self.designer_documents.get(generation, {})
+            if record_id in self.inferences
+        )
+
+    def delayed_samples(self, samples: tuple[Sample, ...]) -> tuple[DelayedSample, ...]:
+        """The Designer replies that the job data of ``samples`` carries, each with its advantage.
+
+        The data carries the replies of each generation g whose carrier round has a task in ``samples`` and no task
+        that a committed job trained, in generation order and then record ID order. Each reply is
+        ``DelayedSample(make_policy_trajectory(record, advantage), advantage)`` of a record that ``designer(g)``
+        names: the trajectory's reward is the advantage that trains it. A record that the stage does not hold, or
+        whose ``response.training`` block cannot make a delayed sample, is skipped and counted in the operational
+        metrics. With ``designer_delay`` 0 the result is empty.
+        """
+        if self.designer_delay == 0 or self.task_store is None:
+            return ()
+        self.refresh_designer_state()
+        rounds = {number for sample in samples if (number := task_round(sample)) is not None}
+        due = [
+            generation
+            for generation in sorted(self.designer_documents)
+            if carrier_round(generation, self.train_rounds, self.designer_delay) in rounds
+        ]
+        if not due:
+            return ()
+        trained = self.trained_rounds()
+        carried: list[DelayedSample] = []
+        for generation in due:
+            if carrier_round(generation, self.train_rounds, self.designer_delay) in trained:
+                continue
+            for record_id, advantage in sorted(self.designer_documents[generation].items()):
+                record = self.inferences.get(record_id)
+                if record is None:
+                    self.missing_designer_records += 1
+                    continue
+                try:
+                    carried.append(DelayedSample(make_policy_trajectory(record, advantage), advantage))
+                except (TypeError, ValueError):
+                    self.uncaptured_designer_records += 1
+        self.carried_designer_samples += len(carried)
+        return tuple(carried)
 
     def stored_tasks(self) -> dict[str, StoredSample]:
         """The generated tasks that the scenario's items hold for this trainer, by task name: the tasks that its
@@ -948,11 +1237,18 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         finished, self.ended_rounds = list(self.ended_rounds), []
         if self.worker is None:
             return tuple(finished)
-        for outcome in self.worker.poll():
+        outcomes = self.worker.poll()
+        for outcome in outcomes:
             if outcome.receipt == DELIVERY_RECEIPT:
-                self.last_error = (
-                    outcome.error if isinstance(outcome, DeliveryOutcome) else "the delivery did not finish"
-                )
+                self.deliveries_in_flight = max(0, self.deliveries_in_flight - 1)
+                if isinstance(outcome, DeliveryOutcome):
+                    self.last_error = outcome.error
+                    self.undelivered.update(outcome.undelivered)
+                else:
+                    self.last_error = "the delivery did not finish"
+                    if self.designer_delay > 0 and self.task_store is not None:
+                        # No round waits for a delivery that cannot run.
+                        self.undelivered.update(state.generation for state in deliverable_generations(self.task_store))
                 continue
             self.generation_in_flight = None
             if isinstance(outcome, Failed):
@@ -972,6 +1268,10 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             finished.append(RoundResult(made_train_tasks=bool(outcome.tasks), retry=not outcome.is_complete))
             self.made.extend(outcome.tasks)
             self.unfinished.update(task.metadata["task"]["name"] for task in outcome.tasks)
+            self.undelivered.update(outcome.undelivered)
+        # A delivery saves Designer advantages, and a generation publishes train tasks: both change which tasks wait.
+        if outcomes and self.designer_delay > 0:
+            self.refresh_designer_state()
         return tuple(finished)
 
     def close(self) -> None:
@@ -979,11 +1279,18 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             self.worker.close()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        return {
+        metrics: dict[str, float | int] = {
             **super().operational_metrics(),
             "waiting_source_sessions": len(self.waiting_sources),
             "generation_in_flight": 0 if self.generation_in_flight is None else 1,
         }
+        if self.designer_delay > 0:
+            metrics.update(
+                carried_designer_samples=self.carried_designer_samples,
+                uncaptured_designer_records=self.uncaptured_designer_records,
+                missing_designer_records=self.missing_designer_records,
+            )
+        return metrics
 
     def status(self) -> Mapping[str, Any]:
         store = self.task_store
@@ -1045,19 +1352,25 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
 
     def deliver_later(self) -> None:
         """Send the generator the results that it has not received, on the worker, after the jobs before it."""
-        if self.worker is not None:
-            self.worker.submit(DeliveryJob(receipt=DELIVERY_RECEIPT))
+        if self.worker is None or not self.worker.submit(DeliveryJob(receipt=DELIVERY_RECEIPT)):
+            return
+        if self.designer_delay > 0:
+            # Tasks can wait for the delivery's Designer advantages: the samples service polls until it ends.
+            self.deliveries_in_flight += 1
 
 
 class GeneratedTaskJobData(Sample2Job):
-    """The tasks of the next job as one task job's data: the ``TaskSample`` values themselves.
+    """The tasks of the next job as one task job's data: the ``TaskSample`` values themselves, and the Designer
+    replies that the job carries.
 
     The generated tasks train like any other sample. A job takes at least ``job_samples``
     tasks, 1 by default, and at most ``buffer_size``, 4 by default or ``job_samples`` when that is more. The
     training component rolls the tasks out on its own sampler and trains on their rollouts (a task job; see the
     training component's job parameters). The commit that submits the job counts the tasks trained;
     ``GeneratedTaskSamples.job_ended`` saves their results when the job ends. Imported train tasks train the same
-    way; only generated tasks get results.
+    way; only generated tasks get results. ``task_samples`` is the generated-task stage of the same pipeline, or
+    None; the job data's ``delayed`` holds the Designer replies that the stage gives the job's tasks
+    (``GeneratedTaskSamples.delayed_samples``), and none without the stage.
     """
 
     accepts_imported_tasks = True
@@ -1074,14 +1387,23 @@ class GeneratedTaskJobData(Sample2Job):
         settings = Sample2JobSettings.parse(config, plugin_class=cls)
         if not isinstance(record2sample, GeneratedTaskSamples):
             raise PluginConfigError(f"{cls.__name__} needs GeneratedTaskSamples, not {type(record2sample).__name__}")
-        return cls(context, buffer_size=settings.buffer_size, job_samples=settings.job_samples)
+        return cls(
+            context, buffer_size=settings.buffer_size, job_samples=settings.job_samples, task_samples=record2sample
+        )
 
     def __init__(
-        self, context: PipelineContext, *, buffer_size: int | None = None, job_samples: int | None = None
+        self,
+        context: PipelineContext,
+        *,
+        buffer_size: int | None = None,
+        job_samples: int | None = None,
+        task_samples: GeneratedTaskSamples | None = None,
     ) -> None:
         job_samples = 1 if job_samples is None else job_samples
         buffer_size = max(DEFAULT_BUFFER_SIZE, job_samples) if buffer_size is None else buffer_size
         super().__init__(context, buffer_size, job_samples)
+        self.task_samples = task_samples
 
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
-        return JobData(data_id, samples)
+        delayed = () if self.task_samples is None else self.task_samples.delayed_samples(samples)
+        return JobData(data_id, samples, delayed=delayed)

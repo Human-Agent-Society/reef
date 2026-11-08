@@ -203,6 +203,9 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     def check_job(self, job: TrainingJob) -> None:
         job_component(job)
+        # Delayed samples ride only with tasks (JobData.delayed); a harness step runs its tasks and trains no sample.
+        if job.kind == "task" and read_job_data(job.data_dir, job.data_id).delayed:
+            raise ValueError("a harness step trains no delayed samples; submit the job's tasks without them")
         tasks = job.parameters.get("evaluation_tasks")
         if tasks is not None and (not isinstance(tasks, list) or not all(isinstance(task, str) for task in tasks)):
             raise ValueError("parameters.evaluation_tasks of a harness job must be a list of task paths or null")

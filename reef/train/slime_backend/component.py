@@ -39,6 +39,7 @@ receive the job's data.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import signal
@@ -79,12 +80,18 @@ from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings, save_root
 from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.harbor_rollouts import (
+    DELAYED_ROWS_FILE,
     TaskJobSource,
+    TaskRolloutResult,
+    check_delayed_task_job,
     check_rollout_can_train,
     check_task_job_options,
     has_group_baseline,
+    read_delayed_rows,
     read_task_rollout_results,
     task_job_metrics,
+    trainable_delayed,
+    write_delayed_rows,
 )
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.objectives import resolve_slime_objective
@@ -112,6 +119,8 @@ from reef.train.slime_backend.rollout_group import (
 )
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 from reef.train.task_rollouts import HarborSettings, task_name
+
+logger = logging.getLogger(__name__)
 
 #: The rollout a job trains and the job's optimizer steps through it, written before the workers train it.
 ROLLOUT_FILE = "rollout.json"
@@ -279,11 +288,15 @@ class SlimeJobs(LocalJobComponent):
         elif dataset_family and job.kind != "task":
             raise ValueError(f"the {SLIME_NATIVE_FAMILY!r} loss family trains only dataset jobs and task jobs")
         if job.kind == "task":
-            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
+            data = read_job_data(job.data_dir, job.data_id)
+            tasks = [item for item in data.samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
                 raise ValueError("the tasks of one job need distinct names: each name groups its task's samples")
+            # The options of an objective that carries delayed samples; the samples themselves are filtered when the
+            # job runs (trainable_delayed), so a sample that cannot train never stops the job.
+            check_delayed_task_job(self.args, resolve_slime_objective(parameters.objective))
         elif parameters.harbor is not None:
             raise ValueError("the harbor parameter applies only to a job of tasks")
         loss_family = resolve_slime_objective(parameters.objective).loss_family
@@ -643,20 +656,49 @@ class SlimeJobRunner(SlimeJobs):
         """Train a task job with Slime's own loop, whose generate step runs one Harbor rollout of each sample's task.
 
         The job trains every task at least once: the last rollout's batch wraps to the first tasks when the tasks do
-        not fill it, as Slime's data source wraps to its next epoch.
+        not fill it, as Slime's data source wraps to its next epoch. When the job's objective carries samples, the
+        first rollout leads with the delayed groups, which hold the job data's delayed samples, so the rollouts hold
+        the tasks and those groups.
         """
         done = self.resume_slime_loop(job, directory)
+        data = read_job_data(job.data_dir, job.data_id)
+        objective = resolve_slime_objective(SlimeJobParameters.from_parameters(job.parameters).objective)
         tasks = tuple(
-            (task_name(item), str(item.task_path.resolve()))
-            for item in read_job_data(job.data_dir, job.data_id).samples
-            if isinstance(item, TaskSample)
+            (task_name(item), str(item.task_path.resolve())) for item in data.samples if isinstance(item, TaskSample)
         )
+        rows_path = directory / DELAYED_ROWS_FILE
+        dropped: dict[str, int] = {}
+        if objective.carries_samples and done > 0 and rows_path.exists():
+            # An earlier driver of the job chose its delayed samples and trained rollout 0; the resumed job keeps
+            # them, so its task offsets hold whatever options it resumes with.
+            delayed_count = len(read_delayed_rows(rows_path))
+        else:
+            delayed, dropped = trainable_delayed(self.args, objective, data.delayed)
+            if dropped:
+                logger.warning("job %s leaves out delayed samples that cannot train: %s", job.job_id, dropped)
+            if objective.carries_samples:
+                write_delayed_rows(directory, delayed)
+            delayed_count = len(delayed)
         source = TaskJobSource(
-            job.job_id, uuid.uuid4().hex, tasks, settings, str(directory.resolve()), self.train_timeout_s, done
+            job.job_id,
+            uuid.uuid4().hex,
+            tasks,
+            settings,
+            str(directory.resolve()),
+            self.train_timeout_s,
+            done,
+            carries_samples=objective.carries_samples,
+            delayed_count=delayed_count,
+            rollout_advantages=objective.rollout_advantages,
         )
         write_json(self.root / DATASET_FILE, source.to_record())
-        total = math.ceil(len(tasks) / self.args.rollout_batch_size)
+        prompts = len(tasks) + source.delayed_groups(self.args.n_samples_per_prompt)
+        total = math.ceil(prompts / self.args.rollout_batch_size)
         metrics = self.run_slime_loop(job, directory, done, total, save_interval, source)
+        if objective.carries_samples:
+            metrics["delayed_samples"] = delayed_count
+        if dropped:
+            metrics["delayed_left_out"] = dropped
         names = [name for name, _ in tasks]
         return {"task_rollouts": total, **metrics, **task_job_metrics(names, read_task_rollout_results(directory))}
 
@@ -693,13 +735,16 @@ class SlimeJobRunner(SlimeJobs):
         Each rollout runs Slime's sequence: the engines take the workers' weights, generate the rollout and release
         their memory, and the workers train it. Every ``save_interval`` rollouts (None: only the last) and the last
         save a checkpoint, whose step counts the job's rollouts. With ``tasks``, a rollout whose prompt groups cannot
-        train fails the job (``check_rollout_can_train``).
+        train fails the job (``check_rollout_can_train``). A job that carries samples ranks its checkpoint for
+        retention by the mean reward of the rollout's task rollouts, since Slime's raw reward also counts its delayed
+        rows.
         """
         if self.rollout_group is None:
             raise RuntimeError("Slime's own loop rolls out on the serving session, which this runner lacks")
         interval = save_interval or total
         metrics: dict[str, Any] = {}
         results_read = 0
+        rollout_results: list[TaskRolloutResult] = []
         for index in range(done, total):
             if self.stopping(directory):
                 break
@@ -709,7 +754,10 @@ class SlimeJobRunner(SlimeJobs):
             self.rollout_group.release()
             if tasks is not None:
                 results = [r for r in read_task_rollout_results(directory) if r.token == tasks.token]
-                check_rollout_can_train(results[results_read:], group_size=2 if has_group_baseline(self.args) else 1)
+                rollout_results = results[results_read:]
+                # A rule of the objective centers each reward on its group, as Slime's group baseline does.
+                centered = tasks.rollout_advantages is not None or has_group_baseline(self.args)
+                check_rollout_can_train(rollout_results, group_size=2 if centered else 1)
                 results_read = len(results)
             self.resolve(self.group.async_train(rollout_id, data))
             rollout_metrics = merge_rank_metrics(self.resolve(self.group.async_pop_metrics()))
@@ -720,6 +768,9 @@ class SlimeJobRunner(SlimeJobs):
                 continue
             rollout = SlimeRound(rollout_id, step, None, None, None, {})
             reward = rollout_metrics.get("rollout/raw_reward", rollout_metrics.get("rollout/rewards", 0.0))
+            if tasks is not None and tasks.carries_samples:
+                rewards = [result.reward for result in rollout_results if result.reward is not None]
+                reward = math.fsum(rewards) / len(rewards) if rewards else 0.0
             protected = set() if self.loaded_rollout_id is None else {self.loaded_rollout_id}
             with self.storage.admit(rollout_id=rollout_id, active_rollouts=protected) as storage_plan:
                 if storage_plan["blocked"]:

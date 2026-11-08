@@ -483,6 +483,14 @@ inference service never creates a scenario: create it first with
   service never returns a buffered answer without its record. A stream goes
   out as the engine sends it, and its record is appended when it ends.
 
+A call that sends ``x-reef-record-training: 1`` also keeps its exact sample in
+its record: the token IDs of the prompt and the reply, the sampled log-probs and
+the sampling distribution. The response does not carry them. A task generator
+sends it for replies that train later (SPADE's ``train_designer``). The
+service answers ``400`` when such a call streams, when ``temperature``,
+``top_p`` or ``top_k`` is in neither the call nor the scenario's serving
+config, or when the engine gives no exact sample. A routed external provider refuses it.
+
 **Control restarts.** While control is down, the inference service continues to
 answer from ``served_models`` and to record. Training jobs, sample requests and
 evaluation rollouts that are already queued continue; new ones wait for control,
