@@ -21,7 +21,7 @@ is due. The worker then asks for the next selection at that time.
 
 Each request names its trigger (``TRIGGERS``). The item records the time of the first request of each trigger in
 ``metadata["trigger:<name>"]``, so a reader can tell why the selection ran (RFC #1267). While a selection runs, its
-counts so far are in ``metadata["progress"]``.
+counts so far are in ``metadata["progress"]``. The worker keeps the log of each attempt (``QueueWorker.keeps_log``).
 
 While only background work runs, the next selection waits twice as long as the last one, from
 ``BACKGROUND_POLL_SECONDS`` up to ``MAX_BACKGROUND_POLL_SECONDS``. A selection that changed something resets the wait.
@@ -154,6 +154,8 @@ class SamplesWorker(QueueWorker):
     work in the background asks for the next selection after the backoff wait (``background_poll_seconds``). A
     selection that left only a set that waits for time asks for the next selection after ``due_in_seconds``.
     """
+
+    keeps_log = True
 
     def __init__(
         self, queue: WorkQueue, producers: SampleProducers, *, worker_id: str, poll_seconds: float = 0.2
