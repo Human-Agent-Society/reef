@@ -435,10 +435,11 @@ class DataStore(Plugin, ABC):
     def read(self, owner: str, item_id: str) -> StoredItem | None: ...
 
     @abstractmethod
-    def read_many(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]:
-        """The items of ``owner`` that ``item_ids`` name, with their content, each once, in the order of their first
-        ID in ``item_ids``. An ID that names no item gives none. A store reads them together, so that a write that
-        names many items does not read each one alone."""
+    def read_many(self, owner: str, item_ids: Sequence[str], *, content: bool = True) -> tuple[StoredItem, ...]:
+        """The items of ``owner`` that ``item_ids`` name, each once, in the order of their first ID in ``item_ids``.
+        An ID that names no item gives none. A store reads them together, so that a write that names many items does
+        not read each one alone. Without ``content``, each item's ``content`` is None, and the store does not read
+        it."""
 
     @abstractmethod
     def query(
@@ -804,10 +805,11 @@ class MemoryDataStore(DataStore):
         check_owner(owner)
         return self.items.get(owner, {}).get(item_id)
 
-    def read_many(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]:
+    def read_many(self, owner: str, item_ids: Sequence[str], *, content: bool = True) -> tuple[StoredItem, ...]:
         check_owner(owner)
         stored = self.items.get(owner, {})
-        return tuple(stored[item_id] for item_id in dict.fromkeys(item_ids) if item_id in stored)
+        found = (stored[item_id] for item_id in dict.fromkeys(item_ids) if item_id in stored)
+        return tuple(item if content else replace(item, content=None) for item in found)
 
     def query(
         self,

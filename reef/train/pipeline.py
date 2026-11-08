@@ -157,8 +157,7 @@ class TrainingPipeline:
 
     The trainer-facing methods (``push``, ``ready``, ``build_job_data``, and
     the others) run under the trainer's lock, whichever thread calls them (the
-    trainer's worker, admission's ``uploaded_sample``, the worker's
-    ``background_jobs_running``), and must not block on network or model
+    trainer's worker, the worker's ``background_jobs_running``), and must not block on network or model
     latency. Stages that call models run that work on a
     background worker and release it in ``close``, which the owning scenario
     calls when it drops the pipeline. State that lives only in memory is
@@ -363,13 +362,6 @@ class TrainingPipeline:
         """Read one record through the record-to-sample stage."""
         self.record2sample.push(item)
         self.store_samples()
-
-    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
-        """The training sample of an uploaded trajectory (``Record2Sample.uploaded_sample``); ``ValueError`` when the
-        recipe does not accept uploads or the trajectory cannot become a sample. Pure: admission calls it too."""
-        if not self.accepts_trajectories:
-            raise ValueError(f"{type(self.sample2job).__name__} does not accept uploaded trajectories")
-        return self.record2sample.uploaded_sample(trajectory)
 
     def job_ended(self, outcome: JobOutcome) -> None:
         """Give the record-to-sample stage the outcome of a job whose end the trainer committed."""
