@@ -42,7 +42,7 @@ generator:
         api_key: "{api_key}"
         # The cap of one reply, as the official solver; before #1110, Reef's Tinker chat route gives 1024 tokens.
         max_tokens: 16384
-        # Thinking off: a thinking model's rollout never assembles into one sample.
+        # Thinking off: a thinking model's rollout trains only its last turn.
         extra_body:
           chat_template_kwargs:
             enable_thinking: false

@@ -6,7 +6,8 @@
 # Supply REEF_TOKEN, E2B_API_KEY and CLAUDE_CODE_OAUTH_TOKEN (made with `claude setup-token`) through the shell.
 # REEF_AUTOENVSCALING_STATE_DIR is where this deployment keeps its state; REEF_AUTOENVSCALING_SEEDS_PATH is the seed
 # directory that `python -m recipes.beta.autoenvscaling.tmax` wrote; REEF_AUTOENVSCALING_MODEL_PATH is a local copy of
-# Qwen/Qwen3.5-9B (`huggingface-cli download Qwen/Qwen3.5-9B --local-dir <path>`).
+# Qwen/Qwen3.5-9B (`hf download Qwen/Qwen3.5-9B --local-dir <path>`). Export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# too: the trainer runs out of memory on a long sample without it.
 reef:
   host: 127.0.0.1
   port: 8900
@@ -23,7 +24,7 @@ inference:
   options:
     # Reef's serving engine and Slime's rollout engines each have a router; they need different ports.
     router-port: 31100
-    # The 64K window of the Tinker runs.
+    # A 64K window: a rollout ends at a history of 65536 - 16384 tokens, since SGLang refuses a longer prompt.
     context-length: 65536
     attention-backend: flashinfer
 # The generator service: checks the seeds and the variants and runs the calibration rollouts, with the harbor command line.
@@ -136,8 +137,6 @@ pipeline:
 training:
   backend: slime
   ready-timeout: 3600
-  # One job: 256 multi-turn rollouts in E2B, then one optimizer step and the checkpoint.
-  timeout-s: 14400
   config:
     checkpoint_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/checkpoints
   options:
@@ -176,8 +175,9 @@ training:
     seq-length: "66560"
     rollout-max-response-len: "16384"
     rollout-max-context-len: "65536"
-    # The rollout engines serve the 64K window of the Tinker runs; without it they serve 262144, and a longer sample
-    # runs the trainer out of memory (its logits and their gradient are about 17 GiB per GPU at 75K tokens).
+    # The rollout engines serve the same 64K window; without it they serve 262144, and a longer sample runs the trainer
+    # out of memory (its logits and their gradient are about 17 GiB per GPU at 75K tokens), as does a 64K sample without
+    # expandable segments.
     sglang-context-length: "65536"
     rollout-temperature: "1.0"
     # The Qwen3.5-9B model: Slime's spec and the model's shape.

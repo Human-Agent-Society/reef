@@ -8,7 +8,7 @@ AutoEnvScaling (preprint forthcoming) as a Reef task generator: a coding agent r
 
 The first two tables measure the tasks generated from sessions; no model has trained on those tasks yet. [Training runs](#training-runs) trains on seed tasks and their variants.
 
-In every run, the agent and the prompt Designer use `gpt-6-sol`, `gpt-6-luna` runs the tasks as a strong solver, and the tasks build and run in E2B. The runs are from 2026-09-30 to 2026-10-13.
+In the runs of the first two tables, the agent and the prompt Designer use `gpt-6-sol`, `gpt-6-luna` runs the tasks as a strong solver, and the tasks build and run in E2B. The runs are from 2026-09-30 to 2026-10-13.
 
 **Agent mode and the prompt Designer.** 77 SWE-Together sessions, 3 rebuilds each, so 231 tasks for each mode:
 
@@ -30,7 +30,12 @@ On the 15 sessions that both arms ran, the arms give 5 and 6 fair tasks. The che
 
 ### Training runs
 
-Qwen3.5-9B trained on TMax seed tasks and Claude Code's variants of them, with the `examples/tmax_seeds/` deployments and [#1215](#fixes-that-are-not-merged-yet). Each checkpoint ran Terminal-Bench 2.0 (89 tasks, 5 attempts each) with the training agent: `VerifiedTerminus2` with thinking off, as in training. avg@5 is the mean reward over the 445 attempts, with its 95% interval over tasks. The difference to the base model is paired over tasks, with a bootstrap 95% interval. Each backend measured its own base model: on Tinker through Reef's artifact evaluation, on Slime with Harbor against an SGLang engine outside Reef.
+Qwen3.5-9B trained on TMax seed tasks and Claude Code's variants of them, with [#1215](#fixes-that-are-not-merged-yet). The runs used the `examples/tmax_seeds/` deployments with these changes:
+
+- Tinker: steps 1 to 8 ran `serve-tinker.yaml` as written. Steps 9 to 50 ran 11 tasks of 32 rollouts per job (`count` 11, `rollouts_per_task` 32, `batch-size` 256), `jobs_per_round: 0` with `refill_tasks` 16, and the Harbor release of TMax v1.1 as seeds.
+- Slime: steps 1 to 6 ran `serve-slime.yaml` on 8 GPUs. From step 7, 2 rollout engines on 7 GPUs trained, so that the eighth GPU could run the evaluations. The run's image had Slime 540ea919 on Megatron core 0.19.2, built before Reef pinned Slime 8a53b680; this example has not run on the pinned Slime yet.
+
+Each checkpoint ran Terminal-Bench 2.0 (89 tasks, 5 attempts each) with the training agent: `VerifiedTerminus2` with thinking off, as in training. avg@5 is the mean over the 89 tasks of each task's mean reward, with a 95% interval over tasks; attempts that failed for an infrastructure reason are left out (3 for the Tinker base model). The difference to the base model is paired over tasks, with a bootstrap 95% interval. Each backend measured its own base model: on Tinker through Reef's artifact evaluation, on Slime with Harbor against an SGLang engine outside Reef. The two base results differ by 1.9 points. The serving differs too: SGLang ends a rollout at a shorter history than Tinker ([settings](#settings-the-examples-depend-on)).
 
 | Backend | Steps | Rollouts per step | Checkpoint | avg@5 | Against the base model |
 | --- | --- | --- | --- | --- | --- |
@@ -181,7 +186,7 @@ Reef refuses at startup a token that is missing or is no Claude Code OAuth token
 
 The pass rate of a task that ran is the mean reward of its training rollouts. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
-By default, the band does not decide what trains. The recipe trains each valid train task once, before the band is known. The objective that the deployment provides (`recipe.config.job_parameters.objective`) decides what such a group trains. The example `serve.yaml` names `recipes.task_group.tinker:TaskGroupTinkerObjective`: each rollout's advantage is its reward minus its task's mean reward, so a group whose rewards are all equal trains nothing, and a job whose groups are all equal is skipped. On Slime, a task job names the `slime_dataset` objective, and Slime's own GRPO trains it; `disable-grpo-std-normalization: true` in `training.options` gives the same advantage, the reward minus the task's mean reward, without the division by the group's standard deviation. With 0 or 1 rewards and four rollouts per task, a task outside the default band has equal rewards in its group, and it still takes a place in a batch. With the recipe's pool review on, the recipe's own band decides which tasks continue to train ([the training pool review](#the-training-pool-review)).
+By default, the band does not decide what trains. The recipe trains each valid train task once, before the band is known. The objective that the deployment provides (`recipe.config.job_parameters.objective`) decides what such a group trains. The Tinker examples (`serve-tinker.yaml`) name `recipes.task_group.tinker:TaskGroupTinkerObjective`: each rollout's advantage is its reward minus its task's mean reward, so a group whose rewards are all equal trains nothing, and a job whose groups are all equal is skipped. On Slime, a task job names the `slime_dataset` objective, and Slime's own GRPO trains it; `disable-grpo-std-normalization: true` in `training.options` gives the same advantage, the reward minus the task's mean reward, without the division by the group's standard deviation. With 0 or 1 rewards and four rollouts per task, a task outside the default band has equal rewards in its group, and it still takes a place in a batch. With the recipe's pool review on, the recipe's own band decides which tasks continue to train ([the training pool review](#the-training-pool-review)).
 
 ## The training pool review
 
@@ -438,11 +443,11 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
 
 Tinker trains a LoRA adapter of rank 32. Each round is one generation of 8 tasks, and one job of those 8 tasks with 8 rollouts each is one optimizer step. 8 rounds take at most 64 seeds.
 
-**On Slime.** Run the Reef image ([docker/README.md](../../../docker/README.md)) on one Linux node with 8 GPUs of 80 GB, with the E2B extra and the `harbor` command line. Download the model, start the deployment, and create the scenario as on Tinker:
+**On Slime.** Build the Reef image ([docker/README.md](../../../docker/README.md)) and run it on one Linux node with 8 GPUs of 80 GB, as [evolve your model](../../../docs/user-guide/evolve-your-model.rst) does: `docker run --gpus all --network host --ipc host --shm-size 64g -it reef bash`, with the model, the seeds and the state directory mounted. In the container, install the E2B extra (`pip install -e '.[e2b]'` in `/workspace/Reef`); the image has the `harbor` command line. Then download the model, start the deployment, and create the scenario as on Tinker:
 
 ```bash
-huggingface-cli download Qwen/Qwen3.5-9B --local-dir /models/Qwen3.5-9B
-export REEF_AUTOENVSCALING_MODEL_PATH=/models/Qwen3.5-9B
+hf download Qwen/Qwen3.5-9B --local-dir /models/Qwen3.5-9B
+export REEF_AUTOENVSCALING_MODEL_PATH=/models/Qwen3.5-9B PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export REEF_TOKEN=reef-local REEF_AUTOENVSCALING_STATE_DIR="$PWD/work/autoenvscaling-slime"   # and E2B_API_KEY
 export REEF_AUTOENVSCALING_SEEDS_PATH=/data/tmax-seeds CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 reef serve -c recipes/beta/autoenvscaling/examples/tmax_seeds/serve-slime.yaml
@@ -450,14 +455,14 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
   -d '{"name": "autoenvscaling"}' http://127.0.0.1:8900/reef/scenarios
 ```
 
-Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Slime's rollout engines, and 1 runs Reef's serving engine. Each job is one Slime rollout of 16 tasks with 16 rollouts each, trained as one optimizer step (`objective: slime_dataset`, GRPO without the division by the standard deviation). With `jobs_per_round: 0`, the next generation starts while fewer than 16 saved tasks wait, so the Designer works ahead of training. In the run of [training runs](#training-runs), a step took 45 to 60 minutes, most of it in the rollouts. Plan the disk before a long run: Reef keeps every step's weights as an artifact, about 18 GB in the artifact repository and as much again in its cache, and each Megatron checkpoint takes about 135 GB.
+Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Slime's rollout engines, and 1 runs Reef's serving engine. Each job is one Slime rollout of 16 tasks with 16 rollouts each, trained as one optimizer step (`objective: slime_dataset`, GRPO without the division by the standard deviation). With `jobs_per_round: 0`, the next generation starts while fewer than 16 saved tasks wait, so the Designer works ahead of training. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` reaches the trainer, which runs out of memory on a long sample without it, as it does without the 64K window. In the run of [training runs](#training-runs), a step took about 40 to 65 minutes (55 in the median) on 7 GPUs, most of it in the rollouts. Plan the disk before a long run: Reef keeps every step's weights as an artifact, about 18 GB in the artifact repository and as much again in its cache, and each Megatron checkpoint takes about 135 GB.
 
 ### Settings the examples depend on
 
 The examples need each of these settings, on Tinker and on Slime:
 
-- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0. A calibration rollout that fills the context ends the same way only with #1215; before it, the rollout does not score, so the calibration gets no measure of a long variant.
-- **The reply cap.** `max_tokens` in `llm_kwargs` caps each reply at 16384 tokens, as the official AutoEnvScaling solver. Before #1215, Reef's Tinker chat route gives a request without `max_tokens` 1024 tokens. Tinker takes a prompt whose length plus `max_tokens` passes the context, so the cap does not shorten a rollout's history. On the chat completions route, `model_info` caps nothing: Harbor only names its `max_output_tokens` to the model after a cut reply.
+- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0. A calibration rollout that fills the context ends the same way only with #1215; before it, Reef's inference route turns the engine's refusal into a 502, the rollout does not score, and the calibration gets no measure of a long variant.
+- **The reply cap.** `max_tokens` in `llm_kwargs` caps each reply at 16384 tokens, as the official AutoEnvScaling solver. Before #1215, Reef's Tinker chat route gives a request without `max_tokens` 1024 tokens. Tinker takes a prompt whose length plus `max_tokens` passes the context, so on Tinker the cap does not shorten a rollout's history. SGLang refuses such a prompt, so on Slime a rollout ends at a history of 65536 - 16384 = 49152 tokens; about 12% of the Slime run's training rollouts reached it. On the chat completions route, `model_info` caps nothing: Harbor only names its `max_output_tokens` to the model after a cut reply.
 - **No compaction, no thinking.** `enable_summarize: false`, as the official solver, and `enable_thinking: false`. Reef trains a rollout as one sample: a summarized history does not assemble into one, and in a thinking history only the last turn trains.
 - **No recording.** `record_terminal_session: false`: the tasks have no network, and on `e2b` the recorder's install hangs the rollout.
 - **The pace of the rounds.** On Tinker, a generation of `count` 8 fills one job of `buffer_size` 8, and `jobs_per_round: 1` starts the next round after that job. On Slime, `jobs_per_round: 0` starts the next round when the last one ends, while fewer than `refill_tasks` saved tasks wait, and `validation_concurrency` checks the candidates of one generation at the same time.
@@ -467,10 +472,10 @@ With compaction on, terminus-2's default, terminus-2 summarizes its history befo
 
 ### Fixes that are not merged yet
 
-The examples need [#1215](https://github.com/Human-Agent-Society/reef/pull/1215) besides this recipe. `examples/tmax_seeds/serve-tinker.yaml` ran with it on Tinker from 2026-11-04, and `examples/tmax_seeds/serve-slime.yaml` on Slime from 2026-11-07. Without it:
+The examples need [#1215](https://github.com/Human-Agent-Society/reef/pull/1215) besides this recipe. The runs of [training runs](#training-runs) had it, on Tinker from 2026-11-04 and on Slime from 2026-11-07. Without it:
 
-- On Tinker and on Slime, only the last reply of a multi-turn rollout trains: the sample masks every earlier reply.
-- On Tinker, a request without `max_tokens` gets 1024 tokens, one rollout longer than the model's context fails a whole optimizer step, a calibration rollout that fills the context gets a 502 and does not score, and a sampling client that sat idle too long fails every later call.
+- On Tinker and on Slime, only the last reply of a multi-turn rollout trains: the sample masks every earlier reply. A calibration rollout that fills the context gets a 502 and does not score.
+- On Tinker, a request without `max_tokens` gets 1024 tokens, one rollout longer than the model's context fails a whole optimizer step, and a sampling client that sat idle too long fails every later call.
 
 ## Time per session, and training from saved tasks
 

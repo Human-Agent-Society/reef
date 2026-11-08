@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -913,8 +914,12 @@ def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimi
     tinker = yaml.safe_load((EXAMPLES / "tmax_seeds/serve-tinker.yaml").read_text())
     parameters = slime["recipe"]["config"]["job_parameters"]
     # The calibration measures a task with the agent that trains on it, and both backends train the same agent.
-    assert slime["generator"]["agent"] == parameters["harbor"]["agent"]
-    assert parameters["harbor"]["agent"] == tinker["recipe"]["config"]["job_parameters"]["rollout"]["agent"]
+    harbor, rollout = parameters["harbor"], tinker["recipe"]["config"]["job_parameters"]["rollout"]
+    assert slime["generator"]["agent"] == harbor["agent"] == rollout["agent"]
+    assert (harbor["environment"], harbor["scaffold_tolerance"]) == (
+        rollout["environment"],
+        rollout["scaffold_tolerance"],
+    )
     # The same seeds, Designer, band and calibration as on Tinker.
     designer_keys = ("designer", "designer_harness", "claude_model", "band_low", "band_high", "adaptive")
     designer_keys += ("variant_share", "review", "calibration", "seed_tasks_path")
@@ -932,12 +937,27 @@ def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimi
     tasks = slime["pipeline"]["sample2job"]["config"]["buffer_size"]
     assert int(options["rollout-batch-size"]) == tasks
     assert int(options["global-batch-size"]) == tasks * int(options["n-samples-per-prompt"])
-    # The actor, the rollout engines and Reef's serving engine share one node.
-    used = int(options["actor-num-gpus-per-node"]) + int(options["rollout-num-gpus"]) + slime["inference"]["num-gpus"]
-    assert used == int(options["num-gpus-per-node"])
-    # The engines serve the window that the trainer's samples fit in.
+    # The actor, the rollout engines and Reef's serving engine share one node, and the actor's parallel layout fits.
+    actor = int(options["actor-num-gpus-per-node"])
+    assert actor + int(options["rollout-num-gpus"]) + slime["inference"]["num-gpus"] == int(
+        options["num-gpus-per-node"]
+    )
+    layout = ("tensor-model-parallel-size", "context-parallel-size", "pipeline-model-parallel-size")
+    assert actor % math.prod(int(options[name]) for name in layout) == 0
+    assert slime["inference"]["options"]["router-port"] != int(options["sglang-router-port"])
+    # The engines serve the window that the trainer's samples fit in, and a training reply has the calibration's cap.
     window = slime["inference"]["options"]["context-length"]
     assert int(options["sglang-context-length"]) == int(options["rollout-max-context-len"]) == window
+    assert int(options["rollout-max-response-len"]) == harbor["agent"]["kwargs"]["llm_kwargs"]["max_tokens"]
+
+
+@pytest.mark.parametrize("name", (*TINKER_EXAMPLES, SLIME_EXAMPLE))
+def test_an_examples_stage_settings_parse(name: str) -> None:
+    stage = yaml.safe_load((EXAMPLES / name).read_text())["pipeline"]["record2sample"]["config"]
+    settings = GeneratedTaskSettings.parse(stage, plugin_class=GeneratedTaskSamples)
+    if name == SLIME_EXAMPLE:
+        # Generation runs ahead of training, and a generation's candidates are checked at the same time.
+        assert (settings.jobs_per_round, settings.refill_tasks, settings.validation_concurrency) == (0, 16, 16)
 
 
 def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_path: Path) -> None:
