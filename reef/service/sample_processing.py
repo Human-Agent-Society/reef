@@ -5,13 +5,26 @@ from __future__ import annotations
 import time
 
 from reef.dispatcher import Dispatcher
-from reef.record2sample.service import SAMPLES_QUEUE
-from reef.storage.work_queue import JsonValue, WorkItem
+from reef.record2sample.service import SAMPLES_QUEUE, selection_triggers
+from reef.storage.work_queue import HELD_STATES, JsonValue, WorkItem
+
+#: The most tasks that one page with ``changed=True`` reads to fill the page.
+MAX_SCANNED_TASKS = 5000
+#: The tasks that one read of the queue gives while a page with ``changed=True`` fills.
+SCAN_BATCH = 200
 
 
 def processing_item(item: WorkItem) -> dict[str, JsonValue]:
-    """Return the public task fields. Queue payloads and worker identities stay internal."""
+    """Return the public task fields. Queue payloads and worker identities stay internal.
+
+    ``triggers`` lists why the task ran (``selection_triggers``). ``progress`` holds the counts so far of the attempt
+    that runs now, and is null otherwise.
+    """
     result = item.result or {}
+    progress = item.metadata.get("progress")
+    current = (
+        item.state in HELD_STATES and isinstance(progress, dict) and progress.get("attempt") == item.attempt_count
+    )
     return {
         "id": item.id,
         "component": item.payload.get("component"),
@@ -26,7 +39,14 @@ def processing_item(item: WorkItem) -> dict[str, JsonValue]:
         "background": result.get("background"),
         "records_read": result.get("records_read"),
         "samples_created": result.get("samples_created"),
+        "triggers": selection_triggers(item),
+        "progress": progress if current else None,
     }
+
+
+def unchanged(item: WorkItem) -> bool:
+    """Whether ``item`` finished and gave its trainer nothing new."""
+    return item.state == "finished" and (item.result or {}).get("changed") is False
 
 
 def get_processing(dispatcher: Dispatcher, scenario: str, task_id: str) -> dict[str, JsonValue] | None:
@@ -42,20 +62,28 @@ def list_processing(
     state: str | None = None,
     before: int | None = None,
     limit: int = 50,
+    changed: bool = False,
 ) -> dict[str, JsonValue]:
     """Return one task page and counts of all retained tasks of the scenario.
 
     ``before`` excludes newer creation sequences. ``limit`` is 1 to 100. Counts are independent of the filter.
     Each task's counts cover its completed attempt only. Missing results remain null, including legacy results.
+
+    With ``changed``, the page omits the finished tasks that gave the trainer nothing new (``unchanged``), and reads
+    at most ``MAX_SCANNED_TASKS`` tasks to fill it. ``hidden`` then lists each run of omitted tasks: ``after`` is the
+    ID of the shown task just newer than the run, or null at the top of the page; ``count`` is the number of tasks
+    in the run; ``first_created_at`` and ``last_created_at`` are the creation times of its oldest and newest task.
+    Without ``changed``, ``hidden`` is empty.
     """
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     with dispatcher.locked_scenario(scenario) as current:
         enabled = any(component.trainer.trains for component in current.trainers)
-    page = dispatcher.queue.page(
-        SAMPLES_QUEUE, scenario=scenario, state=state, before_sequence=before, limit=limit + 1
+    rows, hidden, next_cursor = (
+        changed_page(dispatcher, scenario, state, before, limit)
+        if changed
+        else plain_page(dispatcher, scenario, state, before, limit)
     )
-    rows = page[:limit]
     return {
         "scenario": scenario,
         "enabled": enabled,
@@ -63,5 +91,61 @@ def list_processing(
         "retention_seconds": dispatcher.work_retention_seconds,
         "counts": dict(dispatcher.queue.counts(SAMPLES_QUEUE, scenario=scenario)),
         "tasks": [processing_item(item) for item in rows],
-        "next": rows[-1].created_sequence if len(page) > limit else None,
+        "hidden": hidden,
+        "next": next_cursor,
     }
+
+
+def plain_page(
+    dispatcher: Dispatcher, scenario: str, state: str | None, before: int | None, limit: int
+) -> tuple[list[WorkItem], list[JsonValue], int | None]:
+    """The newest ``limit`` tasks before ``before``, no hidden runs, and the cursor of the next page or None."""
+    page = dispatcher.queue.page(
+        SAMPLES_QUEUE, scenario=scenario, state=state, before_sequence=before, limit=limit + 1
+    )
+    rows = list(page[:limit])
+    return rows, [], rows[-1].created_sequence if len(page) > limit else None
+
+
+def changed_page(
+    dispatcher: Dispatcher, scenario: str, state: str | None, before: int | None, limit: int
+) -> tuple[list[WorkItem], list[JsonValue], int | None]:
+    """The newest ``limit`` tasks before ``before`` that are not ``unchanged``, the runs of omitted tasks between
+    them, and the cursor of the next page or None. A page that reads ``MAX_SCANNED_TASKS`` tasks ends there. A run
+    after the last shown task belongs to the next page, so a page that is full does not list it."""
+    rows: list[WorkItem] = []
+    hidden: list[JsonValue] = []
+    run: list[WorkItem] = []
+    cursor, scanned = before, 0
+
+    def close_run() -> None:
+        if run:
+            hidden.append(
+                {
+                    "after": rows[-1].id if rows else None,
+                    "count": len(run),
+                    "first_created_at": run[-1].created_at,
+                    "last_created_at": run[0].created_at,
+                }
+            )
+            run.clear()
+
+    while scanned < MAX_SCANNED_TASKS:
+        batch = dispatcher.queue.page(
+            SAMPLES_QUEUE, scenario=scenario, state=state, before_sequence=cursor, limit=SCAN_BATCH
+        )
+        for item in batch:
+            scanned += 1
+            cursor = item.created_sequence
+            if unchanged(item):
+                run.append(item)
+                continue
+            if len(rows) == limit:
+                return rows, hidden, rows[-1].created_sequence
+            close_run()
+            rows.append(item)
+        if len(batch) < SCAN_BATCH:
+            close_run()
+            return rows, hidden, None
+    close_run()
+    return rows, hidden, cursor

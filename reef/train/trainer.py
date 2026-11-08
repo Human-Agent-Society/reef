@@ -27,7 +27,7 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
-from reef.record2sample.service import ProducedSamples
+from reef.record2sample.service import ProducedSamples, SampleProgress
 from reef.storage.commits import CommitRecord
 from reef.storage.record_items import used_record, used_records
 from reef.storage.records import RecordStore
@@ -522,11 +522,12 @@ class Trainer:
         if item.request_type in self.pipeline.required_request_types:
             self._pipeline.push(item)
 
-    def produce_samples(self) -> ProducedSamples:
+    def produce_samples(self, progress: SampleProgress | None = None) -> ProducedSamples:
         """Read the job ends of this trainer's state, push every record that arrived since the last call into the
         pipeline and make samples of the formed record sets; return whether the trainer received new input (samples or
         requests), whether background work of the pipeline still runs, and when a set that waits for time alone is
-        due, so the samples service comes back."""
+        due, so the samples service comes back. ``progress`` gets the counts so far after each page of records and
+        after the stage runs."""
         with self._lock:
             if not self.trains:
                 return ProducedSamples(changed=False, background=False)
@@ -536,8 +537,17 @@ class Trainer:
             self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
             before_records = self._data_offset + self._used_read
             before_samples = self._pipeline.stored_sample_count
-            self.read_records()
+
+            def report() -> None:
+                if progress is not None:
+                    progress(
+                        self._data_offset + self._used_read - before_records,
+                        self._pipeline.stored_sample_count - before_samples,
+                    )
+
+            self.read_records(report)
             stored = self._pipeline.produce()
+            report()
             self._pipeline.settle_ended_records(self.committed_record_ids)
             self.skipped_record_ids -= self.committed_record_ids
             if self.skipped_record_ids:
@@ -574,10 +584,10 @@ class Trainer:
         with self._lock:
             self.read_records()
 
-    def read_records(self) -> None:
-        """Push every record after the record cursor into the pipeline and move the cursor. The samples service
-        calls it for a trainer that trains (``produce_samples``); ``read_new_records`` calls it for one that trains
-        nothing. The caller holds the lock."""
+    def read_records(self, page_read: Callable[[], None] | None = None) -> None:
+        """Push every record after the record cursor into the pipeline and move the cursor; call ``page_read`` after
+        each page. The samples service calls it for a trainer that trains (``produce_samples``);
+        ``read_new_records`` calls it for one that trains nothing. The caller holds the lock."""
         self.read_used_records()
         while True:
             items = self._records.replay_page(
@@ -591,6 +601,8 @@ class Trainer:
                 self.push_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
+            if page_read is not None:
+                page_read()
 
     def used_record(self, record_id: str) -> AgentRecord | None:
         """The record item of another scenario that this scenario uses, read as its record, or None."""

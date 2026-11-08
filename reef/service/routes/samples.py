@@ -30,6 +30,9 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
             limit = int(request.query.get("limit", "50"))
         except ValueError:
             raise web.HTTPBadRequest(text="before and limit must be integers") from None
+        changed = request.query.get("changed", "false")
+        if changed not in ("true", "false"):
+            raise web.HTTPBadRequest(text="changed must be true or false")
         listing = await asyncio.to_thread(
             list_processing,
             dispatcher,
@@ -37,6 +40,7 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
             state=request.query.get("state"),
             before=before,
             limit=limit,
+            changed=changed == "true",
         )
         return web.json_response(listing)
 
