@@ -285,8 +285,10 @@ def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
     recipe_type = recipe_class_for(recipe)
     weight_type = None if recipe_type is None else selected_weight_training(recipe_type, config)
     assert weight_type is not None, f"reef.recipe {recipe!r} must train weights"
+    # As the service does: the recipe's parameters with the deployment's job_parameters over them.
     runtime = SlimeDeployment().component_config(
-        asdict(service_config_from_mapping(config)), default_parameters=weight_type.default_parameters()
+        asdict(service_config_from_mapping(config)),
+        default_parameters=weight_type.configured_parameters(config["reef"].get("job_parameters")),
     )
     loss_family = runtime["loss_family"]
     assert runtime["recipe"] == recipe
@@ -415,6 +417,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/beta/autoenvscaling/examples/tinker/serve.yaml",
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
         "recipes/beta/spade/examples/tinker/serve.yaml",
+        "recipes/beta/spade/examples/slime/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
