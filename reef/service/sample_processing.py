@@ -39,6 +39,7 @@ def processing_item(item: WorkItem) -> dict[str, JsonValue]:
         "background": result.get("background"),
         "records_read": result.get("records_read"),
         "samples_created": result.get("samples_created"),
+        "record_sequences": result.get("record_sequences"),
         "triggers": selection_triggers(item),
         "progress": progress if current else None,
     }

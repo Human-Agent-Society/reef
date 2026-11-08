@@ -2965,7 +2965,7 @@ An unknown task, or a task of another scenario, returns 404.
 
 Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at``, ``started_at``,
 ``ended_at``, ``available_at``, ``error``, ``changed``, ``background``, ``records_read``, ``samples_created``,
-``triggers`` and ``progress``.
+``record_sequences``, ``triggers`` and ``progress``.
 Times are Unix seconds. Unavailable fields are null.
 ``triggers`` lists why the task ran, oldest first. Each entry has ``name`` and ``at``, the time of the first request.
 A name is ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``.
@@ -2973,6 +2973,10 @@ Only ``records`` and ``data`` bring new records. The others let a stage make sam
 A task from an older Reef has no triggers.
 ``progress`` holds the counts so far of the attempt that runs now: ``attempt``, ``records_read``,
 ``samples_created`` and ``at``. It is null for a task that does not run.
+``record_sequences`` is ``[first, last]``: the data sequences of the first and last record of the scenario that
+the completed attempt read. It is null when the attempt read none, and for a task from an older Reef.
+A sample that a task stored has the item metadata ``stored_by_task`` and ``read_by_task``.
+A data query with ``group_key`` set to one of them finds the samples of one task.
 ``started_at`` is the first attempt's start. ``error`` can describe a queued task's previous failed attempt.
 
 Processing counts describe the completed attempt only; they exclude earlier failed attempts.
