@@ -2030,7 +2030,7 @@ which are not records.
        the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
 
    ``pipeline.record2sample.config.refill_tasks`` : 1
-       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait. With ``pipeline.sample2job.config.pool_capacity`` above 0, it must stay 1.
+       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait. With ``pool_capacity`` above 0, it must stay 1.
 
    ``pipeline.record2sample.config.rounds`` : 0
        rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
@@ -2059,6 +2059,24 @@ which are not records.
    ``pipeline.record2sample.config.validation_concurrency`` : 1
        candidates that one generation checks at once. After a check that fails to run, no further check starts, and the attempt fails when the running checks end.
 
+   ``pipeline.record2sample.config.pool_capacity`` : 0
+       0 trains each train task once. Above 0, a task trains again after its job ends, and rounds start only while fewer tasks than this are active.
+
+   ``pipeline.record2sample.config.review_interval`` : 16
+       task jobs between two pool reviews; 0 reviews nothing
+
+   ``pipeline.record2sample.config.review_window`` : 4
+       the most recent rewards of a task that a review reads; at least 2
+
+   ``pipeline.record2sample.config.review_band_low`` : 0.25
+       a review retires a task whose pass rate is below this; between 0 and 1
+
+   ``pipeline.record2sample.config.review_band_high`` : 0.75
+       a review retires a task whose pass rate is above this; between ``review_band_low`` and 1
+
+   ``pipeline.record2sample.config.review_min_reward_std`` : 0.1
+       a review retires a task whose rewards have a smaller population standard deviation; 0 turns this rule off
+
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
 The task files go in the task file store; see `Choose the task file store
@@ -2085,30 +2103,13 @@ whatever Tinker's batch size (``training.options.batch-size``) is:
    ``pipeline.sample2job.config.buffer_size`` : 4
        the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
-   ``pipeline.sample2job.config.pool_capacity`` : 0
-       0 trains each train task once. Above 0, a task trains again after its job ends, and rounds start only while fewer tasks than this are active.
-
-   ``pipeline.sample2job.config.review_interval`` : 16
-       task jobs between two pool reviews; 0 reviews nothing
-
-   ``pipeline.sample2job.config.review_window`` : 4
-       the most recent rewards of a task that a review reads; at least 2
-
-   ``pipeline.sample2job.config.review_band_low`` : 0.25
-       a review retires a task whose pass rate is below this; between 0 and 1
-
-   ``pipeline.sample2job.config.review_band_high`` : 0.75
-       a review retires a task whose pass rate is above this; between ``review_band_low`` and 1
-
-   ``pipeline.sample2job.config.review_min_reward_std`` : 0.1
-       a review retires a task whose rewards have a smaller population standard deviation; 0 turns this rule off
-
-With ``pool_capacity`` above 0, the train tasks form a training pool. When a
-task's job ends, the stage saves a new task item for the task's next use,
-``<scenario>.generated-tasks.<task name>@<k>`` for use ``k``, after the items
-that wait. So the tasks train in turn, and each item trains once. The trainer
-can start the next job before the stage reads the end of the job before it;
-the tasks of that next job wait for the end of their own job. A new round
+With ``pipeline.record2sample.config.pool_capacity`` above 0, the train tasks
+form a training pool. When a task's job ends, the stage saves a new task item
+for the task's next use, ``<scenario>.generated-tasks.<task name>@<k>`` for use
+``k``, after the items that wait. So the tasks train in turn, and each item
+trains once. The trainer can start the next job before the stage reads the end
+of the job before it; the tasks of that next job wait for the end of their own
+job. A new round
 starts only while fewer tasks than ``pool_capacity`` are active, so the pool
 can hold more tasks than the capacity by the train tasks of one generation.
 The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks`` must

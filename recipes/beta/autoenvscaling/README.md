@@ -191,13 +191,12 @@ By default, the band does not decide what trains. The recipe trains each valid t
 
 ## The training pool review
 
-By default, each train task trains once. With `pool_capacity` above 0 in `pipeline.sample2job.config`, the recipe keeps a training pool, as AutoEnvScaling's self-play loop does. When a task's job ends, the task waits for a job again after the tasks that wait already, so the tasks train in turn. A new generation starts only while fewer tasks than `pool_capacity` are active.
+By default, each train task trains once. With `pool_capacity` above 0 in `pipeline.record2sample.config`, the recipe keeps a training pool, as AutoEnvScaling's self-play loop does. When a task's job ends, the task waits for a job again after the tasks that wait already, so the tasks train in turn. A new generation starts only while fewer tasks than `pool_capacity` are active.
 
 ```yaml
 pipeline:
-  sample2job:
+  record2sample:
     config:
-      buffer_size: 8
       pool_capacity: 32
 ```
 

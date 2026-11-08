@@ -23,7 +23,7 @@ that made no train task, a failed task job, and no unfinished task are followed 
 the task store and the scenario's items: the scenario still uses the train tasks that did not train, and a later job takes
 them again.
 
-With ``pool_capacity`` above 0 (``TaskJobSettings``), each train task trains again: when its job ends, the stage
+With ``pool_capacity`` above 0 (``GeneratedTaskSettings``), each train task trains again: when its job ends, the stage
 makes the task's sample of the next use, which waits after the samples that wait already. Rounds then start only
 while fewer train tasks than ``pool_capacity`` are active. Every ``review_interval`` jobs, a review retires the tasks
 whose recent rewards are outside the band or do not spread (:mod:`reef.recipe.generated_tasks.review`), and the
@@ -452,10 +452,14 @@ class GeneratedTaskSettings(Record2SampleSettings):
     * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
     * ``eval_fraction`` is a number in [0, 1]; ``split_seed`` an int.
     * ``generation_attempts`` and ``generation_deadline_seconds`` are positive.
+    * ``pool_capacity`` is a non-negative int; 0 trains each train task once, and above 0 each one trains again until
+      a review retires it, with ``refill_tasks`` 1. The ``review_*`` values are those of ``ReviewSettings``; with
+      ``pool_capacity`` 0 they keep their defaults.
     * ``max_staleness`` is as in ``Record2SampleSettings``.
 
     The constructor refuses other values.
-    Purpose: ``GeneratedTaskSamples.from_config`` parses it from ``pipeline.record2sample.config``.
+    Purpose: ``GeneratedTaskSamples.from_config`` parses it from ``pipeline.record2sample.config``, and
+    ``GeneratedTaskSamples`` takes the training pool from it (``training_pool``).
     """
 
     rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
@@ -485,6 +489,25 @@ class GeneratedTaskSettings(Record2SampleSettings):
         DEFAULT_GENERATION_DEADLINE_SECONDS, help="The seconds that all attempts of one generation may take."
     )
     validation_concurrency: int = config_option(1, help="The candidates that one generation checks at once.")
+    pool_capacity: int = config_option(
+        0, help="Above 0, tasks train again, and rounds start only while fewer tasks than this are active."
+    )
+    review_interval: int = config_option(
+        DEFAULT_REVIEW_INTERVAL, help="The task jobs between two pool reviews; 0 reviews nothing."
+    )
+    review_window: int = config_option(
+        DEFAULT_REVIEW_WINDOW, help="The most recent rewards of a task that a review reads."
+    )
+    review_band_low: float = config_option(
+        DEFAULT_REVIEW_BAND_LOW, help="A review retires a task whose pass rate is below this."
+    )
+    review_band_high: float = config_option(
+        DEFAULT_REVIEW_BAND_HIGH, help="A review retires a task whose pass rate is above this."
+    )
+    review_min_reward_std: float = config_option(
+        DEFAULT_REVIEW_MIN_REWARD_STD,
+        help="A review retires a task whose rewards have a smaller standard deviation; 0 turns this off.",
+    )
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -511,6 +534,30 @@ class GeneratedTaskSettings(Record2SampleSettings):
             raise ValueError("rounds need a description (what the tasks are about)")
         if self.generator is not None:
             TaskGenerator.reference(self.generator, setting="pipeline.record2sample.config.generator")
+        if isinstance(self.pool_capacity, bool) or not isinstance(self.pool_capacity, int) or self.pool_capacity < 0:
+            raise ValueError("pool_capacity must be a non-negative integer")
+        if self.pool_capacity > 0 and self.refill_tasks != 1:
+            raise ValueError("pool_capacity sets when rounds start: leave refill_tasks at 1")
+        review = self.review_settings()
+        # The parsed settings cannot tell a default from a key set to it, so a key that changes a default counts.
+        if self.pool_capacity == 0 and review != DEFAULT_REVIEW_SETTINGS:
+            raise ValueError("the review_* settings need a pool_capacity above 0")
+
+    def review_settings(self) -> ReviewSettings:
+        """The rule of the pool reviews. Raises ``ValueError`` for a review setting out of its range."""
+        return ReviewSettings(
+            interval=self.review_interval,
+            window=self.review_window,
+            band_low=self.review_band_low,
+            band_high=self.review_band_high,
+            min_reward_std=self.review_min_reward_std,
+        )
+
+    def training_pool(self) -> TrainingPoolSettings | None:
+        """The training pool, or None with ``pool_capacity`` 0."""
+        if self.pool_capacity == 0:
+            return None
+        return TrainingPoolSettings(capacity=self.pool_capacity, review=self.review_settings())
 
 
 class GenerationRunner(BackgroundJobRunner):
@@ -815,8 +862,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     job sends the generation's results to the generator. A restart sends the results that the generator did not
     receive.
 
-    **Training pool.** Without one, each train task trains once. ``use_training_pool`` gives the stage one
-    (``TrainingPoolSettings``). Then a round is due only while fewer train tasks than its capacity are active
+    **Training pool.** Without one, each train task trains once. With ``pool_capacity`` above 0, the stage has one
+    (``GeneratedTaskSettings.training_pool``). Then a round is due only while fewer train tasks than its capacity are active
     (``active_task_count``), in place of the ``refill_tasks`` rule, and the last case of the list above is "no task
     is active" in place of "no train task is unfinished". A train task of a complete generation is active until a
     review retires it. Each use of a task trains one sample of it: the first use trains the task's sample above, and
@@ -897,8 +944,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         self.unfinished: set[str] = set()
         #: The generation that runs on the worker. One generation runs at a time.
         self.generation_in_flight: int | None = None
-        #: The training pool (``use_training_pool``); None trains each train task once.
-        self.training_pool: TrainingPoolSettings | None = None
+        #: The training pool (``GeneratedTaskSettings.training_pool``); None trains each train task once.
+        self.training_pool = settings.training_pool()
         self.last_error = ""
         store = self.task_store
         self.next_round = next_generation(store) if store is not None else 0
@@ -912,6 +959,10 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                 # A stop can fall between the generation's end and the pipeline storing its tasks.
                 if published.name not in stored:
                     self.made.append(task_item(store, generation, published))
+            # Each active task whose last use ended without its next sample gets that sample now: after a stop, and
+            # a task that trained before the deployment set pool_capacity, which has a first result and no saved use.
+            if self.training_pool is not None:
+                self.made.extend(self.next_uses(stored, results=frozenset(saved)))
         # A trained task without a result waits for the end of its task job (job_ended).
         # Results that a stop kept from the generator go out now, even when no other job is due.
         if store is not None and self.worker is not None and deliverable_generations(store):
@@ -948,20 +999,6 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         context = ReportContext(report, report_score(report), tuple(self.inferences[call] for call in calls))
         if self.source_grouping.is_source_report(context):
             self.waiting_sources.append(context)
-
-    def use_training_pool(self, pool: TrainingPoolSettings) -> None:
-        """Train each train task again until a review of ``pool`` retires it, and start rounds only while fewer train
-        tasks than its capacity are active.
-
-        Each active task whose last use ended without its next sample gets that sample now: after a stop, and for a
-        task that trained before the deployment set ``pool_capacity``, which has a first result and no saved use.
-        Raise ``ValueError`` when ``refill_tasks`` is not 1: the capacity decides when a round starts.
-        """
-        if self.refill_tasks != 1:
-            raise ValueError("pool_capacity sets when rounds start: leave refill_tasks at 1")
-        self.training_pool = pool
-        if self.task_store is not None:
-            self.made.extend(self.next_uses(self.task_items(), results=frozenset(rollout_results(self.task_store))))
 
     def round_due(self) -> bool:
         """Whether the next round should start now."""
@@ -1339,64 +1376,6 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             self.worker.submit(DeliveryJob(receipt=DELIVERY_RECEIPT))
 
 
-@dataclass(frozen=True)
-class TaskJobSettings(Sample2JobSettings):
-    """The config of ``GeneratedTaskJobData``: the tasks of one task job, and the training pool.
-
-    Values: ``buffer_size`` and ``job_samples`` are those of ``Sample2JobSettings``. ``pool_capacity`` is a
-    non-negative int; 0 trains each task once, and above 0 each task trains again until a review retires it. The
-    ``review_*`` values are those of ``ReviewSettings``; with ``pool_capacity`` 0 they keep their defaults. The
-    constructor refuses other values.
-    Purpose: ``GeneratedTaskJobData.from_config`` parses it from ``pipeline.sample2job.config``, and gives the
-    record-to-sample stage the training pool (``training_pool``).
-    """
-
-    pool_capacity: int = config_option(
-        0, help="Above 0, tasks train again, and rounds start only while fewer tasks than this are active."
-    )
-    review_interval: int = config_option(
-        DEFAULT_REVIEW_INTERVAL, help="The task jobs between two pool reviews; 0 reviews nothing."
-    )
-    review_window: int = config_option(
-        DEFAULT_REVIEW_WINDOW, help="The most recent rewards of a task that a review reads."
-    )
-    review_band_low: float = config_option(
-        DEFAULT_REVIEW_BAND_LOW, help="A review retires a task whose pass rate is below this."
-    )
-    review_band_high: float = config_option(
-        DEFAULT_REVIEW_BAND_HIGH, help="A review retires a task whose pass rate is above this."
-    )
-    review_min_reward_std: float = config_option(
-        DEFAULT_REVIEW_MIN_REWARD_STD,
-        help="A review retires a task whose rewards have a smaller standard deviation; 0 turns this off.",
-    )
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if isinstance(self.pool_capacity, bool) or not isinstance(self.pool_capacity, int) or self.pool_capacity < 0:
-            raise ValueError("pool_capacity must be a non-negative integer")
-        review = self.review_settings()
-        # The parsed settings cannot tell a default from a key set to it, so a key that changes a default counts.
-        if self.pool_capacity == 0 and review != DEFAULT_REVIEW_SETTINGS:
-            raise ValueError("the review_* settings need a pool_capacity above 0")
-
-    def review_settings(self) -> ReviewSettings:
-        """The rule of the pool reviews. Raises ``ValueError`` for a review setting out of its range."""
-        return ReviewSettings(
-            interval=self.review_interval,
-            window=self.review_window,
-            band_low=self.review_band_low,
-            band_high=self.review_band_high,
-            min_reward_std=self.review_min_reward_std,
-        )
-
-    def training_pool(self) -> TrainingPoolSettings | None:
-        """The training pool, or None with ``pool_capacity`` 0."""
-        if self.pool_capacity == 0:
-            return None
-        return TrainingPoolSettings(capacity=self.pool_capacity, review=self.review_settings())
-
-
 class GeneratedTaskJobData(Sample2Job):
     """The tasks of the next job as one task job's data: the ``TaskSample`` values themselves.
 
@@ -1405,8 +1384,8 @@ class GeneratedTaskJobData(Sample2Job):
     training component rolls the tasks out on its own sampler and trains on their rollouts (a task job; see the
     training component's job parameters). The commit that submits the job counts the tasks trained;
     ``GeneratedTaskSamples.job_ended`` saves their results when the job ends. Imported train tasks train the same
-    way; only generated tasks get results. Config: ``TaskJobSettings``; with ``pool_capacity`` above 0, the
-    generated tasks train again (``GeneratedTaskSamples.use_training_pool``), and imported tasks still train once.
+    way; only generated tasks get results. With a training pool (``GeneratedTaskSettings.pool_capacity``), the
+    generated tasks train again, and imported tasks still train once.
     """
 
     accepts_imported_tasks = True
@@ -1420,15 +1399,9 @@ class GeneratedTaskJobData(Sample2Job):
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = TaskJobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         if not isinstance(record2sample, GeneratedTaskSamples):
             raise PluginConfigError(f"{cls.__name__} needs GeneratedTaskSamples, not {type(record2sample).__name__}")
-        pool = settings.training_pool()
-        if pool is not None:
-            try:
-                record2sample.use_training_pool(pool)
-            except ValueError as exc:
-                raise PluginConfigError(str(exc)) from exc
         return cls(context, buffer_size=settings.buffer_size, job_samples=settings.job_samples)
 
     def __init__(

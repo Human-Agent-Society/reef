@@ -846,6 +846,19 @@ sessions does not count. A round whose generation ran out of attempts counts
 too, and the next round retries the same sessions and finishes the same
 generation from its saved candidates.
 
+With ``pool_capacity`` above 0, the stage keeps a training pool, and each train
+task trains again until a review retires it. A round is then due while fewer
+train tasks of complete generations than ``pool_capacity`` are active, in place
+of the ``refill_tasks`` rule. When a job's end commits, the stage saves each use
+that the end ends, with its rewards, and runs the review that is due after every
+``review_interval`` jobs. Then it makes the sample of each active task's next
+use, ``generated-tasks/<task name>@<k>`` for use ``k``, which waits after the
+samples that wait already. A review that retires a task ends the scenario's use
+of the task's waiting sample (``TrainerSamples.remove_samples``), so no later
+job takes it; the item stays in the data store with its train counts. See
+`generated tasks <../reference/configuration.rst#generated-tasks>`__ for the
+keys.
+
 The record-to-sample stage keeps its tasks in the task store ``generated-tasks``
 of the scenario session (see `Where the stages live`_). It records each
 publication or rejection, so a retry of a generation uses the saved candidates

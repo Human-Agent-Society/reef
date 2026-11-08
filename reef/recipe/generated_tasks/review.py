@@ -53,8 +53,8 @@ class ReviewSettings:
     ``band_high`` are numbers in [0, 1] with ``band_low <= band_high``, the inclusive bounds of the pass rate
     that keeps a task. ``min_reward_std`` is a non-negative finite number, the smallest population standard
     deviation of the rewards that keeps a task; 0 turns this rule off. The constructor refuses other values.
-    Purpose: ``TaskJobSettings.review_settings`` makes it from ``pipeline.sample2job.config``; ``review_pool``
-    and ``retirement_reason`` read it.
+    Purpose: ``GeneratedTaskSettings.review_settings`` makes it from ``pipeline.record2sample.config``;
+    ``review_pool`` and ``retirement_reason`` read it.
     """
 
     interval: int
@@ -82,9 +82,9 @@ class TrainingPoolSettings:
 
     Values: ``capacity`` is a positive int: a round starts only while fewer train tasks than this are active.
     ``review`` is the ``ReviewSettings`` of the reviews. The constructor refuses other values.
-    Purpose: ``TaskJobSettings.training_pool`` makes it from ``pipeline.sample2job.config`` when ``pool_capacity`` is
-    above 0; ``GeneratedTaskSamples.use_training_pool`` takes it, and the stage reads it at each task job's end and
-    when it decides whether a round is due.
+    Purpose: ``GeneratedTaskSettings.training_pool`` makes it from ``pipeline.record2sample.config`` when
+    ``pool_capacity`` is above 0; ``GeneratedTaskSamples`` takes it when it starts, and reads it at each task job's end
+    and when it decides whether a round is due.
     """
 
     capacity: int

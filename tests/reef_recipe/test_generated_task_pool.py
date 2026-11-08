@@ -24,7 +24,7 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings, TaskJobSettings
+from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.results import rollout_results
 from reef.recipe.generated_tasks.review import PoolReview, RetiredTask, pool_reviews, retired_tasks, task_uses
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -133,17 +133,21 @@ def pipeline(
     jobs_per_round: int = 1,
     refill_tasks: int = 1,
     job_samples: int = 2,
-    **pool_config: float,
+    **pool_config: Any,
 ) -> CommittingPipeline:
     """A generated-task pipeline of the scenario ``tasks`` on SQLite storage under ``tmp_path``. Each job takes
-    ``job_samples`` tasks; ``pool_config`` is the rest of ``pipeline.sample2job.config``."""
+    ``job_samples`` tasks; ``pool_config`` is the training pool's part of ``pipeline.record2sample.config``."""
     worker = InlineWorker()
     session, samples = open_sample_store(tmp_path / "records", "tasks")
     context = PipelineContext("tasks", task_storage=session.tasks, samples=samples.for_trainer(""))
     stage = GeneratedTaskSamples(
         context,
         GeneratedTaskSettings(
-            rounds=rounds, jobs_per_round=jobs_per_round, description="shell tasks", refill_tasks=refill_tasks
+            rounds=rounds,
+            jobs_per_round=jobs_per_round,
+            description="shell tasks",
+            refill_tasks=refill_tasks,
+            **pool_config,
         ),
         task_generator=task_generator,
         generator_service=StandInGenerator(tmp_path / "service"),
@@ -151,7 +155,7 @@ def pipeline(
     )
     worker.stage = stage
     jobs = GeneratedTaskJobData.from_config(
-        {"job_samples": job_samples, "buffer_size": job_samples, **pool_config},
+        {"job_samples": job_samples, "buffer_size": job_samples},
         context=context,
         record2sample=stage,
         environ={},
@@ -678,17 +682,17 @@ def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_
         ({"pool_capacity": 4, "review_band_low": 0.8, "review_band_high": 0.5}, "must not be above"),
         ({"pool_capacity": 4, "review_min_reward_std": -0.1}, "review_min_reward_std must be a non-negative"),
         ({"review_window": 8}, "need a pool_capacity above 0"),
-        ({"pool_capacity": 4, "job_samples": 0}, "job_samples must be None or a positive int"),
     ],
 )
 def test_pool_settings_refuse_bad_values(config: dict[str, float], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        TaskJobSettings(**config)
+        GeneratedTaskSettings(**config)
 
 
-def test_a_pool_capacity_refuses_refill_tasks_above_1(tmp_path: Path) -> None:
+def test_a_pool_capacity_refuses_refill_tasks_above_1() -> None:
+    config = {"refill_tasks": 2, "pool_capacity": 4}
     with pytest.raises(PluginConfigError, match="leave refill_tasks at 1"):
-        pipeline(tmp_path, FixedTasks(), refill_tasks=2, pool_capacity=4)
+        GeneratedTaskSettings.parse(config, plugin_class=GeneratedTaskSamples)
 
 
 def test_the_status_reports_retired_tasks_and_their_reasons(tmp_path: Path) -> None:
