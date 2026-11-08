@@ -869,16 +869,16 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     receive.
 
     **Training pool.** Without one, each train task trains once. With ``pool_capacity`` above 0, the stage has one
-    (``GeneratedTaskSettings.training_pool``). Then a round is due only while fewer train tasks than its capacity
-    are active (``active_task_count``), in place of the ``refill_tasks`` rule, and the last case of the list above
-    is "no task is active" in place of "no train task is unfinished". A train task of a complete generation is active until a
+    (``GeneratedTaskSettings.training_pool``). Then a round is due only while fewer train tasks than its capacity are
+    active (``active_task_count``), in place of the ``refill_tasks`` rule, and the last case of the list above is "no
+    task is active" in place of "no train task is unfinished". A train task of a complete generation is active until a
     review retires it. Each use of a task trains one sample of it: the first use trains the task's sample above, and
     use ``k`` the sample ``generated-tasks/<task name>@<k>``. When a job's end commits, the stage saves the uses that
     the end ends with their rewards (``ended_uses``), runs the review that is due, ends the scenario's use of each
     sample of a retired task that waits, and makes the sample of the next use of each other task whose use ended
-    (``reuse_tasks``). A task has at most one sample that waits or trains at a time, except after the end of a
-    failed job that the stage read after the next job started: the tasks of that next job then get their next
-    sample while they train, and the stage does not save their rewards in that job.
+    (``reuse_tasks``). A task has at most one sample that waits or trains at a time, except after the end of a failed
+    job that the stage read after the next job started: the tasks of that next job then get their next sample while
+    they train, and the stage does not save their rewards in that job.
     """
 
     def __init__(
