@@ -39,7 +39,7 @@ from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
-from reef.scenario.binding import ScenarioBinding, profiled_artifact
+from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
@@ -152,8 +152,7 @@ class ItemStart:
 
     Values: ``item`` is the item's ``ItemIdentity``, and ``uri`` its non-empty ``source_uri``. ``files`` is the
     ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
-    ``None`` for the scenario's one component. The root's artifact of ``component`` keeps the item's artifact ID and
-    names its serving profile.
+    ``None`` for the scenario's one component. The root's artifact of ``component`` keeps the item's artifact ID.
 
     Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
     ``ScenarioFactory.register`` checks it and writes it as the root snapshot.
@@ -313,8 +312,7 @@ class ScenarioFactory:
         ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
         manifest of the components that the root makes. An item that the component's layout or admission check
         refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
-        start from (``Recipe.check_root_start``), and so does an item's serving profile that ``profiled_artifact``
-        refuses. Nothing is registered after a refusal.
+        start from (``Recipe.check_root_start``). Nothing is registered after a refusal.
         """
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -346,11 +344,7 @@ class ScenarioFactory:
             component, layout = components.import_target(start.component)
             directory = work / "item"
             directory.mkdir()
-            stored = profiled_artifact(
-                self._recipe.runtime,
-                layout.stored(start.files, directory, artifact_id=start.item.artifact_id),
-                start.item.serving_profile,
-            )
+            stored = layout.stored(start.files, directory, artifact_id=start.item.artifact_id)
             source = RootSource("item", item=start.item.item_id, uri=start.uri, version=start.files.version)
             # The admission checks of an import: the snapshot's own with one component, else the component's here and
             # the snapshot's on the composed root.

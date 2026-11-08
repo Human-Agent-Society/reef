@@ -15,7 +15,6 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 
-from reef.artifact.artifact import serving_profile_of
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import QueueWorker
@@ -56,8 +55,7 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
             # has no kind.
             declared = components.components.get(row["component"])
             kind = None if declared is None else declared.kind
-            profile = serving_profile_of(components.component_artifact(artifact, row["component"]))
-            missing.append(artifact_item(scenario, row, kind, uri, dispatcher.recipe.harness_adapter, profile))
+            missing.append(artifact_item(scenario, row, kind, uri, dispatcher.recipe.harness_adapter))
     for start in range(0, len(missing), MAX_ITEMS_PER_CREATE):
         store.create(owner, missing[start : start + MAX_ITEMS_PER_CREATE])
     return len(missing)
