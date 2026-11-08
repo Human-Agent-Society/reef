@@ -1066,8 +1066,14 @@ The body takes these fields:
 - ``model``: the model binding that a harness artifact runs on. A request
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.
+  The stored request names the tasks that the evaluation runs.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.
+- ``max_concurrent_rollouts``: the most rollouts of this evaluation that run
+  at once, or null (the default) for no limit. Each rollout holds a task
+  sandbox and sends model calls to the candidate, so set it to what the
+  sandbox provider and the candidate's serving can take. Reef adds the next
+  rollouts to the queue as earlier ones end.
 
 The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
@@ -1077,7 +1083,8 @@ it runs and after it ends:
 
    {"evaluation_id": "1d0e...", "state": "finished",
     "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
-                "model": null, "task_names": [], "rollouts_per_task": 2, "environment": "docker"},
+                "model": null, "task_names": ["sum-391"], "rollouts_per_task": 2, "environment": "docker",
+                "max_concurrent_rollouts": null},
     "created_at": 1793169552.2, "finished_at": 1793169840.7,
     "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
                           "model": {"name": "Qwen/Qwen3-8B", "adapter": "tinker://.../sampler"},
@@ -1099,7 +1106,8 @@ evaluation_id, rollouts}``: each rollout in task and repeat order, as
 score, error, calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
-  ``assigned``, ``running``, ``finished`` or ``failed``.
+  ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
+  while ``max_concurrent_rollouts`` keeps the rollout out of the queue.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at``
   when it finished or failed, in epoch seconds. Each is null until then.
@@ -1121,7 +1129,9 @@ Reef returns:
 - 404 for an unknown scenario, artifact or evaluation.
 
 Reef sets no limit on the evaluations that run at once: the evaluations queue
-holds the rollouts that wait.
+holds the rollouts that wait. An evaluation process runs at most
+``evaluation.max_sandboxes`` rollouts at once, across all evaluations (see
+`Configuration <configuration.rst>`__).
 
 Model calls of a rollout
 ~~~~~~~~~~~~~~~~~~~~~~~~
