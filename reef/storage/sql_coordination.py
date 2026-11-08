@@ -80,7 +80,9 @@ from reef.storage.work_queue import (
     WorkConflict,
     WorkItem,
     WorkLeaseLost,
+    WorkLogLine,
     WorkQueue,
+    check_log_page,
     check_page,
     clock,
 )
@@ -90,7 +92,7 @@ from reef.storage.work_queue import (
 class CoordinationTables:
     """The tables of one coordination database.
 
-    Values: seven ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
+    Values: eight ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
 
     Purpose: a ``CoordinationDatabase`` makes it; the coordination stores query it.
     """
@@ -102,6 +104,7 @@ class CoordinationTables:
     scheduled_stop: Table
     control_lease: Table
     work_item: Table
+    work_log: Table
 
 
 def coordination_tables(metadata: MetaData) -> CoordinationTables:
@@ -179,8 +182,21 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("changed_sequence", BigInteger, nullable=False, index=True),
         PrimaryKeyConstraint("queue", "item_id"),
     )
+    work_log = Table(
+        "work_log",
+        metadata,
+        Column("queue", Text, nullable=False),
+        Column("item_id", Text, nullable=False),
+        Column("attempt", Integer, nullable=False),
+        Column("number", Integer, nullable=False),
+        Column("at", Float, nullable=False),
+        Column("level", String(16), nullable=False),
+        Column("logger", Text, nullable=False),
+        Column("message", Text, nullable=False),
+        PrimaryKeyConstraint("queue", "item_id", "attempt", "number"),
+    )
     return CoordinationTables(
-        sequence, served_model, serving_config, traffic_weights, scheduled_stop, control_lease, work_item
+        sequence, served_model, serving_config, traffic_weights, scheduled_stop, control_lease, work_item, work_log
     )
 
 
@@ -1058,8 +1074,20 @@ class SQLWorkQueue(WorkQueue):
         statement = delete(self.table).where(
             self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.ended_at < finished_before, not_(latest_serving)
         )
+        log = self.database.tables.work_log
+        orphan_lines = delete(log).where(
+            not_(
+                exists(
+                    select(self.table.c.item_id).where(
+                        self.table.c.queue == log.c.queue, self.table.c.item_id == log.c.item_id
+                    )
+                )
+            )
+        )
         with self.database.write(WORK_SEQUENCE) as (connection, _counter):
-            return int(connection.execute(statement).rowcount or 0)
+            deleted = int(connection.execute(statement).rowcount or 0)
+            connection.execute(orphan_lines)
+            return deleted
 
     def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
         require_text(worker_id, "worker_id")
@@ -1307,6 +1335,43 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             counts.update(connection.execute(query).tuples().all())
         return counts
+
+    def append_log(self, queue: str, item_id: str, attempt: int, lines: Sequence[WorkLogLine]) -> None:
+        if not lines:
+            return
+        log = self.database.tables.work_log
+        rows = [
+            {
+                "queue": queue,
+                "item_id": item_id,
+                "attempt": attempt,
+                "number": line.number,
+                "at": line.at,
+                "level": line.level,
+                "logger": line.logger,
+                "message": line.message,
+            }
+            for line in lines
+        ]
+        with self.database.connection(write=True) as connection:
+            connection.execute(insert(log), rows)
+
+    def read_log(
+        self, queue: str, item_id: str, attempt: int, *, after: int = -1, limit: int = 500
+    ) -> tuple[WorkLogLine, ...]:
+        check_log_page(after, limit)
+        log = self.database.tables.work_log
+        query = (
+            select(log)
+            .where(log.c.queue == queue, log.c.item_id == item_id, log.c.attempt == attempt, log.c.number > after)
+            .order_by(log.c.number)
+            .limit(limit)
+        )
+        with self.database.read() as connection:
+            return tuple(
+                WorkLogLine(int(row["number"]), float(row["at"]), row["level"], row["logger"], row["message"])
+                for row in connection.execute(query).mappings().all()
+            )
 
 
 def open_coordination_database(
