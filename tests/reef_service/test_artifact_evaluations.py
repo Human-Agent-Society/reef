@@ -276,6 +276,28 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
                 ("sort", 1, 0.0),
             ]
             assert {rollout["state"] for rollout in rollouts} == {"finished"}
+            assert all(rollout["started_at"] <= rollout["ended_at"] for rollout in rollouts)
+            one_call = {"count": 1, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            assert [rollout["calls"] for rollout in rollouts] == [one_call, one_call, None, None, one_call, one_call]
+            calls_route = f"{rollouts_route}/0/1/calls"
+            listed = await (await client.get(calls_route, headers=AUTH)).json()
+            assert (listed["task_index"], listed["repeat"]) == (0, 1)
+            [summary] = listed["calls"]
+            assert (summary["attempt"], summary["index"], summary["status"], summary["finish_reason"]) == (
+                1,
+                0,
+                200,
+                "stop",
+            )
+            assert summary["duration_s"] >= 0 and "request" not in summary
+            kept = await (await client.get(f"{calls_route}/1/0", headers=AUTH)).json()
+            assert kept["request"]["messages"] == [{"role": "user", "content": "solve add"}]
+            assert kept["response"]["choices"][0]["finish_reason"] == "stop"
+            broken = await (await client.get(f"{rollouts_route}/1/0/calls", headers=AUTH)).json()
+            assert broken["calls"] == [], "a rollout that reached no model keeps no call"
+            for route in (f"{calls_route}/1/1", "/reef/scenarios/s/evaluations/missing/rollouts/0/0/calls"):
+                assert (await client.get(route, headers=AUTH)).status == 404
+            assert (await client.get(f"{rollouts_route}/x/0/calls", headers=AUTH)).status == 400
             missing = await client.get("/reef/scenarios/s/evaluations/missing/rollouts", headers=AUTH)
             assert missing.status == 404
             listing = await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json()

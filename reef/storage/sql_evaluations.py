@@ -1,8 +1,9 @@
 """The evaluation store in the record database of a scenario, for each SQL backend.
 
-The artifact evaluation table is in the same database as the commits. Each
-database operation uses one transaction of the scenario database. The adapters build
-the table with :func:`evaluation_table` and supply their namespace.
+The artifact evaluation table and the evaluation call table are in the same
+database as the commits. Each database operation uses one transaction of the
+scenario database. The adapters build the tables with :func:`evaluation_table`
+and :func:`evaluation_call_table`, and supply their namespace.
 """
 
 from __future__ import annotations
@@ -24,12 +25,21 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    case,
+    func,
     select,
 )
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
-from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
+from reef.storage.evaluations import (
+    EvaluationCall,
+    EvaluationCallSummary,
+    EvaluationCallTotals,
+    EvaluationStateConflict,
+    EvaluationStore,
+    StoredEvaluation,
+)
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
@@ -70,12 +80,57 @@ def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> T
     )
 
 
-class SQLEvaluationStore(EvaluationStore):
-    """The artifact evaluations of one scenario in its record database."""
+def evaluation_call_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
+    """Define the ``evaluation_call`` table in ``metadata``: one row for each kept call of an evaluation rollout.
 
-    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable) -> None:
+    ``foreign_key`` adds the column ``storage_id``, as in :func:`evaluation_table`. The key of a call
+    (``evaluation_id``, ``task_index``, ``repeat``, ``attempt``, ``call_index``) is unique in each namespace. The
+    table refers to no evaluation row: a worker can keep a call before control stores its evaluation.
+    """
+    key = ("evaluation_id", "task_index", "repeat", "attempt", "call_index")
+    columns = (
+        Column("evaluation_id", Text, nullable=False),
+        Column("task_index", Integer, nullable=False),
+        Column("repeat", Integer, nullable=False),
+        Column("attempt", Integer, nullable=False),
+        Column("call_index", Integer, nullable=False),
+        Column("path", Text, nullable=False),
+        Column("status", Integer, nullable=False),
+        Column("started_at", Float(53), nullable=False),
+        Column("duration_s", Float(53), nullable=False),
+        Column("prompt_tokens", BigInteger),
+        Column("completion_tokens", BigInteger),
+        Column("finish_reason", Text),
+        Column("tool_calls", Integer, nullable=False),
+        Column("request_json", Text),
+        Column("response_json", Text),
+    )
+    if foreign_key is None:
+        return Table(
+            "evaluation_call",
+            metadata,
+            Column("sequence", Integer, primary_key=True),
+            *columns,
+            UniqueConstraint(*key),
+            sqlite_autoincrement=True,
+        )
+    return Table(
+        "evaluation_call",
+        metadata,
+        Column("sequence", BigInteger, Identity(), primary_key=True),
+        Column("storage_id", String(32), ForeignKey(foreign_key), nullable=False),
+        *columns,
+        UniqueConstraint("storage_id", *key),
+    )
+
+
+class SQLEvaluationStore(EvaluationStore):
+    """The artifact evaluations of one scenario and their calls in its record database."""
+
+    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable, call_table: ScopedTable) -> None:
         self.database = database
         self.table = table
+        self.call_table = call_table
 
     def create(
         self,
@@ -190,6 +245,112 @@ class SQLEvaluationStore(EvaluationStore):
             )
         return tuple(stored_evaluation(row) for row in rows)
 
+    def add_call(self, evaluation_id: str, call: EvaluationCall) -> None:
+        summary = call.summary
+        values = {
+            **self.call_table.scope,
+            "evaluation_id": evaluation_id,
+            "task_index": summary.task_index,
+            "repeat": summary.repeat,
+            "attempt": summary.attempt,
+            "call_index": summary.index,
+            "path": summary.path,
+            "status": summary.status,
+            "started_at": summary.started_at,
+            "duration_s": summary.duration_s,
+            "prompt_tokens": summary.prompt_tokens,
+            "completion_tokens": summary.completion_tokens,
+            "finish_reason": summary.finish_reason,
+            "tool_calls": summary.tool_calls,
+            "request_json": None if call.request is None else json.dumps(call.request, ensure_ascii=False),
+            "response_json": None if call.response is None else json.dumps(call.response, ensure_ascii=False),
+        }
+        with self.database._transaction(write=True) as connection:
+            if not self.database._insert_if_absent(connection, self.call_table.table, values):
+                raise ValueError(
+                    f"call {summary.attempt}/{summary.index} of rollout {summary.task_index}/{summary.repeat} "
+                    f"of evaluation {evaluation_id!r} is stored already"
+                )
+
+    def call_totals(self, evaluation_id: str) -> dict[tuple[int, int], EvaluationCallTotals]:
+        table = self.call_table.table
+        statement = (
+            select(
+                table.c.task_index,
+                table.c.repeat,
+                func.count(),
+                func.sum(case((table.c.status != 200, 1), else_=0)),
+                func.coalesce(func.sum(table.c.prompt_tokens), 0),
+                func.coalesce(func.sum(table.c.completion_tokens), 0),
+            )
+            .where(self.call_table.condition(), table.c.evaluation_id == evaluation_id)
+            .group_by(table.c.task_index, table.c.repeat)
+        )
+        with self.database._transaction(write=False) as connection:
+            rows = connection.execute(statement).all()
+        return {
+            (int(task_index), int(repeat)): EvaluationCallTotals(int(count), int(failed), int(prompt), int(completion))
+            for task_index, repeat, count, failed, prompt, completion in rows
+        }
+
+    def call_summaries(self, evaluation_id: str, task_index: int, repeat: int) -> tuple[EvaluationCallSummary, ...]:
+        table = self.call_table.table
+        bodies = {table.c.request_json, table.c.response_json}
+        statement = (
+            select(*(column for column in table.c if column not in bodies))
+            .where(
+                self.call_table.condition(),
+                table.c.evaluation_id == evaluation_id,
+                table.c.task_index == task_index,
+                table.c.repeat == repeat,
+            )
+            .order_by(table.c.attempt, table.c.call_index)
+        )
+        with self.database._transaction(write=False) as connection:
+            rows = connection.execute(statement).mappings().all()
+        return tuple(call_summary(row) for row in rows)
+
+    def call(
+        self, evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int
+    ) -> EvaluationCall | None:
+        table = self.call_table.table
+        statement = select(table).where(
+            self.call_table.condition(),
+            table.c.evaluation_id == evaluation_id,
+            table.c.task_index == task_index,
+            table.c.repeat == repeat,
+            table.c.attempt == attempt,
+            table.c.call_index == index,
+        )
+        with self.database._transaction(write=False) as connection:
+            row = connection.execute(statement).mappings().one_or_none()
+        if row is None:
+            return None
+        request, response = row["request_json"], row["response_json"]
+        return EvaluationCall(
+            call_summary(row),
+            None if request is None else json.loads(str(request)),
+            None if response is None else json.loads(str(response)),
+        )
+
+
+def call_summary(row: RowMapping) -> EvaluationCallSummary:
+    """Return the call summary of one ``evaluation_call`` row."""
+    return EvaluationCallSummary(
+        task_index=int(row["task_index"]),
+        repeat=int(row["repeat"]),
+        attempt=int(row["attempt"]),
+        index=int(row["call_index"]),
+        path=str(row["path"]),
+        status=int(row["status"]),
+        started_at=float(row["started_at"]),
+        duration_s=float(row["duration_s"]),
+        prompt_tokens=None if row["prompt_tokens"] is None else int(row["prompt_tokens"]),
+        completion_tokens=None if row["completion_tokens"] is None else int(row["completion_tokens"]),
+        finish_reason=None if row["finish_reason"] is None else str(row["finish_reason"]),
+        tool_calls=int(row["tool_calls"]),
+    )
+
 
 def stored_evaluation(row: RowMapping | Mapping[str, Any]) -> StoredEvaluation:
     """Return the stored evaluation of one table row."""
@@ -206,4 +367,4 @@ def stored_evaluation(row: RowMapping | Mapping[str, Any]) -> StoredEvaluation:
     )
 
 
-__all__ = ["SQLEvaluationStore", "evaluation_table", "stored_evaluation"]
+__all__ = ["SQLEvaluationStore", "evaluation_call_table", "evaluation_table", "stored_evaluation"]

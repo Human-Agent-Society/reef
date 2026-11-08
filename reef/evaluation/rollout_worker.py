@@ -8,7 +8,9 @@ runs the task once with a Harbor agent against the candidate's model, and finish
 A worker asks inference to serve the candidate before each trial (a ``serve_artifact`` item of the ``serving`` queue),
 and waits until the engine is ready. It answers the agent's model calls from that engine on a loopback endpoint
 (``CandidateEndpoints``). The item writes no route, so no client reaches the candidate through ``served_models``, and
-no call is a record, so an evaluation never trains the scenario.
+no call is a record, so an evaluation never trains the scenario. The worker keeps each call of the rollout, failed
+calls too, in the evaluation store of the scenario as the call ends (``RolloutCalls``), so a client can read the calls
+of a rollout while it runs.
 """
 
 from __future__ import annotations
@@ -20,10 +22,13 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+
+from reef_client.serve import CapturedTurn
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
@@ -32,9 +37,11 @@ from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.harness.adapters import get_adapter
+from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import tree_agent
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
+from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
@@ -235,10 +242,11 @@ class CandidateEndpoint:
 
 
 class CandidateEndpoints(ABC):
-    """Opens the endpoint of a candidate artifact for the time of one rollout.
+    """Opens the endpoint of a candidate artifact for the time of one rollout, and keeps the calls of the rollout.
 
     Purpose: an ``EvaluationRolloutWorker`` opens one around each rollout, with the value that reaches the engine
-    that inference started for the candidate (``LocalCandidateEndpoints``).
+    that inference started for the candidate (``LocalCandidateEndpoints``). It keeps each call of the rollout as the
+    call ends (``add_call``).
     """
 
     @abstractmethod
@@ -249,6 +257,10 @@ class CandidateEndpoints(ABC):
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         """The endpoint of ``rollout``'s candidate, until the block ends."""
+
+    @abstractmethod
+    def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
+        """Keep ``call``, a call of ``rollout``, in the evaluation store of the rollout's scenario."""
 
 
 class LocalCandidateEndpoints(CandidateEndpoints):
@@ -270,6 +282,126 @@ class LocalCandidateEndpoints(CandidateEndpoints):
         runtime, artifact = self.artifacts.candidate(rollout.scenario, rollout.artifact_id, rollout.component)
         with ArtifactEndpoint(runtime, artifact, served) as endpoint:
             yield CandidateEndpoint(endpoint.url, None)
+
+    def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
+        self.artifacts.add_evaluation_call(rollout.scenario, rollout.evaluation_id, call)
+
+
+def reply_summary(path: str, reply: Mapping[str, Any]) -> tuple[int | None, int | None, str | None, int]:
+    """The prompt tokens, the completion tokens, the finish reason and the number of tool calls of ``reply``, the
+    200 answer to a call to ``path``.
+
+    The fields come from an OpenAI chat completion, an OpenAI response or an Anthropic message, by ``path``. The
+    prompt tokens of an Anthropic message add its cache tokens. The finish reason of an OpenAI response is the reason
+    in its ``incomplete_details``, else its ``status``. A field that the reply does not hold is None, and its tool
+    calls are 0; so is each field of a reply to another path.
+    """
+    usage = reply.get("usage")
+
+    def tokens(*names: str) -> int | None:
+        counts = [usage.get(name) for name in names] if isinstance(usage, Mapping) else []
+        known = [count for count in counts if isinstance(count, int) and not isinstance(count, bool) and count >= 0]
+        return sum(known) if known else None
+
+    def reason(value: object) -> str | None:
+        return value if isinstance(value, str) and value else None
+
+    def objects(value: object) -> list[Mapping[str, Any]]:
+        return [entry for entry in value if isinstance(entry, Mapping)] if isinstance(value, list) else []
+
+    route = path.partition("?")[0]
+    if route == "/v1/chat/completions":
+        choices = objects(reply.get("choices"))
+        choice: Mapping[str, Any] = choices[0] if choices else {}
+        message = choice.get("message")
+        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+        tool_call_count = len(tool_calls) if isinstance(tool_calls, list) else 0
+        return (
+            tokens("prompt_tokens"),
+            tokens("completion_tokens"),
+            reason(choice.get("finish_reason")),
+            tool_call_count,
+        )
+    if route == "/v1/responses":
+        details = reply.get("incomplete_details")
+        finish = details.get("reason") if isinstance(details, Mapping) else reply.get("status")
+        tool_call_count = sum(entry.get("type") == "function_call" for entry in objects(reply.get("output")))
+        return tokens("input_tokens"), tokens("output_tokens"), reason(finish), tool_call_count
+    if route == "/v1/messages":
+        tool_call_count = sum(entry.get("type") == "tool_use" for entry in objects(reply.get("content")))
+        prompt = tokens("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        return prompt, tokens("output_tokens"), reason(reply.get("stop_reason")), tool_call_count
+    return None, None, None, 0
+
+
+def evaluation_call(turn: CapturedTurn, rollout: EvaluationRollout, attempt: int, index: int) -> EvaluationCall:
+    """The call ``index`` of attempt ``attempt`` of ``rollout`` that the capture proxy captured as ``turn``.
+
+    The call started ``turn.duration_s`` seconds before the proxy captured it at ``turn.at``. Its summary fields come
+    from the reply of a 200 call (``reply_summary``); a failed call has none, and 0 tool calls. The kept response has
+    no ``training`` block: it holds token IDs for training, which nobody reads in a call log.
+    """
+    prompt, completion, finish, tool_calls = (
+        reply_summary(turn.path, turn.response)
+        if turn.status == 200 and turn.response is not None
+        else (None, None, None, 0)
+    )
+    summary = EvaluationCallSummary(
+        task_index=rollout.task_index,
+        repeat=rollout.repeat,
+        attempt=attempt,
+        index=index,
+        path=turn.path,
+        status=turn.status,
+        started_at=turn.at - turn.duration_s,
+        duration_s=turn.duration_s,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        finish_reason=finish,
+        tool_calls=tool_calls,
+    )
+    response = turn.response
+    if response is not None and "training" in response:
+        response = {key: value for key, value in response.items() if key != "training"}
+    return EvaluationCall(summary, turn.request, response)
+
+
+class RolloutCalls(CaptureObserver):
+    """Keeps each call of one attempt of an evaluation rollout in its evaluation's store, as the call ends.
+
+    Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
+    ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
+    the index of the next call.
+
+    Purpose: ``EvaluationRolloutWorker.score`` gives one to the rollout's runner, and closes it when the rollout ends.
+    One writer thread keeps the calls in call order, so the agent does not wait for the store. A call that the store
+    does not keep is logged, and the rollout goes on.
+    """
+
+    def __init__(self, endpoints: CandidateEndpoints, rollout: EvaluationRollout, attempt: int) -> None:
+        self.endpoints = endpoints
+        self.rollout = rollout
+        self.attempt = attempt
+        self.next_index = 0
+        self.lock = threading.Lock()
+        self.writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reef-evaluation-calls")
+
+    def call_captured(self, turn: CapturedTurn) -> None:
+        with self.lock:
+            index = self.next_index
+            self.next_index += 1
+            self.writer.submit(self.keep, evaluation_call(turn, self.rollout, self.attempt, index))
+
+    def keep(self, call: EvaluationCall) -> None:
+        try:
+            self.endpoints.add_call(self.rollout, call)
+        except Exception:
+            # The call log is for people to read: a call that it misses must not change the rollout or its score.
+            logger.exception("could not keep call %d of rollout %s", call.summary.index, self.rollout.item_id())
+
+    def close(self) -> None:
+        """Wait until every captured call is kept or logged."""
+        self.writer.shutdown(wait=True)
 
 
 class EvaluationRolloutWorker(QueueWorker):
@@ -303,7 +435,7 @@ class EvaluationRolloutWorker(QueueWorker):
         self.agent_host = agent_host
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
-        return {"score": self.score(EvaluationRollout.from_item(item), lease_lost).to_json()}
+        return {"score": self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count).to_json()}
 
     def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
         """Ask inference to serve the candidate of ``rollout``, wait until it is ready, and return the value that
@@ -327,12 +459,14 @@ class EvaluationRolloutWorker(QueueWorker):
             time.sleep(SERVE_POLL_S)
         raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
 
-    def score(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> RolloutScore:
-        """Run ``rollout`` once, when its candidate is ready, and return its score."""
+    def score(self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int) -> RolloutScore:
+        """Run ``rollout`` once, when its candidate is ready, and return its score. ``attempt`` is the 1-based attempt
+        of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``)."""
         task_directory = self.endpoints.task_directory(rollout)
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
         bridged = rollout.tree is not None and rollout.environment != "docker"
+        calls = RolloutCalls(self.endpoints, rollout, attempt)
         with (
             tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work,
             self.endpoints.open(rollout, served) as endpoint,
@@ -352,8 +486,14 @@ class EvaluationRolloutWorker(QueueWorker):
                 is_unrecorded=True,
                 concurrency=1,
                 lab=self.lab,
+                capture_observer=calls,
             )
-            [result] = runner.run_rollouts([RolloutRequest(runner.harness, runner.policy_model, str(task_directory))])
+            try:
+                [result] = runner.run_rollouts(
+                    [RolloutRequest(runner.harness, runner.policy_model, str(task_directory))]
+                )
+            finally:
+                calls.close()
             if not result.turns:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model.
                 logger.warning("rollout %s reached no model: %s", rollout.item_id(), result.error)
@@ -369,8 +509,11 @@ __all__ = [
     "EvaluationRollout",
     "EvaluationRolloutWorker",
     "LocalCandidateEndpoints",
+    "RolloutCalls",
     "TreeHarness",
     "agent_harness",
+    "evaluation_call",
     "harbor_agent",
+    "reply_summary",
     "rollout_item_id",
 ]

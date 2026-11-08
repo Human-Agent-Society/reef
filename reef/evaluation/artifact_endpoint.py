@@ -21,6 +21,7 @@ from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, UpstreamStatusError
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
+from reef.storage.evaluations import EvaluationCall
 
 #: The model call routes that the endpoint answers, as Reef's own inference routes do.
 MODEL_CALL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
@@ -116,12 +117,14 @@ class ArtifactEndpoint:
 
 
 class CandidateArtifacts(ABC):
-    """Finds the candidate of an evaluation rollout.
+    """Finds the candidate of an evaluation rollout, and keeps the rollout's calls.
 
     ``candidate(scenario, artifact_id, component)`` returns the runtime of ``scenario`` and the materialized
     artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
     runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
     ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
+    ``add_evaluation_call(scenario, evaluation_id, call)`` keeps one call of a rollout in the scenario's evaluation
+    store (``EvaluationStore.add_call``).
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """
@@ -135,6 +138,9 @@ class CandidateArtifacts(ABC):
     def candidate(
         self, scenario: str, artifact_id: str, component: str | None
     ) -> tuple[InferenceRuntime, Artifact]: ...
+
+    @abstractmethod
+    def add_evaluation_call(self, scenario: str, evaluation_id: str, call: EvaluationCall) -> None: ...
 
 
 __all__ = ["ArtifactEndpoint", "CandidateArtifacts"]

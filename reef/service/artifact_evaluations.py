@@ -315,9 +315,9 @@ class ArtifactEvaluations:
     scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
     end.
 
-    Purpose: the evaluation routes call ``start``, ``get``, ``newest`` and ``rollouts_json``, and the scenario
-    update route calls ``configure``. ``open`` starts ``results`` and the reader of ``new_artifacts``; ``close``
-    stops them. ``get``, ``newest`` and ``rollouts_json`` only read.
+    Purpose: the evaluation routes call ``start``, ``get``, ``newest``, ``rollouts_json``, ``calls_json`` and
+    ``call_json``, and the scenario update route calls ``configure``. ``open`` starts ``results`` and the reader of
+    ``new_artifacts``; ``close`` stops them. ``get``, ``newest`` and the three JSON reads only read.
     """
 
     def __init__(
@@ -590,17 +590,23 @@ class ArtifactEvaluations:
 
     def rollouts_json(self, scenario: str, evaluation_id: str) -> list[dict[str, Any]] | None:
         """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
-        attempt_count, score, error}``; None when ``scenario`` has no evaluation ``evaluation_id``.
+        attempt_count, started_at, ended_at, score, error, calls}``; None when ``scenario`` has no evaluation
+        ``evaluation_id``.
 
-        ``state`` is the rollout's queue state. ``score`` is the rollout's ``RolloutScore`` as JSON once it finished,
-        else null; ``error`` is the reason of a failed rollout, else null.
+        ``state`` is the rollout's queue state, and ``started_at`` and ``ended_at`` are its work item's times.
+        ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``error`` is the reason of a
+        failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept calls as JSON, or
+        null when the store keeps no call of it.
         """
-        if self.get(scenario, evaluation_id) is None:
-            return None
+        with self.dispatcher.locked_scenario(scenario) as current:
+            if current.store.evaluations.get(evaluation_id) is None:
+                return None
+            totals = current.store.evaluations.call_totals(evaluation_id)
         views = []
         for item in self.results.rollouts(evaluation_id, scenario):
             rollout = EvaluationRollout.from_item(item)
             finished = item.state == "finished" and item.result is not None
+            calls = totals.get((rollout.task_index, rollout.repeat))
             views.append(
                 {
                     "task": rollout.task_name,
@@ -608,11 +614,37 @@ class ArtifactEvaluations:
                     "repeat": rollout.repeat,
                     "state": item.state,
                     "attempt_count": item.attempt_count,
+                    "started_at": item.started_at,
+                    "ended_at": item.ended_at,
                     "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
                     "error": item.error,
+                    "calls": None if calls is None else calls.to_json(),
                 }
             )
         return views
+
+    def calls_json(
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int
+    ) -> list[dict[str, JsonValue]] | None:
+        """The summaries of the kept calls of rollout ``(task_index, repeat)`` of one evaluation as JSON, in attempt
+        and then index order; None when ``scenario`` has no evaluation ``evaluation_id``."""
+        with self.dispatcher.locked_scenario(scenario) as current:
+            evaluations = current.store.evaluations
+            if evaluations.get(evaluation_id) is None:
+                return None
+            return [call.to_json() for call in evaluations.call_summaries(evaluation_id, task_index, repeat)]
+
+    def call_json(
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int
+    ) -> dict[str, JsonValue] | None:
+        """The kept call with the key ``(task_index, repeat, attempt, index)`` of one evaluation as JSON, with its
+        bodies; None when ``scenario`` has no such evaluation or call."""
+        with self.dispatcher.locked_scenario(scenario) as current:
+            evaluations = current.store.evaluations
+            if evaluations.get(evaluation_id) is None:
+                return None
+            call = evaluations.call(evaluation_id, task_index, repeat, attempt, index)
+        return None if call is None else call.to_json()
 
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id`` of ``scenario``, or None."""

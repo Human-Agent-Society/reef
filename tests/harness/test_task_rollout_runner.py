@@ -13,10 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from reef_client.serve import CapturedTurn
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
+from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
     ReefEvalLab,
@@ -587,6 +589,30 @@ def test_refused_model_calls_are_named_in_the_error_whether_or_not_the_rollout_i
     assert ran.as_line()["failed_calls"] == 2
     assert unrecorded_ran.turns == () and unrecorded_ran.failed_calls == 2
     assert unrecorded_ran.error.startswith("2 model calls failed; the first answered 401")
+
+
+class ObservedCalls(CaptureObserver):
+    def __init__(self) -> None:
+        self.turns: list[CapturedTurn] = []
+
+    def call_captured(self, turn: CapturedTurn) -> None:
+        self.turns.append(turn)
+
+
+def test_a_capture_observer_gets_every_call_as_it_lands_failed_calls_with_their_error_body(tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    answered, refused = ObservedCalls(), ObservedCalls()
+    with contextlib.closing(StandInReef()) as reef:
+        runner(reef, tmp_path, StandInLab({"reward": 1.0}), capture_observer=answered).run(task_path)
+    with contextlib.closing(StandInReef(refuse_inference=True)) as reef:
+        runner(reef, tmp_path, StandInLab({"reward": 1.0}), capture_observer=refused).run(task_path)
+    assert [(turn.status, turn.request["messages"][0]["content"]) for turn in answered.turns] == [
+        (200, "turn 0"),
+        (200, "turn 1"),
+    ]
+    assert [(turn.status, turn.response) for turn in refused.turns] == [
+        (401, {"error": {"message": "invalid service token"}})
+    ] * 2
 
 
 def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: StandInReef, tmp_path: Path) -> None:

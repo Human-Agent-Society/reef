@@ -51,6 +51,7 @@ from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
+from reef.storage.evaluations import EvaluationCall
 from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -914,6 +915,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if not isinstance(sample, TaskSample):
             raise ReefError(f"scenario {scenario!r} uses no task {task_name!r}")
         return sample.task_path
+
+    def add_evaluation_call(self, scenario: str, evaluation_id: str, call: EvaluationCall) -> None:
+        """Keep ``call`` of evaluation ``evaluation_id`` in the evaluation store of ``scenario`` (``CandidateArtifacts``)."""
+        with self.locked_scenario(scenario) as current:
+            current.store.evaluations.add_call(evaluation_id, call)
 
     def request_artifact_copy(self, scenario: str) -> None:
         """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""
