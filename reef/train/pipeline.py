@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -184,6 +184,9 @@ class TrainingPipeline:
         self.sample2job = NoJobData(context) if sample2job is None else sample2job
         self.supported_training_modes = self.sample2job.supported_training_modes
         self.training_requests: dict[str, TrainingRequest] = {}
+        #: Whether this trainer takes each queued request, by ID. ``request_entries`` decides it once: it reads every
+        #: sample of the request, and ``holds_job_data`` runs on each poll.
+        self.takes_request: dict[str, bool] = {}
         self.consumed_requests: set[str] = set()
         #: What the failed step of each failed request said, by request ID.
         self.failed_requests: dict[str, str] = {}
@@ -276,6 +279,7 @@ class TrainingPipeline:
         if set(queued) - set(self.training_requests):
             self.received_input = True
         self.training_requests = queued
+        self.takes_request = {key: value for key, value in self.takes_request.items() if key in queued}
         held = {**self.failed_requests, **(failures or {})}
         self.failed_requests = {key: value for key, value in held.items() if key in queued}
 
@@ -299,6 +303,7 @@ class TrainingPipeline:
     def consume_request(self, request_id: str) -> None:
         """Take a queued request out of the pipeline; ``queue_requests`` no longer holds it."""
         self.training_requests.pop(request_id, None)
+        self.takes_request.pop(request_id, None)
         self.failed_requests.pop(request_id, None)
         self.consumed_requests.add(request_id)
 
@@ -470,9 +475,14 @@ class TrainingPipeline:
         imported task that it does not take, an upload that its stage cannot render), for samples of more than one
         kind, and for more than the stage's ``max_job_samples``.
         """
+        return self.sample_entries(self.store.get(request.samples))
+
+    def sample_entries(self, samples: Sequence[StoredSample]) -> tuple[tuple[StoredSample, Sample], ...]:
+        """``samples`` of a request, each with the sample that it trains; raise ``ValueError`` as
+        ``request_entries`` does."""
         entries: list[tuple[StoredSample, Sample]] = []
         untrainable: list[str] = []
-        for stored in self.store.get(request.samples):
+        for stored in samples:
             sample = self.trainable(stored)
             if sample is None:
                 untrainable.append(stored.sample_id)
@@ -495,10 +505,11 @@ class TrainingPipeline:
             if not self.sample2job.reads_requests:
                 raise ValueError("the request names no samples to train")
             return
-        unknown = sorted(set(request.samples) - {stored.sample_id for stored in self.store.get(request.samples)})
+        samples = self.store.get(request.samples)
+        unknown = sorted(set(request.samples) - {stored.sample_id for stored in samples})
         if unknown:
             raise ValueError(f"the scenario holds no samples {unknown}")
-        self.request_entries(request)
+        self.sample_entries(samples)
 
     def next_job_listing(self) -> tuple[Mapping[str, Any], ...]:
         """The samples of the next automatic job (``auto_entries``) as JSON: ``sample_id``, ``kind``, ``group``,
@@ -584,11 +595,13 @@ class TrainingPipeline:
             return False
         if not request.samples:
             return self.sample2job.reads_requests
-        try:
-            return bool(self.request_entries(request))
-        except ValueError:
-            # Another trainer's request.
-            return False
+        if request.id not in self.takes_request:
+            try:
+                self.takes_request[request.id] = bool(self.request_entries(request))
+            except ValueError:
+                # Another trainer's request.
+                self.takes_request[request.id] = False
+        return self.takes_request[request.id]
 
     def build_job_data(self, sample_count: int | None) -> JobData:
         """Return the handed out job data, or build the next job's data when ``ready`` for ``sample_count``."""

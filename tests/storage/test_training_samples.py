@@ -196,6 +196,15 @@ def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(scenario):
     assert (second.train_count(""), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
 
 
+def test_a_commit_counts_more_samples_than_one_statement_can_name(scenario):
+    # PostgreSQL takes at most 65535 parameters in one statement, and each count row has several.
+    sample_ids = [f"t{index}" for index in range(20_000)]
+    commit = training_commit(1, *(consumed_sample_id(sample_id) for sample_id in sample_ids))
+    scenario.session.commit_step(expected_step=0, commit=commit)
+    counts = scenario.session.training_state.train_counts(sample_ids)
+    assert len(counts) == len(sample_ids) and counts["t19999"] == {"": 1}
+
+
 def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2", math="train")])
     scenario.session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), component="a"))

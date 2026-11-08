@@ -768,8 +768,6 @@ its original content and digest when every other content field matches.
 The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
-The item of an artifact with a `serving profile <#serving-profiles>`__ also
-has ``serving_profile`` in its metadata.
 Its ``source_uri`` comes from the artifact backend: a backend
 that keeps releases where other deployments can read them, such as an object
 store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
@@ -778,8 +776,7 @@ backend gives none, so its items have a null ``source_uri``.
 To add files that you stored, such as an upload to an S3 prefix, create an
 item with ``POST /reef/namespaces/{owner}/data``, ``metadata`` ``{"kind":
 "artifact"}`` and no ``origin``. Its content needs a ``source_uri`` and a null
-``component``. Add ``serving_profile`` to the metadata to name the model of
-its files (`Serving profiles`_).
+``component``.
 
 To use an artifact item in a scenario, import it:
 ``POST /reef/scenarios/{scenario}/artifacts`` with ``{"item": "<id>"}``. The
@@ -1436,8 +1433,6 @@ names the keys that the route takes:
 - ``component``: the component that holds the item. Leave it out when the
   scenario has one component. It needs ``artifact_id``.
 
-The starting artifact takes the item's `serving profile <#serving-profiles>`__.
-
 Reef stores the starting artifacts and registers the scenario with their
 component mapping. With ``artifact_id``, Reef reads the item's files and checks
 them as ``POST /reef/scenarios/{scenario}/artifacts`` with ``{"item": "<id>"}``
@@ -1825,7 +1820,7 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null}
+   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null}
 
 ``model`` defaults to ``active``. It can also name an active artifact alias
 or an artifact selected for serving beside the active one. An unknown name
@@ -1841,7 +1836,19 @@ returns 404.
   doubles at each failed retry, up to one hour. A retry returns the state to
   ``pending``. Activate the active artifact again to retry at once.
 
-``error`` is null in every other state. The status describes the selected
+``error`` is null in every other state.
+
+``engine`` is the state of the engine behind the route of a ``ready`` artifact
+(RFC #1269), when the deployment's inference handler reports it:
+
+* ``warm``: an engine answers now.
+* ``starting``: an engine runs, but it does not answer yet.
+* ``idle``: no engine runs. The next request starts one and waits for it.
+
+``engine`` is null in every other state, and when the handler cannot tell.
+Reading it starts no engine.
+
+The status describes the selected
 artifact, even while an older route still serves requests. It is a startup
 result, not a continuous health check. Reading it starts no work.
 No startup work returns 404. An unreadable state store returns 503.
@@ -2257,31 +2264,26 @@ files, returns 404. ``?signed=1`` returns a `signed download URL
 <#signed-download-urls>`__ of the list or the file. The data service answers
 this route.
 
-Serving profiles
+Serving settings
 ~~~~~~~~~~~~~~~~
 
-A serving profile names the model that serves an artifact, such as
-``qwen3.8-27b`` (RFC #1233). It lets one deployment serve artifacts of
-several base models, also in one scenario. The deployment's inference runtime
-defines the profiles. An artifact without a profile is served with the
+An artifact holds only its content. It does not say which model serves it or
+how (RFC #1263). A deployment that serves artifacts of several base models
+gives each scenario a `serving config <#serving-config>`__ field that chooses
+the model of each artifact. The deployment's inference runtime defines that
+field and checks it. An artifact without a setting is served with the
 deployment's model.
 
-Because an artifact never changes its profile, a profile names the base model,
-not a version of how it is served. A runtime that changes its serving settings
-for a model keeps the profile name, so that every artifact of that model gets
-the new settings.
+You can change a setting at any time. The runtime applies it when inference
+next serves the scenario. A release that runs keeps its engine.
 
-You write a profile in one place: the ``serving_profile`` metadata of an
-`artifact item <#artifact-items>`__, when you create the item. It never
-changes after that. An artifact takes its profile from where its content came
-from, and keeps it:
+An artifact that training makes names its training starts in its own metadata,
+``training_starts``: the artifact ID of its training start, then that start's
+own training starts. A runtime uses them, so that a training artifact is served
+as its start is, unless it has its own setting.
 
-- A starting artifact or an import takes the profile of its item. The runtime
-  checks the profile then, and refuses an unknown one with 400. A runtime that
-  serves one model refuses every profile.
-- An artifact that training makes takes the profile of its training start.
-- The item that Reef makes for an artifact keeps the artifact's profile, so the
-  profile moves with the artifact to other scenarios.
+Items that RFC #1233 made can have ``serving_profile`` in their metadata. Reef
+ignores it, and a metadata patch can remove it.
 
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
@@ -2290,9 +2292,7 @@ Import an artifact
 artifact from the directory that a URI names. Leave out ``component`` when
 the scenario has one component. The body is ``{"source": "<uri>"}``, or
 ``{"item": "<id>"}`` for an `artifact item <#artifact-items>`__ of the
-scenario's owner, whose ``source_uri`` Reef reads. The new artifact takes the
-item's `serving profile <#serving-profiles>`__; an import from ``source`` has
-none. Reef checks the layout
+scenario's owner, whose ``source_uri`` Reef reads. Reef checks the layout
 below on the source, and then copies the directory from one of these URIs:
 
 - ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
@@ -2940,14 +2940,21 @@ Sample processing tasks
 ``GET /reef/scenarios/{scenario}/sample-processing`` reads the samples queue through the data service.
 The scenario must exist. It does not start processing.
 
-Optional query parameters are ``state``, ``before`` and ``limit``.
+Optional query parameters are ``state``, ``before``, ``limit`` and ``changed``.
 ``state`` is ``queued``, ``assigned``, ``running``, ``finished`` or ``failed``.
 ``before`` excludes creation sequences at or above its positive integer value.
 ``limit`` is 1 to 100, with default 50. Tasks appear newest first.
+``changed`` is ``true`` or ``false``, with default ``false``.
+With ``true``, the page omits finished tasks that gave the trainer nothing new.
+It reads at most 5,000 tasks to fill the page.
 
-The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``counts``, ``tasks`` and ``next``.
+The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``counts``, ``tasks``,
+``hidden`` and ``next``.
 ``enabled`` means the scenario has a trainer that generates samples.
 It does not report worker health. ``counts`` covers all retained tasks, independent of pagination and state filters.
+``hidden`` lists each run of omitted tasks, and is empty without ``changed=true``.
+A run has ``after``, ``count``, ``first_created_at`` and ``last_created_at``.
+``after`` is the ID of the shown task just newer than the run, or null at the top of the page.
 ``next`` is the next page's ``before`` value, or null.
 Reads of the page and counts are separate snapshots; tasks can change between them.
 
@@ -2955,8 +2962,15 @@ Reads of the page and counts are separate snapshots; tasks can change between th
 An unknown task, or a task of another scenario, returns 404.
 
 Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at``, ``started_at``,
-``ended_at``, ``available_at``, ``error``, ``changed``, ``background``, ``records_read`` and ``samples_created``.
+``ended_at``, ``available_at``, ``error``, ``changed``, ``background``, ``records_read``, ``samples_created``,
+``triggers`` and ``progress``.
 Times are Unix seconds. Unavailable fields are null.
+``triggers`` lists why the task ran, oldest first. Each entry has ``name`` and ``at``, the time of the first request.
+A name is ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``.
+Only ``records`` and ``data`` bring new records. The others let a stage make samples without a new record.
+A task from an older Reef has no triggers.
+``progress`` holds the counts so far of the attempt that runs now: ``attempt``, ``records_read``,
+``samples_created`` and ``at``. It is null for a task that does not run.
 ``started_at`` is the first attempt's start. ``error`` can describe a queued task's previous failed attempt.
 
 Processing counts describe the completed attempt only; they exclude earlier failed attempts.

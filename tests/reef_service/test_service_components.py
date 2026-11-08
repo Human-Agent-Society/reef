@@ -273,7 +273,7 @@ def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_th
     trainer = SimpleNamespace(trains=True)
     current = SimpleNamespace(
         trainers=(SimpleNamespace(component="weights", trainer=trainer),),
-        produce_samples=lambda component: made.append(component) or False,
+        produce_samples=lambda component, progress: made.append(component) or False,
     )
     loads: list[tuple[str, object]] = []
 
@@ -282,7 +282,7 @@ def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_th
             loads.append((scenario, allow_implicit_creation))
             return current
 
-    assert LocalSampleProducers(Registry(), None).produce("math", "weights") is False
+    assert LocalSampleProducers(Registry(), None).produce("math", "weights", lambda read, made: None) is False
     assert made == ["weights"] and loads == [("math", False)]
 
 
@@ -320,7 +320,7 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
     first_records = [] if initial_sequence == 0 else ["math"]
     assert changes.records == first_records and changes.samples == []
     sequence["math"] = 5
-    request_selection(queue, "math", "weights")
+    request_selection(queue, "math", "weights", trigger="records")
     item = queue.take(SAMPLES_QUEUE, "samples-1", [RECORD_SELECTION_KIND])
     queue.finish(SAMPLES_QUEUE, item.id, "samples-1", {"changed": True, "background": False})
     watcher.run_once()

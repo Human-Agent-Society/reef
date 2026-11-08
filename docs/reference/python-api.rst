@@ -122,16 +122,21 @@ methods. Each has a default for a handler or runtime without serving fields:
   scenario's override with each request. It applies its own fields and leaves
   the rest.
 - ``InferenceRuntime.apply_serving_config(scenario, override)`` applies the
-  engine fields. The inference worker calls it before each activation and when
-  only the override changed.
+  engine fields. The inference worker calls it before each activation, before
+  each ``serve_artifact(artifact, scenario=...)``, and when only the override
+  changed. After it, the worker reads the scenario's route again with
+  ``served_artifact``, so the runtime may move the scenario to another engine.
 
-A runtime that serves several models accepts `serving profiles
-<http-api.rst#serving-profiles>`__ with
-``InferenceRuntime.check_serving_profile(profile, artifact)``. Control calls it
-before an artifact takes a profile from its item. Raise ``ValueError`` to refuse
-the profile; the default refuses every profile. The runtime reads the profile of
-an artifact that it activates with ``reef.artifact.artifact.serving_profile_of``.
-None selects the deployment's model.
+An ``InferenceHandler`` whose engines scale to zero can report the state of
+the engine behind a route with ``engine_state(served)``: ``"warm"``,
+``"starting"``, ``"idle"`` or None (RFC #1269). The startup status of a ready
+artifact returns it as ``engine``. It must not start an engine.
+
+A runtime that serves several models declares a serving field that chooses the
+model of each artifact (`Serving settings <http-api.rst#serving-settings>`__).
+It reads an artifact's training starts with
+``reef.artifact.artifact.training_starts_of``, nearest first, so that a training
+artifact can use the setting of its start.
 
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
+from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.runtime_stubs import runtime_bindings
 from tests.support.serving import wait_for_serving
@@ -22,7 +22,7 @@ from reef.artifact import (
     directory_checksum,
     read_reference,
 )
-from reef.artifact.artifact import serving_profile_of
+from reef.artifact.artifact import training_starts_of
 from reef.core.errors import CommitPending, UnknownScenario
 from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
@@ -62,34 +62,27 @@ def store(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
-def test_an_import_keeps_the_items_serving_profile_and_training_from_it_inherits_it(tmp_path, monkeypatch) -> None:
-    """RFC #1233: the runtime checks the profile of an import, and an artifact that training makes from it names it."""
+def test_a_training_artifact_names_its_training_starts(tmp_path) -> None:
+    """RFC #1263: an artifact that training makes names its training start, then that start's own starts."""
     value, _, _ = dispatcher(tmp_path)
     scenario = value.get_or_create_scenario("math")
-
     files = weights(tmp_path / "qwen")
-
-    def import_with(profile: str):
-        return value.import_artifact(
-            "math",
-            opened(files),
-            None,
-            source=source(files),
-            directory=store(tmp_path),
-            item=ItemIdentity("qwen-base", serving_profile=profile),
-        )
-
-    with pytest.raises(ValueError, match="takes no serving profile"):
-        import_with("qwen@1")
-    monkeypatch.setattr(ImportingInference, "check_serving_profile", lambda self, profile, artifact: None)
-    imported = import_with("qwen@1")
+    imported = value.import_artifact(
+        "math", opened(files), None, source=source(files), directory=store(tmp_path), item=ItemIdentity("qwen-base")
+    )
     value.train_from("math", imported.artifact_id)
     train(value, 1)
+    first = value.list_artifacts("math")[0]["artifact_id"]
+    value.train_from("math", first)
+    train(value, 2)
+    second = value.list_artifacts("math")[0]["artifact_id"]
 
-    newest = value.list_artifacts("math")[0]
-    assert newest["parent_artifact_id"] == imported.artifact_id
-    for artifact_id in (imported.artifact_id, newest["artifact_id"]):
-        assert serving_profile_of(scenario.resolve_artifact(artifact_id)[1]) == "qwen@1"
+    def starts(artifact_id: str) -> tuple[str, ...]:
+        return training_starts_of(scenario.resolve_artifact(artifact_id)[1])
+
+    assert starts(imported.artifact_id) == ()
+    assert starts(first) == (imported.artifact_id,)
+    assert starts(second) == (first, imported.artifact_id)
     value.close()
 
 
