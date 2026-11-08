@@ -54,11 +54,14 @@ from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import PostgresDataStore
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase, batches
 from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
 from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+
+#: The most parameters that one PostgreSQL statement takes.
+MAX_PARAMETERS = 65535
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
 POSTGRES_SCHEMA_VERSION = 20
@@ -294,8 +297,13 @@ class PostgresScenarioDatabase(SQLScenarioDatabase):
         self, connection: Connection, table: Table, values: Mapping[str, object] | Sequence[Mapping[str, object]]
     ) -> bool:
         rows = [dict(values)] if isinstance(values, Mapping) else [dict(row) for row in values]
-        statement = insert(table).values(rows).on_conflict_do_nothing().returning(next(iter(table.primary_key)))
-        return connection.execute(statement).first() is not None
+        inserted = False
+        # One statement takes at most MAX_PARAMETERS parameters, and each row gives one for each of its columns.
+        for batch in batches(rows, MAX_PARAMETERS // len(rows[0]) if rows else 1):
+            statement = insert(table).values(batch).on_conflict_do_nothing().returning(next(iter(table.primary_key)))
+            if connection.execute(statement).first() is not None:
+                inserted = True
+        return inserted
 
     def task_storage(self, files: TaskFileStore, scenario: str) -> SQLTaskStorage:
         """Open the task stores of this store generation, with their task files in ``files``."""

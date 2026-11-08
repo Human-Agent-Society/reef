@@ -400,7 +400,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "scenario %r: the commit is durable, but its served models were not written", instance.name
             )
         try:
-            self.request_samples(instance)
+            self.request_samples(instance, "commit")
             instance.refresh_requests()
         except Exception:
             logger.exception(
@@ -429,7 +429,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
         workers keep the failure until the samples come and the next cycle runs."""
         if self.services.runs_control:
-            self.request_samples(instance)
+            self.request_samples(instance, "reload")
 
     def close_replaced(self, instance: Scenario) -> None:
         """Close a reloaded scenario's old instance once no local cycle runs on it."""
@@ -763,7 +763,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         samples service, which reads the record items that it uses. The caller holds the scenario's lock."""
         if self.data_store is None:
             raise ReefError("this dispatcher has no data store")
-        self.request_samples(current)
+        self.request_samples(current, "data")
         self.local_workers.wake(current)
         for component_trainer in current.trainers:
             if not component_trainer.trainer.trains:
@@ -886,7 +886,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         # Every component's trainer sees the record. The samples service makes the samples of a trainer that
         # trains, and its worker builds jobs from them. A trainer that trains nothing only advances its record
         # cursor, here.
-        self.request_samples(current)
+        self.request_samples(current, "records")
         self.local_workers.wake(current)
         for component_trainer in current.trainers:
             if not component_trainer.trainer.trains:
@@ -937,7 +937,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
     def records_added(self, current: Scenario) -> None:
         """Another process appended records to ``current``: ask for their samples."""
-        self.request_samples(current)
+        self.request_samples(current, "records")
 
     def samples_added(self, scenario: str) -> None:
         """The samples service stored samples of ``scenario``: its local workers build the next job from them."""
@@ -955,11 +955,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """Another process queued a training request of ``scenario``: its local workers run it."""
         self.samples_added(scenario)
 
-    def request_samples(self, current: Scenario) -> None:
-        """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains."""
+    def request_samples(self, current: Scenario, trigger: str) -> None:
+        """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains,
+        because of ``trigger`` (``reef.record2sample.service.TRIGGERS``)."""
         for component_trainer in current.trainers:
             if component_trainer.trainer.trains:
-                request_selection(self.queue, current.name, component_trainer.component)
+                request_selection(self.queue, current.name, component_trainer.component, trigger=trigger)
 
     # -- Preload ---------------------------------------------------------
 

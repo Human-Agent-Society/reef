@@ -133,3 +133,58 @@ def test_sample_processing_reads_retained_tasks_and_rejects_cross_scenario_detai
             assert (await client.get(path)).status == 401
 
     asyncio.run(run())
+
+
+def test_sample_processing_folds_tasks_that_changed_nothing_and_shows_triggers_and_progress(tmp_path):
+    from reef.record2sample.service import SAMPLES_QUEUE
+    from reef.storage.work_queue import NewWork
+
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    queue = dispatcher.queue
+
+    def task(name: str, changed: bool | None) -> None:
+        # An unknown work kind, so no samples worker takes these tasks while the test reads them.
+        queue.add(NewWork(SAMPLES_QUEUE, name, "s", "inspection", {"component": "probe"}))
+        queue.set_metadata(SAMPLES_QUEUE, name, "trigger:background" if changed is False else "trigger:records", 1.0)
+        if changed is None:
+            return
+        assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == name
+        queue.finish(SAMPLES_QUEUE, name, "w", {"changed": changed, "background": False})
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
+            queue.add(NewWork(SAMPLES_QUEUE, "oldest", "s", "inspection", {"component": "probe"}))
+            assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == "oldest"
+            queue.finish(SAMPLES_QUEUE, "oldest", "w", {})
+            for name, changed in [("a", True), ("b", False), ("c", False), ("d", True), ("e", False)]:
+                task(name, changed)
+            task("running", None)
+            assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == "running"
+            queue.set_metadata(
+                SAMPLES_QUEUE, "running", "progress", {"attempt": 1, "records_read": 7, "samples_created": 2}
+            )
+            path = "/reef/scenarios/s/sample-processing"
+
+            everything = await (await client.get(path + "?state=finished", headers=AUTH)).json()
+            assert [task["id"] for task in everything["tasks"]][:5] == ["e", "d", "c", "b", "a"]
+            assert everything["hidden"] == []
+            assert everything["tasks"][0]["progress"] is None
+            running = await (await client.get(path + "/running", headers=AUTH)).json()
+            assert running["progress"]["records_read"] == 7
+            assert [trigger["name"] for trigger in running["triggers"]] == ["records"]
+            assert (await (await client.get(path + "/oldest", headers=AUTH)).json())["triggers"] == []
+
+            listing = await (await client.get(path + "?state=finished&changed=true&limit=1", headers=AUTH)).json()
+            assert [task["id"] for task in listing["tasks"]] == ["d"]
+            assert [(run["after"], run["count"]) for run in listing["hidden"]] == [(None, 1)]
+            query = f'?state=finished&changed=true&before={listing["next"]}&limit=1'
+            rest = await (await client.get(path + query, headers=AUTH)).json()
+            assert [task["id"] for task in rest["tasks"]] == ["a"]
+            assert [(run["after"], run["count"]) for run in rest["hidden"]] == [(None, 2)]
+            assert (await client.get(path + "?changed=yes", headers=AUTH)).status == 400
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
