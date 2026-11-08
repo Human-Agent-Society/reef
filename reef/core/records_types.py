@@ -14,8 +14,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from reef.core.components import legacy_artifact_id
-from reef.core.snapshot import decode_snapshot_ref
+
+@dataclass(frozen=True)
+class RecordLoss:
+    """Durable capacity-eviction totals for one scenario's stored records or record items."""
+
+    record_count: int = 0
+    body_bytes: int = 0
+    first_sequence: int = 0
+    last_sequence: int = 0
 
 
 class RequestType(StrEnum):
@@ -24,7 +31,7 @@ class RequestType(StrEnum):
 
 
 #: The request header that marks an inference call of a rollout that Reef runs itself. The service
-#: serves the call from the scenario's release as it serves any other, keeps no record of it, and returns the
+#: serves the call from the scenario's snapshot as it serves any other, keeps no record of it, and returns the
 #: response with its training block. Such a rollout is not user data, so it never becomes a record.
 ROLLOUT_HEADER = "x-reef-rollout"
 
@@ -81,27 +88,13 @@ class AgentRecord:
 
 
 def decode_record_artifact_id(value: object, payload: Mapping[str, object]) -> str | None:
-    """Read an ID or an older record locator; prefer the legacy payload's component ID.
-
-    Old records may contain a snapshot locator enclosing several components.
-    Their payload names the actual responding component when available.
-    A locator without that field uses the historical flat-artifact identity.
-    """
-    if isinstance(value, Mapping):
-        ref = decode_snapshot_ref(value)
-        identity = payload.get("artifact_id", legacy_artifact_id(ref.revision, None))
-    elif value is None:
-        identity = payload.get("artifact_id")
-    else:
-        identity = value
+    """Read a record's artifact ID: ``value``, or the ``artifact_id`` of ``payload`` when ``value`` is None."""
+    identity = payload.get("artifact_id") if value is None else value
     if identity is not None and (not isinstance(identity, str) or not identity):
         raise ValueError("a record artifact_id must be a nonempty string or null")
     return identity
 
 
 def stored_record_artifact_id(record: Mapping[str, object], payload: Mapping[str, object]) -> str | None:
-    """The artifact ID of a stored or uploaded record mapping ``record`` with ``payload``.
-
-    It reads ``artifact_id``, or the ``artifact_ref`` of an older record, with ``decode_record_artifact_id``.
-    """
-    return decode_record_artifact_id(record.get("artifact_id", record.get("artifact_ref")), payload)
+    """The artifact ID of a stored or uploaded record mapping ``record`` with ``payload``."""
+    return decode_record_artifact_id(record.get("artifact_id"), payload)

@@ -143,14 +143,27 @@ class ParentCandidate:
 def best_parent(key: CallKey, candidates: Iterable[ParentCandidate]) -> ParentCandidate | None:
     """The parent of the call of ``key`` among ``candidates``: the longest prefix; among one length, a call whose
     reply the request resends; then the newest. ``None`` when there is no candidate."""
+    found = list(candidates)
+    if not found:
+        return None
+    # Only the longest prefix can win, so only its candidates need the hash of the span that follows it, once per
+    # reply length.
+    longest = max(candidate.entry_count for candidate in found)
+    resent: dict[int, str | None] = {}
+
+    def continues(candidate: ParentCandidate) -> bool:
+        if candidate.reply_sha256 is None:
+            return False
+        if candidate.reply_count not in resent:
+            following = key.request[longest : longest + candidate.reply_count]
+            resent[candidate.reply_count] = (
+                reply_sha256(following) if len(following) == candidate.reply_count else None
+            )
+        return resent[candidate.reply_count] == candidate.reply_sha256
+
     return max(
-        candidates,
-        key=lambda candidate: (
-            candidate.entry_count,
-            key.continues(candidate.entry_count, candidate.reply_count, candidate.reply_sha256),
-            candidate.sequence,
-        ),
-        default=None,
+        (candidate for candidate in found if candidate.entry_count == longest),
+        key=lambda candidate: (continues(candidate), candidate.sequence),
     )
 
 

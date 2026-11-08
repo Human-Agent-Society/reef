@@ -1,4 +1,4 @@
-"""Read-channel guarantees of the harness routes: the release catalog with each step's evaluation metrics,
+"""Read-channel guarantees of the harness routes: the snapshot catalog with each step's evaluation metrics,
 version-addressed pulls, served files that are byte for byte the evaluated source tree rendered for the
 adapter, the source form, and the routes the wrapper used that are gone. Hermetic: tasks run a fake pi
 binary through the real adapter path, and the reads go through the real HTTP app."""
@@ -59,7 +59,7 @@ def channel_dispatcher(
     inference_stages: bool = False,
     job_samples: int = 1,
 ) -> Dispatcher:
-    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its root release is
+    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its root snapshot is
     ``seed``, and each step takes ``job_samples`` traces."""
     candidates = iter(patches)
     stages: dict = (
@@ -128,16 +128,16 @@ async def committed_step(client: TestClient) -> dict:
 
 
 async def evaluated_step(client: TestClient) -> dict:
-    """Drive one evaluated step through the wire; the manifest of the release it published."""
+    """Drive one evaluated step through the wire; the manifest of the snapshot it published."""
     response = await client.get("/reef/harness", headers=HEADERS)
-    previous = (await response.json())["release_id"] if response.status == 200 else None
+    previous = (await response.json())["artifact_id"] if response.status == 200 else None
     await scored_exchange(client)
     deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
     while True:
         response = await client.get("/reef/harness", headers=HEADERS)
         if response.status == 200:
             manifest = await response.json()
-            if manifest["release_id"] != previous:
+            if manifest["artifact_id"] != previous:
                 assert manifest["evaluation"]["selected"] is True
                 return manifest
         else:
@@ -210,27 +210,27 @@ def test_a_published_step_reaches_the_served_files_and_the_catalog(tmp_path) -> 
             rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
             current = next(row["artifact_id"] for row in rows if row["active"])
             manifest = await evaluated_step(client)
-            assert manifest["release_id"] != current
+            assert manifest["artifact_id"] != current
 
             # The served files are exactly the tree the evaluation measured, rendered without a model binding.
             assert manifest["files"] == render_tree(TREE_V1, PI)
             source = await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)
             assert source.status == 200
             pulled = await source.json()
-            assert pulled["files"] == dict(TREE_V1.files) and pulled["release_id"] == manifest["release_id"]
+            assert pulled["files"] == dict(TREE_V1.files) and pulled["artifact_id"] == manifest["artifact_id"]
             invalid = await client.get("/reef/harness", params={"form": "zip"}, headers=HEADERS)
             assert invalid.status == 400 and "form must be 'rendered', 'source' or 'client'" in await invalid.text()
 
-            response = await client.get("/reef/harness/releases", headers=HEADERS)
+            response = await client.get("/reef/harness/artifacts", headers=HEADERS)
             assert response.status == 200
             catalog = await response.json()
             assert catalog["scenario"] == "delivery"
-            rows = catalog["releases"]
-            # Newest last: the creation release opens the catalog, the published head closes it with the
+            rows = catalog["artifacts"]
+            # Newest last: the creation snapshot opens the catalog, the published head closes it with the
             # manifest's evaluation.
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
-            assert head["release_id"] == manifest["release_id"] and head["active"] is True
+            assert head["artifact_id"] == manifest["artifact_id"] and head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["selected"] is True and head["metrics"]["wins"] == 1
 
@@ -243,15 +243,15 @@ def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
         async with served(channel_dispatcher(tmp_path, PATCHES)) as client:
             first = await evaluated_step(client)
             second = await evaluated_step(client)
-            assert first["release_id"] != second["release_id"]
-            response = await client.get("/reef/harness", params={"release_id": first["release_id"]}, headers=HEADERS)
-            assert response.status == 200 and response.headers["x-reef-release-id"] == first["release_id"]
+            assert first["artifact_id"] != second["artifact_id"]
+            response = await client.get("/reef/harness", params={"artifact_id": first["artifact_id"]}, headers=HEADERS)
+            assert response.status == 200 and "x-reef-release-id" not in response.headers
             manifest = await response.json()
-            assert manifest["release_id"] == first["release_id"]
+            assert manifest["artifact_id"] == first["artifact_id"]
             assert manifest["files"] == render_tree(TREE_V1, PI)
             assert second["files"] == render_tree(TREE_V2, PI)
             source = await client.get(
-                "/reef/harness", params={"release_id": first["release_id"], "form": "source"}, headers=HEADERS
+                "/reef/harness", params={"artifact_id": first["artifact_id"], "form": "source"}, headers=HEADERS
             )
             assert (await source.json())["files"] == dict(TREE_V1.files)
             selected = await client.get("/reef/harness", params={"artifact_id": first["artifact_id"]}, headers=HEADERS)
@@ -271,7 +271,7 @@ def test_an_unknown_version_is_a_404_naming_it_and_the_install_route_is_gone(tmp
 
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, ())) as client:
-            response = await client.get("/reef/harness", params={"release_id": "no-such-version"}, headers=HEADERS)
+            response = await client.get("/reef/harness", params={"artifact_id": "no-such-version"}, headers=HEADERS)
             assert response.status == 404 and "no-such-version" in await response.text()
             response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=HEADERS)
             assert response.status == 404
@@ -303,8 +303,8 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 second_step = asyncio.create_task(evaluated_step(client))
                 assert await asyncio.to_thread(evaluation_started.wait, UPDATE_TIMEOUT_S)
 
-                async def read_release(path: str, release_id: str | None = None) -> dict:
-                    params = {} if release_id is None else {"release_id": release_id}
+                async def read_artifact(path: str, artifact_id: str | None = None) -> dict:
+                    params = {} if artifact_id is None else {"artifact_id": artifact_id}
                     response = await client.get(path, params=params, headers=HEADERS)
                     assert response.status == 200
                     return await response.json()
@@ -312,27 +312,27 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 # A resident client keeps seeing the committed tree and its evaluation while the next candidate runs.
                 catalog, current, pinned = await asyncio.wait_for(
                     asyncio.gather(
-                        read_release("/reef/harness/releases"),
-                        read_release("/reef/harness"),
-                        read_release("/reef/harness", first["release_id"]),
+                        read_artifact("/reef/harness/artifacts"),
+                        read_artifact("/reef/harness"),
+                        read_artifact("/reef/harness", first["artifact_id"]),
                     ),
                     timeout=1.0,
                 )
                 assert current == pinned == first
-                head = catalog["releases"][-1]
-                assert head["active"] is True and head["release_id"] == first["release_id"]
+                head = catalog["artifacts"][-1]
+                assert head["active"] is True and head["artifact_id"] == first["artifact_id"]
                 assert head["artifact_id"] == first["artifact_id"] and head["metrics"] == first["evaluation"]
 
                 finish_evaluation.set()
                 second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
-                updated = await read_release("/reef/harness/releases")
-                assert len(updated["releases"]) == len(catalog["releases"]) + 1
-                assert updated["releases"][-2]["active"] is False
-                head = updated["releases"][-1]
-                assert head["active"] is True and head["release_id"] == second["release_id"] != first["release_id"]
+                updated = await read_artifact("/reef/harness/artifacts")
+                assert len(updated["artifacts"]) == len(catalog["artifacts"]) + 1
+                assert updated["artifacts"][-2]["active"] is False
+                head = updated["artifacts"][-1]
+                assert head["active"] is True and head["artifact_id"] == second["artifact_id"] != first["artifact_id"]
                 assert head["artifact_id"] == second["artifact_id"] and head["metrics"] == second["evaluation"]
                 assert second["files"] == render_tree(TREE_V2, PI)
-                assert await read_release("/reef/harness", first["release_id"]) == first
+                assert await read_artifact("/reef/harness", first["artifact_id"]) == first
             finally:
                 finish_evaluation.set()
                 if second_step is not None:

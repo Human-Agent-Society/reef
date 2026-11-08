@@ -11,7 +11,7 @@ attempt can consume API resources but cannot apply its gradient twice.
 
 Serving reads each saved checkpoint from its artifact: Tinker's sampler
 (``reef.inference.tinker``) reads the manifest, and Reef's serving engines
-(``reef.runtime.serving``) load the PEFT adapter the component exports beside
+(``reef.inference.serving``) load the PEFT adapter the component exports beside
 it. Nothing is shared in process.
 """
 
@@ -20,7 +20,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
-import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -34,17 +33,19 @@ from reef.artifact.repository import BaseModelFiles, DefaultStart
 from reef.core.chat_rendering import needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
+from reef.core.weight_layout import ArtifactFormat
+from reef.storage.durable_files import read_json, write_json
+from reef.storage.job_data import JobDataKind, read_job_data
+from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
-from reef.train.algos.registry import job_training
-from reef.train.algos.schedule import StepScheduling
+from reef.train.component import SavedCheckpoint, TrainingJob
+from reef.train.learning_rate import learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
+from reef.train.tinker_backend.parameters import TinkerJobParameters, rollout_settings, tinker_parameters_schema
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
 
@@ -52,52 +53,15 @@ from reef.train.tinker_backend.rollout import SamplerChat
 SAMPLER_WARM_TIMEOUT_S = 3600.0
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
-#: The parameters of a Tinker job besides ``method`` and ``scheduling``.
-JOB_PARAMETER_NAMES = frozenset({"batch_size", "kl_coef", "learning_rate", "save_interval", "rollout"})
-
-
-@dataclass(frozen=True)
-class TinkerJobParameters:
-    """The parameters of one Tinker job, with the component's defaults for those the job leaves out.
-
-    Values: ``method`` and ``scheduling`` as ``job_training`` reads them; ``batch_size`` a positive int, the
-    rollouts of one optimizer step; ``learning_rate`` finite and positive; ``kl_coef`` finite and non-negative;
-    ``save_interval`` a positive int, the optimizer steps between two saved checkpoints, or None for one
-    checkpoint when the job ends; ``rollout`` the rollouts of a task job, or None for a job of trajectories.
-    Purpose: ``TinkerTrainingComponent.job_parameters`` makes it when it checks and when it runs a job; the run
-    reads it.
-    """
-
-    method: TrainingMethod
-    scheduling: StepScheduling
-    batch_size: int
-    learning_rate: float
-    kl_coef: float
-    save_interval: int | None
-    rollout: RolloutSettings | None
-
-    def __post_init__(self) -> None:
-        counts = {
-            "batch_size": self.batch_size,
-            "save_interval": 1 if self.save_interval is None else self.save_interval,
-        }
-        for name, count in counts.items():
-            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
-                raise ValueError(f"{name} must be a positive int")
-        for name, rate in (("learning_rate", self.learning_rate), ("kl_coef", self.kl_coef)):
-            if isinstance(rate, bool) or not isinstance(rate, int | float) or not math.isfinite(rate):
-                raise ValueError(f"{name} must be a finite number")
-        if self.learning_rate <= 0 or self.kl_coef < 0:
-            raise ValueError("learning_rate must be positive and kl_coef non-negative")
 
 
 class TinkerJobComponent(LocalJobComponent, ABC):
     """Train each job as remote sessions on a Tinker-compatible service from the job's start, in a background thread.
 
-    A job's parameters are ``TinkerJobParameters``: ``method``, optionally
-    ``scheduling``, and ``batch_size``, ``kl_coef``, ``learning_rate``,
-    ``save_interval`` and ``rollout``, where ``batch_size``, ``kl_coef`` and
-    ``learning_rate`` default to the component's ``TinkerServiceConfig``.
+    A job's parameters are ``TinkerJobParameters``: ``objective``, optionally
+    ``learning_rate_schedule`` and ``scheduling``, and ``batch_size``, ``kl_coef``,
+    ``learning_rate``, ``save_interval`` and ``rollout``, where ``batch_size``,
+    ``kl_coef`` and ``learning_rate`` default to the component's ``TinkerServiceConfig``.
     ``submit`` refuses any other parameter or a malformed value. Jobs of
     several scenarios can share the component, since each job trains from its
     own start.
@@ -127,14 +91,14 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
     releases) and ``jobs/`` (see ``LocalJobComponent``). The constructor makes no base start. ``prepared_base``
     makes ``base/`` on its first call in a process: before the process runs jobs (``start_jobs``), when it reads
-    ``base_start`` or checks a job from it, or when a new scenario's root release holds the default start
+    ``base_start`` or checks a job from it, or when a new scenario's root snapshot holds the default start
     (``TinkerBaseFiles``). A process that does none of these, such as a service that only opens scenarios, makes
     nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
-    directory is both the start of a later job and the release Reef publishes.
+    directory is both the start of a later job and the snapshot Reef publishes.
     The weights stay on the service. A subclass decides the parameterization:
     which checkpoints it trains (``validated``), what its base is
-    (``prepare_base``, ``start_at``), and which releases it imports.
+    (``prepare_base``, ``start_at``), and which snapshots it imports.
     """
 
     def __init__(
@@ -210,8 +174,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"the start {directory} holds no Tinker checkpoint manifest")
         return self.validated(TinkerCheckpoint.read(directory))
 
-    def complete_release(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
-        """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its release holds; by default nothing.
+    def complete_artifact(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its snapshot holds; by default nothing.
 
         The job loop calls it for each saved checkpoint before the checkpoint is recorded, so a job that a restart
         interrupts here saves the checkpoint again.
@@ -221,7 +185,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def check_manifest(self, files: ArtifactFiles) -> None:
         """Raise ``ValueError`` unless ``files`` hold a manifest that ``validated`` takes and whose state resolves."""
         if MANIFEST not in files.paths():
-            raise ValueError(f"a Tinker release holds {MANIFEST}")
+            raise ValueError(f"a Tinker artifact holds {MANIFEST}")
         try:
             checkpoint = TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
         except (TypeError, ValueError) as exc:
@@ -229,11 +193,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
         self._client.check_remote(self.validated(checkpoint))
 
-    def import_manifest(self, release: Path) -> str:
+    def import_manifest(self, artifact_dir: Path) -> str:
         """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
-        if not (release / MANIFEST).exists():
+        if not (artifact_dir / MANIFEST).exists():
             raise ValueError(f"artifact is missing {MANIFEST}")
-        checkpoint = self.validated(TinkerCheckpoint.read(release))
+        checkpoint = self.validated(TinkerCheckpoint.read(artifact_dir))
         digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
         imported = self._root / "imported" / digest
         if not imported.exists():
@@ -242,8 +206,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return str(imported)
 
     @property
-    def release_format(self) -> ReleaseFormat | None:
-        """``None`` by default: a release holds only its manifest, and the weights stay on the service."""
+    def artifact_format(self) -> ArtifactFormat | None:
+        """``None`` by default: a snapshot holds only its manifest, and the weights stay on the service."""
         return None
 
     @property
@@ -261,19 +225,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     def job_parameters(self, parameters: Mapping[str, Any]) -> TinkerJobParameters:
         """``parameters`` over the component's defaults; ``ValueError`` for an unknown or a malformed parameter."""
-        unknown = set(parameters) - {"method", "scheduling", *JOB_PARAMETER_NAMES}
-        if unknown:
-            raise ValueError(f"Tinker jobs accept no parameters {sorted(unknown)}")
-        method, scheduling = job_training(parameters)
-        return TinkerJobParameters(
-            method,
-            scheduling,
-            parameters.get("batch_size", self._config.batch_size),
-            parameters.get("learning_rate", self._config.learning_rate),
-            parameters.get("kl_coef", self._config.kl_coef),
-            parameters.get("save_interval"),
-            None if parameters.get("rollout") is None else RolloutSettings.from_parameters(parameters),
-        )
+        return TinkerJobParameters.from_parameters(parameters, self._config)
+
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
+        return tinker_parameters_schema(kind)
 
     def check_job(self, job: TrainingJob) -> None:
         parameters = self.job_parameters(job.parameters)
@@ -281,10 +236,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             start = Path(job.start)
             # A job from the base start reads ``base/`` as this process prepares it.
             self.start_at(self.prepared_base() if start == self._base else start)
-        tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
-        if tasks and len(tasks) != len(job.data.samples):
-            raise ValueError("a Tinker job trains either trajectories or tasks, not both")
-        if tasks:
+        if job.kind == "task":
+            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
@@ -296,9 +249,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         """A task job rolls its tasks out on this component's sampler, as the ``rollout`` parameter says."""
         if self._sampler is None:
             raise ValueError("this Tinker component has no sampler, so it cannot roll tasks out")
-        if parameters.get("rollout") is None:
-            raise ValueError("a task job needs the rollout parameter as an object")
-        RolloutSettings.from_parameters(parameters)
+        self.job_parameters(parameters)
+        rollout_settings(parameters)
 
     def close_resources(self) -> None:
         try:
@@ -318,11 +270,13 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data_id, samples)), RolloutScores.from_json(kept["scores"])
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
-        tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
+        tasks = tuple(
+            item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)
+        )
         self.warm_sampler(start.sampler_path)
         chat = SamplerChat(
             self._sampler,
@@ -344,7 +298,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         write_json(
             record,
             {
-                "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
+                "samples": JobData(job.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
             },
         )
@@ -372,8 +326,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
         start = self.start_at(Path(job.start))
-        method = parameters.method
-        data = job.data
+        data = read_job_data(job.data_dir, job.data_id)
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
@@ -397,8 +350,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                     return rollout_metrics
         prepared = prepare_tinker_job(
             data,
-            method,
-            start.state_for(method.objective),
+            parameters.objective,
+            start.state_for(parameters.objective),
             parameters.scheduling,
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
@@ -409,7 +362,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             return {**prepared.metrics, **rollout_metrics}
         steps = prepared.steps
         schedule = resolve_learning_rate_schedule_state(
-            start.learning_rate_schedule_state, method.learning_rate_schedule
+            start.learning_rate_schedule_state, parameters.learning_rate_schedule
         )
         learning_rates = (
             (parameters.learning_rate,) * len(steps) if schedule is None else schedule.learning_rates(len(steps))
@@ -437,11 +390,13 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                 self.validated(checkpoint),
                 learning_rate_schedule_state=schedule_state,
                 algorithm_state=dict(prepared.next_algorithm_state) if final else dict(start.algorithm_state),
-                objective=(method.objective if prepared.next_algorithm_state else None) if final else start.objective,
+                objective=(
+                    (parameters.objective if prepared.next_algorithm_state else None) if final else start.objective
+                ),
             )
             target = directory / str(last)
             current.write(target)
-            self.complete_release(current, target)
+            self.complete_artifact(current, target)
             self.save_checkpoint(
                 directory,
                 SavedCheckpoint(
@@ -464,7 +419,7 @@ class TinkerBaseFiles(BaseModelFiles):
     """The base start of a Tinker component as the model files of its default start.
 
     Values: ``component`` is the ``TinkerJobComponent`` whose ``base/`` the files are. ``directory`` returns
-    ``component.prepared_base()``, so a new scenario's root release makes the base start on its first call in a
+    ``component.prepared_base()``, so a new scenario's root snapshot makes the base start on its first call in a
     process. Purpose: ``TinkerJobComponent`` subclasses give it in their ``default_start``, which itself makes
     nothing.
     """
@@ -480,7 +435,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     The base start, ``base/``, is the untrained adapter's checkpoint, which the
     client saves on first use (``TinkerClient.initialize``): before the training
-    process runs jobs, or when a new scenario's root release holds the
+    process runs jobs, or when a new scenario's root snapshot holds the
     default start (``prepared_base``). Serving reads
     each saved checkpoint from its artifact: Tinker's sampler
     (``reef.inference.tinker``) reads the manifest, and a serving runtime that
@@ -501,7 +456,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     def prepare_base(self) -> None:
         if not (self._base / MANIFEST).exists():
-            # The untrained adapter is the base checkpoint: the default start holds it as a release.
+            # The untrained adapter is the base checkpoint: the default start holds it as a snapshot.
             self._client.initialize().write(self._base)
 
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
@@ -520,9 +475,9 @@ class TinkerTrainingComponent(TinkerJobComponent):
             inputs["service"] = self._config.base_url
         return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
 
-    def check_release(self, files: ArtifactFiles) -> None:
+    def check_artifact(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
         self.check_manifest(files)
 
-    def import_start(self, release: Path) -> str:
-        return self.import_manifest(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return self.import_manifest(artifact_dir)

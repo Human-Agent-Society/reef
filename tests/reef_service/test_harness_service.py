@@ -57,8 +57,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
         async with TestClient(TestServer(app)) as client:
             served = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert served["files"] == dict(PI_SEED.files)
-            base = served["release_id"]
-            assert base == control.get_or_create_scenario("demo").current_snapshot().revision
+            base = served["artifact_id"]
             # A client's layer sends its model calls to the inference service that the deployment names.
             layer = await client.get(
                 "/reef/harness",
@@ -67,38 +66,36 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             )
             text = "".join((await layer.json())["files"].values())
             assert f"{INFERENCE_URL}/reef/scenarios/demo" in text and "harness.example" not in text
-            # An import goes to control, which commits it as the active release.
+            # An import goes to control, which commits it as the active selection.
             response = await client.post(
-                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_release_id": base}
+                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_artifact_id": base}
             )
             assert response.status == 200, await response.text()
             imported = await response.json()
-            assert imported["changed"] is True and imported["parent_release_id"] == base
-            current = control.get_or_create_scenario("demo").current_snapshot()
-            assert current.revision == imported["release_id"] == response.headers["x-reef-release-id"]
-            # The harness service reads the release that control committed.
+            assert imported["changed"] is True and imported["parent_artifact_id"] == base
+            # The harness service reads the snapshot that control committed.
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
-            assert source["release_id"] == imported["release_id"] and source["files"]["rules.md"] == "Mine.\n"
-            releases = await (await client.get("/reef/harness/releases", headers=HEADERS)).json()
-            assert releases["releases"][-1]["release_id"] == imported["release_id"]
+            assert source["artifact_id"] == imported["artifact_id"] and source["files"]["rules.md"] == "Mine.\n"
+            releases = await (await client.get("/reef/harness/artifacts", headers=HEADERS)).json()
+            assert releases["artifacts"][-1]["artifact_id"] == imported["artifact_id"]
             # The same files again are a new import, which merges onto the tree they made: nothing changes.
             again = await client.post(
-                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_release_id": base}
+                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_artifact_id": base}
             )
             assert again.status == 200 and (await again.json())["changed"] is False
             # Control's refusals keep their status: a file that both sides changed, an import without its base,
             # and an unknown scenario.
             conflicting = {**MINE, "plugin/rules.md": "Theirs.\n"}
             refusals = (
-                (HEADERS, {"files": conflicting, "base_release_id": base}, 409),
+                (HEADERS, {"files": conflicting, "base_artifact_id": base}, 409),
                 (HEADERS, {"files": MINE}, 400),
-                ({"x-reef-scenario": "missing"}, {"files": MINE, "base_release_id": base}, 404),
+                ({"x-reef-scenario": "missing"}, {"files": MINE, "base_artifact_id": base}, 404),
             )
             for headers, body, status in refusals:
                 refused = await client.post("/reef/harness/import", headers=headers, json=body)
                 assert refused.status == status, await refused.text()
             # The pages and the writes stay with control.
-            assert (await client.get("/reef/harness/releases/0/page", headers=HEADERS)).status == 404
+            assert (await client.get("/reef/harness/artifacts/0/page", headers=HEADERS)).status == 404
             assert (await client.get("/reef/status")).status == 404
 
     try:
@@ -119,7 +116,7 @@ def test_an_import_that_control_does_not_take_answers_503_and_stays_queued(tmp_p
     async def run() -> None:
         async with TestClient(TestServer(create_harness_app(harness))) as client:
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
-            body = {"files": MINE, "base_release_id": source["release_id"]}
+            body = {"files": MINE, "base_artifact_id": source["artifact_id"]}
             response = await client.post("/reef/harness/import", headers=HEADERS, json=body)
             assert response.status == 503 and "send it again" in await response.text()
 

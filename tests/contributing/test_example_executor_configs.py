@@ -7,8 +7,8 @@ import pytest
 import yaml
 from tests.support.config_helpers import deployment_layout
 
+from reef.execution.executor.config import role_executor_settings, select_executor
 from reef.recipe.config import recipe_config_from_file_layout
-from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.service.deploy.execution import service_executor_selection, validate_services
 from reef.service.deploy.inference import INFERENCE_COMPONENT_SERVICE
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -44,7 +44,7 @@ TRAINING_CONFIGS = (
 def slime_flags(config):
     """The ``--name=value`` arguments the HTTP service gives Slime for a resolved example."""
     settings = asdict(service_config_from_mapping(config))
-    runtime = SlimeDeployment().component_config(settings, loss_family="")
+    runtime = SlimeDeployment().component_config(settings, default_parameters={})
     arguments = slime_arguments(runtime["settings"], loss_family="", environ={})
     return dict(argument.removeprefix("--").split("=", 1) for argument in arguments if "=" in argument)
 

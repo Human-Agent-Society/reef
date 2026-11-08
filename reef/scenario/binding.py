@@ -4,21 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from reef.artifact.artifact import Artifact, with_serving_profile
+from reef.artifact.components import ScenarioComponents
 from reef.core.activation import ActivationRule
 from reef.core.reports import ReportBase
-from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
+from reef.inference.interfaces import InferenceRuntime
 from reef.storage.served_models import ServedModels
-from reef.surface.base import Surface
+from reef.train.component import TrainingComponent
 
 
 @dataclass(frozen=True)
 class ScenarioBinding:
     """Runtime-facing capabilities selected by a recipe at construction."""
 
-    #: The surface also carries artifact admission: each component's validator
-    #: runs before that component is published or restored.
-    surface: Surface
+    #: The components every snapshot binds, with each one's admission check, run before that component is
+    #: published or restored.
+    components: ScenarioComponents
     runtime: InferenceRuntime | None
     #: The deployment's rule that decides whether an artifact that training publishes serves at once
     #: (``ActivationRule``). The scenario registry replaces it with the scenario's own rule when the scenario has one
@@ -30,7 +31,39 @@ class ScenarioBinding:
     report_type: type[ReportBase] | None = None
     #: The training component of a weight-training recipe, which its trainer submits jobs to.
     training_component: TrainingComponent | None = None
-    #: Standalone scenarios activate their runtime directly. Service scenarios leave activation to inference.
-    activates_runtime: bool = True
-    #: The actual serving routes, or None for a standalone scenario that activates its own runtime.
+    #: The actual serving routes, or None for a scenario without them, whose served artifact is unknown.
     served_models: ServedModels | None = None
+
+
+def profiled_artifact(runtime: InferenceRuntime | None, artifact: Artifact, serving_profile: str | None) -> Artifact:
+    """``artifact`` with ``serving_profile`` in its own metadata (RFC #1233), or ``artifact`` itself for None.
+
+    Raise ``ValueError`` when ``runtime`` refuses the profile (``InferenceRuntime.check_serving_profile``), or when
+    there is no runtime. The scenario factory calls it for a new root, and the committer for an import.
+    """
+    if serving_profile is None:
+        return artifact
+    if runtime is None:
+        raise ValueError(f"this deployment serves no model, so it refuses serving profile {serving_profile!r}")
+    runtime.check_serving_profile(serving_profile, artifact)
+    return with_serving_profile(artifact, serving_profile)
+
+
+def activate_snapshot(
+    components: ScenarioComponents,
+    artifact: Artifact,
+    runtime: InferenceRuntime | None,
+    scenario: str,
+) -> None:
+    """Load the snapshot ``artifact`` of ``scenario`` into ``runtime`` before traffic routes to it.
+
+    Only the loaded component (``ScenarioComponents.loaded_component``) loads. Nothing loads without a runtime or
+    such a component. The inference worker calls it.
+    """
+    name = components.loaded_component
+    if name is None or runtime is None:
+        return
+    runtime.activate_checkpoint(
+        components.component_artifact(artifact, name),
+        scenario=scenario if runtime.per_scenario_adapters else None,
+    )

@@ -1,8 +1,8 @@
 """The serve form: one resident process holds the tree live, follows Reef's head between steps, and lets the model inspect and try.
 
 A fake Reef on localhost plays the model (a scripted reply per request, the
-receipt and release headers on every answer), the release catalog, and one
-source tree per release, so every path of ``reef-native serve`` runs
+receipt and release headers on every answer), the snapshot catalog, and one
+source tree per snapshot, so every path of ``reef-native serve`` runs
 hermetically."""
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,9 @@ import pytest
 from tests.support.harness_render import native_hook, native_json, native_tool
 
 from reef.harness.adapters import get_adapter
-from reef.harness.capture import CaptureProxy, ReleaseObserver
+from reef.harness.capture import CaptureProxy
 from reef.harness.runners.native import serve
-from reef.harness.runners.native.release_client import ArtifactClient, ArtifactClientError, HeadWatch
+from reef.harness.runners.native.artifact_client import ArtifactClient, ArtifactClientError, HeadWatch
 from reef.harness.runners.native.serve import HARNESS_RELEASE_FILE, ServeError, Server
 from reef.harness.tree import HarnessTree, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_RESERVED_TOOL_NAMES
@@ -76,8 +77,22 @@ def _call(name: str, arguments: dict[str, Any], call_id: str) -> dict[str, Any]:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
 
 
+@dataclass(frozen=True)
+class _HeadMove:
+    """What the next model call does: publish ``tree`` as the new head of ``r1``, and have ``server`` poll for it."""
+
+    artifact_id: str
+    tree: Mapping[str, str]
+    server: Any
+
+    def apply(self, reef: _FakeReef) -> None:
+        reef.head_move = None
+        reef.release(self.artifact_id, dict(self.tree), parent="r1")
+        self.server._watch.poll_once()
+
+
 class _FakeReef(ThreadingHTTPServer):
-    """The model, the release catalog, and one source tree per release."""
+    """The model, the snapshot catalog, and one source tree per snapshot."""
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -85,12 +100,12 @@ class _FakeReef(ThreadingHTTPServer):
         self.order: list[str] = []
         self.head = ""
         self.replies: list[dict[str, Any]] = []
+        self.head_move: _HeadMove | None = None
         self.requests: list[dict[str, Any]] = []
-        self.fail_releases = False
+        self.fail_artifacts = False
         self.delay_s = 0.0
         self.hang_manifest_s = 0.0  # the next manifest read sleeps this long once, as behind a step's lock
         self.polls = 0
-        self.artifact_header = False
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
     @property
@@ -131,12 +146,12 @@ class _Handler(BaseHTTPRequestHandler):
         split = urlsplit(self.path)
         if split.path == "/reef/harness/artifacts":
             reef.polls += 1
-            if reef.fail_releases:
+            if reef.fail_artifacts:
                 self._json(500, {"error": {"message": "catalog down"}})
                 return
             rows = [{k: v for k, v in reef.releases[rid].items() if k != "files"} for rid in reef.order]
             for row in rows:
-                # Every release here was published to serve, so each one was activated when it was made.
+                # Every snapshot here was published to serve, so each one was activated when it was made.
                 row["active"] = row["artifact_id"] == reef.head
                 row["activated"] = True
             self._json(200, {"scenario": SCENARIO, "artifacts": rows})
@@ -148,11 +163,11 @@ class _Handler(BaseHTTPRequestHandler):
             artifact_id = query.get("artifact_id", query.get("release_id", [reef.head]))[0]
             row = reef.releases.get(artifact_id)
             if row is None:
-                self._json(404, {"error": {"message": f"unknown release {artifact_id}"}})
+                self._json(404, {"error": {"message": f"unknown snapshot {artifact_id}"}})
                 return
             manifest = {k: v for k, v in row.items() if k not in ("metrics", "operation")}
             if query.get("form", ["rendered"])[0] != "source":
-                # As Reef serves it: the release rendered for the adapter; the serve process asks for the source.
+                # As Reef serves it: the snapshot rendered for the adapter; the serve process asks for the source.
                 manifest["files"] = render_tree(HarnessTree(row["files"]), NATIVE)
             manifest["evaluation"] = row["metrics"]
             self._json(200, manifest, x_reef_artifact_id=artifact_id)
@@ -167,12 +182,12 @@ class _Handler(BaseHTTPRequestHandler):
             if reef.delay_s:
                 time.sleep(reef.delay_s)
             message = reef.replies.pop(0) if reef.replies else _reply("done")
+            if reef.head_move is not None:
+                reef.head_move.apply(reef)
             self._json(
                 200,
                 {"choices": [{"message": message}]},
                 x_reef_agent_record_id=f"r-{len(reef.requests)}",
-                x_reef_release_id=reef.head,
-                **({"x_reef_artifact_id": "weights-artifact"} if reef.artifact_header else {}),
             )
         else:
             self._json(404, {"error": {"message": "no route"}})
@@ -188,9 +203,9 @@ def reef() -> Iterator[_FakeReef]:
 
 
 def _tree(tmp_path: Path, reef: _FakeReef, artifact_id: str) -> Path:
-    """The pulled tree: the model binding at the fake reef and the release file naming ``artifact_id``.
+    """The pulled tree: the model binding at the fake reef and the snapshot file naming ``artifact_id``.
 
-    No source tree is stored yet, so the process fetches the release's source tree at boot.
+    No source tree is stored yet, so the process fetches the snapshot's source tree at boot.
     """
     dest = tmp_path / "reef-harness"
     (dest / "native").mkdir(parents=True)
@@ -305,7 +320,7 @@ def test_two_turns_in_one_session_keep_the_messages_and_number_the_turns(tmp_pat
     assert not server.mounts_dir.exists() and not server.socket_path.exists()
 
 
-def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
+def test_a_poll_during_a_turn_moves_the_head_and_the_mount_lands_between_two_steps(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
     reef.release("r1", {**RULES, **_tool("whisper", "    return 'quiet'")})
@@ -317,9 +332,9 @@ def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
     dest = _tree(tmp_path, reef, "r1")
     r2 = {**RULES, **_tool("whisper", "    return 'quiet'"), **_tool("shout", "    return 'LOUD'")}
     with _running(dest) as server:
-        # The head moves after the boot poll: the only way this process learns of r2 is the answer's header.
+        # The head moves during the first model call, and a poll finds it before the answer returns.
         _wait(lambda: reef.polls >= 1)
-        reef.release("r2", r2, parent="r1")
+        reef.head_move = _HeadMove("r2", r2, server)
         result, _ = _turn(server, "shout")
         assert result["exit"] == 0 and server.status()["artifact_id"] == "r2"
         assert sorted(server.host.tools) == ["shout", "whisper"]
@@ -335,7 +350,7 @@ def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
     results = _typed(events, "tool/result")
     assert results[0]["error"]["code"] == "UNKNOWN_TOOL" and results[1]["content"] == "LOUD"
     assert [request["headers"]["x-reef-tag-artifact_id"] for request in reef.requests] == ["r1", "r2", "r2"]
-    # What a restart boots from: the stored source tree and the release file name the mounted release.
+    # What a restart boots from: the stored source tree and the snapshot file name the mounted artifact.
     assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["artifact_id"] == "r2"
     assert HarnessTree.read(dest / serve.SOURCE_DIR) == HarnessTree(r2)
 
@@ -345,7 +360,7 @@ def test_a_restart_boots_from_the_stored_source_tree_without_asking_reef(tmp_pat
     dest = _tree(tmp_path, reef, "r1")
     with _running(dest) as server:
         assert server.status()["artifact_id"] == "r1"
-    # Reef no longer knows r1: the next start boots from source/ as the release file names it.
+    # Reef no longer knows r1: the next start boots from source/ as the snapshot file names it.
     reef.releases.pop("r1")
     reef.order.remove("r1")
     with _running(dest) as server:
@@ -425,7 +440,7 @@ def test_follow_pinned_announces_the_head_and_the_mount_control_applies_it(tmp_p
 def test_a_poll_failure_is_logged_with_backoff_and_the_process_keeps_serving(tmp_path: Path, reef: _FakeReef) -> None:
     reef.release("r1", _tool("one"))
     reef.replies = [_reply("served")]
-    reef.fail_releases = True
+    reef.fail_artifacts = True
     with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1) as server:
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: len(_typed(_events(log), "artifact/poll-failed")) >= 2)
@@ -433,7 +448,7 @@ def test_a_poll_failure_is_logged_with_backoff_and_the_process_keeps_serving(tmp
         assert "500" in failures[0]["error"] and [f["retry_in_s"] for f in failures[:2]] == [0.1, 0.2]
         result, _ = _turn(server, "go")
         assert result["text"] == "served"
-        reef.fail_releases = False
+        reef.fail_artifacts = False
         reef.release("r2", {**_tool("one"), **_tool("two")}, parent="r1")
         _wait(lambda: server.status()["artifact_id"] == "r2")
 
@@ -452,15 +467,12 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
                 raise outcome
             return str(outcome)
 
-    class _ReleaseListener(serve.ArtifactUpdateListener):
+    class _ArtifactListener(serve.ArtifactUpdateListener):
         def __init__(self) -> None:
             self.heads: list[tuple[str, str]] = []
 
         def new_head(self, artifact_id: str, source: str) -> None:
             self.heads.append((artifact_id, source))
-
-        def new_legacy_head(self, revision: str) -> None:
-            self.heads.append((revision, "legacy"))
 
     events: list[dict[str, Any]] = []
 
@@ -470,11 +482,11 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
 
     busy = ArtifactClientError("GET /reef/harness/artifacts failed: TimeoutError: timed out", timed_out=True)
     down = ArtifactClientError("GET /reef/harness/artifacts failed: URLError: Connection refused")
-    release_listener = _ReleaseListener()
-    watch = HeadWatch(_Client([busy, busy, busy, down, down, "r2"]), release_listener, _Log(), 0.01, mounted="r1")  # type: ignore[arg-type]
+    artifact_listener = _ArtifactListener()
+    watch = HeadWatch(_Client([busy, busy, busy, down, down, "r2"]), artifact_listener, _Log(), 0.01, mounted="r1")  # type: ignore[arg-type]
     watch.start()
     try:
-        _wait(lambda: release_listener.heads == [("r2", "poll")])
+        _wait(lambda: artifact_listener.heads == [("r2", "poll")])
     finally:
         watch.stop()
     assert [event["type"] for event in events] == ["artifact/poll-failed"] * 5
@@ -559,7 +571,7 @@ def test_a_malformed_request_answers_an_error_and_the_socket_path_falls_back_to_
     assert serve.tree_layout(dest / "native") == (dest, dest / "native")
     with pytest.raises(ServeError, match="scenario is required"):
         Server(dest, scenario="")
-    # No stored source tree, and a release Reef does not know: nothing to boot.
+    # No stored source tree, and a snapshot Reef does not know: nothing to boot.
     (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"artifact_id": "r9"}) + "\n", encoding="utf-8")
     shutil.rmtree(dest / serve.SOURCE_DIR)
     with pytest.raises(ServeError, match=r"no source tree under .* and Reef answered none"):
@@ -680,7 +692,7 @@ def test_a_trial_mount_tags_its_calls_and_is_unmounted_at_turn_end(tmp_path: Pat
     assert _typed(streamed, "harness/unmount")[0]["try_id"] == tried["try_id"]
     assert [r["headers"].get("x-reef-tag-trial") for r in reef.requests] == [None, tried["try_id"], tried["try_id"]]
     assert {r["headers"]["x-reef-tag-artifact_id"] for r in reef.requests} == {"r1"}
-    # A trial is not served: the release file and the stored source tree still name r1.
+    # A trial is not served: the snapshot file and the stored source tree still name r1.
     assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["artifact_id"] == "r1"
     assert HarnessTree.read(dest / serve.SOURCE_DIR) == HarnessTree(served)
 
@@ -800,21 +812,11 @@ def test_validation_refuses_a_tree_tool_with_a_self_tools_name() -> None:
 # -- the pieces on their own -------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("artifact_header", [False, True])
-def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags(
-    reef: _FakeReef, artifact_header
-) -> None:
+def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags(reef: _FakeReef) -> None:
     import urllib.request
 
     reef.release("r1", {})
-    reef.artifact_header = artifact_header
-    seen: list[str] = []
-
-    class Observer(ReleaseObserver):
-        def observe(self, artifact_id: str) -> None:
-            seen.append(artifact_id)
-
-    proxy = CaptureProxy(reef.base_url, SCENARIO, "tok", tags={"artifact_id": "r1"}, observer=Observer())
+    proxy = CaptureProxy(reef.base_url, SCENARIO, "tok", tags={"artifact_id": "r1"})
     proxy.start()
     try:
 
@@ -837,7 +839,6 @@ def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags
         second = [(capture["receipt"], capture["tags"]) for capture in proxy.drain()]
     finally:
         proxy.stop()
-    assert seen == ([] if artifact_header else ["r1", "r1", "r1"])
     tags = [(r["headers"].get("x-reef-tag-artifact_id"), r["headers"].get("x-reef-tag-trial")) for r in reef.requests]
     assert tags == [("r1", None), ("r1", "t1"), ("r1", None)]
     assert {r["headers"]["authorization"] for r in reef.requests} == {"Bearer tok"}
@@ -868,7 +869,8 @@ def test_a_mount_that_orphans_the_pinned_graph_closes_the_turn_with_an_error(tmp
     reef.replies = [_reply(tool_calls=[_call("shout", {}, "c1")]), _reply("thinking done"), _reply("helper")]
     with _running(dest) as server:
         _wait(lambda: reef.polls >= 1)
-        reef.release("r2", {**_tool("shout", "    return 'LOUD'"), **_graph(SEED_STAGES, SEED_EDGES)}, parent="r1")
+        tree = {**_tool("shout", "    return 'LOUD'"), **_graph(SEED_STAGES, SEED_EDGES)}
+        reef.head_move = _HeadMove("r2", tree, server)
         result, streamed = _turn(server, "go")
         assert result["exit"] == 1 and result["text"] == ""
         ended = _typed(streamed, "turn/end")[-1]
@@ -941,7 +943,7 @@ def test_the_release_client_poll_reads_the_active_row() -> None:
     assert _Catalog([]).poll() is None
     r1 = {"artifact_id": "r1", "activated": True}
     r2 = {"artifact_id": "r2", "activated": False}
-    # A newer inactive release is not the active release.
+    # A newer inactive artifact is not the active selection.
     assert _Catalog([{**r1, "active": True}, {**r2, "active": False}]).poll() == "r1"
     assert _Catalog([{**r1, "active": False}, {**r2, "active": True, "activated": True}]).poll() == "r2"
     assert _Catalog([{**r1, "active": False}]).poll() is None
@@ -973,7 +975,7 @@ def test_a_legacy_install_resolves_its_snapshot_before_writing_artifact_metadata
     reef.release("artifact:harness", {**RULES, **_tool("shout")})
     reef.releases["storage:old"] = reef.releases["artifact:harness"]
     dest = _tree(tmp_path, reef, "artifact:harness")
-    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"release_id": "storage:old"}))
+    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"artifact_id": "storage:old"}))
     with _running(dest) as server:
         assert server.artifact_id == "artifact:harness"
         assert server.status()["artifact_id"] == "artifact:harness"

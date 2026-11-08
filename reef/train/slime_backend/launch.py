@@ -19,13 +19,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.config import config_value, interpolate_config
-from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, TrainingComponentFactory, http_readiness_command
-from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
-from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.runtime.jobs import TrainingComponent
+from reef.core.errors import DeployConfigError, RuntimeConfigError
+from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
+from reef.execution.executor.config import role_executor_settings, select_executor
+from reef.execution.processes import http_readiness_command
+from reef.storage.job_data import JobDataKind
 from reef.train.algos.registry import loss_family_refs
+from reef.train.component import TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import TrainingDeployment
+from reef.train.slime_backend.objectives import resolve_slime_objective
 
 
 def require_ray_roles(config: dict[str, Any], *roles: str, backend: str) -> None:
@@ -198,10 +200,20 @@ class SlimeDeployment(TrainingDeployment):
             return {}
         return {TEACHER_URL_ENV: f"${{endpoints.{TEACHER_SERVICE}}}"}
 
-    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(
+        self, settings: Mapping[str, Any], *, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        """The component config, whose startup loss family is that of the recipe's first default objective.
+
+        The trajectory kind comes first, then the task kind. No default objective leaves the family empty, which
+        the factory refuses, so a deployment can be checked without a recipe.
+        """
+        kinds: tuple[JobDataKind, ...] = ("trajectory", "task")
+        objectives = [default_parameters.get(kind, {}).get("objective") for kind in kinds]
+        objective = next((name for name in objectives if name), None)
         return {
             "type": self.component_type,
-            "loss_family": loss_family,
+            "loss_family": "" if objective is None else resolve_slime_objective(objective).loss_family,
             "recipe": settings["recipe"],
             "ray_address": settings["ray_address"] or os.environ.get("RAY_ADDRESS", ""),
             "namespace": settings["ray_namespace"],
@@ -220,6 +232,9 @@ class SlimeComponentFactory(TrainingComponentFactory):
     kind = SlimeDeployment.component_type
 
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
+        loss_family = config["loss_family"]
+        if not loss_family:
+            raise RuntimeConfigError("Slime starts its workers with the loss family of the recipe's default objective")
         from reef.train.slime_backend.component import SlimeSettings, SlimeTrainingComponent
         from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_TIMEOUT_S
 
@@ -229,7 +244,6 @@ class SlimeComponentFactory(TrainingComponentFactory):
             raise RuntimeConfigError("Slime trains on a Ray cluster: set training.ray-address or RAY_ADDRESS")
         # SlimeSettings checks that the timeout is positive.
         train_timeout_s = config["train_timeout_s"]
-        loss_family = config["loss_family"]
         return SlimeTrainingComponent(
             SlimeSettings(
                 arguments=tuple(slime_arguments(settings, loss_family=loss_family, environ=environ)),

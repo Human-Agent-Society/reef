@@ -10,7 +10,6 @@ import pytest
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.storage.control_lease import ControlLease
-from reef.storage.marks import Marks
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
@@ -24,7 +23,6 @@ from reef.storage.sql_coordination import (
     PostgresCoordinationDatabase,
     SQLControlLease,
     SQLiteCoordinationDatabase,
-    SQLMarks,
     SQLServedModels,
     SQLWorkQueue,
 )
@@ -36,7 +34,6 @@ class Coordination:
     queue: WorkQueue
     served: ServedModelsWriter
     lease: ControlLease
-    marks: Marks
 
 
 @pytest.fixture(params=["sqlite-memory", "sqlite", "postgres"])
@@ -56,7 +53,6 @@ def open_coordination(request, tmp_path):
             SQLWorkQueue(database, lease_seconds=lease_seconds, max_attempts=max_attempts),
             SQLServedModels(database, lease),
             lease,
-            SQLMarks(database),
         )
 
     yield opened
@@ -164,6 +160,18 @@ def test_a_request_reuses_the_queued_item_of_its_key_and_ended_items_go_after_th
     assert third.id not in (first.id, second.id)
 
 
+@pytest.mark.unit
+def test_a_request_makes_the_queued_item_of_its_key_available_no_later_than_it_asks(open_coordination):
+    queue = open_coordination().queue
+    later = queue.request("samples", "s", "record_selection", "record_selection:s", {}, available_at=60, now=0)
+    assert later.available_at == 60
+    # A request for a later time leaves it; a request for now moves it to now.
+    assert queue.request("samples", "s", "record_selection", "record_selection:s", {}, available_at=90, now=1) == later
+    moved = queue.request("samples", "s", "record_selection", "record_selection:s", {}, now=2)
+    assert (moved.id, moved.available_at) == (later.id, 2)
+    assert queue.take("samples", "w", ["record_selection"], now=2).id == later.id
+
+
 class FailingWorker(QueueWorker):
     """A worker whose every item ends with ``error``."""
 
@@ -201,6 +209,27 @@ def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, err
         assert warnings_of(caplog) == (
             [f"work item jobs/a of scenario s failed: {item.error}"] if state == "failed" else []
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error", "stored"),
+    [
+        (
+            RuntimeError("modal run failed:\n  the export failed\n"),
+            "RuntimeError: modal run failed:\n  the export failed",
+        ),
+        (RuntimeError(), "RuntimeError:"),
+        (ItemFailed(" "), "the work item failed"),
+    ],
+)
+def test_a_worker_stores_an_error_message_with_surrounding_spaces(error, stored):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.add(job("a"))
+        assert FailingWorker(queue, error).run_once()
+        item = queue.get("jobs", "a")
+        assert (item.state, item.error) == ("failed", stored)
 
 
 @pytest.mark.unit
@@ -289,6 +318,24 @@ def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path
         # An ended item ended at its last change; the start of an earlier item is not known.
         assert (ended.started_at, ended.ended_at, ended.metadata) == (None, 2, {})
         assert (waiting.started_at, waiting.ended_at, waiting.metadata) == (None, None, {})
+
+
+def test_the_queued_training_requests_of_an_older_version_move_to_their_new_queue_and_kind(tmp_path):
+    directory = tmp_path / "coordination"
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        queue.add(NewWork("instructions", "ask-1", "my/agent", "train_instruction:my/agent", {"text": "t"}), now=0)
+        queue.add(job("other"), now=0)
+
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        moved = queue.get("training_requests", "ask-1")
+        assert (moved.kind, moved.payload, queue.get("instructions", "ask-1")) == (
+            "training_request:my/agent",
+            {"text": "t"},
+            None,
+        )
+        assert queue.get("jobs", "other").kind == job("other").kind
 
 
 @pytest.mark.unit
@@ -405,17 +452,17 @@ def test_a_served_artifact_is_reachable_and_names_one_model():
 
 
 @pytest.mark.unit
-def test_a_mark_reads_zero_until_it_advances_and_never_moves_back(open_coordination):
-    marks = open_coordination().marks
-    assert marks.read("record_copy:s") == 0
-    marks.advance("record_copy:s", 5)
-    marks.advance("record_copy:s", 3)
-    marks.advance("record_copy:t", 1)
-    assert (marks.read("record_copy:s"), marks.read("record_copy:t")) == (5, 1)
-    with pytest.raises(ValueError, match="non-negative"):
-        marks.advance("record_copy:s", -1)
-    with pytest.raises(ValueError, match="non-empty"):
-        marks.read("")
+def test_an_upgrade_deletes_the_record_copies_of_an_older_version(tmp_path):
+    database = SQLiteCoordinationDatabase(tmp_path / "c")
+    queue = SQLWorkQueue(database)
+    queue.request("data", "s", "record_copy", "record_copy:s", {})
+    kept = queue.request("data", "s", "artifact_copy", "artifact_copy:s", {})
+    database.close()
+    reopened = SQLiteCoordinationDatabase(tmp_path / "c")
+    try:
+        assert [item.id for item in SQLWorkQueue(reopened).items("data")] == [kept.id]
+    finally:
+        reopened.close()
 
 
 @pytest.mark.unit
@@ -424,7 +471,7 @@ def test_serving_routes_and_the_finished_request_commit_together_and_survive_ret
     lease = stores.lease.acquire("control", now=0)
     table, queue = stores.served, stores.queue
     assert table.current_request("s") is None
-    payload = {"artifact_id": "a", "release_id": "r1"}
+    payload = {"artifact_id": "a"}
     requested = table.request("s", payload, control_lease_number=lease.number, now=0)
     assert requested.state == "queued" and requested.started_at is None
     assert table.request("s", payload, control_lease_number=lease.number, now=1).id == requested.id
@@ -484,11 +531,19 @@ def test_withdrawal_removes_routes_and_cannot_be_undone_by_a_running_start(open_
     )
     assert table.read_serving_config("s") == {"temperature": 0.3}
     assert table.changed_sequence() > before
+    with pytest.raises(ValueError, match="b, c"):
+        table.write_traffic_weights("s", {"a": 50, "b": 25, "c": 25}, control_lease_number=lease.number)
+    assert table.read_traffic_weights("s") == {}
+    before_weights = table.changed_sequence()
+    table.write_traffic_weights("s", {"active": 100, "absent": 0}, control_lease_number=lease.number)
+    assert table.read_traffic_weights("s") == {"active": 100, "absent": 0}
+    assert table.changed_sequence() > before_weights
     table.request("s", {"artifact_id": "b"}, control_lease_number=lease.number, now=3)
     running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=4)
     withdrawn = table.request("s", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=5)
     assert withdrawn.state == "finished" and withdrawn.payload == {}
     assert table.read_scenario("s") == {} and table.read_serving_config("s") == {}
+    assert table.read_traffic_weights("s") == {}
     assert table.due_stops(14) == ()
     assert table.due_stops(15) == (ScheduledStop(served, 15),)
     table.complete_request(
@@ -591,7 +646,7 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
     owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
 
-    table.recover_completed(owner, "worker", stop_delay_seconds=10, now=4)
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=4)
     recovery = table.current_request("ready")
     assert recovery.id != ready.id and recovery.payload == ready.payload and recovery.state == "queued"
     assert recovery.metadata == {"recovery": True}
@@ -600,11 +655,31 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     assert table.current_request("queued") == queued
     assert table.current_request("withdrawn") == withdrawn
     assert table.current_request("failed").state == "failed"
-    table.recover_completed(owner, "worker", stop_delay_seconds=10, now=5)
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=5)
     assert table.current_request("ready") == recovery
     with pytest.raises(WorkLeaseLost):
-        table.recover_completed(owner, "worker", stop_delay_seconds=10, now=14)
+        table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=14)
     assert table.current_request("ready") == recovery
+
+
+@pytest.mark.unit
+def test_a_new_owner_keeps_the_routes_whose_engines_still_serve_until_it_serves_again(open_coordination):
+    stores = open_coordination()
+    lease = stores.lease.acquire("control", now=0)
+    table, queue = stores.served, stores.queue
+    live, gone = ServedArtifact("a", "http://live", "a"), ServedArtifact("b", "http://gone", "b")
+    for scenario, served in (("live", live), ("gone", gone)):
+        table.request(scenario, {"artifact_id": served.artifact_id}, control_lease_number=lease.number, now=0)
+        running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
+        table.complete_request(running, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=2)
+    queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
+    owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
+
+    table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(live,), now=4)
+    assert table.current_request("live").metadata == table.current_request("gone").metadata == {"recovery": True}
+    assert table.read_scenario("live") == {"active": live}
+    assert table.read_scenario("gone") == {}
+    assert table.due_stops(14) == (ScheduledStop(gone, 14),)
 
 
 @pytest.mark.unit

@@ -21,11 +21,12 @@ from reef.core.config import ConfigArgument, config_arguments, config_metadata, 
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
-from reef.storage.data import DataStore
-from reef.storage.postgres import postgres_url, validate_postgres_schema
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
+from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.segments import SegmentStore
+from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.tasks import TaskFileStore
 
 
@@ -37,6 +38,13 @@ class ServiceConfig:
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
+
+    ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
+    takes a blank value as not supplied, and nothing checks the file when the value is made.
+    ``routing_deployment`` holds the router's settings; loading a configuration parses and checks
+    them even when routing is off, but only a routed deployment acts on them. Starting managed routing also
+    needs a deployment ID, a record-only recipe and a loopback host; the controller and app assembly check
+    those when they start, not here.
     """
 
     recipe: str = config_option(
@@ -69,6 +77,12 @@ class ServiceConfig:
     console_origins: tuple[str, ...] = config_option(
         (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
     )
+    routing_manifest: str | None = config_option(
+        None,
+        public_path=("reef", "routing_manifest"),
+        help="External-target routing manifest for a record-only recipe; see reef.routing_deployment.lifecycle.",
+    )
+    routing_deployment: RoutingDeploymentSettings = field(default_factory=RoutingDeploymentSettings)
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
     ray_namespace: str = config_option(
         "reef", public_path=("training", "ray_namespace"), help="Ray namespace of the training component."
@@ -109,7 +123,7 @@ class ServiceConfig:
         None,
         public_path=("inference", "serving"),
         help=(
-            "How a weight-training deployment serves its releases: engines (Reef's engines on an inference "
+            "How a weight-training deployment serves its snapshots: engines (Reef's engines on an inference "
             "component), trainer (the training backend's own serving, such as Tinker's sampler), none, or a "
             "module:Factory runtime factory. Default: engines when engine settings are given, else the "
             "training backend's default."
@@ -124,13 +138,13 @@ class ServiceConfig:
     inference_max_loaded_adapters: int = config_option(
         1,
         public_path=("inference", "max_loaded_adapters"),
-        help="Adapters the serving engines keep resident when the releases are PEFT adapters.",
+        help="Adapters the serving engines keep resident when the snapshots are PEFT adapters.",
     )
     inference_prefix_sharing: bool = config_option(
         False,
         public_path=("inference", "prefix_sharing"),
         help=(
-            "Share prefix-cache entries between requests. Each release load then retracts the requests in "
+            "Share prefix-cache entries between requests. Each snapshot load then retracts the requests in "
             "flight, which prefill again on the new weights."
         ),
     )
@@ -196,6 +210,19 @@ class ServiceConfig:
             "Inference request handler options as a JSON/YAML object.", public_path=("inference", "handler_config")
         ),
     )
+    inference_retry_initial_s: float = config_option(
+        0.05,
+        public_path=("inference", "retry_initial_s"),
+        help="Initial retry delay for a routed request, in seconds.",
+    )
+    inference_retry_max_s: float = config_option(
+        1.0, public_path=("inference", "retry_max_s"), help="Maximum retry delay for a routed request, in seconds."
+    )
+    inference_retry_timeout_s: float = config_option(
+        300.0,
+        public_path=("inference", "retry_timeout_s"),
+        help="Retry deadline for a routed request, in seconds. Defaults to the inference timeout.",
+    )
     #: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin: ``package.module:ClassName`` or module
     #: and config.
     artifact_backend: str | Mapping[str, Any] = config_option(
@@ -219,6 +246,12 @@ class ServiceConfig:
         (),
         public_path=("storage", "artifact_sources"),
         help="Artifact source reader plugin references, as a JSON/YAML list, beside the hf, file and s3 readers.",
+    )
+    #: The address at which a task's container reaches this host, for an evaluation with a harness tree.
+    evaluation_agent_host: str = config_option(
+        "host.docker.internal",
+        public_path=("evaluation", "agent_host"),
+        help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
     )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
@@ -257,6 +290,14 @@ class ServiceConfig:
         public_path=("storage", "work_retention_s"),
         help="Seconds that control keeps an ended work item before it deletes it. Default: 7 days.",
     )
+    job_directory_ttl_s: float = config_option(
+        JOB_DIRECTORY_TTL_SECONDS,
+        public_path=("storage", "job_directory_ttl_s"),
+        help=(
+            "Seconds that the data store keeps a job data directory that no training job used; a job of the same "
+            "samples uses it again. Default: 7 days."
+        ),
+    )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
         "local",
@@ -280,7 +321,7 @@ class ServiceConfig:
     task_import_manifest: str | None = config_option(
         None,
         public_path=("task_import", "manifest"),
-        help="Split manifest of the Harbor tasks that each scenario imports into its sample store.",
+        help="Split manifest of the Harbor tasks that each scenario imports into its samples.",
     )
     task_import_tasks_root: str | None = config_option(
         None,
@@ -369,6 +410,10 @@ class ServiceConfig:
     execution_config: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        if self.routing_manifest is not None and (
+            not isinstance(self.routing_manifest, str) or not self.routing_manifest
+        ):
+            raise ValueError("reef.routing_manifest must be a non-empty path")
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
         if not isinstance(self.execution_config, Mapping):
             raise TypeError("ServiceConfig.execution_config must be a mapping")
@@ -419,6 +464,8 @@ class ServiceConfig:
             raise ValueError("storage.work_max_attempts must be at least 1")
         if not math.isfinite(self.work_retention_s) or self.work_retention_s <= 0:
             raise ValueError("storage.work_retention_s must be a positive number of seconds")
+        if not math.isfinite(self.job_directory_ttl_s) or self.job_directory_ttl_s <= 0:
+            raise ValueError("storage.job_directory_ttl_s must be a positive number of seconds")
         if self.coordination_backend not in (None, "sqlite", "postgres"):
             raise ValueError("storage.coordination_backend must be sqlite or postgres")
         if self.coordination_backend is None and self.record_backend not in ("sqlite", "postgres"):
@@ -498,6 +545,15 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
     return (
         *config_arguments(ServiceConfig),
         ConfigArgument(
+            "routing_deployment",
+            ("reef", "routing_deployment"),
+            "object",
+            False,
+            {},
+            "Semantic Router settings; reef serve owns the router unless the lifecycle is external.",
+            public_path=("reef", "routing_deployment"),
+        ),
+        ConfigArgument(
             "token",
             ("reef", "token"),
             "str",
@@ -545,9 +601,12 @@ def parse_service_arguments(config: Mapping[str, Any]) -> dict[str, Any]:
         value = _argument_value(config, argument)
         if value is not None:
             supplied[argument.name] = value
-    return parse_config_values(
+    values = parse_config_values(
         tuple(dataclasses.replace(argument, required=False) for argument in arguments), supplied, environ=os.environ
     )
+    if "inference_retry_timeout_s" not in supplied:
+        values["inference_retry_timeout_s"] = values["inference_timeout_s"]
+    return values
 
 
 def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -558,6 +617,8 @@ def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
     no Reef HTTP child at all.
     """
     values = parse_service_arguments(config)
+    # Reject removed or invalid routing settings while loading, before any process starts.
+    routing_deployment_settings(values["routing_deployment"])
     normalized = copy.deepcopy(dict(config))
     for argument in service_config_arguments():
         if _argument_value(config, argument) is None:
@@ -580,6 +641,7 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     tokens = (token.strip() for token in (values.pop("token") or "", *values["tokens"]))
     values["tokens"] = tuple(dict.fromkeys(token for token in tokens if token))
     values["console_origins"] = console_origins(values["console_origins"])
+    values["routing_deployment"] = routing_deployment_settings(values["routing_deployment"])
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
     execution = {key: config[key] for key in ("execution", "executors") if key in config}

@@ -33,7 +33,7 @@ REJECTED = {"selected": False, "wins": 0, "losses": 0, "ties": 3, "candidate_sco
 SKIPPED = {"skipped": "the method left the head tree unchanged"}
 NO_PUBLISH = (REJECTED, SKIPPED, SKIPPED)
 PUBLISHED = {"selected": True, "wins": 1, "losses": 0, "ties": 2, "candidate_score": 3.0, "current_score": 2.0}
-#: The release a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
+#: The snapshot a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
 SEED_ARTIFACT = "artifact:seed"
 PUBLISHED_ARTIFACT = "artifact:published"
 
@@ -50,7 +50,7 @@ class StubReefClient:
     before it waits for the step results see the seed and no further.
 
     ``reads`` is every route read the runner makes, in order, as ``("catalog", {"rows": n, "published": bool})``
-    for ``/reef/harness/releases`` and ``("manifest", artifact_id)`` for ``/reef/harness``. It says whether the
+    for ``/reef/harness/artifacts`` and ``("manifest", artifact_id)`` for ``/reef/harness``. It says whether the
     manifest was read because a step result was on the record, or polled before there was one to read.
 
     ``posts`` is every low-level ``post`` the run makes, in order, as ``(path, scenario, payload)``; the run uses it
@@ -91,7 +91,7 @@ class StubReefClient:
 
     def get(self, path: str, **kwargs: object) -> dict:
         self.requested.append(path)
-        if path == "/reef/harness/releases":
+        if path == "/reef/harness/artifacts":
             rows = self._step_rows()
             published = any(row["metrics"].get("selected") for row in rows)
             self.published_seen = self.published_seen or published
@@ -298,7 +298,7 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
 ) -> None:
     """A native run that does publish: the step results come first, then the head, the mount and the second pass.
 
-    The manifest the service serves is a genuinely new release, not the seed, so the run has to reach the
+    The manifest the service serves is a genuinely new snapshot, not the seed, so the run has to reach the
     artifact:published path on the strength of this run's step results rather than on a head that never moved.
 
     The contract is an ordering one, so it is asserted on the recorded route reads, not on a clock: the catalog
@@ -333,10 +333,10 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
 
     assert len(client.reports) == 3, "three turns, three scores reported against their receipts"
     assert "step 1: published" in printed, "the catalog returned this run's steps, one of them published"
-    assert f"published: artifact {PUBLISHED_ARTIFACT}" in printed, "the head is a release other than the seed"
+    assert f"published: artifact {PUBLISHED_ARTIFACT}" in printed, "the head is a snapshot other than the seed"
     assert set(client.mounts) == {
         PUBLISHED_ARTIFACT
-    }, f"the process mounted the published release, saw {client.mounts}"
+    }, f"the process mounted the published snapshot, saw {client.mounts}"
     assert len(client.turns) == 4, f"the second pass runs after the run's three turns, saw {len(client.turns)}"
     assert "second pass" in printed
     assert (

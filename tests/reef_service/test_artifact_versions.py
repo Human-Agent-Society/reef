@@ -24,17 +24,16 @@ from tests.support.artifact_versions import (
     train,
 )
 from tests.support.runtime_stubs import runtime_bindings
-
 from tests.support.serving import wait_for_serving
 
 from reef.dispatcher import Dispatcher
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
-from reef.runtime.interfaces import InferenceArtifact, InferenceHandler
-from reef.runtime.jobs import SavedCheckpoint
 from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SavedCheckpoint
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 
@@ -54,7 +53,7 @@ class BlockingBackend(InferenceHandler):
 
 
 def stored_paths(tmp_path: Path) -> set[Path]:
-    """Every file and directory the repository backend stores: a new release adds some."""
+    """Every file and directory the repository backend stores: a new snapshot adds some."""
     return set((tmp_path / "repository").rglob("*"))
 
 
@@ -73,7 +72,7 @@ def restart(tmp_path: Path, backend_factory) -> tuple[Dispatcher, ImportingCompo
 
 @pytest.mark.unit
 def test_the_status_names_each_components_active_artifact_and_training_start(tmp_path) -> None:
-    """Both start at the root release; training moves both, activation moves only the active one, and train-from
+    """Both start at the root snapshot; training moves both, activation moves only the active one, and train-from
     moves only the training start."""
     value, _, _ = dispatcher(tmp_path)
     scenario = value.get_or_create_scenario("math")
@@ -106,7 +105,7 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     # Each job commits its submission, its checkpoint and its end; only the checkpoint is an artifact.
     assert [row["operation"] for row in before] == ["training", "training", "training", "creation"]
     assert [row["active"] for row in before] == [True, False, False, False]
-    # Each release made its own artifact: a training step's, and the creation's, the scenario's root release.
+    # Each snapshot made its own artifact: a training step's, and the creation's, the scenario's root snapshot.
     assert all(row["artifact_id"] and row["component"] for row in before)
     assert all(not {"release_id", "content_id", "parent_release_id"} & row.keys() for row in before)
     assert before[-1]["artifact_id"] == scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
@@ -123,7 +122,7 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     activated = value.activate("math", target["artifact_id"])
     wait_for_serving(value)
 
-    # The release serves as it was made: its own id and bytes, no copy, no new release.
+    # The snapshot serves as it was made: its own id and bytes, no copy, no new snapshot.
     assert activated.artifact_id == target["artifact_id"]
     assert activated.component == target["component"]
     assert scenario.current_snapshot() == target_ref
@@ -178,7 +177,7 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     ]
     imported = str(runtime.imported[-1])
     assert JobLoopState.from_dict(scenario.trainer.state).start == imported
-    # The next job starts from the imported release.
+    # The next job starts from the imported snapshot.
     train(value, 3)
     assert runtime.submitted[-1].start == imported
     assert value.list_artifacts("math")[0]["parent_artifact_id"] == target["artifact_id"]
@@ -212,7 +211,7 @@ def test_restore_and_operation_history_use_artifact_identities(tmp_path) -> None
             assert scenario.artifact_status()[component] == {"active": target["artifact_id"], "training_start": start}
             assert scenario.store.history()[-1].operation == "restore"
             assert len(scenario.artifacts()) == len(artifacts)
-            for payload in ({"step": True}, {"step": -1}, {"step": 999}, {"release_id": "old"}):
+            for payload in ({"step": True}, {"step": -1}, {"step": 999}, {"artifact_id": "old"}):
                 assert (await client.post("/reef/scenarios/math/restore", json=payload)).status == 400
             assert (await client.post("/reef/scenarios/missing/restore", json={"step": 0})).status == 404
             root = await client.post("/reef/scenarios/math/restore", json={"step": 0})
@@ -279,7 +278,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     train(value, 1)
     train(value, 2)
     creation, target = value.list_artifacts("math")[:-3:-1]
-    # The creation is the scenario's root release, whose artifact_id is its release_id.
+    # The creation is the scenario's root snapshot, whose artifact_id is its release_id.
     created, target_version = creation["artifact_id"], target["artifact_id"]
 
     value.activate("math", target_version)
@@ -296,7 +295,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     (start,) = tracker.starts
     assert (start.step, start.run_segment) == (8, 0)
     assert start.start_artifacts.components == {"weights": creation["artifact_id"]}
-    # The steps after the new start name the training start as their source, not the active release.
+    # The steps after the new start name the training start as their source, not the active selection.
     assert {event.context.source_artifacts.components["weights"] for event in tracker.events[6:7]} == {
         creation["artifact_id"]
     }
@@ -316,7 +315,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted, _ = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
-    assert [version["operation"] for version in recovered.release_queries.snapshot_rows(recovered.scenario_step)] == [
+    assert [version["operation"] for version in recovered.snapshot_queries.snapshot_rows(recovered.scenario_step)] == [
         *(["training"] * 9),
         "creation",
     ]
@@ -325,8 +324,8 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_request_records_the_artifact_id_captured_before_inference(tmp_path) -> None:
-    """A request keeps the served artifact it read first: a commit during the call changes neither the release
-    the engine got nor the release its record names."""
+    """A request keeps the served artifact it read first: a commit during the call changes neither the snapshot
+    the engine got nor the snapshot its record names."""
 
     async def run() -> None:
         value, _, _ = serving_dispatcher(tmp_path)
@@ -499,7 +498,7 @@ def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
         for event in tracker.events:
             assert event.context.backend == "stub"
             assert event.context.backend_config == {
-                "job_parameters": {kind: {"method": {"objective": "sft"}} for kind in ("trajectory", "task")},
+                "job_parameters": {kind: {"objective": "sft"} for kind in ("trajectory", "task")},
             }
         for commit in commits:
             if tracker_fails:
@@ -546,10 +545,10 @@ def test_experiment_events_follow_durable_commits_and_a_new_training_start(
         assert all(stored_step >= event_step for event_step, stored_step in observed)
         assert observed[-1] == (3, 3)
         observed.clear()
-        # The creation's artifact is the scenario's root release.
+        # The creation's artifact is the scenario's root snapshot.
         value.train_from("math", scenario.repository.resolve(scenario.repository.start_artifact).artifact_id)
         value.registry.experiment_reports.flush()
-        # A new start leaves serving alone: the trained release still serves.
+        # A new start leaves serving alone: the trained snapshot still serves.
         assert observed == [(4, 4), True]
         assert scenario.scenario_step == 4
         assert scenario.current_snapshot() == trained

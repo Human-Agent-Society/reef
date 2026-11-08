@@ -8,7 +8,7 @@ Direct route writes retain their control lease checks for callers that manage ro
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
@@ -17,6 +17,8 @@ from reef.storage.work_queue import JsonValue, WorkItem
 SERVING_QUEUE = "serving"
 SERVING_KIND = "serve"
 STOP_SERVING_KIND = "stop_serving"
+#: The kind of an item that asks inference to serve one artifact, with no route: an evaluation rollout's model.
+SERVE_ARTIFACT_KIND = "serve_artifact"
 INFERENCE_OWNER_QUEUE = "inference-owner"
 #: The metadata key of a serving request that control made to retry a failed request by itself: the number of such
 #: retries of the same payload in a row, a positive int. A request without the key has the count 0.
@@ -54,6 +56,10 @@ class ServedModels(ABC):
         published request carried, and ``{}`` before one or after a withdrawal."""
 
     @abstractmethod
+    def read_traffic_weights(self, scenario: str) -> Mapping[str, int]:
+        """The weight of each artifact in ``scenario``'s traffic split, and ``{}`` without a split."""
+
+    @abstractmethod
     def changed_sequence(self) -> int:
         """The number of changes so far; it increases at each write, removal and stop change."""
 
@@ -77,6 +83,14 @@ class ServedModelsWriter(ServedModels):
     @abstractmethod
     def write(self, key: ScenarioModel, served: ServedArtifact, *, control_lease_number: int) -> None:
         """Make ``served`` the row of ``key``."""
+
+    @abstractmethod
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
+        """Make ``weights`` the traffic split of ``scenario``. Empty ``weights`` remove the split.
+
+        Raise ``ValueError`` without a change when an artifact with a weight above 0 has no route. A withdrawal of the
+        scenario also removes the split.
+        """
 
     @abstractmethod
     def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
@@ -173,12 +187,15 @@ class ServedModelsWriter(ServedModels):
         worker_id: str,
         *,
         stop_delay_seconds: float,
+        kept: Collection[ServedArtifact],
         now: float | None = None,
     ) -> None:
         """Queue completed current selections again after an inference owner takes over.
 
         ``owner`` is a held item of the inference-owner queue and kind, in the same attempt.
-        Remove current selections' old routes and schedule cleanup after the finite, non-negative delay.
+        ``kept`` holds the routes whose engines still serve them (``InferenceRuntime.adopt``): they stay until the
+        queued selections replace them. Remove current selections' other routes and schedule cleanup after the
+        finite, non-negative delay.
         Failed, unfinished, and withdrawn requests keep their state.
         """
 
@@ -186,6 +203,7 @@ class ServedModelsWriter(ServedModels):
 __all__ = [
     "AUTOMATIC_RETRIES",
     "INFERENCE_OWNER_QUEUE",
+    "SERVE_ARTIFACT_KIND",
     "SERVING_KIND",
     "SERVING_QUEUE",
     "STOP_SERVING_KIND",

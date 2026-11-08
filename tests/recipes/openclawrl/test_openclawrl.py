@@ -8,6 +8,7 @@ import time
 import pytest
 from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, job_sized_stages, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
@@ -22,9 +23,6 @@ from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import TrainingMethod
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.surface import Surface, WeightLoader
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -124,7 +122,7 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     processor.acknowledge(batch.data_id)
     processor.produce()
     assert not processor.ready(1)
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert "t1" in decision
     assert "t2" not in decision  # still the session's open turn
 
@@ -159,9 +157,9 @@ def test_side_calls_and_retried_turns_are_terminal() -> None:
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t1-retry", Q1))  # identical request: retried logical turn
 
-    releasable = processor.releasable_record_ids()
+    releasable = processor.record2sample.releasable_record_ids()
     assert {"side", "t1-retry"} <= set(releasable)
-    assert "t1" not in processor.releasable_record_ids()
+    assert "t1" not in processor.record2sample.releasable_record_ids()
     assert not worker.jobs
 
 
@@ -173,7 +171,7 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
     time.sleep(0.001)
     processor.produce()
     assert not processor.ready(1)  # catches up: the TTL pass runs
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert "t1" in decision
     assert not processor.background_jobs_running()
 
@@ -187,7 +185,7 @@ def test_untrainable_verdicts_are_terminal() -> None:
     worker.push(TurnJudgment("declined"))  # judge declined: no RL, no directive
     processor.produce()
     assert not processor.ready(1)
-    assert "declined" in processor.releasable_record_ids()
+    assert "declined" in processor.record2sample.releasable_record_ids()
 
     # A scored judgment without a teacher candidate: candidate construction failed, so the turn never trains.
     processor.push(_turn("no-candidates", Q2))
@@ -195,7 +193,7 @@ def test_untrainable_verdicts_are_terminal() -> None:
     worker.push(TurnJudgment("no-candidates", score=-1.0))
     processor.produce()
     assert not processor.ready(1)
-    assert "no-candidates" in processor.releasable_record_ids()
+    assert "no-candidates" in processor.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -212,7 +210,7 @@ def test_candidates_behind_the_served_artifact_leave_the_buffer() -> None:
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
     processor.produce()
     assert not processor.ready(2)  # the stale candidate is not in the buffer, 1 < 2
-    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert {"old", "new"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
 
 
@@ -223,7 +221,7 @@ def test_correlate_only_mode_never_trains_and_releases_everything() -> None:
     processor.push(_turn("t2", _successor(Q1, "ok")))
     processor.produce()
     assert not processor.ready(1)
-    assert "t1" in processor.releasable_record_ids()
+    assert "t1" in processor.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -315,7 +313,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
         for index, reward in enumerate((1.0, -1.0, 0.0, 1.0))
     )
     batch = JobData("s:openclawrl:1", tuple(sample for sample in samples))
-    result = prepare_slime_job(batch, TrainingMethod("openclawrl"), {}, StepScheduling(), step_size=4)
+    result = prepare_slime_job(batch, "openclawrl", {}, StepScheduling(), step_size=4)
     assert result.payload is not None
     assert result.payload["advantages"] == [1.0, -1.0, 0.0, 1.0]
     assert result.payload["loss"] == "openclawrl"
@@ -323,14 +321,13 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
 
 
 @pytest.mark.unit
-def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
+def test_recipe_serves_loaded_weights_and_builds_a_trainer() -> None:
     recipe = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=job_sized_stages(OpenClawRLRecipe.pipeline_spec()))
-    surface = recipe.build_surface("s")
-    assert type(surface) is Surface
-    assert isinstance(surface.loader, WeightLoader)
-    trainer = recipe.build("s", SQLiteRecordStore(), root=STUB_ROOT)
+    components = recipe.build_components("s")
+    assert components.loaded_component == "weights"
+    trainer = recipe.build("s", memory_records("s"), root=STUB_ROOT)
     assert trainer.job_loop is not None
-    assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "openclawrl"
+    assert trainer.pipeline.context.job_parameters["trajectory"]["objective"] == "openclawrl"
     trainer.close()
 
 
@@ -462,7 +459,7 @@ def test_sequential_sessions_with_identical_openers_stay_separate() -> None:
 def test_reports_are_terminal_on_sight() -> None:
     processor = _processor(worker=FakeWorker())
     processor.push(AgentRecord.create(scenario="s", request_type=RequestType.REPORT, payload={}, agent_record_id="r1"))
-    releasable = processor.releasable_record_ids()
+    releasable = processor.record2sample.releasable_record_ids()
     assert "r1" in set(releasable)
 
 
@@ -475,7 +472,7 @@ def test_rejected_submission_retires_the_turn() -> None:
     processor = _processor(worker=RefusingWorker())
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "ok")))
-    assert "t1" in processor.releasable_record_ids()
+    assert "t1" in processor.record2sample.releasable_record_ids()
 
 
 @pytest.mark.unit

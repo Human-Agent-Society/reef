@@ -3,7 +3,7 @@
 Reefine is a [beta recipe](../README.md). It turns plain-language requests
 into versioned harness changes: skills, rules, agent commands, or pi
 extensions. This example asks for a change over HTTP, follows its step on the
-request page, activates a held release, and pulls the result. The scripted
+request page, activates a held snapshot, and pulls the result. The scripted
 demos then run the same path end to end and run a pi session on the new tree.
 
 ## 1. Start Reef
@@ -39,7 +39,7 @@ If you use a token, export it in both terminals and add
 ## 2. Create a scenario
 
 Open another terminal. Create a scenario to keep this harness's releases and
-requests together, then read its first release:
+requests together, then read its first snapshot:
 
 ```bash
 curl -fsS -H 'Content-Type: application/json' \
@@ -50,8 +50,8 @@ curl -fsS -H 'x-reef-scenario: reefine-example' \
   http://127.0.0.1:8901/reef/harness
 ```
 
-The first release is the recipe's seed, one starter skill, rendered for pi.
-Note its `release_id`.
+The first snapshot is the recipe's seed, one starter skill, rendered for pi.
+Note its `artifact_id`.
 
 ## 3. Ask for a change
 
@@ -59,7 +59,7 @@ Send the request, with the release id from the previous step:
 
 ```bash
 curl -fsS -H 'x-reef-scenario: reefine-example' -H 'Content-Type: application/json' \
-  -d '{"text": "When I ask you to fix a bug, reproduce it with a failing test before editing the code.", "session": "example", "release_id": "<release_id>"}' \
+  -d '{"text": "When I ask you to fix a bug, reproduce it with a failing test before editing the code.", "session": "example", "artifact_id": "<artifact_id>"}' \
   http://127.0.0.1:8901/reef/train
 ```
 
@@ -86,9 +86,9 @@ the review, the design and its How to use section, and the next action. The
 default evaluation checks that the harness can run `echo reef-ok` and return
 its output. Passing this health task does not prove that your requested
 behavior works: read the design and the review. Rejected or skipped requests
-leave the active release unchanged.
+leave the active selection unchanged.
 
-A release that changes an extension stays inactive, because an extension
+A snapshot that changes an extension stays inactive, because an extension
 runs in pi's process with your privileges. Inspect its files and declared
 requirements on the page before you serve it. Then activate it with the
 artifact id the page names:
@@ -106,9 +106,9 @@ curl -fsS -H 'x-reef-scenario: reefine-example' \
   http://127.0.0.1:8901/reef/harness
 ```
 
-`files` maps each path of the release's pi package (`plugin/skills/<name>/SKILL.md`
+`files` maps each path of the snapshot's pi package (`plugin/skills/<name>/SKILL.md`
 for a skill, `plugin/rules.md` for the rules, and so on) to its text.
-`requires` lists what the release needs on your machine, each item with a
+`requires` lists what the snapshot needs on your machine, each item with a
 `prompt` that says what to provide. The files carry no endpoint, key, or model: a client writes
 them where pi reads them and binds pi's model to this Reef, as
 [Use a published tree](../../../../docs/user-guide/evolve-your-harness.rst#use-a-published-tree)
@@ -144,9 +144,9 @@ A demo runs these steps in `run.py`:
    page link.
 2. Wait: it prints each new catalog row until the step for its request
    settles.
-3. Activate: it saves an inactive release's step page beside the run, then
-   activates the release.
-4. Install: it pulls the active release's source tree
+3. Activate: it saves an inactive artifact's step page beside the run, then
+   activates the snapshot.
+4. Install: it pulls the active selection's source tree
    (`GET /reef/harness?form=source`), checks each `requires` item on this
    machine, and renders the tree for pi with a model binding at this Reef
    into `work/harness`.
@@ -161,7 +161,7 @@ installed tree.
 
 In the bug-fix show session, check the tool calls: the agent should run a
 failing test before editing `adder.py`, then fix the code and run the test
-again. A published release alone does not establish that the instruction was
+again. A published snapshot alone does not establish that the request was
 followed. If the behavior is incomplete, submit a more specific request.
 
 The [scripted deployment](configs/deployment.yaml) answers requests in text,
@@ -172,7 +172,7 @@ sets model call limits of 900 seconds and 16,384 tokens by default.
 
 Measurement submits up to 12 fixed skill and rule requests, one at a time.
 It reports accepted requests, proposed changes, evaluated candidates, health
-passes, published releases, and inactive releases. It does not install those
+passes, published snapshots, and inactive artifacts. It does not install those
 updates or run a session after each request.
 
 Each run saves `work/<mode>-<timestamp>.json`. A demo's session and saved step

@@ -79,7 +79,7 @@ class SFTSamples(ReportSamples):
     ) -> Self:
         return cls(context, SFTSettings.parse(config, plugin_class=cls))
 
-    def is_stale(self, samples: Sequence[Sample]) -> bool:
+    def is_stale(self, samples: Sequence[Sample], served_artifact_ids: Sequence[str]) -> bool:
         return False
 
     def limited(self, sample: TrajectorySample) -> TrajectorySample:
@@ -123,7 +123,7 @@ class SFTSamples(ReportSamples):
 
 class SFTJobData(DistillJobData):
     """``DistillJobData`` that also takes uploaded ATIF trajectories, which the training component renders, and
-    imported train tasks, which train only for an instruction that gives their job's parameters."""
+    imported train tasks, which train only for a request that gives their job's parameters."""
 
     accepts_trajectories = True
     accepts_imported_tasks = True

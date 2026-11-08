@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.reports import ReportBase, TeacherContextReport
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.sft.processor import SFTJobData, SFTSamples
 from reef.storage.samples import SampleKind
@@ -23,7 +23,7 @@ class SFTRecipe(WeightTrainingRecipe):
     an imported dataset example. SDFT uses the same report contract. Thus the
     two methods can train on the same reports.
 
-    The recipe binds the objective and the report contract. Its stages are ``SFTSamples`` and
+    The recipe binds the default objective and the report contract. Its stages are ``SFTSamples`` and
     ``SFTJobData``. ``SFTJobData`` also takes trajectory items (``POST /reef/namespaces/{owner}/data``), which train
     with every agent turn that is not an ``is_copied_context`` step. The training component renders every sample
     with the model's chat template. The ``pipeline`` section of the deployment configures the stages:
@@ -33,13 +33,14 @@ class SFTRecipe(WeightTrainingRecipe):
       samples of one job. Slime cuts a job's data into optimizer steps of
       ``--global-batch-size`` samples.
     * ``pipeline.sample2job.config.buffer_size``: the most samples that one
-      job takes; later samples wait in the sample store.
-    * ``recipe.config.job_parameters``: the parameters of every job, for
+      job takes; later samples wait for later jobs.
+    * ``recipe.config.job_parameters``: the parameters of every trajectory job, for
       example ``scheduling.packing_length`` to count steps in packs of tokens.
 
-    The recipe gives parameters to trajectory jobs only. An imported train task
-    trains in ``manual`` mode, for an instruction whose ``parameters`` give its
-    job's method and rollout, such as an RL step after SFT.
+    A trajectory job trains the ``sft`` objective. The recipe gives task jobs no
+    parameters, so an imported train task trains only for a request. The
+    request's ``parameters`` name its objective and its rollouts in the
+    backend's own shape, such as an RL step after SFT.
 
     Configure the optimizer in ``training.options``.
     """
@@ -51,19 +52,17 @@ class SFTRecipe(WeightTrainingRecipe):
         return TeacherContextReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            # The Slime component does not import this recipe. A dotted reference imports the objective there.
-            objective="reef.recipe.sft:SftObjective",
-        )
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {"trajectory": {"objective": "sft"}}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=SFTSamples, sample2job=SFTJobData)
 
-    def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
-        """SFT trains trajectories: a task job takes its parameters from its instruction."""
-        return {"trajectory": super().parameters_by_kind()["trajectory"]}
+    @classmethod
+    def configured_parameters(cls, job_parameters: Mapping[str, Any] | None) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """SFT trains trajectories: a task job takes its parameters from its request."""
+        return {"trajectory": super().configured_parameters(job_parameters)["trajectory"]}
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

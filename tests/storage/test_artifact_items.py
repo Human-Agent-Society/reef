@@ -7,7 +7,7 @@ import pytest
 from reef.storage.artifact_items import artifact_item
 from reef.storage.item_kinds import check_artifact_content
 
-ROW = {"artifact_id": "a1", "component": "weights", "release_id": "r1", "content_id": "c1"}
+ROW = {"artifact_id": "a1", "component": "weights", "content_id": "c1"}
 
 
 @pytest.mark.unit
@@ -41,3 +41,9 @@ def test_an_artifact_items_content_is_checked() -> None:
     ):
         with pytest.raises(ValueError, match=reason):
             check_artifact_content(content, made_by_scenario=made_by_scenario)
+
+
+def test_only_the_item_of_a_harness_tree_names_its_adapter() -> None:
+    assert artifact_item("coding", ROW, "harness_plugin", None, "pi").metadata["adapter"] == "pi"
+    assert "adapter" not in artifact_item("coding", ROW, "model", None, "pi").metadata
+    assert "adapter" not in artifact_item("coding", ROW, "harness_plugin", None).metadata

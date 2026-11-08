@@ -1,6 +1,6 @@
 """How ``POST /reef/harness/import`` commits a sync of a person's harness files (RFC #1048, harness supplement).
 
-Control commits a sync itself (``RequestService.harness_import``). The harness service writes no release: it adds a
+Control commits a sync itself (``RequestService.harness_import``). The harness service writes no snapshot: it adds a
 ``harness_sync`` item to control's sync queue, and control's ``HarnessSyncWorker`` commits the sync and finishes the
 item with its answer. The harness service waits up to ``SYNC_WAIT_SECONDS`` for the item.
 

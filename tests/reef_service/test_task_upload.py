@@ -53,7 +53,7 @@ class TaskRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -159,7 +159,7 @@ def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_do
             # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
             evaluated = await client.post(tasks_url("eval"), headers=GZIP, data=archive(tmp_path, "t"))
             assert evaluated.status == 201
-            samples = dispatcher.get_or_create_scenario("s").store.samples
+            samples = dispatcher.storage.sample_store("s", dispatcher.get_or_create_scenario("s").store)
             assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["t"]
 
     try:
@@ -194,7 +194,7 @@ def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_
             assert response.status == (201 if published else 400), await response.text()
             held_out = archive(tmp_path, "held-out", port=9100)
             assert (await client.post(tasks_url("eval"), headers=GZIP, data=held_out)).status == 201
-            samples = dispatcher.get_or_create_scenario("s").store.samples
+            samples = dispatcher.storage.sample_store("s", dispatcher.get_or_create_scenario("s").store)
             assert [task.sample_id for task in samples.imported_tasks(split="train")] == published
             assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["held-out"]
 

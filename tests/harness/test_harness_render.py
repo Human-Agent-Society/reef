@@ -137,6 +137,28 @@ def test_render_refuses_a_tree_it_cannot_lay_out() -> None:
         render_tree(HarnessTree({}), OPENCODE, [("models", {})])
 
 
+def test_a_python_tree_is_a_program_with_an_entry_point_and_gets_its_model_in_a_file() -> None:
+    python = get_adapter("python")
+    main = "import json\n\nprint(json.load(open('model.json'))['model'])\n"
+    assert python.layout.parts["program"].review
+    assert problems({"program/main.py": main, "program/turns.py": "def play():\n    return 1\n"}, python) == ()
+    assert problems({"program/turns.py": "TURNS = 20\n"}, python) == (
+        "the tree needs program/main.py, the program's entry point",
+    )
+    (problem,) = problems({"program/main.py": "def broken(:\n"}, python)
+    assert problem.startswith("program/main.py: the module does not compile")
+
+    binding = ModelBinding(base_url="http://reef:8901", model="m", api_key="k")
+    rendered = render({"program/main.py": main}, python, binding)
+    assert rendered["program/main.py"] == main
+    assert json.loads(rendered["program/model.json"]) == {
+        "api": "openai",
+        "base_url": "http://reef:8901/v1",
+        "api_key": "k",
+        "model": "m",
+    }
+
+
 def test_config_merges_the_tree_over_the_defaults_and_each_overlay_over_the_tree() -> None:
     tree = HarnessTree(config({"compaction": {"auto": True, "prune": False}, "theme": "light"}))
     files = render_tree(tree, OPENCODE, [("primary", {"compaction": {"prune": True}})])

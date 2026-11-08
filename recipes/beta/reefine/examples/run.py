@@ -3,20 +3,20 @@
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
     ask     - the request goes to ``POST /reef/train`` as a training
-              instruction, and the deployment, in ``training_mode: manual``,
+              request, and the deployment, in ``training_mode: manual``,
               runs one evolve step for it at once
     step    - the service's Reefine method designs the change, writes it
               and reviews it; the evaluation runs the candidate on the
               recipe's health task and the floor decides; the catalog row
               carries the result, the method's summary and notes, and the
               request it answered under ``metrics.training_request``
-    activate - a release that changes an extension is made but is not the
-              active release; its page says why it exists and what it
+    activate - a snapshot that changes an extension is made but is not the
+              active selection; its page says why it exists and what it
               changed, and the demo activates it through the route (a person
               reads the page first)
-    install - the active release's source tree
+    install - the active selection's source tree
               (``GET /reef/harness?form=source``) renders for pi with a model
-              binding at this Reef into work/harness; when the release names
+              binding at this Reef into work/harness; when the snapshot names
               ``requires``, the demo checks each item on this machine first,
               and an unmet one stops it
     show    - one ``pi -p`` session on the installed tree, with the session's
@@ -30,8 +30,8 @@ RFC #310's stage 6 asks for (requests that passed the checks); the held out
 shapes are not here.
 
 Start this through ./run.sh: it starts the Reef these constants point at
-from configs/deployment.yaml, installs the active release, and runs a mode.
-The demo is the client here: it pulls, renders and runs the release itself.
+from configs/deployment.yaml, installs the active selection, and runs a mode.
+The demo is the client here: it pulls, renders and runs the snapshot itself.
 Every mode writes work/<mode>-<timestamp>.json with the raw rows it read.
 """
 
@@ -54,7 +54,7 @@ from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
-from reef.service.release_page import result_of
+from reef.service.artifact_page import result_of
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane
@@ -66,7 +66,7 @@ POLL_S = 5.0
 
 HERE = Path(__file__).resolve().parent
 WORK = HERE / "work"
-# The install writes the rendered tree and the release metadata file here.
+# The install writes the rendered tree and the snapshot metadata file here.
 INSTALL_ROOT = WORK / "harness"
 DEMOS = HERE / "demos"
 RELEASE_FILE = ".reef-harness-release"
@@ -140,9 +140,9 @@ def fetch_text(path):
 
 
 def catalog_rows(client):
-    """The catalog oldest first, as GET /reef/harness/releases lists it; empty before the scenario exists."""
+    """The catalog oldest first, as GET /reef/harness/artifacts lists it; empty before the scenario exists."""
     try:
-        return client.get("/reef/harness/releases", extra_headers=scenario_headers())["releases"]
+        return client.get("/reef/harness/artifacts", extra_headers=scenario_headers())["artifacts"]
     except ReefClientError as exc:
         if exc.status != 404:
             raise
@@ -154,7 +154,7 @@ def training_rows(rows):
 
 
 def request_text_of(row):
-    """The request the step answered, from the row the trainer writes for every instruction step; None otherwise."""
+    """The request the step answered, from the row the trainer writes for every request step; None otherwise."""
     return ((row.get("metrics") or {}).get("training_request") or {}).get("text")
 
 
@@ -163,7 +163,7 @@ def harness_manifest(client):
 
 
 def ensure_scenario(client):
-    """Create the scenario, with its root release, if it does not exist yet; its harness manifest."""
+    """Create the scenario, with its root snapshot, if it does not exist yet; its harness manifest."""
     client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     return harness_manifest(client)
 
@@ -250,7 +250,7 @@ def unmet(items):
 
 
 def install(artifact_id=None):
-    """Render the active release (or ``artifact_id``) for pi with a model binding at this Reef, into work/harness.
+    """Render the active selection (or ``artifact_id``) for pi with a model binding at this Reef, into work/harness.
 
     Return the artifact ID, or None when the artifact requires something this machine lacks.
     """
@@ -285,11 +285,11 @@ def install(artifact_id=None):
 
 
 def ask(text):
-    """The request as a training instruction; the id of the training record the service accepted.
+    """Queue ``text`` as a training request; return the id of the training record that the service accepted.
 
-    The instruction names the installed release and this demo's session, and
+    The request names the installed artifact and this demo's session, and
     the deployment's manual mode runs one step for it. A refusal (the
-    screens, a mode that takes no instructions) is a stop, with the service's
+    screens, a mode that takes no requests) is a stop, with the service's
     answer saying why."""
     say(f"ask: POST /reef/train {text!r}")
     payload = {"text": text, "session": SCENARIO, "artifact_id": installed_artifact() or ""}
@@ -307,7 +307,7 @@ def wait_for_step(client, text, before, deadline):
     """The catalog and the training row whose request is ``text``, once that step settled; every new row is
     printed as it lands. ``(rows, None)`` at the deadline.
 
-    Manual mode answers the accepted instructions oldest first, so a request
+    Manual mode answers the accepted requests oldest first, so a request
     a stopped run left queued gets its step before ours; that row is printed
     as an earlier request's and the wait goes on for the row carrying our
     text."""
@@ -343,9 +343,9 @@ def wait_for_step(client, text, before, deadline):
 
 def activate(client, rows, row, run_dir):
     """Save the inactive step's page beside the run, print its URL, activate the row's artifact; the id of the
-    active release that the activation names."""
+    active selection that the activation names."""
     step = rows.index(row)
-    page = f"/reef/harness/releases/{step}/page"
+    page = f"/reef/harness/artifacts/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(fetch_text(page), encoding="utf-8")
     say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
@@ -428,7 +428,7 @@ def totals_of(results):
     """The measurement's counts: filed, answered (a patch came back), admitted (the evaluation ran), won (met the
     floor; on a row from before the floor, more wins than losses), published, inactive. Under ``policy: none`` a
     publish says nothing about the evaluation, so won and published are counted apart; under the floor a publish is
-    a win, and the two agree unless a release waits as inactive."""
+    a win, and the two agree unless a snapshot waits as inactive."""
     return {
         "filed": sum(1 for r in results if r.get("filed")),
         # A patch came back: a step that skipped on a refusal or on a failed step carries none.
@@ -484,7 +484,7 @@ def demo(mode):
             write_record(record_path, record)
             raise SystemExit(2)
     else:
-        say(f"the active release did not change: release {installed_before} stays installed")
+        say(f"the active selection did not change: release {installed_before} stays installed")
         installed = installed_before
     # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)
@@ -570,7 +570,7 @@ def main(argv=None):
         description="Reefine on pi: the two demos and the measurement; start it through ./run.sh",
     )
     modes = parser.add_subparsers(dest="mode", required=True)
-    modes.add_parser("install", help="install the active release into work/harness (run.sh does this first)")
+    modes.add_parser("install", help="install the active selection into work/harness (run.sh does this first)")
     modes.add_parser("bugfix", help="the bug fix flow demo: demos/bugfix.md")
     modes.add_parser("research", help="the research loop demo: demos/research.md")
     measured = modes.add_parser("measure", help="file the fixed request list and count what passed the checks")

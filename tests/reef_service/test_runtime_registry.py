@@ -7,12 +7,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend, SnapshotRef
+from reef.core.errors import RuntimeConfigError
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.inference.registry import RuntimeRegistry
 from reef.recipe import Recipe
 from reef.recipe.registry import build_named_recipe
-from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -197,7 +198,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         async def upstream(request):
             received["path"] = request.path
             received["payload"] = await request.json()
-            received["version"] = request.headers["x-reef-release-id"]
+            received["version"] = request.headers["x-reef-artifact-id"]
             received["authorization"] = request.headers["Authorization"]
             return __import__("aiohttp").web.json_response({"provider": "ok"})
 
@@ -214,7 +215,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
             )
@@ -227,7 +228,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             }
 
             stream = await runtime.inference_handler.inference_stream(
-                Artifact(SnapshotRef("version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
             )
@@ -269,7 +270,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("rev", None), None),
+                Artifact(SnapshotRef("rev", None), None, artifact_id="rev"),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},
             )

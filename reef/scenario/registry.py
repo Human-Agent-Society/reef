@@ -40,7 +40,7 @@ from reef.scenario.factory import ItemStart, ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.served_models import ServedModels
-from reef.train.instructions import InstructionQueue
+from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -79,28 +79,6 @@ class ScenarioLifecycle(ABC):
         """
 
 
-class StandaloneLifecycle(ScenarioLifecycle):
-    """The lifecycle of a registry without an owner: replaced instances close at once, and nothing unloads.
-
-    Without a dispatcher, the registry cannot know that a scenario is idle.
-    """
-
-    def scenario_loaded(self, instance: Scenario) -> None:
-        return None
-
-    def scenario_reloaded(self, instance: Scenario) -> None:
-        return None
-
-    def scenario_committed(self, instance: Scenario) -> None:
-        return None
-
-    def close_replaced(self, instance: Scenario) -> None:
-        instance.close()
-
-    def unload_if_idle(self, scenario: str) -> bool:
-        return False
-
-
 class InstanceState(Enum):
     """Whether a scenario instance is still the one in the registry's table."""
 
@@ -131,10 +109,9 @@ class ScenarioRegistry:
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
         admission: ScenarioAdmission | None = None,
-        lifecycle: ScenarioLifecycle | None = None,
-        activates_runtime: bool = True,
+        lifecycle: ScenarioLifecycle,
         served_models: ServedModels | None = None,
-        instructions: InstructionQueue | None = None,
+        training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._storage = scenario_storage
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -147,9 +124,8 @@ class ScenarioRegistry:
             scenario_storage=scenario_storage,
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
-            activates_runtime=activates_runtime,
             served_models=served_models,
-            instructions=instructions,
+            training_requests=training_requests,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
@@ -159,7 +135,7 @@ class ScenarioRegistry:
         #: Every training scenario in binding order; the first is the one a single-scenario runtime binds.
         self._training_scenarios: list[str] = []
         self._preload_errors: dict[str, str] = {}
-        self.lifecycle = lifecycle if lifecycle is not None else StandaloneLifecycle()
+        self.lifecycle = lifecycle
         self._allow_implicit_creation = allow_implicit_creation
         self.admission = admission if admission is not None else ScenarioLimits()
         #: Makes admission serial, so that two loads cannot both take the last load slot.
@@ -253,7 +229,7 @@ class ScenarioRegistry:
         A missing scenario is created when ``allow_implicit_creation`` is true
         (defaulting to the registry's deployment flag); otherwise ``None`` is
         returned so the caller can surface an unknown-scenario error. A
-        created scenario's root release holds the artifact item ``start``, or
+        created scenario's root snapshot holds the artifact item ``start``, or
         the recipe's default start when ``start`` is ``None``
         (``ScenarioFactory.load_or_create``).
         """
@@ -328,7 +304,7 @@ class ScenarioRegistry:
         """Select an existing scenario's mode and store it, so reloads and restarts apply it again."""
         with self.lock_for(scenario):
             current = self.require(scenario)
-            current.set_training_mode(training_mode, fill_manual_buffer=True)
+            current.set_training_mode(training_mode)
             settings = self._storage.read_settings(scenario)
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current

@@ -21,8 +21,10 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.job_data import JobData, JobOutcome
-from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
-from reef.train.types import TrainStepResult
+from reef.storage.data import DataStore, MemoryDataStore
+from reef.storage.tasks import LocalTaskFileStore
+from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
+from reef.train.types import TrainingCommit
 
 #: The key of a checkpoint commit's metrics that the job loop writes itself.
 TRAINING_JOB_KEY = "training_job"
@@ -113,39 +115,43 @@ class JobLoopState:
 
 @dataclass(frozen=True)
 class JobCommit:
-    """One commit that a job loop gives its trainer: the result to commit, and the job end it records.
+    """One commit that a job loop gives its trainer.
 
-    Values: ``result`` is the ``TrainStepResult`` whose ``state`` is the next ``JobLoopState`` as a dict.
-    ``ended`` is the outcome of the job whose end the commit records, which is that state's ``last_job``, or
-    None for a commit that submits a job or publishes one of its checkpoints. Purpose: ``JobLoop.submit``,
-    ``poll``, ``publish`` and ``end`` make it; the trainer commits ``result`` and, once the commit is durable,
-    gives ``ended`` to its training pipeline.
+    Values: ``result`` is the ``TrainingCommit`` whose ``state`` is the next ``JobLoopState`` as a dict.
+    Purpose: ``JobLoop.submit``, ``poll``, ``publish`` and ``end`` make it; the trainer commits ``result``.
     """
 
-    result: TrainStepResult
-    ended: JobOutcome | None = None
-
-    def __post_init__(self) -> None:
-        if self.ended is not None and not isinstance(self.ended, JobOutcome):
-            raise TypeError("JobCommit.ended must be a JobOutcome or None")
+    result: TrainingCommit
 
 
 class JobLoop:
-    """Submit a weight trainer's jobs to its training component, and turn their checkpoints into commits.
+    """Submit a trainer's jobs to its training component, and turn their checkpoints into commits. Weight training
+    and harness evolution share it: each job carries the same fields (``TrainingJob``).
 
     ``component`` runs the jobs; ``scenario`` is the non-empty name of the
     trainer's scenario, which is part of each job's identity, so two scenarios
-    never share a job. ``submit`` and
+    never share a job. ``scenario_component`` is the scenario component that the jobs train, or None.
+    ``data_store`` keeps the job data directory of each job that ``submit`` submits; None keeps
+    them in a new temporary directory, for a process that keeps no state across restarts. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
     """
 
-    def __init__(self, component: TrainingComponent, *, scenario: str) -> None:
+    def __init__(
+        self,
+        component: TrainingComponent,
+        *,
+        scenario: str,
+        scenario_component: str | None = None,
+        data_store: DataStore | None = None,
+    ) -> None:
         if not isinstance(component, TrainingComponent):
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
         self.component = component
         self.scenario = scenario
+        self.scenario_component = scenario_component
+        self.data_store = MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
@@ -165,23 +171,44 @@ class JobLoop:
         }
         return job_id_for(self.component.name, start, identity, parameters)
 
-    def submit(self, state: JobLoopState, data: JobData, parameters: Mapping[str, Any]) -> JobCommit:
+    def submit(
+        self,
+        state: JobLoopState,
+        data: JobData,
+        parameters: Mapping[str, Any],
+        *,
+        train_from_artifact_id: str | None = None,
+    ) -> JobCommit:
         """Submit the job that trains ``data`` with ``parameters``; the result records the running job.
 
         The job starts from ``state.start``, under ``job_id``. ``parameters``
         is the mapping that the pipeline's sample-to-job stage gives for
-        ``data``, which encodes as JSON. Raise ``ValueError`` when ``state``
-        has a running job.
+        ``data``, which encodes as JSON. The loop writes ``data`` as the job's data directory first. The directory
+        holds no request: the job keeps only its ID (``TrainingJob.request_id``). ``train_from_artifact_id`` is the
+        artifact of ``state.start``, for the job listing, or None. Raise ``ValueError`` when ``state`` has a running
+        job.
         """
         if state.job is not None:
             raise ValueError("a weight trainer runs one job at a time")
         backend = self.component.name
         job_id = self.job_id(state, state.start, data, parameters)
-        self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters, scenario=self.scenario))
+        job = TrainingJob(
+            job_id,
+            backend,
+            state.start,
+            self.data_store.write_job_directory(data),
+            parameters,
+            scenario=self.scenario,
+            request_id=None if data.request is None else data.request.id,
+            component=self.scenario_component,
+            previous_job_id=None if state.last_job is None else state.last_job.job_id,
+            train_from_artifact_id=train_from_artifact_id,
+        )
+        self.component.submit(job)
         submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
         return JobCommit(
-            TrainStepResult(state=submitted.to_dict(), metrics={"training_job": event}, training_job_id=job_id)
+            TrainingCommit(state=submitted.to_dict(), metrics={"training_job": event}, training_job_id=job_id)
         )
 
     def job_status(self, job_id: str) -> JobStatus:
@@ -212,7 +239,7 @@ class JobLoop:
     def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
         """The commit that publishes ``checkpoint``, the running job's next unpublished one, as an artifact.
 
-        The next job starts from ``checkpoint.path``. The commit publishes the checkpoint's ``release_path``, and
+        The next job starts from ``checkpoint.path``. The commit publishes the checkpoint's ``artifact_path``, and
         the scenario's activation rule decides whether it serves. The commit's metrics are the checkpoint's
         training metrics and ``training_job``. Raise ``ValueError`` when ``state`` has no running job, or when a
         training metric is named ``training_job``: a metric is never overwritten.
@@ -235,11 +262,12 @@ class JobLoop:
             },
         }
         return JobCommit(
-            TrainStepResult(
+            TrainingCommit(
                 state=handled.to_dict(),
                 metrics=metrics,
-                artifact=Artifact.local(Path(checkpoint.release_path)),
+                artifact=Artifact.local(Path(checkpoint.artifact_path)),
                 training_job_id=job.job_id,
+                changed_kinds=self.component.changed_parts(state.start, checkpoint),
             )
         )
 
@@ -259,12 +287,11 @@ class JobLoop:
         ended = JobLoopState(state.start, None, state.finished_jobs + 1, outcome)
         event = {key: value for key, value in outcome.to_dict().items() if key != "metrics"}
         return JobCommit(
-            TrainStepResult(
+            TrainingCommit(
                 state=ended.to_dict(),
                 metrics={**status.metrics, "training_job": event},
                 training_job_id=job.job_id,
-            ),
-            ended=outcome,
+            )
         )
 
     def cancel(self, state: JobLoopState) -> None:
@@ -273,7 +300,7 @@ class JobLoop:
             self.component.cancel(state.job.job_id)
 
     def started_from(self, state: JobLoopState, start: str) -> JobLoopState:
-        """The state after the training start is set to ``start``, which the component imported of a release.
+        """The state after the training start is set to ``start``, which the component imported of a snapshot.
 
         The running job is cancelled, and the next job starts from ``start``.
         The jobs that ended stay counted.

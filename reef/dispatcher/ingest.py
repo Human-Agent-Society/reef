@@ -1,8 +1,8 @@
-"""Validate records, training instructions, uploaded trajectories and uploaded tasks of one loaded scenario.
+"""Validate records, training requests, uploaded trajectories and uploaded tasks of one loaded scenario.
 
 The dispatcher calls these functions under the scenario's lock. They append records, uploaded trajectories and
-uploaded Harbor tasks durably, queue training instructions (``reef.train.instructions``), and count the ``ingest/*``
-metrics of records and instructions. They do not start training: the caller wakes the trainers after new data lands.
+uploaded Harbor tasks durably, queue training requests (``reef.train.training_requests``), and count the ``ingest/*``
+metrics of records and requests. They do not start training: the caller wakes the trainers after new data lands.
 """
 
 from __future__ import annotations
@@ -10,18 +10,18 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
-from reef.core.training_request import normalize_training_request_payload
+from reef.core.training_request import TrainingRequest, normalize_training_request_payload
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
 from reef.storage.work_queue import WorkItem
+from reef.train.trainer import Trainer
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
-    """Why admission refuses an instruction, or ``None``. The reason names the rule, never the text or the item.
+    """Why admission refuses a request, or ``None``. The reason names the rule, never the text or the item.
 
     The text becomes proposer input and a catalog row. Thus it must pass the
     same screens as a collected task prompt. A ``requires`` name, check or
@@ -41,27 +41,33 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     return None
 
 
-def file_instruction(current: Scenario, request_id: str, payload: Mapping[str, Any]) -> WorkItem:
-    """Check a training instruction and queue it in ``current``'s instructions; return its queue item.
+def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any]) -> WorkItem:
+    """Check a training request and queue it in ``current``'s requests; return its queue item.
 
-    A retry of an instruction that the scenario queued before returns its item, whatever the training mode now.
-    Otherwise the scenario must train in ``manual`` mode with a trainer that trains, and the text and ``requires``
-    must pass the screens (``training_request_refusal``). Raise ``ValueError`` for a refused instruction, and
+    A retry of a request that the scenario queued before returns its item, whatever the training mode now.
+    Otherwise the scenario must train in ``manual`` mode, the text and ``requires`` must pass the screens
+    (``training_request_refusal``), and a trainer that trains must take the request's samples
+    (``Trainer.check_request``). Raise ``ValueError`` for a refused request, and
     ``RecordConflict`` for an ID that the scenario queued with another payload.
     """
-    if current.instructions is None:
-        raise ValueError(f"scenario {current.name!r} takes no training instructions: it has no instructions queue")
+    if current.training_requests is None:
+        raise ValueError(f"scenario {current.name!r} takes no training requests: it has no training request queue")
     try:
-        retry = current.instructions.get(request_id) is not None
+        retry = current.training_requests.get(request_id) is not None
         if not retry and current.training_mode == "auto":
             raise ValueError("explicit training requests require training_mode='manual'")
-        if not retry and not any(component_trainer.trainer.trains for component_trainer in current.trainers):
+        trainers = [
+            component_trainer.trainer for component_trainer in current.trainers if component_trainer.trainer.trains
+        ]
+        if not retry and not trainers:
             raise ValueError("explicit training requests require a training backend")
         request = normalize_training_request_payload(payload)
-        refusal = None if retry else training_request_refusal(request["text"], request["requires"])
-        if refusal is not None:
-            raise ValueError(refusal)
-        return current.instructions.file(request_id, request)
+        if not retry:
+            refusal = training_request_refusal(request["text"], request["requires"])
+            if refusal is not None:
+                raise ValueError(refusal)
+            check_request(trainers, TrainingRequest.from_dict(request))
+        return current.training_requests.file(request_id, request)
     except RecordConflict:
         current.operations.increment("ingest/rejected_conflict_total")
         raise
@@ -96,7 +102,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
                 source = preceding.get(reference)
                 if source is None:
                     stored_reference = current.records.get_for_audit(item.scenario, reference)
-                    source = stored_reference.item if stored_reference is not None else None
+                    source = stored_reference.item if stored_reference is not None else current.used_record(reference)
                 if source is None or source.request_type is not RequestType.INFERENCE:
                     raise ReportValidationError(
                         f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
@@ -119,6 +125,18 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
         current.operations.increment("ingest/rejected_request_total")
         raise
     return None
+
+
+def check_request(trainers: Sequence[Trainer], request: TrainingRequest) -> None:
+    """Raise ``ValueError`` unless one of ``trainers`` can run ``request``, with the first trainer's reason."""
+    reasons: list[str] = []
+    for trainer in trainers:
+        try:
+            trainer.check_request(request)
+            return
+        except ValueError as exc:
+            reasons.append(str(exc))
+    raise ValueError(reasons[0])
 
 
 def append_record(current: Scenario, item: AgentRecord) -> tuple[AgentRecord, bool]:
@@ -153,30 +171,20 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
 
 
-def check_use(current: Scenario, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool) -> None:
+def check_use(current: Scenario, trajectories: bool, train_tasks: bool) -> None:
     """Raise ``ValueError`` unless ``current`` can train on the data items that it is to use.
 
-    ``trajectories`` are the ``(item_id, trajectory)`` pairs of the trajectory items, and ``train_tasks`` says
-    whether one or more task item is to be in the ``train`` split. A trajectory needs a trainer that accepts
-    uploaded trajectories (``TrainingPipeline.accepts_trajectories``), and each such trainer must render it;
-    otherwise every trainer would skip it. A train task needs a trainer that reads imported tasks
-    (``Trainer.accepts_imported_tasks``). The ``eval`` split is always open: an artifact evaluation
-    runs its tasks.
+    ``trajectories`` says whether one or more trajectory item is new to it, and ``train_tasks`` whether one or more
+    task item is to be in the ``train`` split. A trajectory needs a trainer that accepts uploaded trajectories
+    (``TrainingPipeline.accepts_trajectories``). The check does not read the trajectories: the pipeline renders each
+    one when it reads it, and skips one that cannot train (``TrainingPipeline.trainable``). A train task needs a
+    trainer that reads imported tasks (``Trainer.accepts_imported_tasks``). The ``eval`` split is always open: an
+    artifact evaluation runs its tasks.
     """
-    if trajectories:
-        trainers = [
-            component_trainer.trainer
-            for component_trainer in current.trainers
-            if component_trainer.trainer.pipeline.accepts_trajectories
-        ]
-        if not trainers:
-            raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
-        for item_id, trajectory in trajectories:
-            for trainer in trainers:
-                try:
-                    trainer.uploaded_sample(trajectory)
-                except ValueError as exc:
-                    raise ValueError(f"trajectory {item_id!r} cannot train: {exc}") from exc
+    if trajectories and not any(
+        component_trainer.trainer.pipeline.accepts_trajectories for component_trainer in current.trainers
+    ):
+        raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
     if train_tasks and not any(
         component_trainer.trainer.accepts_imported_tasks for component_trainer in current.trainers
     ):

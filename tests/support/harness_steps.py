@@ -25,13 +25,13 @@ from reef.artifact.artifact import ArtifactNotFound
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginReference
 from reef.evaluation.harness import EvaluationSettings, History, TaskCollector, TaskScorer
+from reef.execution.executor.config import ExecutorSettings
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
-from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 from reef.train.harness_backend import Method, StepContext, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings
@@ -90,10 +90,10 @@ def marker_score(task: str, result: TaskResult) -> float:
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
-class TreeReleases(CommittedArtifacts):
-    """An in-memory commit history of one component: its releases by id, the head the latest one.
+class TreeArtifacts(CommittedArtifacts):
+    """An in-memory commit history of one component: its snapshots by id, the head the latest one.
 
-    ``base`` is the root release; ``publish`` appends one, as a commit that publishes for the component does.
+    ``base`` is the root snapshot; ``publish`` appends one, as a commit that publishes for the component does.
     """
 
     def __init__(self, base: HarnessTree) -> None:
@@ -109,7 +109,7 @@ class TreeReleases(CommittedArtifacts):
 
     def artifact(self, release_id: str, component: str) -> ArtifactTextFiles:
         if release_id not in self.trees:
-            raise ArtifactNotFound(f"no release {release_id!r}")
+            raise ArtifactNotFound(f"no snapshot {release_id!r}")
         return ArtifactTextFiles(release_id, dict(self.trees[release_id].files))
 
 
@@ -161,32 +161,32 @@ def harness_recipe(
     )
 
 
-#: The releases whose head each test backend steps on, as a job names its start.
-BACKEND_RELEASES: WeakKeyDictionary[HarnessBackend, TreeReleases] = WeakKeyDictionary()
+#: The snapshots whose head each test backend steps on, as a job names its start.
+BACKEND_RELEASES: WeakKeyDictionary[HarnessBackend, TreeArtifacts] = WeakKeyDictionary()
 
 
 def build_harness_backend(
-    recipe: HarnessEvolutionRecipe, scenario: str = "demo", releases: TreeReleases | None = None
+    recipe: HarnessEvolutionRecipe, scenario: str = "demo", artifacts: TreeArtifacts | None = None
 ) -> HarnessBackend:
     """``recipe``'s backend of ``COMPONENT`` in ``scenario``, whose steps run on the head of ``releases`` (an
     in-memory history whose base is the seed by default)."""
     backend = recipe.build_backend(scenario, COMPONENT)
-    BACKEND_RELEASES[backend] = TreeReleases(recipe.seed) if releases is None else releases
+    BACKEND_RELEASES[backend] = TreeArtifacts(recipe.seed) if artifacts is None else artifacts
     return backend
 
 
 def head_of(backend: HarnessBackend) -> ArtifactTextFiles:
-    """The head that ``backend``'s next step runs on: the latest release of its ``build_harness_backend`` history."""
+    """The head that ``backend``'s next step runs on: the latest snapshot of its ``build_harness_backend`` history."""
     return BACKEND_RELEASES[backend].head(COMPONENT)
 
 
 def harness_backend(
     tmp_path: Path, method: Any, *, scenario: str = "demo", **recipe_fields: Any
-) -> tuple[HarnessBackend, TreeReleases]:
+) -> tuple[HarnessBackend, TreeArtifacts]:
     """The backend ``harness_recipe`` builds for ``scenario``, over an in-memory history whose base is the seed."""
     recipe = harness_recipe(tmp_path, method, **recipe_fields)
-    releases = TreeReleases(recipe.seed)
-    return build_harness_backend(recipe, scenario, releases), releases
+    artifacts = TreeArtifacts(recipe.seed)
+    return build_harness_backend(recipe, scenario, artifacts), artifacts
 
 
 def changed_rules(text: str) -> Mapping[str, str]:
@@ -290,7 +290,7 @@ __all__ = [
     "FixedScorer",
     "IdleMethod",
     "NoCollection",
-    "TreeReleases",
+    "TreeArtifacts",
     "changed_rules",
     "evolution_config",
     "harness_backend",

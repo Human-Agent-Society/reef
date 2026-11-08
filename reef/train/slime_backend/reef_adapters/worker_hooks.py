@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.runtime.interfaces import LearningRateScheduleState
+from reef.train.learning_rate import LearningRateScheduleState
 from reef.train.slime_backend.algorithm import (
     SlimeAlgorithm,
     reset_objective_paths,

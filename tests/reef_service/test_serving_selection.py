@@ -1,19 +1,19 @@
-"""How a weight-training deployment serves its releases: the serving mode and the serving runtime's config."""
+"""How a weight-training deployment serves its snapshots: the serving mode and the serving runtime's config."""
 
 from __future__ import annotations
 
 import pytest
 
 from reef.core.errors import DeployConfigError
+from reef.core.weight_layout import ArtifactFormat
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.runtime.jobs import ReleaseFormat
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.deploy.serving import ENGINES, NONE, TRAINER, serving_mode, serving_runtime_config
 from reef.train.slime_backend.launch import SlimeDeployment
 from reef.train.tinker_backend.launch import TinkerDeployment
 
 RECIPE = "recipes.sao.recipe:SAORecipe"
-ADAPTER = ReleaseFormat("adapter", 16, ("all",))
+ADAPTER = ArtifactFormat("adapter", 16, ("all",))
 
 
 def tinker(**changes) -> ServiceConfig:
@@ -59,7 +59,7 @@ def test_any_engine_setting_selects_reefs_engines(setting):
             TinkerDeployment(),
             "remove inference.max-loaded-adapters",
         ),
-        (slime(inference_serving=TRAINER), SlimeDeployment(), "serves its own releases"),
+        (slime(inference_serving=TRAINER), SlimeDeployment(), "serves its own snapshots"),
         (slime(inference_serving="sampler"), SlimeDeployment(), "engines, trainer, none or module:Factory"),
         (slime(inference_backend="none", inference_serving=ENGINES), SlimeDeployment(), "serves nothing"),
         (tinker(inference_serving_config={"replicas": 2}), TinkerDeployment(), "module:Factory serving runtime only"),
@@ -88,7 +88,7 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
     assert serving_runtime_config(settings, SlimeDeployment(), ADAPTER) == {
         "type": "remote_serving",
         "remote": {"url": "https://gpu-host.example"},
-        "release_format": ADAPTER.to_dict(),
+        "artifact_format": ADAPTER.to_dict(),
         "engine": "sglang",
         "num_gpus": 4,
         "tensor_parallel_size": 2,
@@ -108,8 +108,8 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
 def test_engines_load_tinker_releases_from_their_sampler_paths():
     resolved = tinker(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
     config = serving_runtime_config(resolved, TinkerDeployment(), None)
-    # A Tinker release holds only its manifest: the engines load the adapter that TinkerSamplerWeights downloads.
-    assert config["release_format"] == ReleaseFormat("adapter", 32, ("all",)).to_dict()
+    # A Tinker artifact holds only its manifest: the engines load the adapter that TinkerSamplerWeights downloads.
+    assert config["artifact_format"] == ArtifactFormat("adapter", 32, ("all",)).to_dict()
     assert config["weights"] == {
         "module": "reef.tinker.weights:TinkerSamplerWeights",
         "config": {
@@ -141,16 +141,16 @@ def test_trainer_and_none_serving_build_the_backends_own_and_the_null_runtime():
         "timeout_s": 300.0,
     }
     assert serving_runtime_config(
-        slime(inference_backend="none", inference_timeout_s=30.0), SlimeDeployment(), ReleaseFormat("full")
+        slime(inference_backend="none", inference_timeout_s=30.0), SlimeDeployment(), ArtifactFormat("full")
     ) == {"type": "none", "inference_timeout_s": 30.0}
 
 
-@pytest.mark.parametrize("release_format", [ADAPTER, None])
-def test_a_module_factory_gets_its_serving_config_and_the_release_format(release_format):
+@pytest.mark.parametrize("artifact_format", [ADAPTER, None])
+def test_a_module_factory_gets_its_serving_config_and_the_release_format(artifact_format):
     settings = tinker(inference_serving="my.serving:Factory", inference_serving_config={"replicas": 2})
     assert serving_mode(settings, TinkerDeployment()) == "my.serving:Factory"
-    assert serving_runtime_config(settings, TinkerDeployment(), release_format) == {
+    assert serving_runtime_config(settings, TinkerDeployment(), artifact_format) == {
         "replicas": 2,
         "type": "my.serving:Factory",
-        "release_format": None if release_format is None else release_format.to_dict(),
+        "artifact_format": None if artifact_format is None else artifact_format.to_dict(),
     }

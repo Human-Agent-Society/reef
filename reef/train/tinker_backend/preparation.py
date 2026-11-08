@@ -7,11 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.job_data import JobData, trajectories
-from reef.runtime.interfaces import TrainingMethod
-from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import StepScheduling, schedule_job_data
 from reef.train.tinker_backend.config import ScoreCentering
 from reef.train.tinker_backend.losses import ScoreCenteredLoss, TinkerLoss, TokenRow, resolve_tinker_loss
+from reef.train.tinker_backend.objectives import resolve_tinker_objective
 
 
 @dataclass(frozen=True)
@@ -40,7 +39,7 @@ class TinkerSteps:
 
 def prepare_tinker_job(
     data: JobData,
-    method: TrainingMethod,
+    objective_reference: str,
     state: Mapping[str, Any],
     scheduling: StepScheduling,
     *,
@@ -50,14 +49,14 @@ def prepare_tinker_job(
 ) -> TinkerSteps:
     """The optimizer steps of ``data`` under ``scheduling``, at most ``batch_size`` rollouts each.
 
-    The job trains ``method``'s objective with that objective's Tinker loss, which must be registered in this
-    process and accept ``kl_coef``. With ``score_centering``, a policy loss trains as ``ScoreCenteredLoss``, which
+    The job trains the objective that ``objective_reference`` names, with that objective's Tinker loss, which must
+    be registered in this process and accept ``kl_coef``. With ``score_centering``, a policy loss trains as ``ScoreCenteredLoss``, which
     only ``importance_sampling`` may; a loss without advantages, such as ``sft``, trains as it is. The
     record-to-sample stage already dropped stale samples. ``ValueError``: the loss refuses ``kl_coef``, score
     centering meets another policy loss, the objective gives no advantage for each trajectory of a policy loss,
     or a row is not trainable.
     """
-    objective = resolve_objective(method.objective)
+    objective = resolve_tinker_objective(objective_reference)
     signal = objective.prepare(data, state)
     if signal.action == "skip":
         return TinkerSteps(None, (), signal.next_algorithm_state, signal.metrics)

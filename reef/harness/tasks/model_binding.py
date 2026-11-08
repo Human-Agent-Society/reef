@@ -14,7 +14,7 @@ run against - and the named ones are the method's own. Methods call
 :meth:`ModelBinding.config_overlays` into the config files of each evaluation
 run and install. A served
 binding points at this Reef's own evaluation route for the scenario when the
-service is known, so a run samples the release the scenario serves;
+service is known, so a run samples the snapshot the scenario serves;
 such calls are served without being recorded, so none of this traffic
 becomes a scenario record either way.
 """
@@ -34,6 +34,7 @@ from typing import Any
 from reef.core.errors import ReefError
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.inference.interfaces import InferenceRuntime
 from reef.inference.provider_protocol import (
     fold_anthropic_stream,
     fold_chat_stream,
@@ -42,7 +43,6 @@ from reef.inference.provider_protocol import (
     stream_events,
     usage_of,
 )
-from reef.runtime.interfaces import InferenceRuntime
 
 #: The API dialects a binding can speak. ``openai`` is Chat Completions,
 #: ``responses`` is OpenAI Responses, and ``anthropic`` is Messages.

@@ -27,8 +27,8 @@ from tests.support.harness_steps import UNCHANGED, harness_recipe
 from reef.core import AgentRecord, RequestType
 from reef.harness.tree import TreePatch
 from reef.service.app import create_app
+from reef.service.artifact_page import build_artifact_page
 from reef.service.auth import page_key_for_digest
-from reef.service.release_page import build_release_page
 from reef.service.request_page import (
     MAX_ACTIVITY_SHOWN,
     REFRESH_SECONDS,
@@ -52,7 +52,7 @@ QUERY = {"scenario": SCENARIO, "key": KEY}
 
 
 def _record(text: str = TEXT, requires: list | None = None) -> dict:
-    """The agent record as ``Dispatcher.read_record`` answers it for a ``POST /reef/train`` instruction."""
+    """The agent record as ``Dispatcher.read_record`` answers it for a ``POST /reef/train`` training request."""
     payload = {"text": text, "session": SESSION, "artifact_id": "rel-0", "requires": requires or []}
     return {
         "sequence": 1,
@@ -83,7 +83,7 @@ def _row(metrics: dict, *, artifact_id: str = "rel-1", parent: str | None = "rel
 
 
 CREATION = _row({}, artifact_id="rel-0", parent=None, operation="creation")
-#: The creation while it serves: a newer release that passed the checks then waits for activation.
+#: The creation while it serves: a newer snapshot that passed the checks then waits for activation.
 SERVED_CREATION = {**CREATION, "active": True}
 
 
@@ -119,19 +119,19 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> No
     page = request_page(_record(), [CREATION], now=1_042.0)
     assert logo in page
     # The version page draws with the same layout, so one logo serves both.
-    assert logo in build_release_page(0, [CREATION])
+    assert logo in build_artifact_page(0, [CREATION])
 
 
 def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
     rows = [CREATION, _row(_answered(selected=True, patch=PATCH), active=True)]
     page = request_page(_record(), rows, link_query=QUERY, now=1_100.0)
-    head = f"/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}"
+    head = f"/reef/harness/artifacts/1/page?scenario=agents&amp;key={KEY}"
     assert f'<a class="brand" href="{head}" aria-label="Harness home">' in page
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
     for href in re.findall(r'href="([^"]+)"', page):
-        assert re.match(r"^/reef/harness/releases/\d+/page(\?|$)", href.replace("&amp;", "&")), href
-    # A catalog with no active release leaves the crumb as text rather than a broken link.
+        assert re.match(r"^/reef/harness/artifacts/\d+/page(\?|$)", href.replace("&amp;", "&")), href
+    # A catalog with no active selection leaves the crumb as text rather than a broken link.
     inactive_only = [_row(_answered(selected=True), artifact_id="rel-0", parent=None, activated=False)]
     bare = request_page(_record(), inactive_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
@@ -202,7 +202,7 @@ def test_a_settled_selected_request_carries_the_result_the_patch_and_the_link_wi
     assert '<span class="selected">Published</span>' in selection_result
     assert "Published as artifact rel-1. GET /reef/harness serves it from now on." in selection_result
     assert '<dt>Artifact</dt><dd class="id">rel-1</dd>' in selection_result
-    assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in selection_result
+    assert f'href="/reef/harness/artifacts/1/page?scenario=agents&amp;key={KEY}">View v1' in selection_result
     assert "<h3>Error</h3>" not in selection_result
     changed = _section(page, "What changed")
     # Each file the patch wrote, with its part of the harness tree.
@@ -212,7 +212,7 @@ def test_a_settled_selected_request_carries_the_result_the_patch_and_the_link_wi
     assert "<h3>Pull it</h3><code>GET /reef/harness</code>" in selection_result
     assert settled_step(rows, RECORD_ID) == 1
     bare = request_page(_record(), rows, now=1_100.0)
-    assert 'href="/reef/harness/releases/1/page">View v1' in bare
+    assert 'href="/reef/harness/artifacts/1/page">View v1' in bare
 
     # A rejected candidate is labeled as proposed, never as an applied change.
     rejected = _row(
@@ -271,7 +271,7 @@ def test_a_rejected_request_names_the_missed_run_on_both_pages() -> None:
         "the task '[health] echo' failed: no transcript was read" in result
     )
     assert "rephrase" not in result and "the change itself was not judged" in result
-    version = build_release_page(1, [CREATION, row])
+    version = build_artifact_page(1, [CREATION, row])
     assert "Missed" in version and "no transcript was read" in version
 
 
@@ -294,12 +294,12 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     assert f"could not be evaluated: {cause}" in result and "did not pass the checks" not in result
     note = "The floor tasks (health) were set before this request"
     assert note in result
-    version = build_release_page(1, [CREATION, row])
+    version = build_artifact_page(1, [CREATION, row])
     assert "The evaluation could not run" in version and f"<dt>Could not run</dt><dd>{cause}</dd>" in version
     assert "Candidate score" not in version and "Missed" not in version and note in version
     # A scored miss keeps the checks' own words and its candidate score.
     scored = _row({**metrics, "candidate_runs": [{**task_run, "score": 0.0, "failure": None, "reply": "no"}]})
-    version = build_release_page(1, [CREATION, scored])
+    version = build_artifact_page(1, [CREATION, scored])
     assert "The evaluation could not run" not in version and "Candidate score" in version
 
 
@@ -315,7 +315,7 @@ def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_its_candidat
     """A skip row whose candidate reached its evaluation says where the step failed, on both pages, and lists the
     change the candidate made instead of saying no change was produced."""
     metrics = _answered(
-        skipped="instruction failed",
+        skipped="request failed",
         error="AttributeError: 'str' object has no attribute 'get'",
         failed_stage="evaluating",
         patch=PATCH,
@@ -325,7 +325,7 @@ def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_its_candidat
     result = _section(page, "Result")
     assert "The step failed during its evaluation" in result and "before evaluation" not in result
     assert "rules.md" in _section(page, "Proposed changes") and "No changes were produced" not in page
-    version = build_release_page(1, [CREATION, failed])
+    version = build_artifact_page(1, [CREATION, failed])
     assert "The step failed during its evaluation" in version and "before evaluation" not in version
 
 
@@ -348,7 +348,7 @@ def test_a_settled_request_shows_what_the_method_said_and_why_a_step_failed() ->
     # A published step without either shows the result and the change alone.
     plain = request_page(_record(), [CREATION, _row(_answered(selected=True, patch=PATCH))], now=1_100.0)
     assert _sections(plain) == ["Request", "Result", "What changed"]
-    failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison method"), artifact_id="rel-0")
+    failed = _row(_answered(skipped="request failed", error="RuntimeError: poison method"), artifact_id="rel-0")
     page = request_page(_record(), [CREATION, failed], now=1_100.0)
     assert '<span class="failed">Failed</span>' in page
     assert "The step failed before evaluation. Nothing was published" in _section(page, "Result")
@@ -380,7 +380,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_method
     assert '<tr><td>&lt;x&gt;</td><td>service</td><td class="id"></td><td>Sign in to &lt;x&gt;</td></tr>' in request
     assert "Needs from your machine" not in request_page(_record(text=text), [CREATION], now=1_100.0)
     assert "&lt;b&gt;failed&lt;/b&gt;" in page and "&quot;&lt;i&gt;off&lt;/i&gt;&quot;" in page
-    assert 'href="/reef/harness/releases/1/page?scenario=a+b&amp;key=k%26%3C"' in page
+    assert 'href="/reef/harness/artifacts/1/page?scenario=a+b&amp;key=k%26%3C"' in page
     assert '<meta name="referrer" content="no-referrer">' in page
     queued = request_page(_record(text=text), [CREATION], now=1_100.0)
     queued.encode("ascii")
@@ -459,9 +459,9 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             link = f"/reef/harness/requests/{record_id}/page"
             # The service hands out the links a browser opens: the scenario and a page key, never the token.
             assert answer["page_path"] == f"{link}?{urlencode(QUERY)}"
-            catalog = await (await client.get("/reef/harness/releases", headers=headers)).json()
-            assert [row["page_path"] for row in catalog["releases"]] == [
-                f"/reef/harness/releases/0/page?{urlencode(QUERY)}"
+            catalog = await (await client.get("/reef/harness/artifacts", headers=headers)).json()
+            assert [row["page_path"] for row in catalog["artifacts"]] == [
+                f"/reef/harness/artifacts/0/page?{urlencode(QUERY)}"
             ]
             assert await asyncio.to_thread(entered.wait, 10)
 
@@ -498,20 +498,20 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
 
             # The version page opens the same way; the wrong key, no key, a key elsewhere or the token in the query
             # does not.
-            response = await client.get("/reef/harness/releases/0/page", params=QUERY)
+            response = await client.get("/reef/harness/artifacts/0/page", params=QUERY)
             assert response.status == 200 and "<title>Harness v0</title>" in await response.text()
             # The step the request is running has no row yet: its page says so and links the request, not a 404.
-            response = await client.get("/reef/harness/releases/1/page", params=QUERY)
+            response = await client.get("/reef/harness/artifacts/1/page", params=QUERY)
             running = await response.text()
             assert response.status == 200 and "This step is running" in running and REFRESH in running
             assert f'href="{link}?scenario=agents&amp;key={KEY}">Follow the request' in running
-            assert (await client.get("/reef/harness/releases/2/page", params=QUERY)).status == 404
+            assert (await client.get("/reef/harness/artifacts/2/page", params=QUERY)).status == 404
             response = await client.get(link, params={**QUERY, "key": "nope"})
             assert response.status == 401 and await response.text() == "invalid service token"
             assert (await client.get(link, params={"scenario": SCENARIO, "token": "secret"})).status == 401
             response = await client.get(link, params={"scenario": SCENARIO})
             assert response.status == 401
-            response = await client.get("/reef/harness/releases", params=QUERY)
+            response = await client.get("/reef/harness/artifacts", params=QUERY)
             assert response.status == 401
             # The header wins when present, and without a scenario from anywhere the page is a 400.
             response = await client.get(link, params=QUERY, headers={"Authorization": "Bearer nope"})
@@ -546,9 +546,9 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
                 assert '<span class="selected">Published</span>' in page
                 assert "Published as artifact " in page and "<code>GET /reef/harness</code>" in page
                 assert '<span class="tag operation-write">write</span><span class="node-id">rules.md</span>' in page
-            assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in page
+            assert f'href="/reef/harness/artifacts/1/page?scenario=agents&amp;key={KEY}">View v1' in page
 
-            # An unknown id, and a record that is no training instruction, are 404s naming the id.
+            # An unknown id, and a record that is no training request, are 404s naming the id.
             response = await client.get("/reef/harness/requests/nope/page", params=QUERY)
             assert response.status == 404 and "has no harness request 'nope'" in await response.text()
             inference = AgentRecord.create(
@@ -577,7 +577,7 @@ def test_a_config_file_shows_its_text_on_the_version_page() -> None:
     agent = {"agent": {"chat": {"mode": "primary", "prompt": "Only search the web — nothing else."}}}
     patch = {"config/primary.json": json.dumps(agent, ensure_ascii=False, indent=2) + "\n"}
     step = _row(_answered(selected=True, patch=patch))
-    version = build_release_page(1, [CREATION, step])
+    version = build_artifact_page(1, [CREATION, step])
     version.encode("ascii")
     shown = html.unescape(version.split("<script", 1)[0])
     assert '"prompt": "Only search the web — nothing else."' in shown

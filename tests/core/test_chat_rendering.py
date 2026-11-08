@@ -23,7 +23,7 @@ def trajectory(*steps: dict[str, Any], tools: list[dict[str, Any]] | None = None
 
 
 def test_every_agent_turn_trains_and_the_turns_between_are_masked() -> None:
-    rendered = render_trajectory(
+    (rendered,) = render_trajectory(
         CharTemplate(), trajectory(step("user", "q"), step("agent", "ab"), step("user", "r"), step("agent", "c"))
     )
     # user q | assistant ab | user r | assistant c.
@@ -33,7 +33,7 @@ def test_every_agent_turn_trains_and_the_turns_between_are_masked() -> None:
 
 
 def test_copied_context_trains_nothing_and_the_steps_after_the_last_trained_turn_are_left_out() -> None:
-    rendered = render_trajectory(
+    (rendered,) = render_trajectory(
         CharTemplate(),
         trajectory(
             step("user", "q"),
@@ -50,7 +50,7 @@ def test_copied_context_trains_nothing_and_the_steps_after_the_last_trained_turn
 def test_the_agent_tools_render_with_every_part() -> None:
     template = CharTemplate()
     tools = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
-    rendered = render_trajectory(template, trajectory(step("user", "q"), step("agent", "a"), tools=tools))
+    (rendered,) = render_trajectory(template, trajectory(step("user", "q"), step("agent", "a"), tools=tools))
     assert rendered.tokens[0] == 8 and all(seen == tools for seen in template.tools)
 
 
@@ -67,12 +67,24 @@ def test_a_trajectory_that_cannot_train_is_refused(steps, error) -> None:
         render_trajectory(CharTemplate(), trajectory(*steps))
 
 
-def test_a_template_that_drops_earlier_turns_cannot_train_them_all() -> None:
-    with pytest.raises(ValueError, match="prefix of the whole conversation"):
-        render_trajectory(
-            CharTemplate(drop_history=True),
-            trajectory(step("user", "q"), step("agent", "a"), step("user", "r"), step("agent", "b")),
-        )
+def test_a_template_that_drops_earlier_turns_trains_each_turn_as_its_call_rendered_it() -> None:
+    first, second = render_trajectory(
+        CharTemplate(drop_history=True),
+        trajectory(step("user", "q"), step("agent", "a"), step("user", "r"), step("agent", "b"), step("agent", "c")),
+    )
+    # The second call's prompt drops "a", so it starts a segment; the third call's prompt extends the second's.
+    assert (first.tokens, first.loss_mask) == ([2, 213, 9, 197], [1])
+    assert second.tokens == [2, 213, 2, 214, 9, 198, 9, 199]
+    assert second.loss_mask == [1, 0, 1]
+
+
+def test_a_template_that_rewrites_a_turns_own_prompt_is_refused() -> None:
+    class RewritesPrompt(CharTemplate):
+        def render(self, messages, tools, *, prompt):
+            return super().render(messages, tools, prompt=prompt)[int(not prompt) :]
+
+    with pytest.raises(ValueError, match="prefix extension of its generation prompt"):
+        render_trajectory(RewritesPrompt(), trajectory(step("user", "q"), step("agent", "a")))
 
 
 def test_a_rendered_trajectory_has_a_prompt_and_trained_tokens() -> None:
@@ -107,6 +119,20 @@ def test_a_teacher_sequence_over_its_limit_and_an_unrenderable_trajectory_are_le
     )
     data, left_out = rendered_job_data(JobData("d", samples), CharTemplate())
     assert left_out == (0, 1) and len(data.samples) == 1
+
+
+def test_each_segment_becomes_a_sample_and_a_teacher_sample_with_segments_is_left_out() -> None:
+    steps = (step("user", "q"), step("agent", "a"), step("user", "r"), step("agent", "b"))
+    data, left_out = rendered_job_data(
+        JobData("d", (teacher_sample(None, *steps), teacher_sample(TeacherRequest(), *steps))),
+        CharTemplate(drop_history=True),
+    )
+    assert left_out == (1,)
+    assert [sample.training["segment"] for sample in data.samples] == [
+        {"index": 0, "count": 2},
+        {"index": 1, "count": 2},
+    ]
+    assert [sample.training["tokens"] for sample in data.samples] == [[2, 213, 9, 197], [2, 213, 2, 214, 9, 198]]
 
 
 def test_a_sample_renders_with_the_template_arguments_of_its_recorded_request() -> None:

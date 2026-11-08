@@ -1,13 +1,11 @@
-"""Shared SQLAlchemy record operations, independent of database setup and dialect.
+"""Shared SQLAlchemy operations, independent of database setup and dialect: the trajectory nodes of record items
+(``TrajectoryNodes``), their eviction sizes, and the database of one scenario's state (``SQLScenarioDatabase``).
 
-Adapters supply tables, transaction-scoped connections, conflict insertion, and
-resource cleanup. The domain behavior is implemented here once; this module
-has no SQLite, filesystem, or scenario lifecycle dependencies.
+This module has no SQLite, filesystem, or scenario lifecycle dependencies.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from abc import abstractmethod
 from collections import Counter
@@ -15,24 +13,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
-from weakref import WeakValueDictionary
 
-from sqlalchemy import (
-    BigInteger,
-    Column,
-    Index,
-    MetaData,
-    String,
-    Table,
-    Text,
-    and_,
-    exists,
-    func,
-    select,
-    true,
-    tuple_,
-    update,
-)
+from sqlalchemy import BigInteger, Column, Index, MetaData, String, Table, Text, and_, select, true, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -44,20 +26,11 @@ from reef.core.atif_payloads import (
     atif_reply,
     call_shape,
     canonical_json,
-    provider_payload,
 )
 from reef.core.errors import ReefError
-from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
 from reef.core.serving_config import ServingConfig
-from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent, call_key, sha256_text, trajectory_calls
-from reef.storage.records import (
-    AppendResult,
-    ConsumptionReceipt,
-    RecordConflict,
-    RecordLoss,
-    RecordStore,
-    StoredRecord,
-)
+from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent
+from reef.storage.commit_history import Closeable
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.segments import SegmentLine, SegmentPartition
 
@@ -86,32 +59,6 @@ def batches[T](values: Iterable[T], size: int = IN_LIST_SIZE) -> Iterable[list[T
             batch = []
     if batch:
         yield batch
-
-
-@dataclass(frozen=True)
-class RecordTables:
-    """Tables for record bodies, trajectory nodes, retry hashes, consumption, capacity losses, scenario settings, and
-    the records that stored samples hold.
-
-    The adapter owns schema types, constraints, indexes, and migrations. Table
-    columns retain the names consumed by SQLRecordStore; backend-specific
-    generated keys or indexes may be added without replacing record operations.
-    ``nodes`` is the node table of ``TrajectoryNodes``, and ``sample_records`` the table of
-    ``sample_record_table``.
-    """
-
-    records: Table
-    consumed: Table
-    consumption: Table
-    eviction: Table
-    settings: Table
-    nodes: Table
-    sample_records: Table
-    scope: Mapping[str, str] = field(default_factory=dict)
-
-    def condition(self, table: Table) -> ColumnElement[bool]:
-        """Restrict operations to the adapter's storage namespace, if any."""
-        return and_(true(), *(table.c[key] == value for key, value in self.scope.items()))
 
 
 @dataclass(frozen=True)
@@ -183,24 +130,6 @@ def trajectory_node_table(metadata: MetaData, name: str, *scope_columns: Column[
     )
 
 
-def sample_record_table(metadata: MetaData, *scope_columns: Column[str]) -> Table:
-    """Define the ``sample_record`` table in ``metadata``: the records that a stored sample holds.
-
-    A row ``(sample_id, agent_record_id)`` says that the stored sample ``sample_id`` renders its trajectory from the
-    record ``agent_record_id`` (``SQLSampleStore``), so capacity eviction keeps the record. ``scope_columns`` are the
-    columns of a store's namespace, as for ``trajectory_node_table``. An index finds the samples of a record.
-    """
-    scope_names = [column.name for column in scope_columns]
-    return Table(
-        "sample_record",
-        metadata,
-        *scope_columns,
-        Column("sample_id", Text, primary_key=True),
-        Column("agent_record_id", Text, primary_key=True),
-        Index("sample_record_by_record", *scope_names, "agent_record_id"),
-    )
-
-
 class NodeContent(NamedTuple):
     """What the trajectory nodes hold for one record's payload, as JSON: the ``entries_json`` of the nodes on its
     path, root first, the ``shape_json`` of its root and the ``call_json`` of its own node."""
@@ -236,6 +165,30 @@ def node_texts(line: str) -> tuple[str, str | None, str]:
         None if node["shape"] is None else canonical_json(node["shape"]),
         canonical_json(node["call"]),
     )
+
+
+@dataclass(frozen=True)
+class NewNode:
+    """The node of one record to add: its sequence, scenario and record ID, and its payload with that payload's key,
+    shape and ``call_json`` (``node_call_json``).
+
+    Purpose: a store gives these to ``TrajectoryNodes.add_many`` when it writes records. All but the sequence
+    depend on the record alone, so a store can make them before it takes a lock.
+    """
+
+    node_sequence: int
+    scenario: str
+    agent_record_id: str
+    payload: Mapping[str, Any]
+    key: CallKey
+    shape: CallShape
+    call_json: str
+
+
+def node_call_json(payload: Mapping[str, Any], shape: CallShape) -> str:
+    """The ``call_json`` of the node of ``payload``: its reply entries and call fields."""
+    reply, call = atif_reply(payload, shape)
+    return canonical_json({"reply": reply, "call": call})
 
 
 @dataclass(frozen=True)
@@ -293,49 +246,88 @@ class TrajectoryNodes:
         shape = call_shape(payload)
         if shape is None:
             raise ValueError(f"record {agent_record_id!r} has no message list, so it has no trajectory node")
+        self.add_many(
+            connection,
+            [NewNode(node_sequence, scenario, agent_record_id, payload, key, shape, node_call_json(payload, shape))],
+        )
+
+    def add_many(self, connection: Connection, new_nodes: Sequence[NewNode]) -> None:
+        """Add ``new_nodes``, in sequence order, with a number of statements that does not grow with their count.
+
+        The parent of each is as ``add`` gives, also among the earlier ones of ``new_nodes``.
+        """
+        if not new_nodes:
+            return
         table = self.nodes.table
-        candidates: list[ParentCandidate] = []
-        for batch in batches(key.prefix_sha256):
+        candidates: dict[tuple[str, str], list[ParentCandidate]] = {}
+        hashes = sorted({prefix for node in new_nodes for prefix in node.key.prefix_sha256})
+        for batch in batches(hashes):
             rows = connection.execute(
-                select(table.c.node_sequence, table.c.entry_count, table.c.reply_count, table.c.reply_sha256).where(
-                    self.nodes.condition(), table.c.scenario == scenario, table.c.list_sha256.in_(batch)
+                select(
+                    table.c.scenario,
+                    table.c.list_sha256,
+                    table.c.node_sequence,
+                    table.c.entry_count,
+                    table.c.reply_count,
+                    table.c.reply_sha256,
+                ).where(
+                    self.nodes.condition(),
+                    table.c.scenario.in_({node.scenario for node in new_nodes}),
+                    table.c.list_sha256.in_(batch),
                 )
             )
-            candidates.extend(
-                ParentCandidate(int(sequence), int(count), int(reply_count), reply)
-                for sequence, count, reply_count, reply in rows
+            for scenario, list_sha256, sequence, count, reply_count, reply in rows:
+                candidates.setdefault((scenario, list_sha256), []).append(
+                    ParentCandidate(int(sequence), int(count), int(reply_count), reply)
+                )
+        values: list[dict[str, Any]] = []
+        children: dict[int, int] = {}
+        for node in new_nodes:
+            shape = node.shape
+            parent = best_parent(
+                node.key,
+                (found for prefix in node.key.prefix_sha256 for found in candidates.get((node.scenario, prefix), ())),
             )
-        parent = best_parent(key, candidates)
-        entries_json = canonical_json(atif_entries(payload, shape, 0 if parent is None else parent.entry_count))
-        shape_json = None
-        if parent is None:
-            agent = atif_agent(payload["tools"], shape.provider) if shape.has_tools else None
-            shape_json = canonical_json({"shape": shape.as_json(), "agent": agent})
-        reply, call = atif_reply(payload, shape)
-        call_json = canonical_json({"reply": reply, "call": call})
-        connection.execute(
-            table.insert().values(
-                **self.nodes.scope,
-                node_sequence=node_sequence,
-                parent_sequence=None if parent is None else parent.sequence,
-                scenario=scenario,
-                agent_record_id=agent_record_id,
-                entry_count=key.entry_count,
-                list_sha256=key.list_sha256,
-                reply_count=key.reply_count,
-                reply_sha256=key.reply_sha256,
-                entries_json=entries_json,
-                shape_json=shape_json,
-                call_json=call_json,
-                body_bytes=len((entries_json + (shape_json or "") + call_json).encode("utf-8")),
-                record_count=1,
+            start = 0 if parent is None else parent.entry_count
+            entries_json = canonical_json(atif_entries(node.payload, shape, start))
+            shape_json = None
+            if parent is None:
+                agent = atif_agent(node.payload["tools"], shape.provider) if shape.has_tools else None
+                shape_json = canonical_json({"shape": shape.as_json(), "agent": agent})
+            values.append(
+                {
+                    **self.nodes.scope,
+                    "node_sequence": node.node_sequence,
+                    "parent_sequence": None if parent is None else parent.sequence,
+                    "scenario": node.scenario,
+                    "agent_record_id": node.agent_record_id,
+                    "entry_count": node.key.entry_count,
+                    "list_sha256": node.key.list_sha256,
+                    "reply_count": node.key.reply_count,
+                    "reply_sha256": node.key.reply_sha256,
+                    "entries_json": entries_json,
+                    "shape_json": shape_json,
+                    "call_json": node.call_json,
+                    "body_bytes": len((entries_json + (shape_json or "") + node.call_json).encode("utf-8")),
+                    "record_count": 1,
+                }
             )
-        )
-        if parent is not None:
+            if parent is not None:
+                children[parent.sequence] = children.get(parent.sequence, 0) + 1
+            candidates.setdefault((node.scenario, node.key.list_sha256), []).append(
+                ParentCandidate(node.node_sequence, node.key.entry_count, node.key.reply_count, node.key.reply_sha256)
+            )
+        connection.execute(table.insert().values(values))
+        # A parent that is new in this call gets its children here too. Most parents have one child, so this is
+        # usually one statement.
+        by_count: dict[int, list[int]] = {}
+        for sequence, count in children.items():
+            by_count.setdefault(count, []).append(sequence)
+        for count, sequences in by_count.items():
             connection.execute(
                 update(table)
-                .where(self.nodes.condition(), table.c.node_sequence == parent.sequence)
-                .values(record_count=table.c.record_count + 1)
+                .where(self.nodes.condition(), table.c.node_sequence.in_(sequences))
+                .values(record_count=table.c.record_count + count)
             )
 
     def paths(self, connection: Connection, node_sequences: Iterable[int], *columns: str) -> list[RowMapping]:
@@ -493,241 +485,24 @@ class EvictionSizes:
         return size
 
 
-class EncodedRecord(NamedTuple):
-    """One record in its stored column order, as the ``agent_record`` row.
+class SQLScenarioDatabase(Closeable):
+    """The database of one scenario's state: its settings, and the tables of the stores that share its transactions.
 
-    A payload with a message list lives in the record's trajectory node as ATIF (``TrajectoryNodes``): then
-    ``payload_json`` is ``{}``, ``message_field`` names the list, and ``payload_sha256`` is the SHA-256 of the
-    payload's canonical JSON. A payload without one stays in ``payload_json``, and the other two are ``None``. The
-    field names bind INSERT parameters by name and identify the fields that participate in retry-content
-    comparison: two records have the same content if and only if their encoded fields other than ``created_at``
-    are equal.
+    Values: ``settings`` is the settings table, and ``scope`` maps its namespace columns to their values (empty in a
+    database of one scenario, ``storage_id`` in the PostgreSQL record database). A subclass gives ``_transaction``
+    and ``_insert_if_absent``.
+
+    Purpose: the task, sample, evaluation and commit stores of a session run their SQL in its transactions.
     """
 
-    agent_record_id: str
-    scenario: str
-    request_type: str
-    created_at: float
-    payload_json: str
-    message_field: str | None
-    payload_sha256: str | None
-    references_json: str
-    artifact_json: str | None
-
-    @property
-    def body_bytes(self) -> int:
-        """The UTF-8 bytes of the row's stored bodies: payload, references and artifact."""
-        values = (self.payload_json, self.references_json, self.artifact_json)
-        return sum(len(value.encode("utf-8")) for value in values if value is not None)
-
-
-class SQLRecordRetention:
-    """Shared retention queries executed inside the caller's transaction.
-
-    The caller selects databases or namespaces and owns the byte-budget
-    policy. Adapters must provide accurate row counts for single DELETEs.
-    """
-
-    def __init__(self, tables: RecordTables) -> None:
-        self._records = tables.records
-        self._tables = tables
-
-    def retained_bytes(self, connection: Connection) -> int:
-        """Count all stored bodies, record rows and trajectory nodes, independent of training consumption."""
-        total = 0
-        for table in (self._records, self._tables.nodes):
-            total += int(
-                connection.execute(
-                    select(func.coalesce(func.sum(table.c.body_bytes), 0)).where(self._tables.condition(table))
-                ).scalar_one()
-            )
-        return total
-
-    def unheld(self) -> ColumnElement[bool]:
-        """The condition of the record rows that no stored sample holds (``sample_record_table``); eviction takes only
-        those, so a stored sample can always render its trajectory."""
-        records, held = self._records, self._tables.sample_records
-        return ~exists(
-            select(held.c.agent_record_id).where(
-                held.c.agent_record_id == records.c.agent_record_id,
-                *(held.c[name] == records.c[name] for name in self.scope_names()),
-            )
-        )
-
-    def eviction_sizes(self) -> EvictionSizes:
-        """New eviction sizes for this database's records and trajectory nodes."""
-        return EvictionSizes(self._tables.nodes, self.scope_names())
-
-    def scope_names(self) -> tuple[str, ...]:
-        """The columns of a record row that scope its trajectory node and its loss totals."""
-        return tuple(column.name for column in self._tables.eviction.primary_key if column.name != "scenario")
-
-    def page(
-        self, connection: Connection, sizes: EvictionSizes, *, after_time: float, after_sequence: int, limit: int = 256
-    ) -> tuple[tuple[float, int, int], ...]:
-        """Read the oldest records after a position that no stored sample holds, across scenarios, using their stored
-        timestamps.
-
-        Return ``(created_at, sequence, size)`` of each record, where ``size`` is the bytes that evicting it frees
-        after the records that ``sizes`` counted before; ``sizes`` counts each returned record.
-        """
-        records = self._records
-        rows = (
-            connection.execute(
-                select(
-                    records.c.created_at,
-                    records.c.sequence,
-                    records.c.body_bytes,
-                    records.c.message_field,
-                    *(records.c[name] for name in sizes.scope_names),
-                )
-                .where(
-                    self._tables.condition(records),
-                    tuple_(records.c.created_at, records.c.sequence) > (after_time, after_sequence),
-                    self.unheld(),
-                )
-                .order_by(records.c.created_at, records.c.sequence)
-                .limit(limit)
-            )
-            .mappings()
-            .all()
-        )
-        sizes.read(connection, rows)
-        return tuple((float(row["created_at"]), int(row["sequence"]), sizes.count(row)) for row in rows)
-
-    def evict(self, connection: Connection, sequences: Sequence[int]) -> tuple[tuple[str, RecordLoss], ...]:
-        """Delete bodies and persist retry hashes and loss totals in the same transaction.
-
-        The trajectory nodes that no remaining record needs are deleted with the records. A record that a stored sample
-        holds stays. The adapter serializes this operation with record writes. Loss totals are per storage generation and scenario; their bytes are the
-        bytes that the eviction frees. Metadata never includes payloads.
-        """
-        tables = self._tables
-        rows = (
-            connection.execute(
-                select(self._records)
-                .where(tables.condition(self._records), self._records.c.sequence.in_(sequences), self.unheld())
-                .order_by(self._records.c.created_at, self._records.c.sequence)
-            )
-            .mappings()
-            .all()
-        )
-        if not rows:
-            return ()
-        sizes = self.eviction_sizes()
-        sizes.read(connection, rows)
-        freed = {int(row["sequence"]): sizes.count(row) for row in rows}
-        groups: dict[tuple[str, ...], list[RowMapping]] = {}
-        for row in rows:
-            groups.setdefault((*sizes.scope(row), str(row["scenario"])), []).append(row)
-        losses: list[tuple[str, RecordLoss]] = []
-        for key, members in groups.items():
-            scope = dict(zip(sizes.scope_names, key[:-1], strict=True))
-            scenario = key[-1]
-            nodes = sizes.trajectory_nodes(key[:-1])
-            ids = [row["agent_record_id"] for row in members]
-            hashes = tables.consumed
-            present: set[str] = set(
-                connection.execute(
-                    select(hashes.c.agent_record_id).where(
-                        *(hashes.c[name] == value for name, value in scope.items()),
-                        hashes.c.agent_record_id.in_(ids),
-                    )
-                ).scalars()
-            )
-            absent = [row for row in members if row["agent_record_id"] not in present]
-            if absent:
-                records = SQLRecordStore.decode_rows(connection, nodes, absent)
-                connection.execute(
-                    hashes.insert(),
-                    [
-                        {**scope, "agent_record_id": record.agent_record_id, "content_sha256": content_sha256(record)}
-                        for record in records
-                    ],
-                )
-            nodes.release(connection, (int(row["sequence"]) for row in members if row["message_field"] is not None))
-            loss = RecordLoss(
-                len(members),
-                sum(freed[int(row["sequence"])] for row in members),
-                min(int(row["sequence"]) for row in members),
-                max(int(row["sequence"]) for row in members),
-            )
-            state = tables.eviction
-            condition = and_(state.c.scenario == scenario, *(state.c[name] == value for name, value in scope.items()))
-            previous = connection.execute(select(state).where(condition)).mappings().first()
-            if previous is None:
-                connection.execute(
-                    state.insert().values(
-                        **scope,
-                        scenario=scenario,
-                        record_count=loss.record_count,
-                        body_bytes=loss.body_bytes,
-                        first_sequence=loss.first_sequence,
-                        last_sequence=loss.last_sequence,
-                    )
-                )
-            else:
-                connection.execute(
-                    state.update()
-                    .where(condition)
-                    .values(
-                        record_count=state.c.record_count + loss.record_count,
-                        body_bytes=state.c.body_bytes + loss.body_bytes,
-                        first_sequence=min(int(previous["first_sequence"]), loss.first_sequence),
-                        last_sequence=max(int(previous["last_sequence"]), loss.last_sequence),
-                    )
-                )
-            losses.append((scenario, loss))
-        connection.execute(
-            self._records.delete().where(
-                tables.condition(self._records), self._records.c.sequence.in_([row["sequence"] for row in rows])
-            )
-        )
-        return tuple(losses)
-
-
-def content_sha256(item: AgentRecord) -> str:
-    """The retry fingerprint of a record: the SHA-256 of its canonical content without ``created_at``.
-
-    The content holds the whole payload and the artifact ID, so its fingerprint
-    does not depend on how a store splits the payload. A client retrying with its own agent_record_id regenerates
-    the timestamp, so a timestamp difference alone must dedup, not conflict.
-    """
-    artifact = item.artifact_id
-    content = {
-        "agent_record_id": item.agent_record_id,
-        "scenario": item.scenario,
-        "request_type": item.request_type.value,
-        "payload_json": SQLRecordStore._json(dict(item.payload)),
-        "references_json": SQLRecordStore._json(item.references),
-        "artifact_json": None if artifact is None else SQLRecordStore._json(artifact),
-    }
-    return hashlib.sha256(SQLRecordStore._json(content).encode("utf-8")).hexdigest()
-
-
-class SQLRecordStore(RecordStore):
-    """Implement record behavior using an adapter's SQLAlchemy connections.
-
-    A transaction hook may open a transaction or join one already owned by a
-    surrounding store operation. Its connection covers the complete operation;
-    the hook must serialize conflicting writers and preserve visible append
-    order. In particular, sequence allocation alone is not commit ordering.
-    """
-
-    def __init__(self, tables: RecordTables) -> None:
-        self._tables = tables
-        self._nodes = TrajectoryNodes(ScopedTable(tables.nodes, tables.scope))
-        self._live_records: WeakValueDictionary[str, AgentRecord] = WeakValueDictionary()
+    def __init__(self, settings: Table, scope: Mapping[str, str] | None = None) -> None:
+        self._settings = ScopedTable(settings, dict(scope or {}))
 
     @abstractmethod
     def _transaction(self, *, write: bool) -> AbstractContextManager[Connection]:
-        """Supply one connection with the isolation and local serialization needed.
-
-        Multi-query receipt reads must observe a consistent state. Write scopes
-        must serialize conflicting appends and evictions across connections,
-        including sequence allocation through commit. An adapter joining an
-        outer transaction leaves its completion to that transaction's owner.
-        """
+        """Supply one connection with the isolation and local serialization needed. A write scope serializes the
+        writers of the scenario across connections. An adapter that joins an outer transaction leaves its end to
+        that transaction's owner."""
 
     @abstractmethod
     def _insert_if_absent(
@@ -736,475 +511,14 @@ class SQLRecordStore(RecordStore):
         table: Table,
         values: Mapping[str, object] | Sequence[Mapping[str, object]],
     ) -> bool:
-        """Insert one or more rows, ignoring duplicate keys; report any insertion.
-
-        Only conflicts covered by the table's record identity may be ignored.
-        The caller compares canonical content after a duplicate. Adapters must
-        return an accurate insertion result without assuming INSERT rowcount is
-        available from every driver.
-        """
-
-    def _insert(
-        self,
-        connection: Connection,
-        table: Table,
-        values: Mapping[str, object] | Sequence[Mapping[str, object]],
-    ) -> bool:
-        rows = [values] if isinstance(values, Mapping) else values
-        return self._insert_if_absent(connection, table, [{**row, **self._tables.scope} for row in rows])
-
-    @staticmethod
-    def _json(value: object) -> str:
-        try:
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        except (TypeError, ValueError) as exc:
-            raise TypeError("a record must contain JSON-serializable values") from exc
-
-    @classmethod
-    def _encode(cls, item: AgentRecord) -> tuple[EncodedRecord, CallKey | None]:
-        """The row of ``item``, and its payload as an ATIF call."""
-        artifact = item.artifact_id
-        artifact_json = None
-        if artifact is not None:
-            artifact_json = cls._json(artifact)
-        key = call_key(item.payload)
-        shape = None if key is None else call_shape(item.payload)
-        encoded = EncodedRecord(
-            agent_record_id=item.agent_record_id,
-            scenario=item.scenario,
-            request_type=item.request_type.value,
-            created_at=item.created_at,
-            payload_json="{}" if shape is not None else cls._json(dict(item.payload)),
-            message_field=None if shape is None else shape.message_field,
-            payload_sha256=None if shape is None else sha256_text(cls._json(dict(item.payload))),
-            references_json=cls._json(item.references),
-            artifact_json=artifact_json,
-        )
-        return encoded, key
-
-    @staticmethod
-    def decode_rows(
-        connection: Connection, nodes: TrajectoryNodes, rows: Sequence[RowMapping]
-    ) -> tuple[AgentRecord, ...]:
-        """The records of the ``agent_record`` rows ``rows``, with their payloads rendered from ``nodes``."""
-        contents = nodes.contents(
-            connection, (int(row["sequence"]) for row in rows if row["message_field"] is not None)
-        )
-        records: list[AgentRecord] = []
-        for row in rows:
-            raw_artifact = json.loads(row["artifact_json"]) if row["artifact_json"] is not None else None
-            if row["message_field"] is not None:
-                payload = provider_payload(contents[int(row["sequence"])].atif_call())
-            else:
-                payload = json.loads(row["payload_json"])
-            records.append(
-                AgentRecord(
-                    agent_record_id=row["agent_record_id"],
-                    scenario=row["scenario"],
-                    request_type=RequestType(row["request_type"]),
-                    payload=payload,
-                    created_at=row["created_at"],
-                    references=tuple(json.loads(row["references_json"])),
-                    artifact_id=decode_record_artifact_id(raw_artifact, payload),
-                )
-            )
-        return tuple(records)
-
-    def _decode(self, connection: Connection, rows: Sequence[RowMapping]) -> tuple[AgentRecord, ...]:
-        return self.decode_rows(connection, self._nodes, rows)
-
-    @staticmethod
-    def row_content(row: RowMapping) -> EncodedRecord:
-        return EncodedRecord(*(row[name] for name in EncodedRecord._fields))
-
-    @classmethod
-    def _content(cls, encoded: EncodedRecord) -> dict[str, object]:
-        """The encoded fields that define row content, excluding ``created_at`` (``content_sha256``)."""
-        return {name: value for name, value in encoded._asdict().items() if name != "created_at"}
-
-    def matches_content(self, connection: Connection, row: RowMapping, encoded: EncodedRecord) -> bool:
-        """Compare retry content after translating an older row's artifact locator to its ID."""
-        stored = self.row_content(row)
-        if stored.artifact_json != encoded.artifact_json:
-            stored, _ = self._encode(self._decode(connection, [row])[0])
-        return self._content(stored) == self._content(encoded)
-
-    def append(self, item: AgentRecord) -> AgentRecord:
-        return self.append_result(item).item
-
-    def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:
-        """Validate a retry before applying admission rules for new records.
-
-        Compacted records retain content hashes, so an already accepted
-        instruction can still be retried after the training mode changes.
-        This lookup never appends data or changes its receipt.
-        """
-        encoded, _ = self._encode(item)
-        with self._transaction(write=False) as connection:
-            consumed = (
-                connection.execute(
-                    select(self._tables.consumed.c.content_sha256).where(
-                        self._tables.condition(self._tables.consumed),
-                        self._tables.consumed.c.agent_record_id == item.agent_record_id,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            if consumed is not None:
-                if consumed["content_sha256"] != content_sha256(item):
-                    raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-                return item
-            row = (
-                connection.execute(
-                    select(self._tables.records).where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.agent_record_id == item.agent_record_id,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            if row is None:
-                return None
-            if not self.matches_content(connection, row, encoded):
-                raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-            return self._decode(connection, [row])[0]
-
-    def append_result(self, item: AgentRecord) -> AppendResult:
-        return self.append_many((item,))[0]
-
-    def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
-        if not items:
-            return ()
-        scenario = items[0].scenario
-        if any(item.scenario != scenario for item in items):
-            raise ValueError("a record batch must belong to one scenario")
-        with self._transaction(write=True) as connection:
-            return tuple(self.append_in_transaction(connection, item) for item in items)
-
-    def append_in_transaction(self, connection: Connection, item: AgentRecord) -> AppendResult:
-        """Apply the same retry and capacity-eviction rules to single and batch writes."""
-        encoded, key = self._encode(item)
-        consumed = (
-            connection.execute(
-                select(self._tables.consumed.c.content_sha256).where(
-                    self._tables.condition(self._tables.consumed),
-                    self._tables.consumed.c.agent_record_id == item.agent_record_id,
-                )
-            )
-            .mappings()
-            .first()
-        )
-        if consumed is not None:
-            if consumed["content_sha256"] != content_sha256(item):
-                raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-            return AppendResult(item, False)
-        if item.request_type is RequestType.REPORT and item.references:
-            evicted_reference = connection.execute(
-                select(self._tables.consumed.c.agent_record_id)
-                .where(
-                    self._tables.condition(self._tables.consumed),
-                    self._tables.consumed.c.agent_record_id.in_(item.references),
-                    ~select(self._tables.records.c.agent_record_id)
-                    .where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.agent_record_id == self._tables.consumed.c.agent_record_id,
-                    )
-                    .exists(),
-                )
-                .limit(1)
-            ).first()
-            if evicted_reference is not None:
-                # A report is discarded once its references are gone, but a row
-                # already stored under this id stays canonical: check the discard
-                # against that row so a divergent retry cannot register its own
-                # content as the receipt and reject the honest retry that follows.
-                existing = (
-                    connection.execute(
-                        select(self._tables.records).where(
-                            self._tables.condition(self._tables.records),
-                            self._tables.records.c.agent_record_id == item.agent_record_id,
-                        )
-                    )
-                    .mappings()
-                    .first()
-                )
-                if existing is not None and not self.matches_content(connection, existing, encoded):
-                    raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-                self._insert(
-                    connection,
-                    self._tables.consumed,
-                    {"agent_record_id": item.agent_record_id, "content_sha256": content_sha256(item)},
-                )
-                return AppendResult(item, False)
-        inserted = self._insert(
-            connection, self._tables.records, {**encoded._asdict(), "body_bytes": encoded.body_bytes}
-        )
-        if inserted:
-            if key is not None:
-                sequence = connection.execute(
-                    select(self._tables.records.c.sequence).where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.agent_record_id == item.agent_record_id,
-                    )
-                ).scalar_one()
-                self._nodes.add(connection, int(sequence), item.scenario, item.agent_record_id, item.payload, key)
-            self._live_records[item.agent_record_id] = item
-            return AppendResult(item, True)
-        existing = (
-            connection.execute(
-                select(self._tables.records).where(
-                    self._tables.condition(self._tables.records),
-                    self._tables.records.c.agent_record_id == item.agent_record_id,
-                )
-            )
-            .mappings()
-            .first()
-        )
-        if existing is None or not self.matches_content(connection, existing, encoded):
-            raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-        stored = self._decode(connection, [existing])[0]
-        live = self._live_records.get(item.agent_record_id)
-        # An outer transaction can roll back after caching the inserted
-        # object. Reuse it only while the persisted record still matches.
-        if live is not None and live == stored:
-            return AppendResult(live, False)
-        self._live_records[item.agent_record_id] = stored
-        return AppendResult(stored, False)
-
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
-        """Read a record still visible to training, scoped to its scenario."""
-        with self._transaction(write=False) as connection:
-            row = (
-                connection.execute(
-                    select(self._tables.records).where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.scenario == scenario,
-                        self._tables.records.c.agent_record_id == agent_record_id,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            return None if row is None else self._decode(connection, [row])[0]
-
-    def replay(
-        self,
-        scenario: str,
-        *,
-        offset: int = 0,
-        limit: int | None = None,
-    ) -> tuple[AgentRecord, ...]:
-        if offset < 0:
-            raise ValueError("offset must be non-negative")
-        if limit is not None and limit < 0:
-            raise ValueError("limit must be non-negative")
-        if limit == 0:
-            return ()
-        statement = (
-            select(self._tables.records)
-            .where(
-                self._tables.condition(self._tables.records),
-                self._tables.records.c.scenario == scenario,
-            )
-            .order_by(self._tables.records.c.sequence)
-            .limit(limit)
-            .offset(offset)
-        )
-        with self._transaction(write=False) as connection:
-            rows = connection.execute(statement).mappings().all()
-            return self._decode(connection, rows)
-
-    def replay_page(
-        self,
-        scenario: str,
-        *,
-        after_sequence: int = 0,
-        limit: int = 256,
-    ) -> tuple[tuple[int, AgentRecord], ...]:
-        """Read a bounded keyset page for internal streaming consumers."""
-        if after_sequence < 0:
-            raise ValueError("after_sequence must be non-negative")
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        with self._transaction(write=False) as connection:
-            rows = (
-                connection.execute(
-                    select(self._tables.records)
-                    .where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.scenario == scenario,
-                        self._tables.records.c.sequence > after_sequence,
-                    )
-                    .order_by(self._tables.records.c.sequence)
-                    .limit(limit)
-                )
-                .mappings()
-                .all()
-            )
-            records = self._decode(connection, rows)
-        return tuple((int(row["sequence"]), record) for row, record in zip(rows, records, strict=True))
-
-    def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
-        """Count training-visible records, optionally by type and after an append sequence."""
-        if after_sequence < 0:
-            raise ValueError("after_sequence must be non-negative")
-        statement = (
-            select(func.count())
-            .select_from(self._tables.records)
-            .where(
-                self._tables.condition(self._tables.records),
-                self._tables.records.c.scenario == scenario,
-                self._tables.records.c.sequence > after_sequence,
-            )
-        )
-        if request_type is not None:
-            statement = statement.where(self._tables.records.c.request_type == request_type.value)
-        with self._transaction(write=False) as connection:
-            return int(connection.execute(statement).scalar_one())
-
-    def last_sequence(self, scenario: str) -> int:
-        statement = select(func.max(self._tables.records.c.sequence)).where(
-            self._tables.condition(self._tables.records), self._tables.records.c.scenario == scenario
-        )
-        with self._transaction(write=False) as connection:
-            return int(connection.execute(statement).scalar_one() or 0)
-
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
-        """Read a retained record with its append sequence."""
-        with self._transaction(write=False) as connection:
-            row = (
-                connection.execute(
-                    select(self._tables.records).where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.scenario == scenario,
-                        self._tables.records.c.agent_record_id == agent_record_id,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            return None if row is None else self._audit_records(connection, [row])[0]
-
-    def audit_page(
-        self,
-        scenario: str,
-        *,
-        after_sequence: int = 0,
-        limit: int = 256,
-        request_type: RequestType | None = None,
-    ) -> tuple[StoredRecord, ...]:
-        """Read a bounded append-order page including consumed bodies, scoped to one scenario and optional type."""
-        if after_sequence < 0:
-            raise ValueError("after_sequence must be non-negative")
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        statement = select(self._tables.records).where(
-            self._tables.condition(self._tables.records),
-            self._tables.records.c.scenario == scenario,
-            self._tables.records.c.sequence > after_sequence,
-        )
-        if request_type is not None:
-            statement = statement.where(self._tables.records.c.request_type == request_type.value)
-        with self._transaction(write=False) as connection:
-            rows = (
-                connection.execute(statement.order_by(self._tables.records.c.sequence).limit(limit)).mappings().all()
-            )
-            return self._audit_records(connection, rows)
-
-    def _audit_records(self, connection: Connection, rows: Sequence[RowMapping]) -> tuple[StoredRecord, ...]:
-        records = self._decode(connection, rows)
-        return tuple(
-            StoredRecord(sequence=int(row["sequence"]), item=record) for row, record in zip(rows, records, strict=True)
-        )
-
-    def trajectory(self, scenario: str, agent_record_id: str) -> tuple[str, ...]:
-        """The record IDs of the trajectory that the record ``agent_record_id`` of ``scenario`` ends, oldest first.
-
-        The calls of the trajectory are the record and the records on its node path whose messages are a strict
-        prefix of the next call's messages; a record whose messages equal the next call's (a retry) is left out
-        (``trajectory_calls``). An ID can name a record that capacity eviction deleted while a later record needs
-        its messages. A stored record without a message list is a trajectory of one call; return ``()`` for a
-        record that the store keeps neither as a record nor as a node.
-        """
-        nodes = self._tables.nodes
-        with self._transaction(write=False) as connection:
-            sequence = connection.execute(
-                select(nodes.c.node_sequence).where(
-                    self._tables.condition(nodes),
-                    nodes.c.scenario == scenario,
-                    nodes.c.agent_record_id == agent_record_id,
-                )
-            ).scalar_one_or_none()
-            if sequence is None:
-                stored = connection.execute(
-                    select(self._tables.records.c.sequence).where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.scenario == scenario,
-                        self._tables.records.c.agent_record_id == agent_record_id,
-                    )
-                ).first()
-                return () if stored is None else (agent_record_id,)
-            rows = self._nodes.paths(connection, [int(sequence)], "agent_record_id", "entry_count")
-        by_sequence = {int(row["node_sequence"]): row for row in rows}
-        path: list[tuple[str, int]] = []
-        node: int | None = int(sequence)
-        while node is not None:
-            row = by_sequence[node]
-            path.append((str(row["agent_record_id"]), int(row["entry_count"])))
-            node = None if row["parent_sequence"] is None else int(row["parent_sequence"])
-        return trajectory_calls(path[::-1])
-
-    def records_by_id(
-        self, connection: Connection, scenario: str, agent_record_ids: Iterable[str]
-    ) -> dict[str, AgentRecord]:
-        """The stored records of ``scenario`` among ``agent_record_ids``, by ID, read in ``connection``; an ID that the
-        store does not keep is absent."""
-        ids = list(dict.fromkeys(agent_record_ids))
-        if not ids:
-            return {}
-        records = self._tables.records
-        rows = (
-            connection.execute(
-                select(records).where(
-                    self._tables.condition(records), records.c.scenario == scenario, records.c.agent_record_id.in_(ids)
-                )
-            )
-            .mappings()
-            .all()
-        )
-        return {record.agent_record_id: record for record in self._decode(connection, rows)}
-
-    def hold_records(self, connection: Connection, sample_id: str, agent_record_ids: Iterable[str]) -> None:
-        """Write in ``connection`` that the stored sample ``sample_id`` holds the records ``agent_record_ids``:
-        capacity eviction keeps them (``sample_record_table``)."""
-        rows = [
-            {**self._tables.scope, "sample_id": sample_id, "agent_record_id": record_id}
-            for record_id in dict.fromkeys(agent_record_ids)
-        ]
-        if rows:
-            self._insert_if_absent(connection, self._tables.sample_records, rows)
-
-    def loss(self, scenario: str) -> RecordLoss:
-        table = self._tables.eviction
-        with self._transaction(write=False) as connection:
-            row = (
-                connection.execute(select(table).where(self._tables.condition(table), table.c.scenario == scenario))
-                .mappings()
-                .first()
-            )
-        if row is None:
-            return RecordLoss()
-        return RecordLoss(
-            *(int(row[name]) for name in ("record_count", "body_bytes", "first_sequence", "last_sequence"))
-        )
+        """Insert one or more rows, ignoring duplicate keys; report any insertion. Adapters must return an accurate
+        result without assuming that every driver gives the INSERT rowcount."""
 
     def read_settings(self) -> ScenarioSettings:
-        """The scenario settings kept with these records; defaults when none are stored."""
-        table = self._tables.settings
+        """The scenario's settings; defaults when none are stored."""
+        table = self._settings.table
         with self._transaction(write=False) as connection:
-            rows = connection.execute(select(table.c.name, table.c.value_json).where(self._tables.condition(table)))
+            rows = connection.execute(select(table.c.name, table.c.value_json).where(self._settings.condition()))
             values = {name: json.loads(value_json) for name, value_json in rows}
         return ScenarioSettings(
             training_mode=values.get("training_mode"),
@@ -1216,7 +530,7 @@ class SQLRecordStore(RecordStore):
 
     def write_settings(self, settings: ScenarioSettings) -> None:
         """Replace the stored settings in one transaction; a ``None`` setting is not stored."""
-        table = self._tables.settings
+        table = self._settings.table
         values = {
             "training_mode": settings.training_mode,
             "artifact_evaluation": (
@@ -1227,44 +541,11 @@ class SQLRecordStore(RecordStore):
             "serving_config": settings.serving_config.to_json() or None,
         }
         rows = [
-            {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}
+            {**self._settings.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}
             for name, value in values.items()
             if value is not None
         ]
         with self._transaction(write=True) as connection:
-            connection.execute(table.delete().where(self._tables.condition(table)))
+            connection.execute(table.delete().where(self._settings.condition()))
             if rows:
                 connection.execute(table.insert(), rows)
-
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        """Read ordered consumption metadata for this scenario."""
-        with self._transaction(write=False) as connection:
-            rows = (
-                connection.execute(
-                    select(self._tables.consumption)
-                    .where(
-                        self._tables.condition(self._tables.consumption),
-                        self._tables.consumption.c.scenario == scenario,
-                    )
-                    .order_by(self._tables.consumption.c.recorded_at, self._tables.consumption.c.receipt_id)
-                )
-                .mappings()
-                .all()
-            )
-        receipts: list[ConsumptionReceipt] = []
-        for row in rows:
-            consumed_ids = json.loads(row["consumed_ids_json"])
-            metadata = json.loads(row["metadata_json"])
-            if not isinstance(metadata, dict):
-                raise ValueError("consumption receipt metadata must be an object")
-            if not isinstance(consumed_ids, list) or any(not isinstance(record_id, str) for record_id in consumed_ids):
-                raise ValueError("consumption receipt IDs must be a list of strings")
-            receipts.append(
-                {
-                    "receipt_id": row["receipt_id"],
-                    "consumed_ids": tuple(consumed_ids),
-                    "metadata": metadata,
-                    "recorded_at": float(row["recorded_at"]),
-                }
-            )
-        return tuple(receipts)

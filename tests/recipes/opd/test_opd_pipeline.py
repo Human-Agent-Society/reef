@@ -6,14 +6,13 @@ import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.runtime_stubs import runtime_bindings
 
-from recipes.opd import OpdObjective, OPDRecipe, OPDSamples, OPDSettings
-from recipes.opd.slime import OpdSettings
+from recipes.opd import OPDRecipe, OPDSamples, OPDSettings
+from recipes.opd.slime import OpdObjective, OpdSettings
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TeacherRequest, rendered_job_data
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.recipe.registry import build_recipe
-from reef.runtime.interfaces import TrainingMethod
 from reef.sample2job import DistillJobData
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
@@ -82,7 +81,7 @@ def test_exact_student_tokens_and_no_scalar_reward_reach_slime(processor: Traini
     rendered, left_out = rendered_job_data(batch, template)
     assert left_out == ()
     tokens = template.render([*QUESTION, {"role": "assistant", "content": REPLY}], None, prompt=False)
-    prepared = prepare_slime_job(rendered, TrainingMethod("opd"), {}, StepScheduling(), step_size=1)
+    prepared = prepare_slime_job(rendered, "opd", {}, StepScheduling(), step_size=1)
     payload = prepared.payload
     assert payload is not None
     assert "advantages" not in payload
@@ -111,8 +110,8 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     )
     assert isinstance(recipe, OPDRecipe)
     assert recipe.report_type is TeacherContextReport
-    spec = recipe.training_spec()
-    assert (spec.objective, spec.loss_family) == ("opd", "opd")
+    assert recipe.default_parameters()["trajectory"] == {"objective": "opd"}
+    assert OpdObjective.loss_family == "opd"
     pipeline = recipe.build_pipeline(PipelineContext("math", TeacherContextReport))
     assert isinstance(pipeline.record2sample, OPDSamples)
     assert pipeline.record2sample.exclusive_sources, "each report owns its inference records"

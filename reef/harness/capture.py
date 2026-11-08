@@ -3,9 +3,8 @@
 A harness that runs outside Reef's evaluation, such as a Harbor task run
 or the native serve process, reaches Reef through this proxy. It forwards to
 Reef with ``x-reef-scenario`` and the token, tags every call as
-``x-reef-tag-<name>``, keeps the receipt each answer carries, and hands the
-legacy harness head to a ``ReleaseObserver``. Modern inference responses identify model artifacts instead;
-the harness watch polls its own catalog for updates.
+``x-reef-tag-<name>``, and keeps the receipt each answer carries. The harness watch polls its own catalog for
+updates.
 """
 
 from __future__ import annotations
@@ -15,10 +14,9 @@ import sys
 import threading
 import time
 import urllib.request
-from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, MutableMapping
 from dataclasses import asdict
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from typing import Any
 
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
@@ -41,18 +39,9 @@ def wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
-#: Older file-serving services announce their harness head through this response header.
-RELEASE_HEADER = "x-reef-release-id"
 #: The paths Reef serves inference on; a receipt rides on each. The proxy matches the path with its query, and
 #: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
 CAPTURE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages?beta=true")
-
-
-class ReleaseObserver(ABC):
-    """Where the proxy hands the release id an inference response names."""
-
-    @abstractmethod
-    def observe(self, release_id: str) -> None: ...
 
 
 class ProxyTags(MutableMapping[str, str]):
@@ -114,20 +103,6 @@ class TaggedStore(CaptureStore):
             return super().clear()
 
 
-def observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObserver) -> type[BaseHTTPRequestHandler]:
-    class Handler(base):  # type: ignore[valid-type,misc]
-        def _relay(self, response: Any, *args: Any) -> None:
-            # Before the body reaches the agent: a head the answer names is queued by the time the agent reads it.
-            # Modern inference answers identify the model artifact, which need not be the harness artifact.
-            # Its update watch polls the harness catalog. Older file-serving services used the legacy header.
-            release = response.getheader(RELEASE_HEADER)
-            if release and not response.getheader("x-reef-artifact-id"):
-                observer.observe(str(release))
-            super()._relay(response, *args)
-
-    return Handler
-
-
 class CaptureProxyServer(ThreadingHTTPServer):
     """The proxy's HTTP server, quiet when a client resets a connection.
 
@@ -147,8 +122,7 @@ class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
     Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
-    call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
-    and hands the release id an answer names to ``observer``.
+    call with ``tags`` as ``x-reef-tag-<name>`` headers, and keeps the receipts.
 
     With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
     record of it, and the captured response holds the whole training block. A streaming agent still gets a
@@ -161,7 +135,6 @@ class CaptureProxy:
         token: str | None = None,
         *,
         tags: Mapping[str, str] | None = None,
-        observer: ReleaseObserver | None = None,
         listen_host: str = "127.0.0.1",
         is_unrecorded: bool = False,
     ) -> None:
@@ -176,13 +149,12 @@ class CaptureProxy:
         self.config = ServeConfig(
             upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
         )
-        #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
+        #: The tag channel: the record keeps which snapshot (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)
         for name, value in (tags or {}).items():
             self.tags[name] = value
         self.store = TaggedStore(self.tags)
-        handler = build_handler(self.config, self.store)
-        self.handler = handler if observer is None else observing_handler(handler, observer)
+        self.handler = build_handler(self.config, self.store)
         self.server: CaptureProxyServer | None = None
 
     @property
@@ -210,4 +182,4 @@ class CaptureProxy:
         return self.store.drain()
 
 
-__all__ = ["CAPTURE_PATHS", "RELEASE_HEADER", "CaptureError", "CaptureProxy", "ReleaseObserver"]
+__all__ = ["CAPTURE_PATHS", "CaptureError", "CaptureProxy"]

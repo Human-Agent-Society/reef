@@ -41,17 +41,17 @@ from reef.core.evaluation import (
 from reef.evaluation.harness.history import History, RunRecord
 from reef.evaluation.harness.runner import EvaluationWorkerPool, TaskEvaluationWorker, TaskRun
 from reef.evaluation.harness.scoring import ScoredRun, TaskScorer
+from reef.execution.executor import WorkerSpec
+from reef.execution.executor.config import ExecutorSelection
+from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.harbor_task import can_run_in_task_container
+from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TrajectoryKeepError
 from reef.harness.tasks.trajectory import sum_agents
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import clip_record_text
-from reef.runtime.executor import WorkerSpec
-from reef.runtime.executor.config import ExecutorSelection
-from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.storage.tasks import files_digest
 
 #: The trees a candidate evaluation runs, in pairing order; a policy that evaluates the candidate alone names the
@@ -262,7 +262,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         )
 
     @property
-    def served_model(self) -> PolicyModel:
+    def policy_model(self) -> PolicyModel:
         """The model that every request must name: the served model, which the runs call."""
         return PolicyModel(self.models.served.model)
 
@@ -286,7 +286,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         remote worker returns the kept record as an archive; it is extracted
         here into the request's ``record_dir``.
         """
-        served = self.served_model
+        served = self.policy_model
         for request in requests:
             if request.harness.base != self.descriptor.name:
                 raise ValueError(
@@ -344,7 +344,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
                 harnesses[checksums[index]] = self.policy_harness(tree)
             task_run, record_dir = self.history.new_run()
             task_runs.append(task_run)
-            to_run.append(RolloutRequest(harnesses[checksums[index]], self.served_model, task, record_dir))
+            to_run.append(RolloutRequest(harnesses[checksums[index]], self.policy_model, task, record_dir))
         scored = self.run_rollouts(to_run)
         for index, task_run, request, result in zip(missing, task_runs, to_run, scored, strict=True):
             record = RunRecord.from_scored(

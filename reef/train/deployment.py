@@ -8,11 +8,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
-from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, training_component_factory_for
-from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import ReleaseWeights
+from reef.core.errors import DeployConfigError, RuntimeConfigError
+from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
+from reef.execution.executor.arguments import normalize_native_options
+from reef.storage.job_data import JobDataKind
+from reef.train.component import training_component_factory_for
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
 NO_INFERENCE_BACKEND = "none"
@@ -25,19 +25,19 @@ DefaultServing = Literal["engines", "trainer"]
 class EngineWeights:
     """How Reef's engines serve releases that hold no weight files: what they load, and the plugin that fetches it.
 
-    Values: ``release_format`` is the format of the files that ``weights`` gives for each release. ``weights`` is a
-    ``ReleaseWeights`` plugin reference, ``package.module:ClassName`` or a module and config. Purpose: a training
+    Values: ``artifact_format`` is the format of the files that ``weights`` gives for each snapshot. ``weights`` is a
+    ``ArtifactWeights`` plugin reference, ``package.module:ClassName`` or a module and config. Purpose: a training
     deployment returns it from ``engine_weights``; the serving assembly writes both into the engine runtime's
     config.
     """
 
-    release_format: ReleaseFormat
+    artifact_format: ArtifactFormat
     weights: str | Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.release_format, ReleaseFormat):
-            raise TypeError("EngineWeights.release_format must be a ReleaseFormat")
-        ReleaseWeights.reference(self.weights, setting="EngineWeights.weights")
+        if not isinstance(self.artifact_format, ArtifactFormat):
+            raise TypeError("EngineWeights.artifact_format must be a ArtifactFormat")
+        ArtifactWeights.reference(self.weights, setting="EngineWeights.weights")
 
 
 class TrainingDeployment(ABC):
@@ -69,13 +69,15 @@ class TrainingDeployment(ABC):
         """
 
     @abstractmethod
-    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(
+        self, settings: Mapping[str, Any], *, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+    ) -> dict[str, Any]:
         """Describe the training component for ``build_training_component``, without constructing it.
 
         The config's ``type`` is the dotted reference of the component's ``TrainingComponentFactory``.
 
-        ``loss_family`` is the recipe's startup loss family, which a backend
-        that starts its workers with one loss family reads.
+        ``default_parameters`` is the recipe's ``configured_parameters``, opaque to Reef: a backend that starts its
+        workers with one method reads its own parameters there. It is empty when no recipe is selected yet.
         """
 
     def http_environment(self, settings: Mapping[str, Any]) -> Mapping[str, str]:
@@ -94,7 +96,7 @@ class TrainingDeployment(ABC):
     def engine_weights(self, settings: Mapping[str, Any]) -> EngineWeights | None:
         """How Reef's engines (``inference.serving: engines``) get weights for releases that hold none, or None.
 
-        Reef asks only when the training component's ``release_format`` is ``None``. The default is None: engines
+        Reef asks only when the training component's ``artifact_format`` is ``None``. The default is None: engines
         cannot serve such releases.
         """
         return None
@@ -118,12 +120,14 @@ class InProcessTrainingDeployment(TrainingDeployment):
         try:
             factory = training_component_factory_for(self.component_type)
             # Use the component's schema for both CLI and YAML options, without a model.
-            factory.parse_config(self.component_config(settings, loss_family=""), os.environ)
+            factory.parse_config(self.component_config(settings, default_parameters={}), os.environ)
         except RuntimeConfigError as exc:
             raise DeployConfigError(str(exc)) from exc
         return ()
 
-    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(
+        self, settings: Mapping[str, Any], *, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+    ) -> dict[str, Any]:
         options = {
             key.replace("-", "_"): value
             for key, value in normalize_native_options(settings["training_backend_options"]).items()

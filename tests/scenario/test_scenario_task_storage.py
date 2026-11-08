@@ -7,14 +7,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from tests.support._threshold_processor import threshold_pipeline
+from tests.support.samples import data_storage, sample_store
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.components import ScenarioComponents
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface
 from reef.train.pipeline import TrainingPipeline
 
 
@@ -53,14 +54,15 @@ def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path
 
 def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sample_store() -> None:
     first, second = ContextRecipe(), ContextRecipe()
-    with closing(SQLiteScenarioStorage()) as storage, closing(storage.open("math")) as session:
+    with closing(data_storage()) as storage, closing(storage.open("math")) as session:
+        samples = sample_store(storage, "math", session)
         trainers = CompositeRecipe(components={"first": first, "second": second}).build_trainers(
             "math",
             session.records,
-            surface=Surface(),
+            components=ScenarioComponents(),
             algorithm_states={},
             task_storage=session.tasks,
-            samples=session.samples,
+            samples=samples,
         )
         for component_trainer in trainers:
             component_trainer.trainer.close()
@@ -70,8 +72,7 @@ def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sampl
 
         assert second_storage.open("tasks").generations() == ()
         assert session.tasks.open("first/tasks").generation(0) is not None
-        # The scenario's samples, such as its imported tasks, are one store that every component reads as itself.
+        # The sample store, with its imported tasks, is one store that every component reads as itself.
         first_samples, second_samples = first.contexts[-1].samples, second.contexts[-1].samples
         assert first_samples is not None and second_samples is not None
-        assert first_samples.store is session.samples and second_samples.store is session.samples
-        assert (first_samples.trainer, second_samples.trainer) == ("first", "second")
+        assert first_samples == samples.for_trainer("first") and second_samples == samples.for_trainer("second")

@@ -7,8 +7,8 @@ training service on one ``HarnessBackend`` per scenario component, with
 the evaluator and the selection policy around it. A method is a
 ``reef.train.harness_backend.Method`` that the deployment names in
 ``evolution.method``; a method needs no recipe of its own. A recipe subclass
-is for a method that changes more than the method, such as the delivery
-surface::
+is for a method that changes more than the method, such as the files a
+client pulls::
 
     evolution:
       adapter: pi
@@ -30,13 +30,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote
 
+from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComponents
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.config import Settings, config_option
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
-from reef.core.job_data import JobData, TaskSample
 from reef.core.model_metadata import ModelMetadata
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
@@ -54,13 +54,14 @@ from reef.evaluation.harness import (
     TaskScorer,
     evaluation_selection,
 )
+from reef.execution.executor.config import ExecutorSettings, role_executor_settings
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.adapters.parts import TreeLayout
-from reef.harness.sync import create_harness_surface
-from reef.harness.tasks.harbor_task import can_run_in_task_container
+from reef.harness.harbor.agent import can_run_in_task_container
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
@@ -68,21 +69,20 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
-from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.runtime.jobs import SavedCheckpoint, ScenarioRoot, TrainingComponent
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
+from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
-from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentArtifacts
+from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
-from reef.train.jobs import JobCommit, JobLoop, JobLoopState
-from reef.train.pipeline import PipelineSpec
+from reef.train.jobs import JobLoop
+from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.trainer import Trainer
 
 #: The directory of the harness training component's jobs and starts under ``evolution.state_dir``.
@@ -159,8 +159,8 @@ class HarnessLayout(ArtifactLayout):
 
     A directory meets it when its files, read as UTF-8 text, form a
     ``HarnessTree`` that passes ``validate_tree`` for ``descriptor``: the
-    files a release of the harness component stores.
-    Purpose: ``HarnessEvolutionRecipe.build_surface`` binds it on the harness
+    files a snapshot of the harness component stores.
+    Purpose: ``HarnessEvolutionRecipe.build_components`` binds it on the harness
     component; the committer checks an imported harness with it.
     """
 
@@ -171,73 +171,6 @@ class HarnessLayout(ArtifactLayout):
         validation = validate_tree(tree, self.descriptor)
         if not validation.passed:
             raise ValueError(f"the harness tree fails validation: {validation.message()}")
-
-
-class HarnessJobLoop(JobLoop):
-    """The ``JobLoop`` of a harness scenario component: each job carries the harness parameters, and each
-    checkpoint names the parts of the tree that it changed.
-
-    Values: ``component`` and ``scenario`` as ``JobLoop``. ``releases`` reads the scenario component's head, whose
-    release is the job's start. ``eval_samples`` is the sample store whose imported eval split the job evaluates on,
-    or ``None`` for the configured tasks. ``layout`` is the adapter's tree layout.
-
-    Operations: ``submit(state, data, parameters)`` is ``JobLoop.submit`` with ``harness_parameters(data,
-    state)`` added to ``parameters``; ``ValueError`` when ``parameters`` names one of them. ``publish(state,
-    checkpoint)`` is ``JobLoop.publish`` whose result's ``changed_kinds`` are the names of the parts that take a
-    path of the diff from the tree in the directory ``state.start`` to the tree at ``checkpoint.release_path``: the parts
-    that the job's step changed, which the scenario's activation rule reads.
-
-    Purpose: ``HarnessEvolutionRecipe.build`` makes one for its trainer; ``HarnessTrainingComponent`` reads the
-    parameters.
-    """
-
-    def __init__(
-        self,
-        component: TrainingComponent,
-        *,
-        scenario: str,
-        releases: ComponentArtifacts,
-        eval_samples: TrainerSamples | None,
-        layout: TreeLayout,
-    ) -> None:
-        super().__init__(component, scenario=scenario)
-        self.releases = releases
-        self.eval_samples = eval_samples
-        self.layout = layout
-
-    def harness_parameters(self, data: JobData, state: JobLoopState) -> dict[str, Any]:
-        """``{component, head_artifact_id, evaluation_tasks, previous_job}``: the component's name, its starting artifact ID,
-        the eval split's task paths in arrival order or ``None``, and the ID of the last job that the trainer
-        committed the end of (``state.last_job``), whose harness state the job continues, or ``None`` before the
-        first."""
-        tasks = (
-            None
-            if self.eval_samples is None
-            else [
-                str(stored.sample.task_path)
-                for stored in self.eval_samples.imported_tasks(split="eval")
-                if isinstance(stored.sample, TaskSample)
-            ]
-        )
-        return {
-            "component": self.releases.component,
-            "head_artifact_id": self.releases.head().artifact_id,
-            "evaluation_tasks": tasks,
-            "previous_job": None if state.last_job is None else state.last_job.job_id,
-        }
-
-    def submit(self, state: JobLoopState, data: JobData, parameters: Mapping[str, Any]) -> JobCommit:
-        added = self.harness_parameters(data, state)
-        shared = sorted(set(added) & set(parameters))
-        if shared:
-            raise ValueError(f"the stage's job parameters already name {shared}")
-        return super().submit(state, data, {**parameters, **added})
-
-    def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
-        commit = super().publish(state, checkpoint)
-        changes = HarnessTree.read(Path(state.start)).diff(HarnessTree.read(Path(checkpoint.release_path))).changes
-        changed_kinds = frozenset(self.layout.part_names(changes).values())
-        return replace(commit, result=replace(commit.result, changed_kinds=changed_kinds))
 
 
 @dataclass(frozen=True)
@@ -267,6 +200,10 @@ class RecipeSteps(HarnessSteps):
         validation = validate_tree(tree, get_adapter(self.recipe.evolution.adapter))
         if not validation.passed:
             raise ValueError(f"the harness tree fails validation: {validation.message()}")
+
+    @property
+    def layout(self) -> TreeLayout:
+        return get_adapter(self.recipe.evolution.adapter).layout
 
 
 @dataclass(frozen=True)
@@ -307,7 +244,7 @@ class HarnessEvolutionRecipe(Recipe):
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     agent: AgentSettings | None = None
     model_name: str | None = None
-    #: Where this Reef answers inference: evaluation runs sample the release it serves through it.
+    #: Where this Reef answers inference: evaluation runs sample the snapshot it serves through it.
     served_endpoint: ServedEndpoint | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
@@ -372,9 +309,11 @@ class HarnessEvolutionRecipe(Recipe):
         """The harness component, whose jobs are this recipe's steps."""
         return () if self.harness_component is None else (self.harness_component,)
 
-    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> HarnessEvolutionRecipe:
+    def with_job_components(
+        self, components: Mapping[str, TrainingComponent], data_store: DataStore
+    ) -> HarnessEvolutionRecipe:
         check_job_components(self, components)
-        return replace(self, harness_component=next(iter(components.values())))
+        return replace(self, harness_component=next(iter(components.values())), data_store=data_store)
 
     def runs_offline(self) -> bool:
         """Whether the steps roll out the imported train tasks (``TrainTaskJobData``)."""
@@ -416,6 +355,16 @@ class HarnessEvolutionRecipe(Recipe):
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=TraceSamples, sample2job=TraceJobData)
 
+    def stages(self) -> PipelineConfig:
+        """The pipeline's stages, whose harness stage names the eval split in each job when the steps evaluate on the
+        imported tasks (``evolution.evaluation.imported_tasks``)."""
+        stages = super().stages()
+        sample2job = stages.sample2job
+        if not self.evaluation.imported_tasks or not issubclass(sample2job.plugin_class, TraceJobData):
+            return stages
+        config = {**sample2job.config, "evaluation_split": True}
+        return replace(stages, sample2job=replace(sample2job, config=config))
+
     @property
     def harness_adapter(self) -> str | None:
         return self.evolution.adapter
@@ -435,7 +384,7 @@ class HarnessEvolutionRecipe(Recipe):
             evaluation_section = section.get("evaluation", {})
             if isinstance(evaluation_section, Mapping) and "task_store" in evaluation_section:
                 raise ValueError(
-                    "evolution.evaluation.task_store is gone: imported tasks are in the scenario's sample store; "
+                    "evolution.evaluation.task_store is gone: imported tasks are task items that the scenario uses; "
                     "set evolution.evaluation.imported_tasks: true"
                 )
             evolution = EvolutionSettings.from_config(
@@ -497,7 +446,7 @@ class HarnessEvolutionRecipe(Recipe):
 
         With the service known and a scenario named, this Reef's own
         evaluation route for that scenario: a run then samples the
-        release the scenario serves, weights, request defaults and all, and
+        snapshot the scenario serves, weights, request defaults and all, and
         its calls are kept by nobody. Otherwise the runtime's own endpoint.
         """
         if self.runtime is None:
@@ -520,8 +469,8 @@ class HarnessEvolutionRecipe(Recipe):
     def served_through_service(self, binding: ModelBinding, scenario: str | None) -> ModelBinding:
         """``binding`` routed through this Reef's evaluation route for ``scenario``, when the service is known.
 
-        A component of a composed release names itself in the route, so the
-        release's hooks for the component a candidate replaces stay out.
+        A component of a composed snapshot names itself in the route, so the
+        snapshot's hooks for the component a candidate replaces stay out.
         """
         if self.served_endpoint is None or scenario is None:
             return binding
@@ -555,12 +504,15 @@ class HarnessEvolutionRecipe(Recipe):
         reviewed = frozenset(name for name, part in layout.parts.items() if part.review)
         return AlwaysActivate(rule.review_kinds | reviewed)
 
-    def build_surface(self, scenario: str) -> Surface:
+    def build_components(self, scenario: str) -> ScenarioComponents:
         descriptor = get_adapter(self.evolution.adapter)
-        return create_harness_surface(descriptor, layout=HarnessLayout(descriptor))
+        harness = ComponentSpec(
+            files=HarnessFiles(descriptor), kind="harness_plugin", layout=HarnessLayout(descriptor)
+        )
+        return ScenarioComponents({HARNESS_COMPONENT: harness})
 
     def default_start(self) -> DefaultStart:
-        """The seed tree, which a new scenario's root release holds unless an artifact item starts it.
+        """The seed tree, which a new scenario's root snapshot holds unless an artifact item starts it.
 
         The files are the seed tree's files; the empty seed makes a root with no files. The input is the seed
         tree's checksum.
@@ -589,28 +541,27 @@ class HarnessEvolutionRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
         """The scenario's trainer: it submits each step as a job of ``harness_component``, whose start is the
-        component's head release in ``releases``."""
-        if releases is None:
-            raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
+        component's head snapshot in ``releases``."""
+        if artifacts is None:
+            raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed snapshots")
         if self.evaluation.imported_tasks and samples is None:
-            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the sample store of a scenario session")
+            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the samples of a scenario session")
         if self.harness_component is None:
             raise RecipeConfigError("harness evolution has no training component to run its steps")
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=self.build_pipeline,
-            job_loop=HarnessJobLoop(
+            job_loop=JobLoop(
                 self.harness_component,
                 scenario=scenario,
-                releases=releases,
-                eval_samples=samples if self.evaluation.imported_tasks else None,
-                layout=get_adapter(self.evolution.adapter).layout,
+                scenario_component=artifacts.component,
+                data_store=self.data_store,
             ),
             root=root,
             algorithm_state=algorithm_state,

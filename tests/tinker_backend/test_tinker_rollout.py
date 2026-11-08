@@ -8,22 +8,24 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-
 from tests.support.chat_templates import CharTemplate
+from tests.support.job_data import job_data_ref
 
 from reef.core.evaluation import RolloutScore, RolloutScores
-from reef.core.job_data import JobData, TaskSample, TrajectorySample
+from reef.core.job_data import JobData, TaskSample, TrajectorySample, trajectories
 from reef.core.trajectories import trajectory_reward
-from reef.harness.tasks.rollouts import RolloutRow, TaskLab
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
-from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.task_rollouts import ChatEndpoint, RolloutSettings, TaskJobRollouts, run_train_tasks
+from reef.train.algos.signals import TrainingSignal
+from reef.train.component import TrainingJob
+from reef.train.task_rollouts import ChatEndpoint, TaskJobRollouts, run_train_tasks
 from reef.train.tinker_backend import component as component_module
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.objectives import TinkerObjective
+from reef.train.tinker_backend.parameters import rollout_settings
 from reef.train.tinker_backend.rollout import SamplerChat
 
 MODEL = "Qwen/Qwen3-8B"
@@ -93,7 +95,7 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
 
     rollouts = run_train_tasks(
         tasks,
-        RolloutSettings.from_parameters({"rollout": ROLLOUT}),
+        rollout_settings({"rollout": ROLLOUT}),
         SamplerChat(sampler, "tinker://start/sampler", model=MODEL, runtime_load_id="tinker:start", topk_logprobs=0),
         model=MODEL,
         work_dir=tmp_path / "work",
@@ -169,7 +171,7 @@ def test_the_sampler_chat_answers_a_bad_request_and_a_sampler_failure_with_their
 )
 def test_the_rollout_parameter_is_checked(rollout, message):
     with pytest.raises(ValueError, match=message):
-        RolloutSettings.from_parameters({} if rollout is None else {"rollout": rollout})
+        rollout_settings({} if rollout is None else {"rollout": rollout})
 
 
 class Client(TinkerClient):
@@ -216,20 +218,38 @@ def grouped(tmp_path: Path) -> TaskJobRollouts:
     return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), scores)
 
 
+class RewardObjective(TinkerObjective):
+    """A method that a deployment provides: each rollout's reward is its advantage."""
+
+    name = "test-reward-objective"
+    loss_family = "importance_sampling"
+
+    def prepare(self, data, state):
+        return TrainingSignal("train", {}, {}, tuple(trajectory_reward(item) for item in trajectories(data)))
+
+
+TASK_OBJECTIVE = f"{__name__}:RewardObjective"
+
+
 @pytest.mark.unit
 def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
-    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
-
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
     )
     component.start_jobs()
     try:
         tasks = (harbor_task(tmp_path / "a", "add"), harbor_task(tmp_path / "b", "add"))
-        parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
+        parameters = {"objective": TASK_OBJECTIVE, "rollout": ROLLOUT, "batch_size": 2}
         with pytest.raises(ValueError, match="distinct names"):
             component.submit(
-                TrainingJob("job-0", "tinker", component.base_start, JobData("d", tasks), parameters, scenario="s")
+                TrainingJob(
+                    "job-0",
+                    "tinker",
+                    component.base_start,
+                    job_data_ref(JobData("d", tasks)),
+                    parameters,
+                    scenario="s",
+                )
             )
     finally:
         component.close()
@@ -237,8 +257,6 @@ def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
 
 @pytest.mark.unit
 def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(tmp_path, monkeypatch):
-    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
-
     calls = []
 
     def fake_roll_out(tasks, settings, chat, **options):
@@ -252,12 +270,12 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
     )
     component.start_jobs()
     try:
-        parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
+        parameters = {"objective": TASK_OBJECTIVE, "rollout": ROLLOUT, "batch_size": 2}
         job = TrainingJob(
             "job-0",
             "tinker",
             component.base_start,
-            JobData("d", (harbor_task(tmp_path, "add"),)),
+            job_data_ref(JobData("d", (harbor_task(tmp_path, "add"),))),
             parameters,
             scenario="s",
         )
@@ -280,10 +298,8 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
 
 @pytest.mark.unit
 def test_a_task_job_is_checked_at_submit(tmp_path):
-    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
-
     task = harbor_task(tmp_path, "add")
-    method = {"method": TrainingMethod("task_group").to_dict()}
+    method = {"objective": TASK_OBJECTIVE}
     trajectory = grouped(tmp_path).samples[0]
     without_sampler = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "a")), Client())
     without_sampler.start_jobs()
@@ -294,7 +310,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
                     "j",
                     "tinker",
                     without_sampler.base_start,
-                    JobData("d", (task,)),
+                    job_data_ref(JobData("d", (task,))),
                     {**method, "rollout": ROLLOUT},
                     scenario="s",
                 )
@@ -308,12 +324,19 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     try:
         for items, parameters, message in (
             ((task,), method, "needs the rollout parameter"),
-            ((task, trajectory), {**method, "rollout": ROLLOUT}, "either trajectories or tasks"),
+            ((task, trajectory), {**method, "rollout": ROLLOUT}, "both trajectories and tasks"),
             ((trajectory,), {**method, "rollout": ROLLOUT}, "applies only to a job of tasks"),
         ):
             with pytest.raises(ValueError, match=message):
                 component.submit(
-                    TrainingJob("j", "tinker", component.base_start, JobData("d", items), parameters, scenario="s")
+                    TrainingJob(
+                        "j",
+                        "tinker",
+                        component.base_start,
+                        job_data_ref(JobData("d", items)),
+                        parameters,
+                        scenario="s",
+                    )
                 )
     finally:
         component.close()
@@ -337,8 +360,6 @@ class ColdSampler(Sampler):
 
 @pytest.mark.unit
 def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, monkeypatch):
-    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
-
     sampler = ColdSampler(cold=2)
     rolled_out_after = []
 
@@ -352,13 +373,13 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
     )
     component.start_jobs()
     try:
-        parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
+        parameters = {"objective": TASK_OBJECTIVE, "rollout": ROLLOUT, "batch_size": 2}
         component.submit(
             TrainingJob(
                 "job-0",
                 "tinker",
                 component.base_start,
-                JobData("d", (harbor_task(tmp_path, "add"),)),
+                job_data_ref(JobData("d", (harbor_task(tmp_path, "add"),))),
                 parameters,
                 scenario="s",
             )
@@ -370,6 +391,19 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
     # Two timed-out warm-up samples and the one that answered, all of one token on the start's sampler.
     assert sampler.requests == [("tinker://base/sampler", {"max_tokens": 1})] * 3
     assert rolled_out_after == [3]
+
+
+@pytest.mark.unit
+def test_a_task_job_without_an_objective_is_refused(tmp_path):
+    component = TinkerTrainingComponent(
+        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+    )
+    try:
+        with pytest.raises(ValueError, match="needs the objective parameter"):
+            component.check_task_jobs({"rollout": ROLLOUT})
+        component.check_task_jobs({"objective": TASK_OBJECTIVE, "rollout": ROLLOUT})
+    finally:
+        component.close()
 
 
 @pytest.mark.unit

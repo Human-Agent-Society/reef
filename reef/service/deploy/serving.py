@@ -1,10 +1,10 @@
-"""How a weight-training deployment serves its releases, from its ``inference`` settings alone.
+"""How a weight-training deployment serves its snapshots, from its ``inference`` settings alone.
 
 The serving runtime is chosen and configured here, not by the training
 backend. ``serving_mode`` reads ``inference.serving`` (or its default), and
 ``serving_runtime_config`` writes the runtime config that the HTTP service
 builds once the training component exists, because the engines need the
-component's ``ReleaseFormat``. The training backend contributes only its
+component's ``ArtifactFormat``. The training backend contributes only its
 default mode and, for ``trainer`` serving, the config of its own serving
 runtime.
 """
@@ -18,14 +18,14 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
-from reef.runtime.executor.config import role_executor_settings
-from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
+from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
+from reef.execution.executor.config import role_executor_settings
+from reef.inference.interfaces import InferenceHandler
 from reef.service.deploy.service_config import ServiceConfig
 from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
 
-#: Reef's engines on an inference component serve the releases.
+#: Reef's engines on an inference component serve the snapshots.
 ENGINES = "engines"
 #: The training backend's own serving runtime serves them, such as Tinker's sampler.
 TRAINER = "trainer"
@@ -33,7 +33,7 @@ TRAINER = "trainer"
 NONE = "none"
 
 #: Native options that Reef sets itself for a serving engine, in SGLang's names: the managed engine's,
-#: and the adapter table that the release format and inference.max-loaded-adapters set.
+#: and the adapter table that the artifact format and inference.max-loaded-adapters set.
 INFERENCE_RESERVED_OPTIONS = MANAGED_ENGINE_OPTIONS | {
     "enable-lora",
     "max-lora-rank",
@@ -107,7 +107,7 @@ def serving_mode(settings: ServiceConfig, backend: TrainingDeployment) -> str:
     if selected != ENGINES and configured:
         raise DeployConfigError(f"inference.serving: {selected} runs no Reef engine; remove {', '.join(configured)}")
     if selected == TRAINER and backend.trainer_serving_config(asdict(settings)) is None:
-        raise DeployConfigError("inference.serving: trainer needs a training backend that serves its own releases")
+        raise DeployConfigError("inference.serving: trainer needs a training backend that serves its own snapshots")
     if ":" not in selected and settings.inference_serving_config:
         raise DeployConfigError("inference.serving-config configures a module:Factory serving runtime only")
     return selected
@@ -156,16 +156,16 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> N
 
 
 def serving_runtime_config(
-    settings: ServiceConfig, backend: TrainingDeployment, release_format: ReleaseFormat | None
+    settings: ServiceConfig, backend: TrainingDeployment, artifact_format: ArtifactFormat | None
 ) -> dict[str, Any]:
-    """The runtime config of the deployment's serving, for releases of ``release_format``.
+    """The runtime config of the deployment's serving, for releases of ``artifact_format``.
 
     ``engines`` gives a ``remote_serving`` config over the resolved engine
     settings, the inference component of ``inference.remote`` and the
     ``rollout`` role's executor. ``trainer`` gives the backend's own config,
     and ``none`` the null runtime. A ``module:Factory`` gets
-    ``inference.serving-config`` and the release format as ``release_format``
-    (``None`` when the releases hold no weight files). Raise
+    ``inference.serving-config`` and the artifact format as ``artifact_format``
+    (``None`` when the snapshots hold no weight files). Raise
     ``DeployConfigError`` when Reef's engines would serve releases without
     weight files.
     """
@@ -175,23 +175,25 @@ def serving_runtime_config(
     if mode == TRAINER:
         own = backend.trainer_serving_config(asdict(settings))
         if own is None:
-            raise DeployConfigError("inference.serving: trainer needs a training backend that serves its own releases")
+            raise DeployConfigError(
+                "inference.serving: trainer needs a training backend that serves its own snapshots"
+            )
         return own
     if mode != ENGINES:
         return {
             **dict(settings.inference_serving_config),
             "type": mode,
-            "release_format": None if release_format is None else release_format.to_dict(),
+            "artifact_format": None if artifact_format is None else artifact_format.to_dict(),
         }
     weights: str | Mapping[str, Any] | None = None
-    if release_format is None:
+    if artifact_format is None:
         engine_weights = backend.engine_weights(asdict(settings))
         if engine_weights is None:
             raise DeployConfigError(
                 "the training backend's releases hold no weight files that engines load, and it names no way to "
                 "fetch them; set inference.serving: trainer"
             )
-        release_format, weights = engine_weights.release_format, engine_weights.weights
+        artifact_format, weights = engine_weights.artifact_format, engine_weights.weights
     if (
         settings.inference_backend is None
         or settings.inference_num_gpus is None
@@ -204,7 +206,7 @@ def serving_runtime_config(
     config: dict[str, Any] = {
         "type": "remote_serving",
         "remote": dict(settings.inference_remote),
-        "release_format": release_format.to_dict(),
+        "artifact_format": artifact_format.to_dict(),
         "engine": settings.inference_backend,
         "num_gpus": settings.inference_num_gpus,
         "tensor_parallel_size": settings.tensor_parallel_size,

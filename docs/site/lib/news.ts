@@ -8,7 +8,7 @@ export const news: NewsItem[] = [
   { kind: "news", text: "Reef is open source under Apache-2.0", href: "https://github.com/Human-Agent-Society/reef", date: "2026-08-31" },
 ];
 
-// The ticker carries the milestones and the latest release, newest first. Merged pull requests stay in the activity section.
+// The ticker carries the milestones and the latest snapshot, newest first. Merged pull requests stay in the activity section.
 export function tickerItems(version: string | null, versionDate: string | null, repository: string): NewsItem[] {
   const items: NewsItem[] = [...news];
   if (version && versionDate) {

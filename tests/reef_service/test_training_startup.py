@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from reef.cli import main
-from reef.runtime.jobs import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.service.deploy import inference as inference_deploy
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_config
@@ -31,7 +31,7 @@ from reef.train.slime_backend.launch import SlimeDeployment, global_batch_size, 
 
 RECIPE = "recipes.sao.recipe:SAORecipe"
 CONTROL_TOKEN_ENV = "REEF_REMOTE_CONTROL_TOKEN"
-FULL_WEIGHTS = ReleaseFormat("full")
+FULL_WEIGHTS = ArtifactFormat("full")
 INFERENCE_TOKEN_ENV = "REEF_REMOTE_INFERENCE_TOKEN"
 
 
@@ -45,7 +45,7 @@ def training_config():
 
 
 def slime_runtime_config(config):
-    return SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family="")
+    return SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), default_parameters={})
 
 
 def slime_argv(config):
@@ -53,9 +53,9 @@ def slime_argv(config):
     return slime_arguments(slime_runtime_config(config)["settings"], loss_family="", environ={})
 
 
-def serving_config(config, release_format=FULL_WEIGHTS):
-    """The serving runtime config that the HTTP service builds for Slime's releases of ``release_format``."""
-    return serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), release_format)
+def serving_config(config, artifact_format=FULL_WEIGHTS):
+    """The serving runtime config that the HTTP service builds for Slime's releases of ``artifact_format``."""
+    return serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), artifact_format)
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +144,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             {"inference.backend": "vllm", "inference.num-gpus": "2", "inference.tensor-parallel-size": "1"},
             "vllm serves one engine",
         ),
-        ({"inference.serving": "trainer"}, "needs a training backend that serves its own releases"),
+        ({"inference.serving": "trainer"}, "needs a training backend that serves its own snapshots"),
         ({"inference.serving": "elsewhere"}, "engines, trainer, none or module:Factory"),
         ({"inference.backend": "tinker-engine"}, "unknown inference backend 'tinker-engine'"),
     ],

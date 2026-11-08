@@ -1,4 +1,4 @@
-"""The per-job training method: learning-rate schedules, their progress, and the recipe's method of each job."""
+"""Learning-rate schedules, their progress, and the recipe's parameters of each job."""
 
 from __future__ import annotations
 
@@ -10,19 +10,18 @@ from typing import Any
 import pytest
 from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
 from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
 
 from reef.core.job_data import JobOutcome, TaskSample
-from reef.runtime.interfaces import (
+from reef.storage.samples import SampleKind
+from reef.train.component import job_id_for
+from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.learning_rate import (
     LearningRateSchedule,
     LearningRateScheduleState,
-    TrainingMethod,
     resolve_learning_rate_schedule_state,
 )
-from reef.runtime.jobs import job_id_for
-from reef.storage.samples import SampleKind
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig
 from reef.train.types import JobData
 
@@ -91,24 +90,27 @@ def test_a_job_continues_the_active_schedule_and_starts_another_at_step_zero() -
 
 
 @pytest.mark.unit
-def test_the_method_takes_part_in_the_job_identity() -> None:
-    method = TrainingMethod("sft", SFT)
-    assert TrainingMethod.from_dict(method.to_dict()) == method
+def test_a_schedule_with_unknown_or_missing_fields_is_refused() -> None:
+    with pytest.raises(ValueError, match="unknown or missing fields"):
+        LearningRateSchedule.from_dict({**SFT.to_dict(), "unknown": 1})
+    with pytest.raises(ValueError, match="unknown or missing fields"):
+        LearningRateSchedule.from_dict({"name": "no-peak"})
+
+
+@pytest.mark.unit
+def test_the_parameters_take_part_in_the_job_identity() -> None:
     data = {"scenario": "math", "items": [["a", [1, 2], [1], [-0.1], 1.0]]}
 
-    def identity(value: TrainingMethod) -> str:
-        return job_id_for("stub", None, data, {"method": value.to_dict()})
+    def identity(objective: str, schedule: LearningRateSchedule | None) -> str:
+        parameters = {"objective": objective, "learning_rate_schedule": schedule and schedule.to_dict()}
+        return job_id_for("stub", None, data, parameters)
 
-    # A retry selects the same method: the same job.
-    assert identity(TrainingMethod("sft", SFT)) == identity(method)
+    # A retry selects the same parameters: the same job.
+    assert identity("sft", SFT) == identity("sft", SFT)
     # Another objective or schedule over the same rows is another job.
-    assert identity(TrainingMethod("sft")) != identity(method)
-    assert identity(TrainingMethod("sft", RL)) != identity(method)
-    assert identity(TrainingMethod("other", SFT)) != identity(method)
-    with pytest.raises(ValueError, match="non-empty objective"):
-        TrainingMethod("")
-    with pytest.raises(TypeError, match="LearningRateSchedule or None"):
-        TrainingMethod("sft", SFT.to_dict())  # type: ignore[arg-type]
+    assert identity("sft", None) != identity("sft", SFT)
+    assert identity("sft", RL) != identity("sft", SFT)
+    assert identity("other", SFT) != identity("sft", SFT)
 
 
 def batch(name: str) -> JobData:
@@ -120,42 +122,43 @@ def task(name: str) -> JobData:
 
 
 @pytest.mark.unit
-def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> None:
+def test_a_single_method_recipe_trains_every_job_with_its_default_objective() -> None:
     recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=ONE_SAMPLE_JOBS)
-    sft = {"method": TrainingMethod("sft").to_dict()}
+    sft = {"objective": "sft"}
     assert recipe.parameters_by_kind() == {"trajectory": sft, "task": sft}
-    trainer = recipe.build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
+    trainer = recipe.build("scenario", memory_records("scenario"), root=STUB_ROOT)
     stage = trainer.pipeline.sample2job
     assert stage.job_parameters(batch("b")) == stage.job_parameters(task("t")) == sft
     assert stage.experiment_config() == {"job_parameters": {"trajectory": sft, "task": sft}}
-    assert sft["method"]["learning_rate_schedule"] is None
 
 
 @pytest.mark.unit
-def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default_build() -> None:
+def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default_build(tmp_path) -> None:
     class SupervisedThenPolicy(StagedRecipe):
         """Supervised trajectories with a warmup, then policy training on tasks with a lower rate."""
 
         def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
             return {
-                "trajectory": {"method": TrainingMethod("sft", SFT).to_dict()},
-                "task": {"method": TrainingMethod("rl-objective", RL).to_dict()},
+                "trajectory": {"objective": "sft", "learning_rate_schedule": SFT.to_dict()},
+                "task": {"objective": "rl-objective", "learning_rate_schedule": RL.to_dict()},
             }
 
     component = StubTrainingComponent()
     trainer = SupervisedThenPolicy(**runtime_bindings(component), pipeline_stages=ONE_SAMPLE_JOBS).build(
         "scenario",
-        SQLiteRecordStore(),
+        memory_records("scenario"),
         root=STUB_ROOT,
     )
     loop, stage = trainer.job_loop, trainer.pipeline.sample2job
     assert loop is not None
     loop.submit(JobLoopState(component.base_start), batch("first"), stage.job_parameters(batch("first")))
     finished = JobLoopState(component.base_start, finished_jobs=1, last_job=JobOutcome("j", "stub", "finished"))
-    loop.submit(finished, task("second"), stage.job_parameters(task("second")))
-    assert [TrainingMethod.from_dict(job.parameters["method"]) for job in component.submitted] == [
-        TrainingMethod("sft", SFT),
-        TrainingMethod("rl-objective", RL),
+    (tmp_path / "second").mkdir()
+    second = JobData("second", (TaskSample(tmp_path / "second"),))
+    loop.submit(finished, second, stage.job_parameters(second))
+    assert [job.parameters for job in component.submitted] == [
+        {"objective": "sft", "learning_rate_schedule": SFT.to_dict()},
+        {"objective": "rl-objective", "learning_rate_schedule": RL.to_dict()},
     ]
 
 

@@ -31,7 +31,7 @@ pi's ``adapter.yaml``, shortened:
    binary: pi
    install: {kind: npm, package: "@earendil-works/pi-coding-agent", version: "0.84.2",
              binary_path: node_modules/.bin/pi}
-   evolve:                                  # what Reef may evolve: its path in the release's pi package
+   evolve:                                  # what Reef may evolve: its path in the snapshot's pi package
      rules: {renders: plugin/rules.md, holds: ...}
      skill: plugin/skills/{name}/SKILL.md
      command: plugin/prompts/{name}.md
@@ -60,8 +60,9 @@ pi's ``adapter.yaml``, shortened:
    * - Section
      - Says
    * - ``install``
-     - the vendor's package and pinned version (``npm``, or ``git`` with
-       ``repository`` and ``ref``); ``version`` is what ``--version`` reports
+     - the vendor's package and pinned version (``npm``, ``uv``, or ``git``
+       with ``repository`` and ``ref``); ``version`` is what ``--version``
+       reports
    * - ``evolve``
      - each part Reef may evolve, and where the agent reads it (`Tree parts`_)
    * - ``dirs``
@@ -109,12 +110,12 @@ How Reef runs an agent
        session log, and removes the root.
      - ``dirs``, ``model``, ``run.task``, ``sessions``
    * - Harbor task
-     - Starts the task's container, installs the pinned agent with npm,
-       copies in the tree, runs ``run.task`` with the instruction, and
+     - Starts the task's container, installs the pinned agent with npm (or
+       uv), copies in the tree, runs ``run.task`` with the instruction, and
        scores the tests' reward.
-     - an npm ``install``
+     - an npm or uv ``install``
    * - A person's machine
-     - ``reef-client harness`` installs the release as the agent's plugin,
+     - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
        Reef.
      - ``run.layer``
@@ -158,6 +159,10 @@ path:
      - ``native/tools/{name}.py`` and so on (`Native runner`_)
      - the kind
      - by file
+   * - ``program``
+     - ``program/{name}.py``; ``main`` is the entry point
+     - ``program``
+     - by file
    * - ``config``
      - ``config/<target>.json``, on every adapter
      - ``config``
@@ -175,7 +180,7 @@ Each part also has ``holds``, one line on what the file holds, which a method
 reads in ``material/host.json``, and optionally ``review: true``: the
 activation rule then leaves every kept tree that changes the part inactive
 until a person activates it, whatever the ``always`` rule's ``review_kinds``
-lists. Native's ``native_loop`` is such a kind. Other settings and records
+lists. Native's ``native_loop`` and Python's ``program`` are such kinds. Other settings and records
 name kinds too: the ``review_kinds`` of the ``always`` activation rule, the
 ``changed_kinds`` of a kept tree, and the ``patch_parts`` of a step's commit
 metrics. The harness recipe refuses a ``review_kinds`` name that the adapter
@@ -250,6 +255,11 @@ settings or memory.
      - ``native/skills/<name>/SKILL.md``
      - none
      - none
+   * - ``python``
+     - none
+     - none
+     - none
+     - none; its ``program`` part renders at ``program/<name>.py``
 
 Config targets and a person's machine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -257,8 +267,8 @@ Config targets and a person's machine
 A tree's ``config/<target>.json`` merges into the target's file and must pass
 the target's checks (`Config checks`_). A key that the model binding writes
 never comes from a tree: validation refuses it. The last column says whether
-the adapter has a ``run.layer``, so that ``reef-client`` runs its releases on a
-person's machine (`A person's machine`_). Without one, a release runs only in
+the adapter has a ``run.layer``, so that ``reef-client`` runs its snapshots on a
+person's machine (`A person's machine`_). Without one, a snapshot runs only in
 Reef's runs.
 
 .. list-table::
@@ -304,6 +314,11 @@ Reef's runs.
    * - ``native``
      - ``primary`` (``native/config.json``): no checks. ``models``
        (``native/models.json``): no checks besides the binding's keys.
+     - no
+   * - ``python``
+     - ``primary`` (``program/config.json``): the program's own settings, no
+       checks. ``model`` (``program/model.json``): nothing; the binding
+       writes it.
      - no
 
 Bundled adapters
@@ -355,6 +370,13 @@ campaign adds ``terminus`` (`its README
    * - ``native``
      - ships with Reef; ``reef-native -p``
      - Reef's own loop (`Native runner`_).
+   * - ``python``
+     - uv 0.13.4; ``uv run --script {root}/program/main.py``
+     - The tree is a Python program that owns its loop and every model
+       call. It gets the instruction as its argument and reads the binding
+       (``api``, ``base_url`` ending in ``/v1``, ``api_key``, ``model``) from
+       ``program/model.json``. It declares its dependencies as inline script
+       metadata (PEP 723). Only the ``openai`` dialect.
 
 The comments in each ``adapter.yaml`` explain its defaults and checks.
 
@@ -460,7 +482,7 @@ Prefer a check to a step for a rule on config values.
 A person's machine
 ------------------
 
-On a person's machine, the release is the agent's own plugin, installed
+On a person's machine, the snapshot is the agent's own plugin, installed
 with the agent's own command. The agent then loads it in every session,
 beside the person's own configuration, which Reef never reads. A session
 that Reef starts also sends its model calls to Reef.
@@ -471,7 +493,7 @@ that Reef starts also sends its model calls to Reef.
 
    * - Agent
      - ``register``
-     - Loads a new release
+     - Loads a new snapshot
    * - ``claude``
      - ``claude plugin marketplace add <install>``, ``claude plugin install
        reef@reef``
@@ -489,7 +511,7 @@ that Reef starts also sends its model calls to Reef.
 
 ``reef-client harness`` asks ``GET /reef/harness?form=client&root=<install>``
 and installs the files under ``<install>``. It runs ``register`` once per
-installed release, and ``unregister`` on ``disconnect``. A release that a
+installed artifact, and ``unregister`` on ``disconnect``. A snapshot that a
 person activates (``POST /reef/scenarios/<scenario>/activate``) installs at
 the client's next sync. The layer's render starts each config target from
 nothing and skips the checks; ``layer_files`` adds what ``register`` names

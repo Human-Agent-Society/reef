@@ -29,7 +29,7 @@ dependencies = [
     # generator service play Harbor tasks with reef-eval.
     "harbor>=0.20,<0.26",
     "pyyaml",
-    "reef-client>=0.2.0",
+    "reef-client>=0.4.0",
     "reef-eval>=0.1.1",
     "sqlalchemy>=2.0,<3",
     "tomli-w",
@@ -103,7 +103,7 @@ dev = [
 # them out of package metadata lets GPU environments install them with
 # `--no-deps` without replacing their CUDA-matched dependency stack.
 runtime = [
-    "slime @ git+https://github.com/THUDM/slime.git@540ea919e45b8b929198abce008a103be9cfc779",
+    "slime @ git+https://github.com/THUDM/slime.git@8a53b680e82932dabb48cbfcd34f749854400857",
 ]
 
 [project.urls]

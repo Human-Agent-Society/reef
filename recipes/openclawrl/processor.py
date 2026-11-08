@@ -93,7 +93,7 @@ class OpenClawRLSamples(JudgedSamples):
 
 @dataclass(frozen=True)
 class OpenClawRLJobSettings(Sample2JobSettings):
-    """The config of ``OpenClawRLJobData``: the buffer, the job size, and the PRM record file."""
+    """The config of ``OpenClawRLJobData``: ``buffer_size``, the job size, and the PRM record file."""
 
     # Upstream's OPENCLAW_PRM_RECORD_FILE.
     prm_record_file: str = config_option(

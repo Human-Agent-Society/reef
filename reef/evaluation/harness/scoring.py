@@ -17,9 +17,9 @@ from typing import Any
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.tasks import primary_reward
+from reef.execution.executor.requirements import ExecutionRequirements
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.run import TaskResult
-from reef.runtime.executor.requirements import ExecutionRequirements
 
 
 class TaskScorer(ConfiguredPlugin, ABC):
@@ -55,7 +55,7 @@ def verifier_reward(task: str, result: TaskResult) -> float:
     """The Harbor verifier's reward for a task directory run; :class:`VerifierRewardScorer` scores with it.
 
     A task directory run's trajectory holds one ``verifier`` row with the task it ran and the rewards
-    its verifier wrote (``reef.harness.tasks.harbor_task`` writes it, and so may an adapter's own runner);
+    its verifier wrote (``reef.harness.harbor.agent`` writes it, and so may an adapter's own runner);
     Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
     run or a verifier that wrote nothing scores 0 (the evaluation has already marked a run whose
     trial never ran as failed); a run that exited without a row scores 0; a row for another task, several

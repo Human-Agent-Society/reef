@@ -63,6 +63,7 @@ def training_record(step: int = 1) -> CommitRecord:
         component="weights",
         metrics={"score": 0.8},
         training_job_id=f"job-{step}",
+        selection=ArtifactSelection({"weights": f"release-{step}"}),
     )
 
 
@@ -116,7 +117,7 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         assert event.context == context
         assert event.metrics == landed.metrics
         assert event.metrics["experiment/run_id"] == "run-0"
-        assert event.produced_artifacts.components == {"weights": landed.snapshot.revision}
+        assert event.produced_artifacts.components == landed.selection.components
         assert event.training_job_id == "job-1"
         assert event.checkpoint_path == "/checkpoint/1"
         assert observer.run_step == 1
@@ -158,6 +159,7 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
             high_water_sequence=0,
             high_water_offset=0,
             operation=operation,
+            selection=ArtifactSelection({"weights": snapshot.revision}),
         )
 
     start = operation_record(2, "train_from", seed)
@@ -176,7 +178,7 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
         (event,) = tracker.starts
         assert event.run_segment == 0 and event.step == 2
         assert event.start_artifacts.components == {"weights": seed.revision}
-        # The step after the new start names the training start as its source, not the active release.
+        # The step after the new start names the training start as its source, not the active selection.
         assert tracker.events[-1].context.source_artifacts.components == {"weights": seed.revision}
     finally:
         store.close()

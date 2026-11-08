@@ -1,6 +1,6 @@
-"""The weight files of a Tinker release for Reef's own serving engines.
+"""The weight files of a Tinker artifact for Reef's own serving engines.
 
-A Tinker release holds only its manifest (``reef.tinker.checkpoint``); the weights stay on the Tinker-compatible
+A Tinker artifact holds only its manifest (``reef.tinker.checkpoint``); the weights stay on the Tinker-compatible
 service. ``TinkerSamplerWeights`` downloads the LoRA adapter that the manifest's ``sampler_path`` names and converts
 it into a PEFT adapter in the base model's parameter names, which SGLang and vLLM load. This is tinker-cookbook's
 own flow: ``weights.download`` of a ``sampler_weights`` path, then ``weights.build_lora_adapter``.
@@ -23,10 +23,8 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
-from reef.core.weight_layout import WeightLayout
-from reef.runtime.interfaces import WeightFiles
-from reef.runtime.serving import ReleaseWeights
-from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.core.weight_layout import ArtifactWeights, WeightFiles, WeightLayout
+from reef.tinker.checkpoint import TinkerArtifact
 from reef.tinker.service import close_service, tinker_sdk
 
 
@@ -46,8 +44,8 @@ class TinkerSamplerWeightsSettings(PluginSettings):
     timeout_s: float = config_option(600.0, help="Seconds to wait for the service's download URL.")
 
 
-class TinkerSamplerWeights(ReleaseWeights):
-    """The adapter at a Tinker release's ``sampler_path``, downloaded from ``base_url`` and converted to PEFT.
+class TinkerSamplerWeights(ArtifactWeights):
+    """The adapter at a Tinker artifact's ``sampler_path``, downloaded from ``base_url`` and converted to PEFT.
 
     Values: ``cache_dir`` holds ``<sha256 of the sampler path>/adapter/`` for each adapter downloaded so far;
     ``api_key`` is a non-empty key of the service at ``base_url`` (``None`` is hosted Tinker). ``weight_files``
@@ -89,16 +87,16 @@ class TinkerSamplerWeights(ReleaseWeights):
             timeout_s=settings.timeout_s,
         )
 
-    def weight_files(self, release: Path, layout: WeightLayout) -> WeightFiles:
+    def weight_files(self, artifact_dir: Path, layout: WeightLayout) -> WeightFiles:
         if layout != "adapter":
-            raise ReefError(f"a Tinker release serves as an adapter, not as {layout} weights")
+            raise ReefError(f"a Tinker artifact serves as an adapter, not as {layout} weights")
         try:
-            checkpoint = TinkerCheckpoint.read(release)
+            manifest = TinkerArtifact.read(artifact_dir)
         except (OSError, TypeError, ValueError) as exc:
-            raise ReefError(f"the release in {release} holds no Tinker checkpoint manifest: {exc}") from exc
-        if checkpoint.service != self.base_url:
+            raise ReefError(f"the snapshot in {artifact_dir} holds no Tinker checkpoint manifest: {exc}") from exc
+        if manifest.service != self.base_url:
             raise ReefError(
-                f"the release's weights are held by {checkpoint.service or 'hosted Tinker'}, "
+                f"the snapshot's weights are held by {manifest.service or 'hosted Tinker'}, "
                 f"not by {self.base_url or 'hosted Tinker'}"
             )
         try:
@@ -107,17 +105,17 @@ class TinkerSamplerWeights(ReleaseWeights):
             raise RuntimeError(
                 "serving Tinker checkpoints on Reef's engines needs tinker-cookbook: uv pip install 'reef-infra[tinker]'"
             ) from exc
-        entry = self.cache_dir / hashlib.sha256(checkpoint.sampler_path.encode()).hexdigest()
+        entry = self.cache_dir / hashlib.sha256(manifest.sampler_path.encode()).hexdigest()
         adapter = entry / "adapter"
         if not (adapter / "adapter_config.json").is_file():
             entry.mkdir(parents=True, exist_ok=True)
             staging = entry / f".staging-{uuid.uuid4().hex}"
             try:
                 raw = staging / "tinker"
-                self.download(checkpoint.sampler_path, raw)
+                self.download(manifest.sampler_path, raw)
                 converted = staging / "adapter"
                 weights.build_lora_adapter(
-                    base_model=checkpoint.base_model, adapter_path=str(raw), output_path=str(converted)
+                    base_model=manifest.base_model, adapter_path=str(raw), output_path=str(converted)
                 )
                 # Another load may have finished the same adapter meanwhile; both conversions are equal.
                 if not (adapter / "adapter_config.json").is_file():

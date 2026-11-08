@@ -55,7 +55,7 @@ SFT has two pipeline stages
   ``extra.reef.max_tokens``. The stage never finds a sample stale. An SFT target
   is fixed text, not tokens that an older model version sampled. Thus the
   stage takes no ``max_staleness`` and refuses the key.
-- ``SFTJobData`` puts the samples into job data in store order: reports in
+- ``SFTJobData`` puts the samples into job data in use order: reports in
   arrival order, and uploaded ATIF trajectories in upload order, interleaved
   by arrival (see `Train on whole conversations`_). With the default
   ``buffer_size``, one job's data holds
@@ -67,7 +67,7 @@ The training component renders each sample with the model's chat template
 a sample that cannot render or that is longer than ``max_tokens``, and counts
 it in the job metric ``unrenderable_samples``.
 
-The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
+The ``sft`` objective, built in on Slime and on Tinker, sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
 ``sft_loss``. On Tinker, the built-in ``sft`` family trains Tinker's
 ``cross_entropy`` on the target tokens (``training.backend: tinker``). Both
@@ -112,7 +112,7 @@ Import the file with ``reef-client`` (`Import records for cold-start learning
 A job trains when Reef holds ``job_samples`` reports. Thus the last
 reports of a dataset wait until that number of reports is available. Reef
 reads the imported reports only as fast as jobs train, so a large import
-waits in the record store, not in the buffer. Reef does not repeat a dataset. To train on the data again, import it again
+waits in the record store, not as samples. Reef does not repeat a dataset. To train on the data again, import it again
 with new record IDs.
 
 Train on whole conversations
@@ -203,7 +203,7 @@ Each stage reads only its own ``config``.
        the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
 
    ``pipeline.sample2job.config.buffer_size`` : ``job_samples``
-       the most samples that one job takes. Later samples wait in the sample store for the next jobs.
+       the most samples that one job takes. Later samples wait for the next jobs.
 
    ``training.config.global_batch_size`` : none
        the samples in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
@@ -287,29 +287,32 @@ SFT, then RL on uploaded tasks
 
 The recipe gives parameters to trajectory jobs only. An uploaded train task
 (a task item in the ``train`` split, ``POST /reef/namespaces/{owner}/data/tasks``) trains in ``manual``
-mode, for an instruction whose ``parameters`` give its job's method and
-rollout. Thus one scenario runs SFT first and then RL:
+mode, for a request whose ``parameters`` give its job's objective and
+rollouts. The recipe gives task jobs no objective, so a request without one is
+refused. Thus one scenario runs SFT first and then RL:
 
 1. Set the scenario to ``manual``, and create the trajectories and the tasks as items that it uses.
-2. Put the trajectories in the manual buffer and send an instruction. The job
+2. Send a request that names the trajectories in ``samples``. The job
    trains them with SFT.
-3. Put the tasks in the manual buffer and send an instruction with
-   ``{"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}``
-   in ``parameters``. The job rolls the tasks out and trains on the rollouts.
+3. Send a request that names the tasks in ``samples``, with
+   ``{"objective": "my_methods.objectives:MyObjective", "rollout": {"rollouts_per_task": 4}}``
+   in ``parameters``, with a method that the deployment provides. The job rolls the
+   tasks out and trains on the rollouts.
 
-The training component must run task jobs: Tinker does, and Slime does with
-its own rollout engines (`Task jobs on Slime
-<../../reference/configuration.rst#task-jobs-on-slime>`__). See
+The training component must run both kinds of job, as Tinker does. On Slime, a
+task job needs a deployment of the ``slime`` loss family, which refuses jobs of
+trajectories, so this sequence does not run on one Slime deployment (`Task jobs on
+Slime <../../reference/configuration.rst#task-jobs-on-slime>`__). See
 `Manual training <../../reference/http-api.rst#manual-training>`__ for the
-instruction and `Choose the samples that train
-<../../reference/http-api.rst#choose-the-samples-that-train>`__ for the buffer.
+request and `Choose the samples that train
+<../../reference/http-api.rst#choose-the-samples-that-train>`__ for ``samples``.
 
 Train SFT for some jobs of another recipe
 -----------------------------------------
 
 A recipe can train some jobs with SFT, for example its trajectory jobs, and its
-task jobs with a policy objective. Its ``parameters_by_kind()``
-puts ``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
+task jobs with a policy objective. Its ``default_parameters()``
+puts ``"sft"`` in the ``objective``
 parameter of the jobs of that kind (`Train each kind of sample with its own
 method
 <../../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).

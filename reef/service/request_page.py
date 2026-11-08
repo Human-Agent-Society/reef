@@ -24,8 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from reef.core.requirements import required_by
-from reef.service.page_layout import document, escape, requires_table, stamp, status_span
-from reef.service.release_page import (
+from reef.service.artifact_page import (
     failed_words,
     floor_tasks_note,
     method_notes,
@@ -38,6 +37,7 @@ from reef.service.release_page import (
     step_href,
     unscored_failures,
 )
+from reef.service.page_layout import document, escape, requires_table, stamp, status_span
 from reef.train.harness_backend.backend import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -104,7 +104,7 @@ left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font
 
 #: What each state means, in the words the page prints beside it.
 STATE_WORDS = {
-    "queued": "no step has taken the request yet; the trainer runs one step per instruction, oldest first",
+    "queued": "no step has taken the request yet; the trainer runs one step per request, oldest first",
     "proposing": "the method is making the change; the activity shows what it has done so far",
     "evaluating": "the evaluation is running the candidate through its runs",
     "running": "the step holds the request and reports no phase; its row follows",
@@ -127,9 +127,9 @@ class NextAction:
 
 
 def next_action(scenario: str, artifact_id: str, selection_result: str, requires: Sequence[str]) -> NextAction | None:
-    """The next action of a settled step: activate a release that is not active, or pull an active one.
+    """The next action of a settled step: activate a snapshot that is not active, or pull an active one.
 
-    ``requires`` names what the release needs where the harness runs (see
+    ``requires`` names what the snapshot needs where the harness runs (see
     ``reef.core.requirements.required_by``). ``None`` for a rejected,
     skipped or failed step: nothing waits on the person then.
     """
@@ -137,7 +137,7 @@ def next_action(scenario: str, artifact_id: str, selection_result: str, requires
         return NextAction(
             "Read this page, then activate it",
             (f'POST /reef/scenarios/{scenario}/activate {{"artifact_id": "{artifact_id}"}}',),
-            "The scenario's activation rule did not make this release active; activating it serves it.",
+            "The scenario's activation rule did not make this snapshot active; activating it serves it.",
         )
     if selection_result != "selected":
         return None
@@ -145,7 +145,7 @@ def next_action(scenario: str, artifact_id: str, selection_result: str, requires
     return NextAction(
         "Pull it",
         ("GET /reef/harness",),
-        f"Reef serves this release's files now; a client gets them from there.{needs}",
+        f"Reef serves this snapshot's files now; a client gets them from there.{needs}",
     )
 
 
@@ -245,7 +245,7 @@ def request_html(record: Mapping[str, object]) -> str:
         f'<p class="text">{escape(payload.get("text"))}</p>',
         '<details class="request-meta"><summary>Session and request details</summary><dl class="metadata">',
         f'<div><dt>Session</dt><dd class="id">{escape(payload.get("session") or "Not provided")}</dd></div>',
-        f'<div><dt>Base artifact</dt><dd class="id">{escape(payload.get("artifact_id", payload.get("release_id")) or "Not provided")}</dd></div>',
+        f'<div><dt>Base artifact</dt><dd class="id">{escape(payload.get("artifact_id") or "Not provided")}</dd></div>',
         f'<div class="record-id"><dt>Request ID</dt><dd class="id">{escape(record["agent_record_id"])}</dd></div>',
     ]
     filed = record.get("created_at")
@@ -410,7 +410,7 @@ def build_request_page(
             body += (
                 f'<section class="card activity-card">\n<h2>Activity</h2>\n{activity_html(progress, now)}</section>\n'
             )
-        subtitle = "Follow your request from instruction to outcome."
+        subtitle = "Follow your training request to its outcome."
         current_stage = {"queued": 0, "proposing": 1, "evaluating": 1, "running": 1}.get(state, 1)
     else:
         metrics = rows[step].get("metrics")
@@ -452,7 +452,7 @@ def build_request_page(
         eyebrow="Harness evolution",
         heading="Request details",
         subtitle=escape(subtitle),
-        # The active release is this scenario's home, the version this request is asked against.
+        # The active selection is this scenario's home, the version this request is asked against.
         home="" if served is None else step_href(served, link_query),
         head=head,
         body=(

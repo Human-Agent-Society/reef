@@ -1,14 +1,14 @@
-"""A training component's own rollouts of a task job: Harbor rollouts sampled at the job's start weights.
+"""A training component's own Harbor rollouts of a task job's tasks.
 
-A task job holds ``TaskSample`` values. Before it trains, the component runs ``rollouts_per_task`` rollouts of
-each task with ``TaskRolloutRunner``: the agent works in the task's sandbox, the task's verifier scores the
-rollout, and each model call goes through the runner's capture proxy to a ``ChatEndpoint`` on this host. The
-endpoint answers each call with the component's ``RolloutChat``, which samples the weights that the job trains
-and returns the training capture. Each rollout that ran assembles into one sample; the samples of one task form
-its group, which trains only with at least two samples. Reef's serving takes no part.
+A task job holds ``TaskSample`` values. For each rollout, ``TaskRolloutRunner`` runs the agent in the task's
+sandbox, and the task's verifier scores the rollout. Each model call goes through the runner's capture proxy to a
+``ChatEndpoint`` on this host. The endpoint answers each call with the component's ``RolloutChat``, which samples
+the weights that the job trains and returns the training capture. Each rollout that ran assembles into one sample
+(``rollout_sample``). Reef's serving takes no part.
 
-Tinker answers on its sampler (``reef.train.tinker_backend.rollout``) and Slime on its own rollout engines
-(``reef.train.slime_backend.rollout_group``).
+Tinker runs ``rollouts_per_task`` rollouts of each task before it trains (``run_train_tasks``), and answers on its
+sampler (``reef.train.tinker_backend.rollout``). On Slime, each rollout is one generate step of Slime's own training
+loop (``reef.train.slime_backend.harbor_rollouts``).
 """
 
 from __future__ import annotations
@@ -18,17 +18,17 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from reef.core import AgentRecord, RequestType
+from reef.core.errors import inference_aborted
 from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
-from reef.harness.tasks.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
+from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.runtime.interfaces import inference_aborted
 
 logger = logging.getLogger(__name__)
 
@@ -41,21 +41,19 @@ CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
 
 @dataclass(frozen=True)
-class RolloutSettings:
-    """A task job's ``rollout`` parameter: how the component samples the rollouts of the job's tasks.
+class HarborSettings:
+    """How a training component runs Harbor rollouts of a task job's tasks.
 
-    Values: ``rollouts_per_task`` is an int of at least 2, the group of one task. ``agent`` is a Harbor
-    agent config with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders, or None for
-    ``TaskRolloutRunner``'s default agent. ``environment`` is a non-empty Harbor environment type, such as
-    ``docker``, ``e2b`` or ``modal``. ``agent_host`` is the host at which an agent in the sandbox reaches this host, or
-    None for an agent on this host. ``concurrency`` is a positive int, the rollouts in flight.
-    ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed out, or None to leave it
-    unscored. ``scaffold_tolerance`` is a non-negative int, the masked tokens that the assembly may realign
-    before a response (for a thinking template's scaffold). Purpose: ``from_parameters`` reads it from a
-    job's parameters; ``run_train_tasks`` runs it.
+    Values: ``agent`` is a Harbor agent config with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders, or None
+    for ``TaskRolloutRunner``'s default agent. ``environment`` is a non-empty Harbor environment type, such as
+    ``docker``, ``e2b`` or ``modal``. ``agent_host`` is the host at which an agent in the sandbox reaches the host that
+    runs the rollouts, or None for an agent on that host. ``concurrency`` is a positive int, the rollouts in flight.
+    ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed out, or None to leave it unscored.
+    ``scaffold_tolerance`` is a non-negative int, the masked tokens that the assembly may realign before a response
+    (for a thinking template's scaffold). Purpose: a training component makes it from its own job parameters, and
+    reads it where it runs the rollouts.
     """
 
-    rollouts_per_task: int
     agent: Mapping[str, Any] | None = None
     environment: str = "docker"
     agent_host: str | None = None
@@ -65,36 +63,37 @@ class RolloutSettings:
 
     def __post_init__(self) -> None:
         for name, value, least in (
-            ("rollouts_per_task", self.rollouts_per_task, 2),
             ("concurrency", self.concurrency, 1),
             ("scaffold_tolerance", self.scaffold_tolerance, 0),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < least:
-                raise ValueError(f"rollout.{name} must be an int of at least {least}, got {value!r}")
+                raise ValueError(f"{name} must be an int of at least {least}, got {value!r}")
         if self.agent is not None and not isinstance(self.agent, Mapping):
-            raise ValueError("rollout.agent must be a Harbor agent config object")
+            raise ValueError("agent must be a Harbor agent config object")
         if not isinstance(self.environment, str) or not self.environment:
-            raise ValueError("rollout.environment must be a non-empty Harbor environment type")
+            raise ValueError("environment must be a non-empty Harbor environment type")
         if self.agent_host is not None and (not isinstance(self.agent_host, str) or not self.agent_host):
-            raise ValueError("rollout.agent_host must be a non-empty host or None")
+            raise ValueError("agent_host must be a non-empty host or None")
         reward = self.verifier_timeout_reward
         if reward is not None and (isinstance(reward, bool) or not isinstance(reward, (int, float))):
-            raise ValueError("rollout.verifier_timeout_reward must be a number or None")
+            raise ValueError("verifier_timeout_reward must be a number or None")
 
-    @classmethod
-    def from_parameters(cls, parameters: Mapping[str, Any]) -> RolloutSettings:
-        """The ``rollout`` parameter of a task job; raise ``ValueError`` when it is missing or malformed."""
-        value = parameters.get("rollout")
-        if not isinstance(value, Mapping):
-            raise ValueError("a task job needs the rollout parameter as an object")
-        names = {name.replace("-", "_"): item for name, item in value.items()}
-        unknown = set(names) - set(cls.__dataclass_fields__)
-        if unknown:
-            raise ValueError(f"the rollout parameter takes no {sorted(unknown)}")
-        try:
-            return cls(**names)
-        except TypeError as exc:
-            raise ValueError(f"the rollout parameter is incomplete: {exc}") from exc
+
+@dataclass(frozen=True)
+class RolloutSettings(HarborSettings):
+    """``HarborSettings`` of a component that runs a fixed number of rollouts of each task before it trains.
+
+    Values: every value of ``HarborSettings`` with ``rollouts_per_task``, an int of at least 2, the group of one task.
+    Purpose: Tinker makes it from its ``rollout`` job parameter; ``run_train_tasks`` runs it.
+    """
+
+    rollouts_per_task: int = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        count = self.rollouts_per_task
+        if isinstance(count, bool) or not isinstance(count, int) or count < 2:
+            raise ValueError(f"rollouts_per_task must be an int of at least 2, got {count!r}")
+        super().__post_init__()
 
 
 @dataclass(frozen=True)
@@ -228,6 +227,17 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, s
     return replace(sample, group_id=group, source_agent_record_ids=())
 
 
+def rollout_assembly(settings: HarborSettings) -> SampleAssembly:
+    """The assembly of a task rollout's model calls into one sample, as ``rollout_sample`` reads it."""
+    return SampleAssembly(
+        SampleAssemblySettings(
+            accept_multi_turn_policy_samples=True,
+            realign_threshold=REALIGN_THRESHOLD,
+            scaffold_tolerance=settings.scaffold_tolerance,
+        )
+    )
+
+
 def run_train_tasks(
     tasks: Sequence[TaskSample],
     settings: RolloutSettings,
@@ -245,13 +255,7 @@ def run_train_tasks(
     the job's ``start``, the weights that ``chat`` samples; each sample names it as its ``artifact_id``.
     ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``.
     """
-    assembly = SampleAssembly(
-        SampleAssemblySettings(
-            accept_multi_turn_policy_samples=True,
-            realign_threshold=REALIGN_THRESHOLD,
-            scaffold_tolerance=settings.scaffold_tolerance,
-        )
-    )
+    assembly = rollout_assembly(settings)
     with ChatEndpoint(chat) as endpoint:
         runner = TaskRolloutRunner(
             reef_url=endpoint.url,
@@ -270,7 +274,7 @@ def run_train_tasks(
         )
         rollouts = runner.run_rollouts(
             [
-                RolloutRequest(runner.harness, runner.served_model, str(task.task_path))
+                RolloutRequest(runner.harness, runner.policy_model, str(task.task_path))
                 for task in tasks
                 for _ in range(settings.rollouts_per_task)
             ]

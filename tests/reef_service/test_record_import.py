@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import RecordingComponent
+from tests.support.samples import made_task
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.record2sample import ReportSamples
-from reef.runtime.interfaces import InferenceHandler
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
@@ -26,7 +26,6 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import JobData, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskSample
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 
@@ -50,7 +49,7 @@ def imported(record_id, payload=None, request_type="inference"):
 
 class FeedbackSamples(ReportSamples):
     def make_sample(self, context):
-        return TaskSample(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
+        return made_task(context.report.agent_record_id, metadata=context.inferences[0].payload)
 
 
 class FeedbackJobData(Sample2Job):
@@ -82,7 +81,7 @@ class LearningRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -372,7 +371,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
                 {"records": [imported("first"), imported("bad", {"references": ["first"]}, "report")]},
                 {"records": [imported("first"), imported("bad", {"score": 1, "references": ["missing"]}, "report")]},
                 {"records": [imported("bad", {"score": 1, "references": ["first"]}, "report"), imported("first")]},
-                {"records": [imported("first"), imported("instruction", {}, "train")]},
+                {"records": [imported("first"), imported("request", {}, "train")]},
             ]
             for body in invalid:
                 response = await client.post(endpoint, headers=HEADERS, json=body)

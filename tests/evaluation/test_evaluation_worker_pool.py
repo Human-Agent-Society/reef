@@ -10,14 +10,14 @@ from tests.support.harness_steps import build_harness_backend, harness_recipe
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection
-from reef.runtime.executor import ExecutorFailedError, WorkerSpec
-from reef.runtime.executor.config import ExecutorSettings
+from reef.execution.executor import ExecutorFailedError, WorkerSpec
+from reef.execution.executor.config import ExecutorSettings
 
 
 def run_requests(evaluator, *pairings):
     """One run request for each ``(files, task)``, on the evaluator's adapter and served model."""
     return [
-        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.served_model, task)
+        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.policy_model, task)
         for files, task in pairings
     ]
 
@@ -142,7 +142,7 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
             assert [row.score.value for row in scores] == expected
         evaluator = backend.evaluator
         for request, message in (
-            (RolloutRequest(PolicyHarness("claude"), evaluator.served_model, "task"), "adapter"),
+            (RolloutRequest(PolicyHarness("claude"), evaluator.policy_model, "task"), "adapter"),
             (RolloutRequest(PolicyHarness("pi"), PolicyModel("another-model"), "task"), "serves"),
         ):
             with pytest.raises(ValueError, match=message):

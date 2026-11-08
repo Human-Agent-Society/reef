@@ -26,6 +26,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 from aiohttp import web
@@ -33,14 +34,15 @@ from aiohttp import web
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
-from reef.recipe.base import ServedEndpoint
+from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
-from reef.runtime.deployment import close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
     build_artifact_backend,
+    build_data_store,
     build_dispatcher,
+    build_task_files,
     default_served_url,
     open_scenario_storage,
     open_service_coordination,
@@ -49,10 +51,13 @@ from reef.service.assembly import (
 from reef.service.auth import evaluation_token_for
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.engine_clients import DeploymentEngineClients
-from reef.service.inference_service import build_inference_app
+from reef.service.inference_service import ServedModelsCache, build_inference_app
+from reef.service.routed_replica import ReplicaRecords, add_replica_routing
 from reef.service.web import service_application
 from reef.storage.coordination import Coordination, instance_id
+from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
+from reef.storage.tasks import TaskFileStore
 from reef.train.job_queue import TrainingJobWorker
 
 
@@ -83,8 +88,9 @@ class InferenceApp(ComponentApp):
         coordination = open_service_coordination(settings)
         try:
             backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
-            storage, _ = open_scenario_storage(settings)
-            # Records that this service appends are traced as the records that control appends are.
+            # Records that this service appends are record items (RFC #1219), traced as the records that control
+            # appends are.
+            storage, data_store = open_scenario_storage(settings)
             record_observer = build_record_observer(settings.tracing_config, environ=environ)
             if record_observer is not None:
                 storage = ObservedScenarioStorage(storage, record_observer)
@@ -104,6 +110,21 @@ class InferenceApp(ComponentApp):
             timeout_seconds=timeout_seconds,
             for_codex=recipe.harness_adapter == "codex",
         )
+        if settings.routing_manifest is not None:
+            try:
+                add_replica_routing(
+                    app,
+                    settings,
+                    recipe,
+                    ReplicaRecords(ServedModelsCache(coordination.served_models), storage),
+                    environ,
+                )
+            except BaseException:
+                data_store.close()
+                storage.close()
+                coordination.close()
+                close_runtimes(recipe.job_components(), runtime)
+                raise
 
         worker = None
         if backends is not None:
@@ -119,6 +140,8 @@ class InferenceApp(ComponentApp):
         async def close_inference(app: web.Application) -> None:
             if worker is not None:
                 await asyncio.to_thread(worker.stop)
+            # The data store shares the storage's task file store, so it closes first.
+            data_store.close()
             storage.close()
             coordination.close()
             close_runtimes(recipe.job_components(), runtime)
@@ -161,7 +184,8 @@ class TrainingApp(ComponentApp):
 
     Values: this stateless builder returns an app with one worker per recipe job component, and refuses a recipe
     with no job component. The app owns these workers, their components, the runtime and the coordination store.
-    Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario, artifact or data stores.
+    Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario or artifact stores. It opens
+    the data store, which keeps the data directory of each job.
     """
 
     def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
@@ -173,6 +197,8 @@ class TrainingApp(ComponentApp):
         components = recipe.job_components()
         runtime = recipe.runtime
         coordination: Coordination | None = None
+        task_files: TaskFileStore | None = None
+        data_store: DataStore | None = None
         workers: list[TrainingJobWorker] = []
 
         def close_training() -> None:
@@ -189,11 +215,13 @@ class TrainingApp(ComponentApp):
                 errors.extend(close_runtimes(unclosed_components, runtime))
             except BaseException as exc:
                 errors.append(exc)
-            if coordination is not None:
-                try:
-                    coordination.close()
-                except BaseException as exc:
-                    errors.append(exc)
+            # The data store does not own the task file store, so the task files close after it.
+            for store in (coordination, data_store, task_files):
+                if store is not None:
+                    try:
+                        store.close()
+                    except BaseException as exc:
+                        errors.append(exc)
             if errors:
                 raise errors[0]
 
@@ -201,9 +229,14 @@ class TrainingApp(ComponentApp):
             if not components:
                 raise ValueError(f"recipe {settings.recipe!r} submits no training job, so it has no training service")
             coordination = open_service_coordination(settings)
+            task_files = build_task_files(settings)
+            data_store = build_data_store(settings, task_files)
             workers.extend(
                 TrainingJobWorker(
-                    component, coordination.work_queue, worker_id=instance_id(f"training-{component.name}")
+                    component,
+                    coordination.work_queue,
+                    data_store,
+                    worker_id=instance_id(f"training-{component.name}"),
                 )
                 for component in components
             )
@@ -264,11 +297,18 @@ def build_component_app(
 ) -> web.Application:
     """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
 
-    Raise ``ValueError`` for an unknown service.
+    Every service of a deployment reads the same settings. With ``external`` routing only ``inference`` routes; the
+    other services ignore the manifest.
+
+    Raise ``ValueError`` for an unknown service or a managed routing manifest, which requires the orchestrator.
     """
     builder = COMPONENT_APPS.get(component)
     if builder is None:
         raise ValueError(f"unknown service {component!r}; the services are {SERVICE_COMPONENTS}")
+    if settings.routing_manifest is not None and settings.routing_deployment.lifecycle == "managed":
+        raise ValueError("managed routing requires reef serve without --component")
+    if component != "inference":
+        settings = replace(settings, routing_manifest=None)
     return builder.build(settings, os.environ if environ is None else environ)
 
 

@@ -1,10 +1,7 @@
 """The ``importance_sampling`` loss family on Slime: truncated importance sampling on Reef's advantages.
 
-Tinker has a built-in loss of this name, which the generated-task objective
-(``reef.recipe.generated_tasks.TaskGroupObjective``) trains with: each
-rollout's advantage is its reward centered and scaled within its task's group.
-This family is the same objective's loss on Slime's own rollouts, so a task job
-trains group relative advantages on either backend.
+Tinker has a built-in loss of this name. No built-in objective selects this
+family: a method that a deployment provides can, with the advantages it computes.
 
 The loss of one response token ``t`` is ``-A_t * sg[min(p_t / q_t, c)] * log p_t``,
 where ``p`` is the trained policy, ``q`` the rollout engine's probability of the
@@ -15,9 +12,9 @@ reduction is the per-sample mean, not the token sum. The truncated weight is
 what score centering corrects (``--score-centering``): the term is zero for the
 untruncated ratio, which Tinker's loss uses.
 
-Only samples with recorded rollout log-probs train: those of the component's own
-task rollouts. Reef computes the advantages, so Slime's advantage pass stays
-off (``--disable-compute-advantages-and-returns``).
+Only samples with recorded rollout log-probs train, which the method must provide:
+a Slime task job trains the ``slime`` family instead. Reef computes the advantages,
+so Slime's advantage pass stays off (``--disable-compute-advantages-and-returns``).
 """
 
 from __future__ import annotations

@@ -10,33 +10,38 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
+from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import RunningEngines
 
 from reef.artifact.artifact import Artifact
+from reef.core.errors import RuntimeConfigError
+from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
+from reef.inference.interfaces import InferenceBackend, InferenceHandler
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
-from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
-from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
-from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights
+from reef.inference.residency import adapter_name
+from reef.inference.serving import AdapterServingRuntime
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import local_model_required
-from reef.surface.adapter import adapter_name
-from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.weights import TinkerSamplerWeights
-from reef.train.algos import TrainingSignal
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.algos.signals import TrainingSignal
+from reef.train.component import TrainingJob, job_id_for
+from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
+from reef.train.tinker_backend.objectives import (
+    TinkerObjective,
+    register_tinker_objective,
+    unregister_tinker_objective,
+)
 from reef.train.types import JobData, TrajectorySample
 
 TOKENS = ("REEF_REMOTE_CONTROL_TOKEN", "REEF_REMOTE_INFERENCE_TOKEN")
-#: What the engines load: the adapter at each release's sampler path, at the configs' LoRA rank.
-ENGINE_ADAPTERS = ReleaseFormat("adapter", 16, ("all",))
+#: What the engines load: the adapter at each snapshot's sampler path, at the configs' LoRA rank.
+ENGINE_ADAPTERS = ArtifactFormat("adapter", 16, ("all",))
 
 
 class RemoteClient:
@@ -112,7 +117,7 @@ class Handler(InferenceHandler):
         raise AssertionError("unused")
 
 
-class SampleObjective(TrainingObjective):
+class SampleObjective(TinkerObjective):
     loss_family = "importance_sampling"
     name = "tinker-local-engine-objective"
 
@@ -125,9 +130,9 @@ class SampleObjective(TrainingObjective):
 @pytest.fixture
 def objective():
     value = SampleObjective()
-    register_objective(value)
+    register_tinker_objective(value)
     yield value
-    unregister_objective(value.name)
+    unregister_tinker_objective(value.name)
 
 
 @pytest.fixture(autouse=True)
@@ -214,7 +219,7 @@ def build(config, monkeypatch, engines):
 
     def serve(factory, config, model_path, recipe_config, environ):
         seen.update(config)
-        weights = ReleaseWeights.from_setting(config["weights"], setting="runtime.weights")
+        weights = ArtifactWeights.from_setting(config["weights"], setting="runtime.weights")
         runtime = AdapterServingRuntime(
             RunningEngines(engines), Handler(), adapter_capacity=config["adapter_capacity"], weights=weights
         )
@@ -224,7 +229,7 @@ def build(config, monkeypatch, engines):
 
     monkeypatch.setattr(RemoteServingRuntimeFactory, "__call__", serve)
     component, inference = connect_training_component(
-        service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", loss_family="tttd"
+        service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", default_parameters={}
     )
     # The test runs the jobs in this process, as the training service does.
     component.start_jobs()
@@ -234,17 +239,17 @@ def build(config, monkeypatch, engines):
 def train(component, inference, objective, scenario, sample, start=None):
     """Run one job to its end, then serve its checkpoint for ``scenario``; return the checkpoint and its version."""
     data = JobData("b", (item(sample),))
-    parameters = {"method": TrainingMethod(objective.name).to_dict()}
+    parameters = {"objective": objective.name}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
+    component.submit(TrainingJob(job_id, component.name, start, job_data_ref(data), parameters, scenario="s"))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":
         assert time.monotonic() < deadline
         time.sleep(0.01)
     assert status.state == "finished", status.error
     (checkpoint,) = status.checkpoints
-    return checkpoint, inference.activate_checkpoint(Artifact.local(Path(checkpoint.release_path)), scenario=scenario)
+    return checkpoint, inference.activate_checkpoint(Artifact.local(Path(checkpoint.artifact_path)), scenario=scenario)
 
 
 def test_local_engines_run_on_an_inference_component_that_reef_serve_starts(tmp_path):
@@ -275,7 +280,7 @@ def test_local_engines_run_on_an_inference_component_that_reef_serve_starts(tmp_
     assert "test-key" not in yaml.safe_dump(config)
     assert not local_model_required(config)
     serving = serving_config(config)
-    assert serving["type"] == "remote_serving" and serving["release_format"] == ENGINE_ADAPTERS.to_dict()
+    assert serving["type"] == "remote_serving" and serving["artifact_format"] == ENGINE_ADAPTERS.to_dict()
     assert serving["weights"]["module"] == "reef.tinker.weights:TinkerSamplerWeights"
     assert serving["remote"]["url"] == url and serving["engine"] == "sglang"
     assert (serving["num_gpus"], serving["tensor_parallel_size"]) == (2, 1)
@@ -304,11 +309,11 @@ def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(
     component, inference, seen = build(config, monkeypatch, engines)
     try:
         assert isinstance(component, TinkerTrainingComponent) and isinstance(inference, AdapterServingRuntime)
-        # A release is its manifest; the engines load the adapter downloaded from its sampler path.
-        assert component.release_format is None
-        assert (seen["release_format"], seen["adapter_capacity"]) == (ENGINE_ADAPTERS.to_dict(), 3)
+        # A snapshot is its manifest; the engines load the adapter downloaded from its sampler path.
+        assert component.artifact_format is None
+        assert (seen["artifact_format"], seen["adapter_capacity"]) == (ENGINE_ADAPTERS.to_dict(), 3)
         math, served = train(component, inference, objective, "math", 0)
-        assert [path.name for path in Path(math.release_path).iterdir()] == ["tinker-checkpoint.json"]
+        assert [path.name for path in Path(math.artifact_path).iterdir()] == ["tinker-checkpoint.json"]
         assert downloads == ["tinker://update-1/sampler"]
         assert engines.loads == [
             (adapter_name("math", served), cached_adapter(tmp_path, "tinker://update-1/sampler"), served)
@@ -339,7 +344,7 @@ def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypat
     engines = Engines()
     component, inference, _ = build(config, monkeypatch, engines)
     try:
-        served = inference.activate_checkpoint(Artifact.local(Path(math.release_path)), scenario="math")
+        served = inference.activate_checkpoint(Artifact.local(Path(math.artifact_path)), scenario="math")
         adapter = cached_adapter(tmp_path, "tinker://update-1/sampler")
         assert engines.loads == [(adapter_name("math", served), adapter, served)]
         # The adapter downloaded before the restart serves again without a second download.
@@ -394,7 +399,9 @@ def test_engines_serve_tinker_adapters_only_on_an_engine_that_loads_them(tmp_pat
     raw["inference"]["num-gpus"] = 1
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     with pytest.raises(RuntimeConfigError, match="vllm serves full weights only"):
-        connect_training_component(service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", loss_family="tttd")
+        connect_training_component(
+            service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", default_parameters={}
+        )
 
 
 def test_tinker_samples_in_process_without_engines(tmp_path):

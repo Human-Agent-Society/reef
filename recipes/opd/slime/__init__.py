@@ -1,9 +1,15 @@
 """OPD's thin Slime family on the shared distillation implementation."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
+from reef.train.algos.helpers import next_steps
+from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.algorithm import register_loss_family
 from reef.train.slime_backend.distill import DistillAlgorithm, DistillSettings
+from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.types import JobData, trajectories
 
 
 @dataclass(frozen=True)
@@ -35,4 +41,18 @@ class OpdAlgorithm(DistillAlgorithm):
     settings_type = OpdSettings
 
 
-__all__ = ["OpdAlgorithm", "OpdSettings"]
+@register_slime_objective
+class OpdObjective(SlimeObjective):
+    name = "opd"
+    loss_family = "opd"
+    supports_multiple_epochs = False
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
+        if not samples:
+            raise ValueError("OPD requires student rollouts")
+        steps = next_steps(state)
+        return TrainingSignal("train", {"steps": steps}, {"steps": steps, "samples": len(samples)})
+
+
+__all__ = ["OpdAlgorithm", "OpdObjective", "OpdSettings"]

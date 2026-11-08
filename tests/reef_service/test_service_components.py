@@ -18,7 +18,7 @@ from tests.support.harness_steps import IdleMethod, harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.sources import ArtifactSources
+from reef.artifact.sources import ArtifactSources, DirectorySource
 from reef.core.job_data import JobData
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
@@ -30,7 +30,6 @@ from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
-from reef.runtime.jobs import TrainingJob
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app
@@ -39,16 +38,20 @@ from reef.service.data_service import DataJob, DataWorker
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
+from reef.service.scenario_files import artifact_directory
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
+from reef.train.component import TrainingJob
 from reef.train.harness_backend.component import HarnessTrainingComponent
-from reef.train.instructions import InstructionQueue
 from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker
+from reef.train.training_requests import TrainingRequestQueue
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
 import signal
+
+from tests.support.job_data import job_data_ref
 
 from reef.core.errors import ReefError
 from reef.dispatcher.dispatcher import build_default_dispatcher
@@ -102,7 +105,14 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
     coordination = assembly.open_service_coordination(config)
     view = JobQueueComponent(component, coordination.work_queue, owns_component=False)
     view.submit(
-        TrainingJob("one", component.name, component.base_start, JobData("data", (trajectory,)), {}, scenario="math")
+        TrainingJob(
+            "one",
+            component.name,
+            component.base_start,
+            job_data_ref(JobData("data", (trajectory,))),
+            {},
+            scenario="math",
+        )
     )
 
     async def run() -> None:
@@ -260,8 +270,11 @@ def test_failed_assembly_stops_workers_before_closing_their_stores(
 @pytest.mark.unit
 def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_the_jobs_to_control() -> None:
     made: list[str] = []
-    trainer = SimpleNamespace(trains=True, produce_samples=lambda: made.append("weights") or False)
-    current = SimpleNamespace(trainers=(SimpleNamespace(component="weights", trainer=trainer),))
+    trainer = SimpleNamespace(trains=True)
+    current = SimpleNamespace(
+        trainers=(SimpleNamespace(component="weights", trainer=trainer),),
+        produce_samples=lambda component: made.append(component) or False,
+    )
     loads: list[tuple[str, object]] = []
 
     class Registry:
@@ -278,7 +291,7 @@ class Changes(StoreChanges):
         self.records: list[str] = []
         self.samples: list[str] = []
         self.jobs: list[str] = []
-        self.instructions: list[str] = []
+        self.training_requests: list[str] = []
 
     def records_added(self, current) -> None:
         self.records.append(current.name)
@@ -289,8 +302,8 @@ class Changes(StoreChanges):
     def job_changed(self, scenario: str) -> None:
         self.jobs.append(scenario)
 
-    def instructions_added(self, scenario: str) -> None:
-        self.instructions.append(scenario)
+    def requests_added(self, scenario: str) -> None:
+        self.training_requests.append(scenario)
 
 
 @pytest.mark.unit
@@ -314,11 +327,11 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
     assert changes.records == [*first_records, "math"] and changes.samples == ["math"]
     watcher.run_once()
     assert changes.records == [*first_records, "math"] and changes.samples == ["math"]
-    # A training instruction that another process queued wakes control once.
-    InstructionQueue(queue).of("math").file("one", {"text": "train"})
+    # A training request that another process queued wakes control once.
+    TrainingRequestQueue(queue).of("math").file("one", {"text": "train"})
     watcher.run_once()
     watcher.run_once()
-    assert changes.instructions == ["math"]
+    assert changes.training_requests == ["math"]
 
     # A job that a worker takes changes nothing to commit; its checkpoint and its end each wake control.
     queue.add(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
@@ -408,6 +421,54 @@ def test_control_and_data_load_a_scenario_without_activating_its_engine(tmp_path
     finally:
         data.close()
     assert component.inference.activated == []
+
+
+@pytest.mark.unit
+def test_the_data_service_reads_the_artifact_that_control_commits_after_the_data_service_loaded(
+    tmp_path: Path,
+) -> None:
+    component = ImportingComponent(tmp_path / "checkpoints")
+    repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+
+    def dispatcher(components: frozenset[str]) -> Dispatcher:
+        return Dispatcher(
+            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            repository,
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
+            components=components,
+        )
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "config.json").write_text("{}")
+    (weights / "model.safetensors").write_bytes(b"w9")
+    directory = tmp_path / "store"
+    directory.mkdir()
+    control = dispatcher(frozenset({"control"}))
+    data = dispatcher(frozenset({"data"}))
+    try:
+        control.get_or_create_scenario("math")
+        before = {row["artifact_id"] for row in _listed(data)}
+        imported = control.import_artifact(
+            "math",
+            DirectorySource(weights, source_version="", link=False),
+            None,
+            source={"uri": weights.as_uri(), "version": ""},
+            directory=directory,
+        )
+        assert imported.artifact_id not in before
+        assert imported.artifact_id in {row["artifact_id"] for row in _listed(data)}
+        assert artifact_directory(data, "math", imported.artifact_id, None).is_dir()
+    finally:
+        data.close()
+        control.close()
+
+
+def _listed(dispatcher: Dispatcher) -> tuple[dict[str, object], ...]:
+    """The data service's artifact list. It loads the scenario on its first read."""
+    dispatcher.get_or_create_scenario("math")
+    return dispatcher.list_artifacts("math")
 
 
 @pytest.mark.unit

@@ -10,19 +10,19 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
-
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
+from reef.inference.interfaces import InferenceHandler
 from reef.observability import ExperimentLogger, ExperimentTracker
-from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.app import create_app
+from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer
 
@@ -31,7 +31,7 @@ _ASYNC_WAIT_POLL_S = 0.01
 
 
 class MaterializingInference(StubInferenceRuntime):
-    """Serve each release under the version its ``model.txt`` names, so the initial release serves as ``w0``."""
+    """Serve each snapshot under the version its ``model.txt`` names, so the initial snapshot serves as ``w0``."""
 
     def serve(self, artifact: Artifact) -> str:
         return super().serve(artifact.materialize())
@@ -59,7 +59,7 @@ class DurableComponent(StubTrainingComponent):
         if self.block and not self.release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked training")
         (checkpoint,) = super().train(job)
-        return (SavedCheckpoint(checkpoint.step, checkpoint.path, checkpoint.release_path, self.complete_metrics),)
+        return (SavedCheckpoint(checkpoint.step, checkpoint.path, checkpoint.artifact_path, self.complete_metrics),)
 
 
 class BlockingLostAckBackend(InMemoryRepositoryBackend):
@@ -239,6 +239,7 @@ def test_report_returns_and_inference_resolves_while_training_job_is_blocked(sta
 
 @pytest.mark.unit
 def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher, monkeypatch) -> None:
+    failure_timeout_seconds = 30
     component, dispatcher = start_dispatcher()
     # Control submits a job by adding it to the jobs queue; the first addition loses its acknowledgement.
     queued_submit = JobQueueComponent.submit
@@ -253,7 +254,7 @@ def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher
     monkeypatch.setattr(JobQueueComponent, "submit", lose_first_acknowledgement)
     _submit_pair(dispatcher)
     # Each record wakes the worker, so a retry may clear the error before a poll sees it: wait for the count.
-    deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
+    deadline = time.monotonic() + failure_timeout_seconds
     while dispatcher.errors.failure_count("math") == 0 and time.monotonic() < deadline:
         time.sleep(_ASYNC_WAIT_POLL_S)
     assert dispatcher.errors.failure_count("math") == 1
@@ -336,7 +337,10 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     _submit_pair(dispatcher, "2")
     _wait_for_jobs(dispatcher, 2)
 
-    assert [source_record_id(job.data.samples[0]) for job in component.calls] == ["inference-1", "inference-2"]
+    assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.calls] == [
+        "inference-1",
+        "inference-2",
+    ]
     # Training is linear: the second job starts from the first job's checkpoint.
     assert component.calls[0].start == component.base_start
     assert component.calls[1].start == str(component.checkpoint_root / "1")
@@ -357,7 +361,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
 
-    # The checkpoint's commit publishes the release and carries the job's training metrics.
+    # The checkpoint's commit publishes the snapshot and carries the job's training metrics.
     committed = next(record.metrics for record in scenario.store.history() if record.checkpoint)
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
@@ -408,7 +412,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.context.recipe == "test_policy"
     assert event.context.backend == "stub"
     assert event.context.backend_config == {
-        "job_parameters": {kind: {"method": {"objective": "sft"}} for kind in ("trajectory", "task")},
+        "job_parameters": {kind: {"objective": "sft"} for kind in ("trajectory", "task")},
     }
     assert event.context.source_artifacts.components == {
         "weights": scenario.repository.resolve(
@@ -437,7 +441,7 @@ def test_operational_sample_wait_ignores_a_matching_backlog_before_training() ->
 def test_periodic_metrics_report_backlog_during_training_without_status_reads(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    # The root release answers the second pair while the first job trains, so that pair trains one artifact behind.
+    # The root snapshot answers the second pair while the first job trains, so that pair trains one artifact behind.
     _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_staleness=1)
     # The trainer's cycle executes while it submits the first job: hold the submission.
     started, release = _hold_job_submission(monkeypatch)

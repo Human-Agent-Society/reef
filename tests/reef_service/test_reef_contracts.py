@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -21,20 +22,20 @@ from reef.artifact import (
     InMemoryRepositoryBackend,
     Repository,
 )
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import ReefError, RequestType
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.sync import create_harness_surface
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
+from reef.record2sample.service import SAMPLES_QUEUE
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_weight_surface
-from reef.train import TrainStepResult
-from reef.train.types import JobData
+from reef.train import TrainingCommit
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -46,10 +47,10 @@ class ContractInferenceHandler(InferenceHandler):
 
 
 class WeightRecipe(Recipe):
-    """A recipe whose scenarios serve weights (the core ``recipe`` implementation serves a plain evolution surface)."""
+    """A recipe whose scenarios serve weights (the core ``recipe`` implementation serves none)."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return create_weight_surface(kind="model")
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents({"weights": ComponentSpec(kind="model")})
 
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={"model.txt": "base"})
@@ -111,7 +112,7 @@ def serving_dispatcher(tmp_path) -> Dispatcher:
 @asynccontextmanager
 async def proxied_client(tmp_path, path: str, upstream) -> AsyncIterator[tuple[TestClient, Dispatcher]]:
     """A client of a Reef app whose HTTP inference handler forwards to the ``upstream`` route at ``path``; the
-    scenario "chat" serves the committed version ``v1``, so its records name that release."""
+    scenario "chat" serves the committed version ``v1``, so its records name that snapshot."""
     upstream_app = web.Application()
     upstream_app.router.add_post(path, upstream)
     async with TestServer(upstream_app) as upstream_server:
@@ -188,7 +189,7 @@ def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> Non
 @pytest.mark.unit
 def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_start(tmp_path) -> None:
     """A report creates its scenario from the recipe's default start; ``x-reef-release-id`` on a request names no
-    release to start from, so any value is accepted."""
+    snapshot to start from, so any value is accepted."""
     backend = InMemoryRepositoryBackend.factory()
     dispatcher = build_default_dispatcher(
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
@@ -217,7 +218,7 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
             algorithm_state=None,
             experiment_logger=None,
             task_storage=None,
-            releases=None,
+            artifacts=None,
             samples=None,
             root=None,
         ):
@@ -304,7 +305,6 @@ def test_recipe_pipeline_has_no_update_algorithm() -> None:
     ).get_or_create_scenario("math")
 
     assert not runtime.trainer.trains
-    assert runtime.trainer.pipeline.output_schema is JobData
 
 
 @pytest.mark.unit
@@ -406,7 +406,7 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
     async def upstream(request):
         received["path"] = request.path
         received["payload"] = await request.json()
-        received["release_id"] = request.headers["x-reef-release-id"]
+        received["release_id"] = request.headers["x-reef-artifact-id"]
         received["artifact_path"] = request.headers["x-reef-artifact-path"]
         return web.json_response({"provider": "ok"})
 
@@ -445,7 +445,7 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
         async def upstream(request):
             received["path"] = request.path
             received["payload"] = await request.json()
-            received["release_id"] = request.headers["x-reef-release-id"]
+            received["release_id"] = request.headers["x-reef-artifact-id"]
             response = web.StreamResponse(
                 headers={
                     "Content-Type": "text/event-stream",
@@ -628,7 +628,7 @@ def test_published_candidate_is_used_after_inference_startup(tmp_path) -> None:
     candidate_path.mkdir()
     (candidate_path / "model.txt").write_text("trained")
     committed = dispatcher.registry.get("chat")
-    committed.commit(TrainStepResult(state=None, artifact=Artifact.local(candidate_path)))
+    committed.commit(TrainingCommit(state=None, artifact=Artifact.local(candidate_path)))
     dispatcher.scenario_committed(committed)
     new_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
@@ -654,8 +654,20 @@ def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) ->
     checkpoint.mkdir()
     (checkpoint / "model.txt").write_text(version)
     current = dispatcher.registry.get(scenario)
-    current.commit(TrainStepResult(state=None, artifact=Artifact.local(checkpoint)))
+    current.commit(TrainingCommit(state=None, artifact=Artifact.local(checkpoint)))
     dispatcher.scenario_committed(current)
+
+
+@pytest.mark.unit
+def test_a_commit_asks_the_samples_service_for_a_selection_of_each_trainer_that_trains(tmp_path) -> None:
+    # A commit can end a job, and the job's end can make background work due, such as the next round of generated
+    # tasks. No record arrives to ask the samples service for it.
+    dispatcher = weight_dispatcher(tmp_path)
+    trains = SimpleNamespace(component="weights", trainer=SimpleNamespace(trains=True))
+    idle = SimpleNamespace(component="harness", trainer=SimpleNamespace(trains=False))
+    dispatcher.scenario_committed(SimpleNamespace(name="chat", trainers=(trains, idle)))
+    [selection] = dispatcher.queue.items(SAMPLES_QUEUE, scenario="chat")
+    assert selection.payload == {"scenario": "chat", "component": "weights"}
 
 
 def serving_weight_dispatcher(tmp_path, *, training: bool = False) -> Dispatcher:
@@ -916,7 +928,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
-    dispatcher.registry.get("math").commit(TrainStepResult(state={"label": "no artifact"}))
+    dispatcher.registry.get("math").commit(TrainingCommit(state={"label": "no artifact"}))
     # A no-artifact commit advances the step (the trainer consumed records and
     # state) but does not move the serving head: there is no candidate to publish.
     assert dispatcher.get_or_create_scenario("math").scenario_step == 1
@@ -927,7 +939,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
         candidate = tmp_path / f"{scenario}-{version}"
         candidate.mkdir()
         dispatcher.registry.get(scenario).commit(
-            TrainStepResult(state={"version": version}, artifact=Artifact.local(candidate))
+            TrainingCommit(state={"version": version}, artifact=Artifact.local(candidate))
         )
 
     assert dispatcher.get_or_create_scenario("math").scenario_step == 3
@@ -954,7 +966,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
 
     with pytest.raises(ArtifactPublicationError, match="repository failed"):
         dispatcher.registry.get("chat").commit(
-            TrainStepResult(state={"label": "new"}, artifact=Artifact.local(candidate))
+            TrainingCommit(state={"label": "new"}, artifact=Artifact.local(candidate))
         )
 
     assert (
@@ -1073,11 +1085,13 @@ def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
 
 
 class HarnessRecipe(Recipe):
-    """A recipe whose clients pull a file tree: the served exchange is the same on every release. A stub runtime
+    """A recipe whose clients pull a file tree: the served exchange is the same on every snapshot. A stub runtime
     answers its model calls."""
 
-    def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(get_adapter("pi"))
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(
+            {HARNESS_COMPONENT: ComponentSpec(files=HarnessFiles(get_adapter("pi")), kind="harness_plugin")}
+        )
 
 
 @pytest.mark.unit
@@ -1087,8 +1101,8 @@ class HarnessRecipe(Recipe):
     ids=["harness", "weights"],
 )
 def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
-    """The inference service records every call against the release that served it: it reads served_models only,
-    never the catalog. The release that a session says it runs stays in the record's tags."""
+    """The inference service records every call against the snapshot that served it: it reads served_models only,
+    never the catalog. The snapshot that a session says it runs stays in the record's tags."""
 
     async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
         return {"ok": True}
@@ -1100,7 +1114,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
     )
-    releases = [dispatcher.get_or_create_scenario("chat").serving_artifact_id()]
+    artifacts = [dispatcher.get_or_create_scenario("chat").serving_artifact_id()]
     for version in (1, 2):
         if isinstance(recipe, WeightRecipe):
             commit_saved_version(dispatcher, "chat", f"sglang-v{version}", tmp_path)
@@ -1109,15 +1123,15 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
             candidate.mkdir()
             (candidate / "rules.md").write_text(f"v{version}")
             current = dispatcher.registry.get("chat")
-            current.commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+            current.commit(TrainingCommit(state=None, artifact=Artifact.local(candidate)))
             dispatcher.scenario_committed(current)
-        releases.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
-    assert len(set(releases)) == 3
+        artifacts.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
+    assert len(set(artifacts)) == 3
 
     async def run() -> list[str]:
         async with serving_client(dispatcher, backend) as client:
             await wait_for_inference(client, "chat")
-            for tag in (releases[1], releases[0], "no-such-release", None):
+            for tag in (artifacts[1], artifacts[0], "no-such-release", None):
                 headers = {"x-reef-scenario": "chat", **({"x-reef-tag-release": tag} if tag else {})}
                 response = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})
                 assert response.status == 200
@@ -1129,7 +1143,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
         return [(item.artifact_id, item.payload.get("metadata", {}).get("tags", {}).get("release")) for item in rows]
 
     recorded = asyncio.run(run())
-    first, middle, served = releases
+    first, middle, served = artifacts
     assert recorded == [(served, middle), (served, first), (served, "no-such-release"), (served, None)]
 
 
@@ -1212,7 +1226,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
                 )
             )
         with pytest.raises(ValueError, match="training_mode"):
-            dispatcher.accept_instruction("math", {"text": "train"})
+            dispatcher.accept_request("math", {"text": "train"})
         scenario = dispatcher.get_or_create_scenario("math")
 
         def fail_write(item: AgentRecord) -> None:

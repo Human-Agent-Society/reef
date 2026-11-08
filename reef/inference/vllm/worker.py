@@ -8,15 +8,15 @@ from typing import Any
 import ray
 
 from reef.inference.process import EngineStartup, retire_engines
-from reef.inference.vllm.config import VLLMConfig
-from reef.inference.vllm.launch import VLLMEngineGroup, VLLMEngineHealthChecks
-from reef.runtime.recovery import (
+from reef.inference.recovery import (
     EngineHealthMonitor,
     HealthMonitorConfig,
     InferenceControl,
     InferenceEngineGroup,
     InferenceMonitor,
 )
+from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.launch import VLLMEngineGroup, VLLMEngineHealthChecks
 
 
 class VLLMWorker:

@@ -5,7 +5,7 @@ such as trajectory items (``POST /reef/namespaces/{owner}/data``) or imported re
 (``POST /reef/records``). It takes no GPUs and serves no requests: its base URL
 names no HTTP engine, so control writes no ``served_models`` row for it and the
 inference service answers every request 404. Reef still publishes and commits
-every saved checkpoint as a release, which another deployment can serve.
+every saved checkpoint as a snapshot, which another deployment can serve.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable
-from reef.runtime.deployment import RuntimeFactory
-from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import InferenceAdmissionHandle, InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.registry import RuntimeFactory
 
 #: The response body of every inference request.
 UNAVAILABLE_MESSAGE = (
@@ -35,7 +35,7 @@ class NullInferenceHandler(InferenceHandler):
 
 
 class NullInferenceRuntime(InferenceRuntime):
-    """Serve nothing: admission refuses every request, and activating a release loads nothing."""
+    """Serve nothing: admission refuses every request, and activating a snapshot loads nothing."""
 
     def __init__(self, *, model_path: str = "", inference_timeout_s: float = 300.0) -> None:
         super().__init__(base_url=NULL_INFERENCE_URL, inference_timeout_s=inference_timeout_s)
@@ -56,7 +56,7 @@ class NullInferenceRuntime(InferenceRuntime):
 
     @property
     def shared_by_training_scenarios(self) -> bool:
-        # Nothing is served, so no scenario's release replaces another's.
+        # Nothing is served, so no scenario's snapshot replaces another's.
         return True
 
     async def acquire_inference(self) -> InferenceAdmissionHandle:

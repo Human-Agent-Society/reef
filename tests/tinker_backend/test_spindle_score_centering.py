@@ -8,18 +8,16 @@ import urllib.error
 import urllib.request
 
 import pytest
+from tests.support.job_data import job_data_ref
 from tests.tinker_backend.test_spindle_full import BASE, MODEL, RELEASES, SPINDLE, Exporter, SpindleClient
 
 from reef.core.errors import DeployConfigError
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos import TrainingSignal
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.algos.schedule import StepScheduling
+from reef.train.algos.signals import TrainingSignal
+from reef.train.component import TrainingJob
 from reef.train.task_rollouts import ChatEndpoint, TaskJobRollouts
 from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.config import ScoreCentering, SpindleFullConfig
@@ -31,6 +29,11 @@ from reef.train.tinker_backend.losses import (
     MatrixInput,
     ScoreCenteredLoss,
     TokenRow,
+)
+from reef.train.tinker_backend.objectives import (
+    TinkerObjective,
+    register_tinker_objective,
+    unregister_tinker_objective,
 )
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
@@ -52,7 +55,7 @@ def trajectory(group: str = "g", reward: float = 1.0, **training: object) -> Tra
     )
 
 
-class Objective(TrainingObjective):
+class Objective(TinkerObjective):
     loss_family = "importance_sampling"
     name = "score-centering-test-objective"
 
@@ -60,7 +63,7 @@ class Objective(TrainingObjective):
         return TrainingSignal("train", {}, advantages=tuple(1.0 for _ in batch.samples))
 
 
-class SftObjective(TrainingObjective):
+class SftObjective(TinkerObjective):
     loss_family = "sft"
     name = "score-centering-test-sft"
 
@@ -68,7 +71,7 @@ class SftObjective(TrainingObjective):
         return TrainingSignal("train", {})
 
 
-class TttdObjective(TrainingObjective):
+class TttdObjective(TinkerObjective):
     loss_family = "tttd"
     name = "score-centering-test-tttd"
 
@@ -82,16 +85,16 @@ def objectives():
 
     values = (Objective(), SftObjective(), TttdObjective())
     for value in values:
-        register_objective(value)
+        register_tinker_objective(value)
     yield values
     for value in values:
-        unregister_objective(value.name)
+        unregister_tinker_objective(value.name)
 
 
-def prepare(objective: TrainingObjective, *items: TrajectorySample):
+def prepare(objective: TinkerObjective, *items: TrajectorySample):
     return prepare_tinker_job(
         JobData("d", items),
-        TrainingMethod(objective.name),
+        objective.name,
         {},
         StepScheduling(),
         batch_size=len(items),
@@ -250,9 +253,7 @@ class Client(SpindleClient):
 
 
 @pytest.mark.unit
-def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, monkeypatch):
-    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
-
+def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, monkeypatch, objectives):
     widths = []
 
     def fake_roll_out(tasks, settings, rollout_chat, **options):
@@ -273,7 +274,7 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
         task.mkdir()
         (task / "task.toml").write_text('version = "1.0"\n')
         parameters = {
-            "method": TrainingMethod("task_group").to_dict(),
+            "objective": Objective.name,
             "rollout": {"rollouts_per_task": 2},
             "batch_size": 2,
         }
@@ -282,7 +283,7 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
                 "job-0",
                 component.name,
                 component.base_start,
-                JobData("d", (TaskSample(task, metadata={"task": {"name": "add"}}),)),
+                job_data_ref(JobData("d", (TaskSample(task, metadata={"task": {"name": "add"}}),))),
                 parameters,
                 scenario="s",
             )

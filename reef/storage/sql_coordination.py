@@ -5,13 +5,12 @@ The services of a deployment hand work to each other through these tables:
 - ``served_model`` and ``scheduled_stop`` hold ``served_models`` (``reef.storage.served_models``);
 - ``control_lease`` holds the control lease (``reef.storage.control_lease``);
 - ``work_item`` holds the work queues (``reef.storage.work_queue``);
-- ``coordination_mark`` holds the marks (``reef.storage.marks``);
 - ``coordination_sequence`` holds two counters: ``WORK_SEQUENCE`` numbers the changes of the work queues, and
   ``SERVED_SEQUENCE`` the changes of ``served_models`` and its stops.
 
 A write that numbers its change takes its counter's row first. So the writes of one counter are serialized, and
 the sequence order of their changes is the order in which they commit: a reader that reads the changes after a
-sequence never misses a later commit. A write that numbers nothing (a lease extension, a mark) takes no counter, so
+sequence never misses a later commit. A write that numbers nothing (a lease extension) takes no counter, so
 it never waits behind the writes of a counter.
 """
 
@@ -22,7 +21,7 @@ import json
 import math
 import time
 from abc import abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,9 +60,7 @@ from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
-from reef.storage.marks import Marks, check_mark_name
-from reef.storage.migrations import migrate_work_item_columns
-from reef.storage.postgres import postgres_url, validate_postgres_schema
+from reef.storage.migrations import migrate_training_request_items, migrate_work_item_columns, remove_record_copies
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
@@ -73,7 +70,7 @@ from reef.storage.served_models import (
     ControlLeaseConflict,
     ServedModelsWriter,
 )
-from reef.storage.sqlite import enable_wal
+from reef.storage.sql_setup import enable_wal, postgres_url, validate_postgres_schema
 from reef.storage.work_queue import (
     FINAL_STATES,
     HELD_STATES,
@@ -101,10 +98,10 @@ class CoordinationTables:
     sequence: Table
     served_model: Table
     serving_config: Table
+    traffic_weights: Table
     scheduled_stop: Table
     control_lease: Table
     work_item: Table
-    mark: Table
 
 
 def coordination_tables(metadata: MetaData) -> CoordinationTables:
@@ -128,6 +125,13 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
     # The override of the served component that each scenario's routes serve with (RFC #1097); no row is no field.
     serving_config = Table(
         "serving_config",
+        metadata,
+        Column("scenario", Text, primary_key=True),
+        Column("value_json", Text, nullable=False),
+    )
+    # The weight of each artifact in each scenario's traffic split; no row is no split.
+    traffic_weights = Table(
+        "traffic_weights",
         metadata,
         Column("scenario", Text, primary_key=True),
         Column("value_json", Text, nullable=False),
@@ -175,13 +179,9 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("changed_sequence", BigInteger, nullable=False, index=True),
         PrimaryKeyConstraint("queue", "item_id"),
     )
-    mark = Table(
-        "coordination_mark",
-        metadata,
-        Column("name", Text, primary_key=True),
-        Column("value", BigInteger, nullable=False),
+    return CoordinationTables(
+        sequence, served_model, serving_config, traffic_weights, scheduled_stop, control_lease, work_item
     )
-    return CoordinationTables(sequence, served_model, serving_config, scheduled_stop, control_lease, work_item, mark)
 
 
 #: The counter row that numbers the changes of the work queues.
@@ -248,6 +248,8 @@ class CoordinationDatabase(CoordinationResource):
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
         migrate_work_item_columns(connection, self.tables.work_item)
+        migrate_training_request_items(connection, self.tables.work_item)
+        remove_record_copies(connection, self.tables.work_item)
         present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
         for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
             if sequence not in present:
@@ -471,6 +473,8 @@ class SQLServedModels(ServedModelsWriter):
                 return item
             self.replace_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
             self.replace_serving_config(connection, served_counter, scenario, {})
+            traffic = self.tables.traffic_weights
+            connection.execute(delete(traffic).where(traffic.c.scenario == scenario))
             return self.work.save(connection, counter, item, moment, state="finished", result={}, ended_at=moment)
 
     def replace_routes(
@@ -630,6 +634,7 @@ class SQLServedModels(ServedModelsWriter):
         worker_id: str,
         *,
         stop_delay_seconds: float,
+        kept: Collection[ServedArtifact],
         now: float | None = None,
     ) -> None:
         if not math.isfinite(stop_delay_seconds) or stop_delay_seconds < 0:
@@ -658,7 +663,10 @@ class SQLServedModels(ServedModelsWriter):
             self.checked_owner(connection, owner, worker_id, moment)
             for row in connection.execute(latest).mappings().all():
                 current = item_from_row(row)
-                self.replace_routes(connection, served_counter, current.scenario, {}, moment + stop_delay_seconds)
+                served = self.tables.served_model
+                routes = connection.execute(select(served).where(served.c.scenario == current.scenario)).mappings()
+                staying = {row["name"]: route for row in routes if (route := served_from_row(row)) in kept}
+                self.replace_routes(connection, served_counter, current.scenario, staying, moment + stop_delay_seconds)
                 if current.state != "finished" or not current.payload:
                     continue
                 sequence = counter.next()
@@ -705,6 +713,28 @@ class SQLServedModels(ServedModelsWriter):
         with self.database.read() as connection:
             value_json = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
         return {} if value_json is None else cast(dict[str, JsonValue], json.loads(value_json))
+
+    def read_traffic_weights(self, scenario: str) -> Mapping[str, int]:
+        table = self.tables.traffic_weights
+        with self.database.read() as connection:
+            value_json = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
+        return {} if value_json is None else cast(dict[str, int], json.loads(value_json))
+
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
+        table = self.tables.traffic_weights
+        routes = self.tables.served_model
+        with self.database.write(SERVED_SEQUENCE) as (connection, counter):
+            self.checked(connection, control_lease_number)
+            names = connection.execute(select(routes.c.name).where(routes.c.scenario == scenario)).scalars().all()
+            missing = sorted(
+                artifact_id for artifact_id, weight in weights.items() if weight > 0 and artifact_id not in names
+            )
+            if missing:
+                raise ValueError(f"serve these artifacts before they get a traffic weight: {', '.join(missing)}")
+            connection.execute(delete(table).where(table.c.scenario == scenario))
+            if weights:
+                connection.execute(insert(table).values(scenario=scenario, value_json=canonical_json(dict(weights))))
+            counter.next()
 
     def changed_sequence(self) -> int:
         with self.database.read() as connection:
@@ -851,35 +881,6 @@ class SQLControlLease(ControlLease):
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
 
-class SQLMarks(Marks):
-    """The marks as rows of ``coordination_mark``. A mark changes no work, so it takes no sequence value."""
-
-    def __init__(self, database: CoordinationDatabase) -> None:
-        self.database = database
-        self.table = database.tables.mark
-
-    def read(self, name: str) -> int:
-        with self.database.read() as connection:
-            value = connection.execute(
-                select(self.table.c.value).where(self.table.c.name == check_mark_name(name))
-            ).scalar_one_or_none()
-        return 0 if value is None else int(value)
-
-    def advance(self, name: str, value: int) -> None:
-        check_mark_name(name)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError("a mark is a non-negative int")
-        with self.database.connection(write=True) as connection:
-            query = select(self.table.c.value).where(self.table.c.name == name)
-            if self.database.locks_rows:
-                query = query.with_for_update()
-            current = connection.execute(query).scalar_one_or_none()
-            if current is None:
-                connection.execute(insert(self.table).values(name=name, value=value))
-            elif value > int(current):
-                connection.execute(update(self.table).where(self.table.c.name == name).values(value=value))
-
-
 def item_from_row(row: RowMapping) -> WorkItem:
     return WorkItem(
         queue=row["queue"],
@@ -995,7 +996,11 @@ class SQLWorkQueue(WorkQueue):
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             found = connection.execute(waiting).mappings().first()
             if found is not None:
-                return item_from_row(found)
+                queued = item_from_row(found)
+                wanted = moment if available_at is None else available_at
+                if queued.available_at <= wanted:
+                    return queued
+                return self.save(connection, counter, queued, moment, available_at=wanted)
             sequence = counter.next()
             work = NewWork(
                 queue,
@@ -1356,7 +1361,6 @@ def coordination_on(
         SQLWorkQueue(database, lease_seconds=lease_seconds, default_attempts=default_attempts),
         SQLServedModels(database, lease),
         lease,
-        SQLMarks(database),
     )
 
 
@@ -1372,7 +1376,6 @@ __all__ = [
     "CoordinationTables",
     "PostgresCoordinationDatabase",
     "SQLControlLease",
-    "SQLMarks",
     "SQLServedModels",
     "SQLWorkQueue",
     "SQLiteCoordinationDatabase",

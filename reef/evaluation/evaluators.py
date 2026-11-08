@@ -38,7 +38,7 @@ from reef.core.evaluation import (
 
 @dataclass(frozen=True)
 class ScoreComparison:
-    """How a candidate's rollouts compare with the current release's, pair by pair.
+    """How a candidate's rollouts compare with the current snapshot's, pair by pair.
 
     Values: ``wins``, ``losses``, ``ties`` and ``dropped`` are non-negative ints, and their sum is the number of
     pairs. Purpose: ``compare_scores`` makes it; the ``compare`` policy reads it.
@@ -58,7 +58,7 @@ class ScoreComparison:
 
 
 def compare_scores(candidate: RolloutScores, current: RolloutScores) -> ScoreComparison:
-    """Compare two releases' rollouts pair by pair: the same task and the same run on each side.
+    """Compare two snapshots' rollouts pair by pair: the same task and the same run on each side.
 
     The rollouts of a pair rank by their values. A pair with a failed side is dropped: the environment, not
     either policy, decided it. ``ValueError`` when the two did not run the same tasks the same number of times.

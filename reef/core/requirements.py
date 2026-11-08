@@ -1,12 +1,12 @@
-"""What a release needs from the person: the ``requires`` items a training request carries.
+"""What a snapshot needs from the person: the ``requires`` items a training request carries.
 
 A request posted to ``POST /reef/train`` may name what its change needs
 from the person's machine, as ``{name, kind, check, prompt}`` items (the
 ``prompt`` is one sentence telling the person what to enter or grant); the
 proposer may add items its extension needs, and the commit that answered the
-request carries the merged list under ``training_request.requires``. A release's
-items are per step, so the manifest and the release pages read the union over
-the release's chain with :func:`required_by`. Nothing here runs a check: a
+request carries the merged list under ``training_request.requires``. A snapshot's
+items are per step, so the manifest and the snapshot pages read the union over
+the snapshot's chain with :func:`required_by`. Nothing here runs a check: a
 client runs the checks where the harness runs, after the person read them.
 """
 
@@ -19,7 +19,7 @@ from typing import Any
 #: What a ``requires`` item asks of the person: an OS permission to grant, a variable to set, a service to
 #: connect, a program to install. A ``binary`` item's name is the program, looked for on PATH.
 REQUIRE_KINDS = ("permission", "env", "service", "binary")
-#: A release names a handful of things to set up; a longer list is a request that should be split.
+#: A snapshot names a handful of things to set up; a longer list is a request that should be split.
 MAX_REQUIRES = 8
 #: A prompt is one sentence saying what to enter or grant; the listings show it beside the item, so it stays short.
 MAX_REQUIRE_PROMPT = 200
@@ -91,7 +91,7 @@ def merge_requires(base: Sequence[Mapping[str, Any]], added: Sequence[Mapping[st
 
 
 def row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-    """The ``training_request.requires`` items of one release's gate metrics; empty when the step read no request."""
+    """The ``training_request.requires`` items of one snapshot's gate metrics; empty when the step read no request."""
     request = metrics.get("training_request") if isinstance(metrics, Mapping) else None
     requires = request.get("requires") if isinstance(request, Mapping) else None
     if not isinstance(requires, Sequence) or isinstance(requires, str):
@@ -102,7 +102,7 @@ def row_requires(metrics: Mapping[str, Any] | None) -> list[dict[str, Any]]:
 def artifact_chain(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -> list[Mapping[str, Any]]:
     """The content chain of ``artifact_id`` through the catalog ``rows``, newest first.
 
-    ``rows`` come oldest first, as ``GET /reef/harness/releases`` lists
+    ``rows`` come oldest first, as ``GET /reef/harness/artifacts`` lists
     them, and the row that published an id is its oldest row; the chain
     continues at each row's parent."""
     published: dict[str, Mapping[str, Any]] = {}
@@ -120,14 +120,14 @@ def artifact_chain(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -
 
 
 def required_by(rows: Sequence[Mapping[str, Any]], artifact_id: str | None) -> list[dict[str, Any]]:
-    """What a release needs from the person: every ``training_request.requires`` item over its chain, by name.
+    """What a snapshot needs from the person: every ``training_request.requires`` item over its chain, by name.
 
-    A request's items are per release, so a later release whose request
+    A request's items are per snapshot, so a later snapshot whose request
     named nothing still carries the extension an earlier one added. The
     walk starts at ``artifact_id`` and follows its chain through the
     catalog ``rows``. Names keep the order of their oldest definition and
     the newest definition of a name wins. The one rule for the manifest and
-    the release pages."""
+    the snapshot pages."""
     merged: dict[str, dict[str, Any]] = {}
     for row in reversed(artifact_chain(rows, artifact_id)):
         for item in row_requires(row.get("metrics")):

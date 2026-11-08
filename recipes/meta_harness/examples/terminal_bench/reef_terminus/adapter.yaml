@@ -85,8 +85,8 @@ config:
     defaults: {}
     checks:
       # Terminus 2 constructor arguments a tree may set, verified against
-      # harbor 0.20.0, which reef-eval 0.1.1 resolves; a bump should check
-      # the signature again. The last three are the ones Reef's model
+      # harbor 0.25.0, which Reef's lock pins; a bump should check the
+      # signature again. The last three are the ones Reef's model
       # binding writes, which the render refuses from a tree without it.
       #
       # With ".", the entire file is matched as a dict.

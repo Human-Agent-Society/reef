@@ -19,13 +19,13 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ScenarioCapacityFull, ScenarioLimitReached
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import Trainer
+from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop
 
 
@@ -44,7 +44,7 @@ class StepJobs(StubTrainingComponent):
             self.started.set()
             assert self.resume.wait(10), "the test did not release the cycle"
         step = len(self.submitted)
-        path = self.checkpoint_root / f"{job.data.data_id.replace(':', '-')}-{step}"
+        path = self.checkpoint_root / f"{job.data_id.replace(':', '-')}-{step}"
         path.mkdir(parents=True)
         (path / "model.txt").write_text(f"step {step}", encoding="utf-8")
         return (SavedCheckpoint(0, str(path), str(path)),)
@@ -62,7 +62,7 @@ class StepRecipe(Recipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -143,7 +143,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
     dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
         before = trained(dispatcher, "math", 1)
-        releases = before.release_queries.snapshot_rows(before.scenario_step)
+        artifacts = before.snapshot_queries.snapshot_rows(before.scenario_step)
 
         # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
         wait_for(lambda: dispatcher.unload_if_idle("math"))
@@ -154,7 +154,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
         after = dispatcher.get_or_create_scenario("math")
         assert after is not None and after is not before
         assert after.scenario_step == 3
-        assert after.release_queries.snapshot_rows(after.scenario_step) == releases
+        assert after.snapshot_queries.snapshot_rows(after.scenario_step) == artifacts
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)

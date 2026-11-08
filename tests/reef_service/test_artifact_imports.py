@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent, dispatcher, train
+from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.runtime_stubs import runtime_bindings
 from tests.support.serving import wait_for_serving
@@ -22,7 +22,9 @@ from reef.artifact import (
     directory_checksum,
     read_reference,
 )
+from reef.artifact.artifact import serving_profile_of
 from reef.core.errors import CommitPending, UnknownScenario
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
@@ -33,7 +35,7 @@ from reef.train.trainer import Trainer
 
 
 def weights(directory: Path, content: bytes = b"w9") -> Path:
-    """A full-weight release: the layout of ``StubTrainingComponent``'s releases."""
+    """A full-weight artifact: the layout of ``StubTrainingComponent``'s releases."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -60,6 +62,38 @@ def store(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
+def test_an_import_keeps_the_items_serving_profile_and_training_from_it_inherits_it(tmp_path, monkeypatch) -> None:
+    """RFC #1233: the runtime checks the profile of an import, and an artifact that training makes from it names it."""
+    value, _, _ = dispatcher(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+
+    files = weights(tmp_path / "qwen")
+
+    def import_with(profile: str):
+        return value.import_artifact(
+            "math",
+            opened(files),
+            None,
+            source=source(files),
+            directory=store(tmp_path),
+            item=ItemIdentity("qwen-base", serving_profile=profile),
+        )
+
+    with pytest.raises(ValueError, match="takes no serving profile"):
+        import_with("qwen@1")
+    monkeypatch.setattr(ImportingInference, "check_serving_profile", lambda self, profile, artifact: None)
+    imported = import_with("qwen@1")
+    value.train_from("math", imported.artifact_id)
+    train(value, 1)
+
+    newest = value.list_artifacts("math")[0]
+    assert newest["parent_artifact_id"] == imported.artifact_id
+    for artifact_id in (imported.artifact_id, newest["artifact_id"]):
+        assert serving_profile_of(scenario.resolve_artifact(artifact_id)[1]) == "qwen@1"
+    value.close()
+
+
+@pytest.mark.unit
 def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path) -> None:
     value, runtime, backend_factory = dispatcher(tmp_path)
     train(value, 1)
@@ -75,7 +109,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         "math", opened(weights(tmp_path / "w9")), None, source=source(tmp_path / "w9"), directory=store(tmp_path)
     )
 
-    # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
+    # Nothing serves, trains from or moves to the artifact: the active selection, the chain tip and the start stay.
     assert scenario.current_snapshot() == served
     assert scenario.repository.checkpoint_artifact == checkpoint
     assert scenario.trainer.state == trainer_state
@@ -175,7 +209,7 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
 
 
 class CountingReader(ArtifactSourceReader):
-    """Opens ``mem://`` URIs as the full-weight release in ``directory`` and keeps each URI it opened."""
+    """Opens ``mem://`` URIs as the full-weight artifact in ``directory`` and keeps each URI it opened."""
 
     def __init__(self, directory: Path) -> None:
         self.directory = weights(directory)
@@ -289,7 +323,7 @@ def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_pa
             assert read_reference(stored) is not None and (stored / REFERENCE_FILE).is_file()
             assert not (stored / "model.safetensors").exists()
 
-            # The revision must have the layout of the component's releases, and resolve.
+            # The revision must have the layout of the component's snapshots, and resolve.
             del hub.files["config.json"]
             refused = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
             assert refused.status == 400 and "config.json and weight files" in await refused.text()

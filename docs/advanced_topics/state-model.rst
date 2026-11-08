@@ -9,25 +9,25 @@ It includes a record id, a scenario, an inference payload (for inference
 exchange) or feedback (for report), and necessary metadata (e.g. request type
 or artifact identifier used for serving).
 
-``RecordStore`` defines record append, replay, audit, and consumption receipt
+``RecordStore`` defines record append, replay, and audit
 operations. It does not know about scenario lifecycle, commits, artifact
-publication, or training. ``SQLiteRecordStore`` and ``PostgresRecordStore``
-share SQL record operations while supplying their own database connections,
-schemas, and transactions.
+publication, or training. A scenario's records are record items of its owner in
+the data store (RFC #1219): ``ItemRecordStore`` gives the records of one scenario
+over the data store, and each storage session has one.
 
-Consumption does not delete a record: reads include every retained body,
+Consumption does not delete a record: reads include every retained record,
 whether a trainer consumed it or not. Each trainer keeps its own consumption
-in its commits (see `Commit ordering`_). Retention evicts the oldest record
-bodies only when the deployment-wide byte budget is full. It keeps the retry
-hashes, so a retry with different content still conflicts, and it keeps the
-commit metadata.
+in its commits (see `Commit ordering`_). Retention deletes the oldest record
+items only when the deployment-wide byte budget is full
+(``DataStore.prune_records``), and it keeps the commit metadata. A retry of a
+deleted record stores it again.
 
-With a database path configured, the SQLite store uses WAL journalling and
-synchronous = FULL. The default in-memory database is for tests and does not
-survive a restart.
+With a database path configured, the SQLite scenario database uses WAL
+journalling and synchronous = FULL. The default in-memory database is for tests
+and does not survive a restart.
 
-The release chain
------------------
+The snapshot chain
+------------------
 
 The repository retains a publication chain internally. The public state
 model has three parts: immutable artifacts, scenario selections and an
@@ -83,9 +83,12 @@ The publication head orders new snapshots independently of the active
 selection. Publication checks its expected parent and uses a Git push lease;
 a stale writer conflicts instead of overwriting another publication.
 
-Old commit records remain readable. Recovery resolves their stored release
-references to component artifact selections. New selection records retain
-storage locators privately so recovery can load the same immutable bytes.
+Old commit records remain readable, with their stored locations. A new commit
+record stores only its component artifact selection. Recovery reads each
+location from the repository's binding of an artifact ID. A binding never
+changes and Reef never removes one, so a committed record always resolves. A
+retry of a failed commit publishes nothing new: one artifact ID names one
+stored snapshot.
 
 Commit ordering
 ---------------
@@ -94,7 +97,7 @@ Commit ordering
 its task stores. It validates step progression and settles record
 consumption with each commit.
 Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` writes a
-new scenario's root release, opens a storage session, and returns the
+new scenario's root snapshot, opens a storage session, and returns the
 complete ``Scenario``. The scenario owns that session and
 coordinates trainer and artifact operations. Both built-in storages
 assemble their record store with ``CommitHistoryScenarioStore`` and keep
@@ -122,12 +125,12 @@ durable store, the order is:
    * - Commit kind
      - Order after trainer preparation
    * - Activated artifact
-     - Stage the bytes, load them into serving, publish the durable release,
+     - Stage the bytes, publish the durable snapshot,
        commit the store with ``activated: true``, install the committed heads,
        synchronize the backend pointer, apply trainer state.
    * - Activation
-     - Check the selected artifact. A standalone scenario loads it first;
-       a service scenario defers loading until the selection commits. Append
+     - Check the selected artifact. Inference loads it after the selection
+       commits. Append
        an ``activate`` operation with the complete component mapping.
        Publish no artifact snapshot. Recovery restores the committed mapping,
        including every unchanged component.
@@ -147,7 +150,7 @@ durable store, the order is:
        artifact that the activation rule does not activate commits this way.
        A later activation is its own record.
 
-Every trainer is bound to a release component (``records`` when the recipe
+Every trainer is bound to a snapshot component (``records`` when the recipe
 serves none). With several trainers, every commit record names the
 ``component`` that made it. In a scenario of one trainer, commit records,
 checkpoint metadata and drop receipts name no component.
@@ -165,7 +168,7 @@ trainers:
   waits for its commit.
 
 Thus the chain tip does not move under a step, and every step commits on the
-release that it was prepared against.
+snapshot that it was prepared against.
 
 When a commit fails, the worker rebuilds the scenario from durable state at
 once. A cycle that still runs on the old instance keeps that instance open
@@ -175,26 +178,25 @@ under it also ends without a commit.
 
 A commit retires no row, so the trainers share every stored row and each
 keeps its own consumption: a row one trainer consumed is still there for the
-others. Job data that a trainer drops as stale goes on a consumption receipt
-that names its component. On restart each trainer recovers its state and
-read cursor from its own commits and skips the rows its own commits and
-receipts name, which needs durable commit storage.
+others. On restart each trainer recovers its state and
+read cursor from its own commits and skips the rows that they name, which needs
+durable commit storage.
 
-Without a durable store, a saved release advances the active selection and the
+Without a durable store, a saved snapshot advances the active selection and the
 chain tip before the in-memory commit settles. A conflicting chain tip
 therefore rejects the step before its records are consumed. In-memory commit history supports retries
 only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
-under ``scenario_commit_record`` (format ``reef-scenario/6``): the root's
-``source``, and after step zero the root release as ``start_artifact``.
-Recovery also reads legacy ``reef-scenario/5`` metadata and refuses other formats. It decodes the metadata into a ``CommitRecord`` and
+under ``scenario_commit_record`` (format ``reef-scenario/7``): the root's
+``source``, and after step zero the root snapshot as ``start_artifact``.
+Recovery refuses other formats. It decodes the metadata into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
 repairs that pointer. An older checkpoint ahead of the commit history can
 be adopted into the history. Recovery replays retained records through the
 committed watermark while excluding every committed step's consumed IDs and
-the records of every sample that the trainer saved to the sample store, and
+the records that the trainer's stages consumed (its training state), and
 restores the read cursor. The watermark is a read position:
 retained records behind it can still belong to incomplete job data.
 

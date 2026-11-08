@@ -39,7 +39,7 @@ Two programs share the work. ``reef-client`` runs on your machine, next to
 the agent. Reef runs as a service, on the same machine or on a server.
 
 .. figure:: ../assets/harness-tutorial-overview-light.svg
-   :alt: What runs where: your agent and reef-client on your machine; the method and the releases in Reef
+   :alt: What runs where: your agent and reef-client on your machine; the method and the snapshots in Reef
 
    The client installs Reef's version beside your own configuration and sends
    back what a session changed. Reef records the calls, evolves the harness,
@@ -142,9 +142,9 @@ starts on it. List the steps and their results:
 
 .. code:: bash
 
-   curl -s -H "x-reef-scenario: $SCENARIO" http://127.0.0.1:8901/reef/harness/releases
+   curl -s -H "x-reef-scenario: $SCENARIO" http://127.0.0.1:8901/reef/harness/artifacts
 
-Each step has a page, ``/reef/harness/releases/<step>/page``. A change to
+Each step has a page, ``/reef/harness/artifacts/<step>/page``. A change to
 code, such as a pi extension, waits for you to promote it.
 
 When you and Reef change the same file
@@ -152,7 +152,7 @@ When you and Reef change the same file
 
 You can edit Reef's files too, for example the rules in
 ``~/.local/share/reef-client/harness/my-agent/plugin/rules.md``. The client
-sends your edit with the next sync, and Reef merges it onto the active release. Text
+sends your edit with the next sync, and Reef merges it onto the active selection. Text
 files merge line by line:
 
 +---------------------------------+--------------------------------------+

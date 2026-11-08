@@ -14,6 +14,7 @@ from pathlib import Path
 from threading import Barrier, Event
 
 import pytest
+from tests.support.records import memory_records
 
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
@@ -22,7 +23,7 @@ from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.scenario import ScenarioStoreConflict
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
 
@@ -73,13 +74,11 @@ def open_storage(request, tmp_path):
 
 def test_commit_is_fenced_and_preserves_readable_records(store):
     store.records.append(record("record-1"))
-    store.records.append(record("other", scenario="code"))
     accepted = store.commit_step(expected_step=0, commit=commit())
 
     assert accepted == commit()
     assert store.history() == (accepted,)
     assert [row.agent_record_id for row in store.records.replay("math")] == ["record-1"]
-    assert store.records.get("code", "other") is not None
     assert store.training_run_position() == (0, 1)
 
 
@@ -227,16 +226,17 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
 
 
 def sqlite_session(*, database=None, initial_step=0):
-    records = SQLiteRecordStore(database)
+    opened = SQLiteScenarioDatabase(database)
     files = LocalTaskFileStore()
-    tasks = records.task_storage(files, "math")
+    tasks = opened.task_storage(files, "math")
     return CommitHistoryScenarioStore(
         "math",
-        records,
-        records.commit_history(),
+        memory_records(),
+        opened.commit_history(),
         tasks=tasks,
-        samples=records.sample_store(files, "math"),
-        evaluations=records.evaluation_store(),
+        training_state=opened.training_state(),
+        evaluations=opened.evaluation_store(),
+        database=opened,
         initial_step=initial_step,
     )
 
@@ -335,25 +335,24 @@ def test_memory_sessions_wait_for_another_sessions_transaction(write: bool) -> N
         closing(storage.open("math")) as first,
         closing(storage.open("math")) as second,
     ):
-        records = first.records
-        assert isinstance(records, SQLiteRecordStore)
+        database = first._database
+        assert isinstance(database, SQLiteScenarioDatabase)
         started = Event()
-        item = record("concurrent")
 
         def append() -> None:
             started.set()
-            second.records.append(item)
+            second.commit_step(expected_step=0, commit=commit())
 
         with ThreadPoolExecutor(max_workers=1) as pool:
-            with records._transaction(write=write) as connection:
+            with database._transaction(write=write) as connection:
                 # Shared-cache reads lock the table until their transaction ends.
-                connection.exec_driver_sql("SELECT agent_record_id FROM agent_record").fetchall()
+                connection.exec_driver_sql("SELECT step FROM scenario_commit").fetchall()
                 pending = pool.submit(append)
                 assert started.wait(5)
                 with pytest.raises(TimeoutError):
                     pending.result(timeout=0.1)
             pending.result(timeout=5)
-        assert first.records.get("math", item.agent_record_id) == item
+        assert first.history() == (commit(),)
 
 
 def test_session_refreshes_cached_history_after_another_writer(open_storage):
@@ -442,14 +441,14 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
 def test_an_archive_skips_a_wal_file_that_sqlite_removed_while_it_moved_the_files(tmp_path, monkeypatch):
     """SQLite removes a WAL file only after it folded its frames into the database. When a reader of another
     service makes it do so while the archive runs, the archive skips the file and the moved database keeps every
-    record."""
+    commit."""
     import sqlite3
 
     import reef.storage.sqlite as sqlite_module
 
     factory = SQLiteScenarioStorage(tmp_path)
     reader = factory.open("math")
-    reader.records.append(record("record-1"))
+    reader.commit_step(expected_step=0, commit=commit())
     database, wal, _ = factory.state_paths("math")
     with closing(sqlite3.connect(database)) as connection:
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -465,25 +464,8 @@ def test_an_archive_skips_a_wal_file_that_sqlite_removed_while_it_moved_the_file
     monkeypatch.undo()
     reader.close()
     assert [Path(location).name for location in archived] == [database.name, f"{database.name}-shm"]
-    with closing(SQLiteRecordStore(Path(archived[0]))) as records:
-        assert records.count("math") == 1
-    factory.close()
-
-
-def test_storage_capacity_includes_unconsumed_archived_records(tmp_path):
-    factory = SQLiteScenarioStorage(tmp_path)
-    with closing(factory.open("math")) as session:
-        session.records.append(record("record-1"))
-        session.records.append(record("active"))
-        session.commit_step(expected_step=0, commit=commit())
-    archived = factory.archive("math")
-
-    assert factory.prune(max_bytes=1) == 2
-
-    database = next(Path(path) for path in archived if path.endswith(".sqlite3"))
-    with SQLiteRecordStore(database) as records:
-        assert records.get_for_audit("math", "record-1") is None
-        assert records.get("math", "active") is None
+    with closing(SQLiteScenarioDatabase(Path(archived[0]))) as database:
+        assert len(database.commit_history().records()) == 1
     factory.close()
 
 
@@ -492,7 +474,6 @@ def test_storage_close_preserves_existing_session_and_rejects_new_operations():
     with closing(factory.open("math")) as session:
         assert factory.durable is False
         assert factory.archive("math") == ()
-        assert factory.prune(max_bytes=1) == 0
         factory.close()
         factory.close()
         session.commit_step(expected_step=0, commit=commit())
@@ -500,8 +481,6 @@ def test_storage_close_preserves_existing_session_and_rejects_new_operations():
             factory.open("math")
         with pytest.raises(RuntimeError, match="storage is closed"):
             factory.archive("math")
-        with pytest.raises(RuntimeError, match="storage is closed"):
-            factory.prune(max_bytes=1)
 
 
 def test_sqlite_storage_does_not_require_posix_locks(tmp_path):

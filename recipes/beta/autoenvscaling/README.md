@@ -162,7 +162,7 @@ Reef refuses at startup a token that is missing or is no Claude Code OAuth token
 
 The pass rate of a task that ran is the mean reward of its training rollouts. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
-The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every rollout of a group whose rewards are all equal. With 0 or 1 rewards and four rollouts per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
+The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. The objective that the deployment provides (`recipe.config.job_parameters.objective`; the example `serve.yaml` holds a placeholder that you must replace) decides what such a group trains. With 0 or 1 rewards and four rollouts per task, a task outside the default band has equal rewards in its group, and it still takes a place in a batch.
 
 ## Solver calibration
 
@@ -321,7 +321,8 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
    from reef.pipeline_context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
    from reef.recipe.generated_tasks.processor import GenerationJob, next_generation
-   from reef.storage.samples import TrainerSamples
+   from reef.storage.samples import SampleStore
+   from reef.storage.sql_data import SQLiteDataStore
    from reef.storage.sqlite import SQLiteScenarioStorage
    from reef.storage.tasks import LocalTaskFileStore
 
@@ -330,8 +331,10 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
        """Run the generator's generations with no trainer: generate, validate, and save the tasks."""
        task_files = LocalTaskFileStore(Path(state_dir) / "task-files")
        storage = SQLiteScenarioStorage(Path(state_dir) / "agent-record", task_files=task_files)
+       data = SQLiteDataStore(Path(state_dir) / "data", task_files)
        session = storage.open("autoenvscaling")
-       context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+       samples = SampleStore(data, "autoenvscaling", "autoenvscaling", session.training_state).for_trainer("")
+       context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=samples)
        generator = AutoEnvScalingGenerator.from_config(generator_config, scenario=context.scenario, environ=os.environ)
        settings = GeneratedTaskSettings(
            rounds=rounds,
@@ -345,12 +348,13 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
        finally:
            tasks.close()
            session.close()
+           data.close()
            storage.close()
    ```
 
    `generator_config` is the generator's `config` from the example, with its environment references filled in. `state_dir` is the deployment's state directory, so the generations save each valid task in the task store that the example's `storage` uses. The band is only recorded in the generation report. A restart continues with the next generation.
 
-2. **Train from the saved tasks.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it stores their train tasks in the scenario's sample store and trains them, up to `buffer_size` tasks in one job.
+2. **Train from the saved tasks.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it saves their train tasks as task items that the scenario uses and trains them, up to `buffer_size` tasks in one job.
 
    ```bash
    reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2sample.config.rounds 4

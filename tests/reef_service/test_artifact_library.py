@@ -10,18 +10,18 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent
+from tests.support.artifact_versions import ImportingComponent, ImportingInference
 from tests.support.runtime_stubs import runtime_bindings
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import SnapshotRef
+from reef.artifact.artifact import SnapshotRef, serving_profile_of
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
-from reef.service.data_service import DataWorker, data_jobs
+from reef.service.data_service import DataWorker, copy_scenario_artifacts, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_coordination import memory_coordination
@@ -33,32 +33,42 @@ DATA = "/reef/namespaces/acme/data"
 
 
 class UriBackend(InMemoryRepositoryBackend):
-    """An in-memory repository that names each release's directory with a ``file`` URI, as an object store names it
+    """An in-memory repository that names each snapshot's directory with a ``file`` URI, as an object store names it
     with an ``s3`` URI."""
 
-    def release_uri(self, ref: SnapshotRef) -> str:
+    def snapshot_uri(self, ref: SnapshotRef) -> str:
         return self.materialize(ref).local_path.as_uri() + "/"
 
 
 def weights(directory: Path, content: bytes) -> Path:
-    """A full-weight release: the layout of the test policy's releases."""
+    """A full-weight artifact: the layout of the test policy's releases."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
     return directory
 
 
-def cell(tmp_path: Path, name: str) -> Dispatcher:
+class ProfileInference(ImportingInference):
+    """A runtime that serves the serving profiles ``qwen@1`` and ``muse@1`` (RFC #1233)."""
+
+    def check_serving_profile(self, profile, start):
+        if profile not in ("qwen@1", "muse@1"):
+            raise ValueError(f"unknown serving profile {profile!r}")
+
+
+def cell(tmp_path: Path, name: str, *, serves_profiles: bool = False) -> Dispatcher:
     """One deployment, a Cell, whose data service copies records and artifacts, as assembly builds it.
 
     Every Cell of ``tmp_path`` shares the data store under ``tmp_path / "data"``; each has its own repository and
-    records.
+    records. With ``serves_profiles``, its runtime is a ``ProfileInference``.
     """
     root = tmp_path / name
     runtime = ImportingComponent(root / "exported")
+    if serves_profiles:
+        runtime.inference = ProfileInference(runtime.restore_order)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
-    storage = SQLiteScenarioStorage(root / "records", task_files=task_files)
+    storage = SQLiteScenarioStorage(root / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
         UriBackend.factory(directory=root / "repository"),
@@ -125,22 +135,34 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             refused = await client.delete(f"{DATA}/{item_id}")
             assert refused.status == 400 and "still exists" in await refused.text()
 
-            # A scenario of the owner in the other Cell imports the item: a copy of the same content, which names
-            # the item.
+            # A scenario of the owner in the other Cell imports the item: the same artifact, under the same ID, and
+            # the library keeps one item of it (RFC #1218).
             into = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
             assert into.status == 201, await into.text()
             receipt = await into.json()
-            copied = await library_item(client, f"other/{receipt['artifact_id']}")
-            assert "content_id" not in copied["content"]
+            assert receipt["artifact_id"] == imported["artifact_id"]
             listed = (await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]
             assert listed[0]["source"] == {"uri": content["source_uri"], "version": "", "item": item_id}
-            # The import is an artifact of "other", so it enters the library too.
-            await library_item(client, f"other/{receipt['artifact_id']}")
+            again = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
+            assert (await again.json())["artifact_id"] == imported["artifact_id"]
+            assert len((await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]) == len(
+                listed
+            )
+            assert copy_scenario_artifacts(second, "other") == 0
+            missing = await client.get(f"{DATA}/other/{receipt['artifact_id']}")
+            assert missing.status == 404
 
             # A client adds files that it stored as an item of its own, imports it, and deletes it.
             body = upload_item("upload-1", weights(tmp_path / "upload", b"w10"))
             assert (await client.post(DATA, json=body)).status == 201
-            assert (await other_cell.post("/reef/scenarios/other/artifacts", json={"item": "upload-1"})).status == 201
+            first_use = await (
+                await other_cell.post("/reef/scenarios/other/artifacts", json={"item": "upload-1"})
+            ).json()
+            # An upload gets one ID at its first use, and it keeps it.
+            stored = await (await client.get(f"{DATA}/upload-1")).json()
+            assert stored["metadata"]["artifact_id"] == first_use["artifact_id"]
+            patch = {"ids": ["upload-1"], "patch": {"artifact_id": "artifact:other"}}
+            assert (await client.post(f"{DATA}/metadata", json=patch)).status == 400
             assert (await client.delete(f"{DATA}/upload-1")).status == 200
 
             # A scenario uses an artifact item by importing it, not through metadata.scenarios.
@@ -166,7 +188,7 @@ def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
 
 @pytest.mark.integration
 def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path) -> None:
-    """RFC #1062, RFC #1070: the item is the scenario's root release, so it is the active artifact and the training
+    """RFC #1062, RFC #1070: the item is the scenario's root snapshot, so it is the active artifact and the training
     start, and the creation row names the item as its source.
 
     A process trains one scenario, so each new scenario has a Cell of its own; the Cells share the data store.
@@ -195,6 +217,8 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert created.status == 201, await created.text()
                 answer = await created.json()
                 started = answer["artifact_id"]
+                if name == "from-scenario":
+                    assert started == imported["artifact_id"]
                 assert answer == {
                     "scenario": name,
                     "owner": "acme",
@@ -217,7 +241,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
                 # The root is the only release: no default start was written first.
-                assert len(scenario.release_queries.snapshot_rows(scenario.scenario_step)) == 1
+                assert len(scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(
@@ -231,6 +255,56 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
     finally:
         for dispatcher in cells.values():
             dispatcher.close()
+
+
+@pytest.mark.integration
+def test_an_artifact_takes_its_serving_profile_from_its_item_and_the_profile_never_changes(tmp_path: Path) -> None:
+    """RFC #1233: a client writes the profile when it creates an item, the runtime checks it when an artifact takes it,
+    and one scenario holds artifacts of several profiles."""
+    profiled, plain = cell(tmp_path, "profiled", serves_profiles=True), cell(tmp_path, "plain")
+
+    def profiled_item(item_id: str, profile: str) -> dict[str, Any]:
+        body = upload_item(item_id, weights(tmp_path / item_id, item_id.encode()))
+        body["items"][0]["metadata"]["serving_profile"] = profile
+        return body
+
+    async def run() -> None:
+        async with client_of(plain, tmp_path) as client:
+            for item_id, profile in (("qwen-base", "qwen@1"), ("muse-ft", "muse@1"), ("gpt-base", "gpt@1")):
+                assert (await client.post(DATA, json=profiled_item(item_id, profile))).status == 201
+            changed = await client.post(
+                f"{DATA}/metadata", json={"ids": ["qwen-base"], "patch": {"serving_profile": "x"}}
+            )
+            assert changed.status == 400 and "never changes" in await changed.text()
+            refused = await client.post(
+                "/reef/scenarios", json={"name": "plain", "owner": "acme", "artifact_id": "qwen-base"}
+            )
+            assert refused.status == 400 and "takes no serving profile" in await refused.text()
+            assert not plain.has_scenario("plain")
+        async with client_of(profiled, tmp_path) as client:
+            body = {"name": "math", "owner": "acme"}
+            unknown = await client.post("/reef/scenarios", json={**body, "artifact_id": "gpt-base"})
+            assert unknown.status == 400 and "unknown serving profile" in await unknown.text()
+            assert not profiled.has_scenario("math")
+            created = await client.post("/reef/scenarios", json={**body, "artifact_id": "qwen-base"})
+            assert created.status == 201, await created.text()
+            muse = await client.post("/reef/scenarios/math/artifacts", json={"item": "muse-ft"})
+            assert muse.status == 201, await muse.text()
+            direct = await client.post(
+                "/reef/scenarios/math/artifacts", json={"source": weights(tmp_path / "direct", b"d").as_uri()}
+            )
+            scenario = profiled.registry.require("math")
+            profiles = {
+                answer["artifact_id"]: serving_profile_of(scenario.resolve_artifact(answer["artifact_id"])[1])
+                for answer in [await created.json(), await muse.json(), await direct.json()]
+            }
+            assert sorted(profiles.values(), key=str) == [None, "muse@1", "qwen@1"]
+
+    try:
+        asyncio.run(run())
+    finally:
+        profiled.close()
+        plain.close()
 
 
 @pytest.mark.integration

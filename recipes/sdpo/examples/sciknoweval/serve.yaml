@@ -48,7 +48,7 @@ pipeline:
   # and the teacher's windows.
   record2sample:
     config:
-      max_staleness: 0               # on-policy: the stage waits for each step's release before sampling again
+      max_staleness: 0               # on-policy: the stage waits for each step's snapshot before sampling again
       groups_per_step: 32            # MUST equal the stage's SDPO_GROUPS_PER_STEP
       rollouts_per_group: 8          # MUST equal the stage's SDPO_ROLLOUTS_PER_GROUP
       max_teacher_prompt_tokens: 10240  # the reference's max_reprompt_len

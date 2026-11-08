@@ -28,10 +28,10 @@ def _make_client(tokens, evaluation_tokens=None) -> TestClient:
     app.router.add_get("/healthz", _ok)
     # The two harness pages a browser opens by a link, and their neighbours that are no page.
     app.router.add_get("/reef/harness/requests/{record_id}/page", _ok)
-    app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/page", _ok)
+    app.router.add_get(r"/reef/harness/artifacts/{step:\d{1,9}}/page", _ok)
     app.router.add_post("/reef/harness/requests/{record_id}/page", _ok)
-    app.router.add_get("/reef/harness/releases", _ok)
-    app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/records", _ok)
+    app.router.add_get("/reef/harness/artifacts", _ok)
+    app.router.add_get(r"/reef/harness/artifacts/{step:\d{1,9}}/records", _ok)
     app.router.add_get("/reef/harness/requests/{record_id}/progress", _ok)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", _ok)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", _ok)
@@ -72,7 +72,7 @@ def test_the_anthropic_dialect_presents_the_token_in_its_own_header() -> None:
 
 
 def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
-    """The token a recipe's evaluation calls carry runs candidate code: it samples the served release through the
+    """The token a recipe's evaluation calls carry runs candidate code: it samples the served artifact through the
     evaluation routes, in either header, and every other route refuses it."""
 
     async def run() -> None:
@@ -169,13 +169,13 @@ def test_the_token_is_never_read_from_a_query() -> None:
         async with client:
             for path in (
                 "/reef/harness/requests/3f1c2a9d0b7e/page",
-                "/reef/harness/releases/3/page",
+                "/reef/harness/artifacts/3/page",
                 "/protected",
-                "/reef/harness/releases",
+                "/reef/harness/artifacts",
             ):
                 resp = await client.get(path, params={"token": "secret"})
                 assert resp.status == 401, path
-            path = "/reef/harness/releases/3/page"
+            path = "/reef/harness/artifacts/3/page"
             resp = await client.get(path, params={"token": "nope"}, headers={"Authorization": "Bearer secret"})
             assert resp.status == 200
 
@@ -193,7 +193,7 @@ def test_a_page_key_opens_the_two_pages_of_its_scenario_and_nothing_else() -> No
         client = _make_client(["old", "secret"])
         key = page_key("secret", "mine")
         async with client:
-            for path in ("/reef/harness/requests/3f1c2a9d0b7e/page", "/reef/harness/releases/3/page"):
+            for path in ("/reef/harness/requests/3f1c2a9d0b7e/page", "/reef/harness/artifacts/3/page"):
                 resp = await client.get(path, params={"scenario": "mine", "key": key})
                 assert resp.status == 200, path
                 resp = await client.get(path, params={"scenario": "mine", "key": page_key("old", "mine")})
@@ -210,8 +210,8 @@ def test_a_page_key_opens_the_two_pages_of_its_scenario_and_nothing_else() -> No
                     assert resp.status == 401, path
             for path in (
                 "/protected",
-                "/reef/harness/releases",
-                "/reef/harness/releases/3/records",
+                "/reef/harness/artifacts",
+                "/reef/harness/artifacts/3/records",
                 "/reef/harness/requests/3f1c2a9d0b7e/progress",
             ):
                 resp = await client.get(path, params={"scenario": "mine", "key": key})

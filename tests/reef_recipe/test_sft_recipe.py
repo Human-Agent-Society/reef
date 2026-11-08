@@ -21,16 +21,15 @@ from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.recipe.sft import SFTJobData, SftObjective, SFTRecipe, SFTSamples, SFTSettings
-from reef.runtime.interfaces import TrainingMethod
+from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
 from reef.sample2job import DistillJobData
+from reef.storage.data import NewItem
 from reef.train import PipelineContext
-from reef.train.algos import registry
-from reef.train.algos.registry import ObjectiveRegistry, resolve_objective
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.objectives import SftObjective, resolve_slime_objective
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.sft import SftAlgorithm
 
@@ -343,8 +342,8 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
     assert isinstance(recipe, SFTRecipe)
     assert recipe.name == "sft"
     assert recipe.report_type is TeacherContextReport
-    spec = SFTRecipe.training_spec()
-    assert (spec.objective, spec.loss_family) == ("reef.recipe.sft:SftObjective", "sft")
+    assert SFTRecipe.default_parameters() == {"trajectory": {"objective": "sft"}}
+    assert resolve_slime_objective("sft").loss_family == "sft"
     assert SftObjective.rollout_unit == "sample"
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SFTSamples)
@@ -379,34 +378,15 @@ def test_objective_trains_every_batch_without_advantages_and_allows_several_epoc
     assert (signal.action, signal.next_algorithm_state, signal.advantages) == ("train", {"steps": 3}, None)
     assert signal.metrics == {"steps": 3, "samples": 1}
     SftObjective().validate_scheduling(StepScheduling(epochs=3))
-    # Another recipe selects the objective for a job by its dotted reference.
-    assert isinstance(resolve_objective("reef.recipe.sft:SftObjective"), SftObjective)
-
-
-@pytest.mark.unit
-def test_the_recipe_objective_resolves_where_the_recipe_was_never_imported(
-    tokenizer: TurnTokenizer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The Slime bridge never imports the recipe module, so no objective is registered there.
-    monkeypatch.setattr(registry, "OBJECTIVES", ObjectiveRegistry())
-
-    step = prepare_slime_job(
-        _rendered(_pipeline_with_report().build_job_data(1), tokenizer),
-        TrainingMethod(SFTRecipe.training_spec().objective),
-        {},
-        StepScheduling(),
-        step_size=1,
-    )
-
-    assert step.payload is not None
-    assert step.payload["loss"] == "sft"
+    # Another recipe selects the objective for a job by its name.
+    assert isinstance(resolve_slime_objective("sft"), SftObjective)
 
 
 @pytest.mark.unit
 def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: TurnTokenizer) -> None:
     payload = prepare_slime_job(
         _rendered(_pipeline_with_report().build_job_data(1), tokenizer),
-        TrainingMethod("sft"),
+        "sft",
         {},
         StepScheduling(),
         step_size=1,
@@ -482,7 +462,7 @@ def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnToke
     template = TokenizerChatTemplate(tokenizer)
 
     # The copied turn is context: in the tokens, before the prompt that the loss mask starts after.
-    rendered = render_trajectory(template, _uploaded(ASK, {**CALL, "is_copied_context": True}, ANSWER).trajectory)
+    (rendered,) = render_trajectory(template, _uploaded(ASK, {**CALL, "is_copied_context": True}, ANSWER).trajectory)
     assert rendered.tokens == [
         *ASK_IDS,
         GENERATION_PROMPT,
@@ -496,7 +476,7 @@ def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnToke
     assert rendered.loss_mask == [1] * (len(ANSWER_IDS) + 1)
 
     # A copied turn after the last trained one trains nothing either, so the sample ends before it.
-    rendered = render_trajectory(template, _uploaded(ASK, CALL, {**ANSWER, "is_copied_context": True}).trajectory)
+    (rendered,) = render_trajectory(template, _uploaded(ASK, CALL, {**ANSWER, "is_copied_context": True}).trajectory)
     assert rendered.tokens == [*ASK_IDS, GENERATION_PROMPT, *LOOK_IDS, END_OF_TURN]
     assert rendered.loss_mask == [1] * (len(LOOK_IDS) + 1)
 
@@ -525,7 +505,7 @@ def test_an_uploaded_trajectory_that_cannot_train_is_refused(steps, reason) -> N
 
 
 @pytest.mark.unit
-def test_a_template_that_changes_earlier_turns_or_a_long_sample_is_left_out_by_the_component(
+def test_a_long_sample_is_left_out_and_a_template_that_changes_earlier_turns_trains_in_segments(
     tokenizer: TurnTokenizer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The upload names the limit; the component leaves out a sample that renders longer.
@@ -540,11 +520,10 @@ def test_a_template_that_changes_earlier_turns_or_a_long_sample_is_left_out_by_t
         return ids[1:] if len(conversation) > 2 else ids
 
     monkeypatch.setattr(tokenizer, "apply_chat_template", drops_earlier_turns)
-    # The upload checks only the structure, so it accepts the trajectory; the component cannot render it.
+    # The answer's call rendered the first turn shorter, so each turn trains in a segment of its own.
     sample = _samples().uploaded_sample(_uploaded(ASK, CALL, ANSWER))
-    with pytest.raises(ValueError, match="does not render each turn as a prefix"):
-        render_trajectory(TokenizerChatTemplate(tokenizer), sample.trajectory)
-    assert _left_out(sample, tokenizer) == (0,)
+    assert len(render_trajectory(TokenizerChatTemplate(tokenizer), sample.trajectory)) == 2
+    assert _left_out(sample, tokenizer) == ()
 
 
 @pytest.mark.unit
@@ -556,17 +535,16 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
         record2sample=_samples(),
         sample2job=SFTJobData(context, None, 1),
     )
-    pipeline.store.store.add_trajectories((("t1", _uploaded(ASK, ANSWER)),))
+    samples = pipeline.store.store
+    metadata = {"kind": "trajectory", "scenarios": {"science": "train"}}
+    samples.data.create(samples.owner, [NewItem("t1", dict(_uploaded(ASK, ANSWER).trajectory), metadata)])
     data = pipeline.build_job_data(1)
     (item,) = _rendered(data, tokenizer).samples
     assert item.training["loss_mask"] == [1] * (len(ANSWER_IDS) + 1)
     assert pipeline.acknowledge(data.data_id) == {"sample:t1"}
 
 
-def test_sft_gives_parameters_to_trajectory_jobs_and_trains_imported_tasks_only_by_instruction() -> None:
-    recipe = SFTRecipe(**runtime_bindings())
-    assert set(recipe.parameters_by_kind()) == {"trajectory"}
-    assert (
-        recipe.parameters_by_kind()["trajectory"]["method"] == TrainingMethod("reef.recipe.sft:SftObjective").to_dict()
-    )
+def test_sft_configures_trajectory_jobs_and_trains_imported_tasks_only_by_request() -> None:
+    recipe = SFTRecipe(**runtime_bindings(), job_parameters={"save_interval": 50})
+    assert recipe.parameters_by_kind() == {"trajectory": {"objective": "sft", "save_interval": 50}}
     assert SFTJobData.accepts_trajectories and SFTJobData.accepts_imported_tasks

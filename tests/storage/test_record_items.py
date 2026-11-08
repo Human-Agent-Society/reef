@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
+from tests.support.conversations import conversation
 
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage import record_items
-from reef.storage.data import ItemConflict, MemoryDataStore, NewItem
-from reef.storage.data_sync import release_items
+from reef.storage.data import MemoryDataStore, ScenarioArchived
 from reef.storage.item_kinds import copied_record
-from reef.storage.record_items import copy_records, record_item, sync_scenario_records
+from reef.storage.record_items import ItemRecordStore, record_item, used_record, used_records
+from reef.storage.records import AppendResult, RecordConflict
+from reef.storage.scenario import ScenarioSettings
+from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -52,28 +55,6 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
     }
 
 
-def test_a_copy_makes_one_page_of_items_and_is_safe_to_repeat(tmp_path, monkeypatch):
-    monkeypatch.setattr(record_items, "RECORD_PAGE_SIZE", 2)
-    task_files = LocalTaskFileStore(tmp_path / "task-files")
-    data = MemoryDataStore(task_files)
-    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage, closing(storage.open("math")) as session:
-        for appended in (record("r1", score=1.0), record("r2", score=0.0), record("r3", score=0.5)):
-            session.records.append(appended)
-        assert copy_records(session.records, data, "acme", "math", 0) == 2
-        assert copy_records(session.records, data, "acme", "math", 2) == 3
-        assert copy_records(session.records, data, "acme", "math", 3) == 3
-        assert [item.item_id for item in data.query("acme")] == ["math/r1", "math/r2", "math/r3"]
-        assert copy_records(session.records, data, "acme", "math", 0) == 2, "a copy again changes nothing"
-        assert len(data.query("acme")) == 3
-
-        # A client item with a record item's ID and other content stops the copy.
-        data.delete("acme", "math/r1")
-        other = record_item(record("r1", score=0.5))
-        data.create("acme", [NewItem("math/r1", other.content, other.metadata)])
-        with pytest.raises(ItemConflict):
-            copy_records(session.records, data, "acme", "math", 0)
-
-
 def test_a_copy_in_another_scenario_names_the_copies_of_its_references():
     inference = record_item(record("i1", RequestType.INFERENCE, tokens=[1]))
     report = record_item(
@@ -98,66 +79,118 @@ def test_a_copy_in_another_scenario_names_the_copies_of_its_references():
             copied_record(item_id, content, "math", "code")
 
 
-def test_another_scenario_of_the_owner_holds_copies_that_get_no_items_and_stay(tmp_path):
+def test_another_scenario_of_the_owner_reads_the_records_it_uses_and_stores_no_copy(tmp_path):
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = MemoryDataStore(task_files)
-    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage:
+    with closing(SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data)) as storage:
+        for scenario in ("math", "code"):
+            storage.write_settings(scenario, ScenarioSettings(owner="acme"))
         with closing(storage.open("math")) as session:
             session.records.append(record("i1", RequestType.INFERENCE, tokens=[1]))
             session.records.append(record("r1", score=1.0, references=["i1"]))
-            copy_records(session.records, data, "acme", "math", 0)
         data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": "train"}})
         with closing(storage.open("code")) as session:
-            assert sync_scenario_records(session.records, data, "acme", "code") == ("math/i1", "math/r1")
-            assert sync_scenario_records(session.records, data, "acme", "code") == (), "a sync again adds nothing"
-            assert session.records.get("code", "math/r1").references == ("math/i1",)
-            assert copy_records(session.records, data, "acme", "code", 0) == 2
+            cursor, records = used_records(data, "acme", "code")
+            assert [item.agent_record_id for item in records] == ["math/i1", "math/r1"]
+            assert records[1].references == ("math/i1",) and records[1].scenario == "code"
+            assert used_records(data, "acme", "code", after_sequence=cursor) == (cursor, ()), "nothing new"
+            assert used_record(data, "acme", "code", "math/r1").references == ("math/i1",)
+            assert session.records.get("code", "math/r1") is None, "the scenario stores no copy"
             assert [item.item_id for item in data.query("acme")] == ["math/i1", "math/r1"]
 
-            # The origin keeps its record items; another scenario can drop them, and its copies stay.
+            # A scenario does not read its own items as records of another scenario.
+            assert used_records(data, "acme", "math")[1] == ()
+            assert used_record(data, "acme", "math", "math/i1") is None
+
+            # The origin keeps its record items. Another scenario can drop them, and the read stops at once.
             with pytest.raises(ValueError, match="stays in 'math'"):
                 data.update("acme", ["math/r1"], {"scenarios": {"math": None}})
             data.update("acme", ["math/i1", "math/r1"], {"scenarios": {"code": None}})
-            assert sync_scenario_records(session.records, data, "acme", "code") == ()
-            assert session.records.get("code", "math/i1") is not None
+            assert used_records(data, "acme", "code")[1] == ()
+            assert used_record(data, "acme", "code", "math/i1") is None
 
 
-def test_an_archive_releases_the_items_of_the_scenario_but_not_the_records_it_made(tmp_path):
-    data = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
-    data.create("acme", [record_item(record("r1", score=1.0))])
-    atif = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
-    data.create("acme", [NewItem("t1", atif, {"kind": "trajectory", "scenarios": {"math": "train"}})])
-    release_items(data, "acme", "math")
-    assert [(item.item_id, dict(item.scenarios)) for item in data.query("acme")] == [
-        ("math/r1", {"math": "train"}),
-        ("t1", {}),
-    ]
+@pytest.fixture(params=["memory", "sqlite"])
+def item_records(request, tmp_path):
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    data = MemoryDataStore(task_files) if request.param == "memory" else SQLiteDataStore(None, task_files)
+    with closing(task_files), closing(data):
+        yield ItemRecordStore(data, "acme", "math", data.scenario_generation("acme", "math"))
 
 
-def test_copy_retry_keeps_legacy_record_item_digest(tmp_path):
-    served = AgentRecord.create(
+def plain(record_id: str, *references: str) -> AgentRecord:
+    return AgentRecord.create(
+        agent_record_id=record_id,
         scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload={"artifact_id": "weights:existing"},
-        agent_record_id="legacy",
-        artifact_id="weights:existing",
+        request_type=RequestType.REPORT if references else RequestType.INFERENCE,
+        payload={"value": record_id},
+        references=references,
+        created_at=123.0,
     )
-    canonical = record_item(served)
-    legacy_content = dict(canonical.content)
-    legacy_content.pop("artifact_id")
-    legacy_content["artifact_ref"] = {
-        "kind": "artifact",
-        "release_id": "snapshot",
-        "parent_release_id": None,
-        "content_id": "old",
-    }
-    data = MemoryDataStore(LocalTaskFileStore(tmp_path / "tasks"))
-    data.create("owner", [NewItem(canonical.item_id, legacy_content, canonical.metadata)])
-    digest = data.read("owner", canonical.item_id).digest
-    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage, closing(storage.open("math")) as store:
-        store.records.append(served)
-        assert copy_records(store.records, data, "owner", "math", 0) == 1
-        assert copy_records(store.records, data, "owner", "math", 0) == 1
-    archived = data.read("owner", canonical.item_id)
-    assert archived.digest == digest
-    assert copied_record(archived.item_id, archived.content, "math", "other").artifact_id == served.artifact_id
+
+
+def test_a_scenario_reads_and_retries_its_records_as_record_items(item_records):
+    original = plain("first")
+    assert item_records.existing_receipt(original) is None
+    assert item_records.append_result(original) == AppendResult(original, True)
+    retry = replace(original, created_at=456.0)
+    assert item_records.append_result(retry) == AppendResult(original, False)
+    assert item_records.existing_receipt(retry) == original
+    with pytest.raises(RecordConflict):
+        item_records.existing_receipt(replace(original, payload={"value": "changed"}))
+    with pytest.raises(RecordConflict):
+        item_records.append(replace(original, payload={"value": "changed"}))
+    with pytest.raises(ValueError, match="scenario 'math'"):
+        item_records.append(replace(original, scenario="code"))
+
+    calls = [conversation(f"call-{turns}", turns) for turns in range(1, 4)]
+    report = plain("report", "first")
+    for item in (*calls, report):
+        item_records.append(item)
+    assert item_records.replay("math") == (original, *calls, report)
+    page = item_records.replay_page("math", limit=1)
+    sequence = page[0][0]
+    assert page[0][1] == original
+    assert item_records.replay_page("math", after_sequence=sequence, limit=1)[0][1] == calls[0]
+    assert item_records.replay("math", offset=4, limit=1) == (report,)
+    assert item_records.count("math") == 5
+    assert item_records.count("math", request_type=RequestType.REPORT) == 1
+    assert item_records.count("math", after_sequence=sequence) == 4
+    assert [stored.item for stored in item_records.audit_page("math", request_type=RequestType.REPORT)] == [report]
+    assert item_records.get_for_audit("math", "report").item == report
+    assert item_records.get("math", "missing") is None
+    assert item_records.get("code", "first") is None and item_records.replay("code") == ()
+    assert item_records.last_sequence("math") == item_records.get_for_audit("math", "report").sequence
+
+
+def test_a_batch_of_records_stores_all_or_none_and_a_repeat_is_a_retry(item_records):
+    first, second = plain("first"), plain("second")
+    with pytest.raises(RecordConflict):
+        item_records.append_many([first, second, replace(first, payload={"changed": True})])
+    assert item_records.count("math") == 0
+    assert item_records.append_many([first, second, first]) == (
+        AppendResult(first, True),
+        AppendResult(second, True),
+        AppendResult(first, False),
+    )
+    assert item_records.append_many([replace(first, created_at=9.0)]) == (AppendResult(first, False),)
+    with pytest.raises(RecordConflict):
+        item_records.append_many([plain("third"), replace(first, payload={"changed": True})])
+    assert item_records.get("math", "third") is None
+
+
+def test_an_archive_ends_the_writes_of_the_open_records_and_the_loss_is_the_data_stores(item_records):
+    data = item_records.data
+    item_records.append(plain("first"))
+    assert data.prune_records(0) == 1
+    assert item_records.loss("math").record_count == 1
+    data.remove_scenario("acme", "math")
+    with pytest.raises(ScenarioArchived):
+        item_records.append(plain("late"))
+    assert item_records.replay("math") == ()
+
+
+def test_a_copy_in_its_origin_has_the_item_id_and_the_item_references():
+    item = record_item(plain("report", "first"))
+    copied = copied_record(item.item_id, item.content, "math", "math")
+    assert (copied.agent_record_id, copied.references) == ("math/report", ("math/first",))

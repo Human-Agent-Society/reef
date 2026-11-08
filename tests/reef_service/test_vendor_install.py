@@ -19,6 +19,7 @@ import pytest
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
 
+from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import (
@@ -32,10 +33,9 @@ from reef.harness.tasks.vendor_install import (
     version_probe_env,
 )
 from reef.harness.tree import TreePatch
-from reef.runtime.executor.config import ExecutorSettings
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
 
@@ -208,6 +208,27 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
     assert len(steps) == 3
 
 
+def test_the_uv_kind_installs_the_pinned_uv_from_pypi_into_a_venv_of_its_own(tmp_path, monkeypatch) -> None:
+    descriptor = get_adapter("python")
+    prefix = tmp_path / "prefix"
+    steps: list[list[str]] = []
+
+    def record(command):
+        steps.append(list(command))
+        if "pip" in command:
+            _write_executable(
+                prefix / descriptor.install.binary_path, "#!/bin/sh\necho 'uv 0.13.4 (1a2b3c 2026-10-20)'\n"
+            )
+
+    monkeypatch.setattr("reef.harness.tasks.vendor_install._run", record)
+
+    assert resolve_binary(descriptor, prefix=prefix) == str(prefix / "venv/bin/uv")
+    assert steps == [
+        [sys.executable, "-m", "venv", str(prefix / "venv")],
+        [str(prefix / "venv/bin/python"), "-m", "pip", "install", "--quiet", "uv==0.13.4"],
+    ]
+
+
 # -- the backend's use of it ----------------------------------------------
 
 
@@ -250,7 +271,7 @@ def _backend(
     return build_harness_backend(recipe, "demo")
 
 
-def _step(backend: HarnessBackend) -> TrainStepResult:
+def _step(backend: HarnessBackend) -> TrainingCommit:
     return backend_step(backend, JobData("demo:1"), HarnessState().to_json())
 
 

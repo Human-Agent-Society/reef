@@ -26,8 +26,10 @@
 # after the v0.5.9 tag). The base image's SGLang 0.5.21 contains the fix, so
 # tp>1 is expected to work; it has not yet been re-validated on this image.
 
-# The base that Slime's pin (pyproject.toml, dependency group runtime) was released with.
-ARG SLIME_IMAGE_TAG=nightly-dev-20261027a-cu130
+# The base that Slime's pin (pyproject.toml, dependency group runtime) was released with,
+# by digest: the tag was re-pushed on 2026-11-03 with Megatron-LM ae76c60e6 (Megatron-Core
+# 0.20.0), whose get_model reads a run config that only Slime 8a53b680 or newer sets.
+ARG SLIME_IMAGE_TAG=nightly-dev-20261027a-cu130@sha256:2a7437aa771ddcd5928054d4a143a5ac1a10776ead3cf7d641b93dbec51371f4
 FROM slimerl/slime:${SLIME_IMAGE_TAG} AS reef-common
 
 WORKDIR /workspace/Reef

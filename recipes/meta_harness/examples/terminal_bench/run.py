@@ -24,8 +24,8 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
-from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshot_files import component_files
 from reef.service.deploy.config_utils import load_config
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -82,7 +82,7 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutio
 def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher:
     """Use persistent artifacts and SQLite records so a new process can resume.
 
-    The recipe's seed is the root release of a new scenario, as the service makes it, so the search starts there.
+    The recipe's seed is the root snapshot of a new scenario, as the service makes it, so the search starts there.
 
     ``search`` prepares and commits every step itself, so the dispatcher runs no training cycle of its own: a
     cycle would commit the same step a second time.
@@ -110,7 +110,7 @@ def steps_done(scenario: Scenario) -> int:
 
 def search_history(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> History:
     """The search history that the harness training component keeps for the scenario, as its last step left it."""
-    root = recipe.harness_state_dir(scenario.name, scenario.surface.files_component or "harness")
+    root = recipe.harness_state_dir(scenario.name, scenario.components.files_component or "harness")
     if root is None:
         raise TypeError("the example's scenario evolves a harness")
     return History.open(root / HISTORY_DIR)
@@ -121,12 +121,12 @@ def commit_job(scenario: Scenario) -> bool:
     end; False when no job starts. The dispatcher's training service runs the job meanwhile."""
     trainer = scenario.trainer
     if not trainer.job_running:
-        submitted = scenario.prepare_training_step()
+        submitted = scenario.next_commit()
         if submitted is None:
             return False
         scenario.commit(submitted)
     while trainer.job_running:
-        result = scenario.prepare_training_step()
+        result = scenario.next_commit()
         if result is None:
             time.sleep(1.0)
             continue
@@ -135,9 +135,11 @@ def commit_job(scenario: Scenario) -> bool:
 
 
 def served_tree(scenario: Scenario) -> HarnessTree:
-    """The head release's source tree: the tree the next step builds on."""
+    """The head snapshot's source tree: the tree the next step builds on."""
     artifact = scenario.repository.resolve(scenario.repository.require_current_artifact())
-    return HarnessTree(component_files(scenario.surface, artifact, scenario.surface.files_component or "harness"))
+    return HarnessTree(
+        component_files(scenario.components, artifact, scenario.components.files_component or "harness")
+    )
 
 
 def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) -> dict[str, Any]:
@@ -182,7 +184,7 @@ def search(dispatcher: Dispatcher, scenario: Scenario, recipe: HarnessEvolutionR
     summary = write_summary(scenario, recipe, directory)
     while steps_done(scenario) < steps:
         step = steps_done(scenario) + 1
-        dispatcher.accept_instruction(
+        dispatcher.accept_request(
             scenario.name, {"text": STEP_REQUEST, "session": "", "artifact_id": ""}, request_id=f"step-{step}"
         )
         if not commit_job(scenario):

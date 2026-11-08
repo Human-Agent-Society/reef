@@ -16,10 +16,10 @@ class NoArtifactPublication:
 class SavedArtifactPublication:
     """The publication of a commit that publishes durable bytes.
 
-    Values: ``artifact`` is the release to publish, and ``component`` is None
-    or the non-empty name of the release component that ``artifact`` replaces;
+    Values: ``artifact`` is the snapshot to publish, and ``component`` is None
+    or the non-empty name of the snapshot component that ``artifact`` replaces;
     the committer carries the other components forward. Purpose:
-    ``TrainStepResult.publication`` makes the value, and the scenario committer
+    ``TrainingCommit.publication`` makes the value, and the scenario committer
     publishes it. The published version, not a runtime load ID, names it.
     """
 
@@ -34,7 +34,7 @@ ArtifactPublication = NoArtifactPublication | SavedArtifactPublication
 
 
 @dataclass(frozen=True)
-class TrainStepResult:
+class TrainingCommit:
     """One commit's worth of training: the trainer state to commit, its metrics and what it publishes.
 
     ``state`` is the trainer state the commit records, a mapping, or ``None``
@@ -49,9 +49,9 @@ class TrainStepResult:
     ``artifact`` changes from the tree it was trained from, and the rule reads
     it. It is empty for weights and for a commit that publishes nothing.
 
-    ``component`` names the release component ``artifact`` replaces. A scenario
+    ``component`` names the snapshot component ``artifact`` replaces. A scenario
     serving several components requires it; the committer carries the other
-    components from the active release. A flat scenario may leave
+    components from the active selection. A flat scenario may leave
     it unset.
     """
 

@@ -47,6 +47,9 @@ def test_object_routes_reject_non_object_bodies_with_400() -> None:
                     assert expected in await response.text()
                 empty = await client.post(path, data="", headers=json_headers)
                 assert empty.status == 400, (path, empty.status)
+                # A caller's malformed JSON stays the caller's 400; only a provider's is a 502.
+                malformed = await client.post(path, data="{not json", headers=json_headers)
+                assert malformed.status == 400, (path, malformed.status)
             created = await client.post("/reef/scenarios", json={"name": "still-works"}, headers=HEADERS)
             assert created.status in (200, 201)
         finally:
@@ -153,7 +156,8 @@ def test_create_and_update_refuse_the_retired_release_id_and_model_keys() -> Non
             update = await client.post("/reef/scenarios/s/update", json={"model": None})
             assert (
                 update.status == 400
-                and "training_mode, artifact_evaluation, activation or serving_config" in await update.text()
+                and "training_mode, artifact_evaluation, activation, serving_config or traffic_weights"
+                in await update.text()
             )
 
     asyncio.run(run())

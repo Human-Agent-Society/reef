@@ -81,7 +81,20 @@ def test_a_query_pages_by_sequence_and_a_task_item_reads_without_content(tmp_pat
         assert [item["id"] for item in tasks["items"]] == ["task-a"]
         task = await (await client.get(f"{base}/task-a", headers=AUTH)).json()
         assert (task["content"], task["metadata"]["kind"]) == (None, "task")
-        for query in ("?kind=dataset", "?after=x", "?limit=0", "?content=2", "?content=yes"):
+        # The uploads give no set_id, so the trajectories are in the group without a value.
+        ungrouped = await (await client.get(f"{base}?kind=trajectory&group_key=set_id", headers=AUTH)).json()
+        assert [item["id"] for item in ungrouped["items"]] == ["t1", "t2", "t3"]
+        named = await (await client.get(f"{base}?group_key=set_id&group_value=a", headers=AUTH)).json()
+        assert named["items"] == []
+        for query in (
+            "?kind=dataset",
+            "?after=x",
+            "?limit=0",
+            "?content=2",
+            "?content=yes",
+            "?group_value=a",
+            "?group_key=set.id",
+        ):
             assert (await client.get(base + query, headers=AUTH)).status == 400, query
         assert (await client.delete(f"{base}/missing", headers=AUTH)).status == 404
 
@@ -113,9 +126,9 @@ def test_a_client_record_item_needs_the_content_and_id_of_a_record(tmp_path: Pat
         "payload": {"score": 1.0},
         "created_at": 1.0,
         "references": [],
-        "artifact_ref": None,
+        "artifact_id": None,
     }
-    metadata = {"kind": "record", "origin": {"scenario": "old", "release_id": None, "artifact_id": None}}
+    metadata = {"kind": "record", "origin": {"scenario": "old", "artifact_id": None}}
 
     async def check(client: TestClient) -> None:
         good = {"items": [{"id": "old/r1", "content": content, "metadata": metadata}]}

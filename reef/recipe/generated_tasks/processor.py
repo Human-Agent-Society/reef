@@ -1,4 +1,4 @@
-"""The generated-task stages: tasks generated and saved here, stored in the sample store, and trained from the buffer.
+"""The generated-task stages: tasks generated and saved here, saved as task items, and trained as task jobs.
 
 When a round is due, ``GeneratedTaskSamples`` makes a ``TaskGenerationRound`` and runs it as one generation job on
 a private worker, off the trainer's thread. A generation job:
@@ -8,9 +8,9 @@ a private worker, off the trainer's thread. A generation job:
 3. Publishes each valid task with its train/eval split. Eval tasks run no rollouts.
 
 The stage hands each train task of a complete generation to the pipeline
-(``made_samples``), which stores it in the scenario's sample store as ``generated-tasks/<task name>``. The
-tasks then train from the buffer like any other sample: ``GeneratedTaskJobData`` makes one task job of the
-buffer's tasks, and the commit that submits the job counts them trained. The training component rolls the
+(``made_samples``), which saves it as a task item that the scenario uses (``stage_item_id``). The
+tasks then train like any other sample: ``GeneratedTaskJobData`` makes one task job of the next job's
+tasks, and the commit that submits the job counts them trained. The training component rolls the
 tasks out on its own sampler and trains on their rollouts; Reef runs no rollout of them. When the job's end
 commits, the stage saves the result of each task that trained and has none, from the job's metrics; when
 every train task of a generation has a result, the next job sends the generation's results to the generator.
@@ -19,7 +19,7 @@ A train task waits until a committed job trains it, and is unfinished until it h
 starts when the pipeline first looks for job data. The next round starts after ``jobs_per_round`` task jobs
 ended since the previous round started, and only while fewer than ``refill_tasks`` train tasks wait. A round
 that made no train task, a failed task job, and no unfinished task are followed at once. A restart continues from
-the task store and the sample store: the store holds the train tasks that did not train, and the buffer takes
+the task store and the scenario's items: the scenario still uses the train tasks that did not train, and a later job takes
 them again.
 
 The stage trains on no report. It holds the reports that are source sessions for the rounds, and releases the
@@ -452,9 +452,219 @@ class GeneratedTaskSettings(Record2SampleSettings):
             TaskGenerator.reference(self.generator, setting="pipeline.record2sample.config.generator")
 
 
+class GenerationRunner(BackgroundJobRunner):
+    """Generate and publish tasks, save training results, and deliver completed generations.
+
+    Values: ``scenario`` is non-empty text and ``description`` is text. ``task_store`` is a TaskStore or None;
+    ``task_generator`` is a TaskGenerator or None. ``run``, ``generated`` and ``deliver_results`` require both
+    dependencies and raise RuntimeError otherwise. ``run_generation`` requires the store; a missing generator
+    exhausts its attempts and returns an incomplete outcome. Result saving requires the store alone.
+    ``generation_attempts`` is a positive int.
+    ``generation_deadline_seconds`` is a positive number, including infinity for no time limit.
+    ``eval_fraction`` is a number in [0, 1], and
+    ``split_seed`` is a non-bool int. ``unsaved_results`` is a FIFO queue of TaskRolloutResult values whose saves
+    failed; it may be empty and contain repeated task names, since the store keeps only each task's first result.
+
+    Purpose: GeneratedTaskSamples submits jobs to this runner on one background worker. The runner writes
+    candidates, validation results, task publications and delivery markers. The stage reads them to schedule
+    rounds and emit samples. The trainer's job-end path also calls save_result. Both paths write the shared task
+    store through its existing operations. The retry queue is the runner's only mutable in-memory state shared
+    between them. The scenario session owns and closes the store
+    after the stage has stopped its worker.
+    """
+
+    def __init__(
+        self,
+        scenario: str,
+        task_store: TaskStore | None,
+        task_generator: TaskGenerator | None,
+        *,
+        description: str,
+        generation_attempts: int,
+        generation_deadline_seconds: float,
+        eval_fraction: float,
+        split_seed: int,
+    ) -> None:
+        if not isinstance(scenario, str) or not scenario:
+            raise ValueError("scenario must be non-empty text")
+        if not isinstance(description, str):
+            raise TypeError("description must be text")
+        if task_store is not None and not isinstance(task_store, TaskStore):
+            raise TypeError("task_store must be a TaskStore or None")
+        if task_generator is not None and not isinstance(task_generator, TaskGenerator):
+            raise TypeError("task_generator must be a TaskGenerator or None")
+        if not isinstance(generation_attempts, int) or generation_attempts < 1:
+            raise ValueError("generation_attempts must be a positive integer")
+        if not isinstance(generation_deadline_seconds, (int, float)) or not generation_deadline_seconds > 0:
+            raise ValueError("generation_deadline_seconds must be positive")
+        if (
+            isinstance(eval_fraction, bool)
+            or not isinstance(eval_fraction, (int, float))
+            or not 0 <= eval_fraction <= 1
+        ):
+            raise ValueError("eval_fraction must be between 0 and 1")
+        if isinstance(split_seed, bool) or not isinstance(split_seed, int):
+            raise ValueError("split_seed must be an integer")
+        self.scenario = scenario
+        self.task_store = task_store
+        self.task_generator = task_generator
+        self.description = description
+        self.generation_attempts = generation_attempts
+        self.generation_deadline_seconds = generation_deadline_seconds
+        self.eval_fraction = eval_fraction
+        self.split_seed = split_seed
+        self.unsaved_results: queue.SimpleQueue[TaskRolloutResult] = queue.SimpleQueue()
+
+    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
+        """Run one job on the worker, after sending the generator any results that it has not received."""
+        if self.task_generator is None or self.task_store is None:
+            raise RuntimeError("a job needs a task generator and a task store")
+        self.save_unsaved_results()
+        delivery_error = await self.deliver_results()
+        if isinstance(job, DeliveryJob):
+            return DeliveryOutcome(receipt=job.receipt, error=delivery_error)
+        if isinstance(job, GenerationJob):
+            generation = await self.run_generation(job)
+            # A generation without train tasks has its complete results now.
+            delivery_error = await self.deliver_results() or delivery_error
+            return replace(generation, error=generation.error or delivery_error)
+        raise TypeError(f"the round worker takes GenerationJob or DeliveryJob, not {type(job).__name__}")
+
+    async def run_generation(self, job: GenerationJob) -> GenerationOutcome:
+        """Generate, validate and save one generation; retry a failure to run within the attempts and deadline."""
+        if self.task_store is None:
+            raise RuntimeError("a generation needs a task store")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.generation_deadline_seconds
+        error = ""
+        for attempt in range(1, self.generation_attempts + 1):
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds <= 0:
+                break
+            # The generator is a deployment's plugin: whatever it raises is a failure to run.
+            try:
+                await asyncio.wait_for(self.generated(job), remaining_seconds)
+            except Exception as exc:
+                error = str(exc) or type(exc).__name__
+                logger.exception(
+                    "generated-task generation %d attempt %d failed on scenario %r",
+                    job.generation,
+                    attempt,
+                    self.scenario,
+                )
+                continue
+            tasks = tuple(
+                task_item(self.task_store, generation, stored)
+                for generation, stored in published_train_tasks(self.task_store)
+                if generation == job.generation
+            )
+            return GenerationOutcome(
+                receipt=job.receipt, generation=job.generation, tasks=tasks, is_complete=True, error=""
+            )
+        return GenerationOutcome(
+            receipt=job.receipt,
+            generation=job.generation,
+            tasks=(),
+            is_complete=False,
+            error=error or "the generation deadline passed",
+        )
+
+    async def generated(self, job: GenerationJob) -> None:
+        """One attempt: continue from the saved candidates and validation outcomes, then complete the generation."""
+        if self.task_generator is None or self.task_store is None:
+            raise RuntimeError("a generation needs a task generator and a task store")
+        generation = self.task_store.begin_generation(
+            generation=job.generation,
+            source_record_ids=tuple(record.agent_record_id for record in job.source_records),
+        )
+        if generation.candidates is None:
+            generated = await self.task_generator.generate(
+                TaskGenerationRequest(job.source_records, self.description, generation=job.generation)
+            )
+            with tempfile.TemporaryDirectory(prefix="reef-candidates-") as staging:
+                # One directory for each candidate, because two candidates can have the same name.
+                directories = tuple(
+                    write_harbor_task(task, Path(staging) / str(index)) for index, task in enumerate(generated)
+                )
+                generation = self.task_store.save_candidates(generation=job.generation, directories=directories)
+        candidates = generation.candidates or ()
+        for index in generation.pending_indices:
+            candidate = candidates[index]
+            # The store would take the same files again as the earlier publication, which this generation
+            # does not own, so its results would never be complete.
+            if any(stored.files_digest == candidate.files_digest for stored in self.task_store.tasks()):
+                refusal = f"task {candidate.name!r} is already published"
+                self.task_store.reject_task(generation=job.generation, index=index, reason=refusal)
+                continue
+            task = read_harbor_task(self.task_store.path(candidate.files_digest))
+            validation = await self.task_generator.validate(task)
+            if validation.is_valid:
+                try:
+                    split = assigned_split(
+                        self.task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
+                    )
+                    self.task_store.publish_task(generation=job.generation, index=index, split=split)
+                except (TaskConflict, TaskSplitConflict) as conflict:
+                    self.task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
+            else:
+                self.task_store.reject_task(
+                    generation=job.generation, index=index, reason="; ".join(validation.errors)
+                )
+        self.task_store.complete_generation(generation=job.generation)
+
+    def save_result(self, result: TaskRolloutResult) -> None:
+        """Save ``rollout(n)`` unless the task has a result.
+
+        A result that the store fails to save waits for the next job.
+        """
+        if self.task_store is None:
+            raise RuntimeError("a result needs a task store")
+        try:
+            if result.task_name not in rollout_results(self.task_store):
+                save_rollout_result(self.task_store, result)
+        except TaskStoreError:
+            logger.exception("the result of generated-task %s conflicts with the task store", result.task_name)
+        except Exception:
+            # The task still trained; the next job's end saves the result again before it delivers.
+            logger.exception(
+                "the result of generated-task %s was not saved on scenario %r", result.task_name, self.scenario
+            )
+            self.unsaved_results.put(result)
+
+    def save_unsaved_results(self) -> None:
+        """Save the results that an earlier job's end could not save; one that still fails waits for the next job."""
+        unsaved: list[TaskRolloutResult] = []
+        while not self.unsaved_results.empty():
+            unsaved.append(self.unsaved_results.get_nowait())
+        for result in unsaved:
+            self.save_result(result)
+
+    async def deliver_results(self) -> str:
+        """Send each generation whose train tasks all have results to the generator, oldest first.
+
+        Returns the error of the last delivery that failed; a failed generation waits for the next job, and later
+        generations still go out.
+        """
+        if self.task_generator is None or self.task_store is None:
+            raise RuntimeError("delivering results needs a task generator and a task store")
+        error = ""
+        for state in deliverable_generations(self.task_store):
+            try:
+                await self.task_generator.record_results(
+                    task_results(self.task_store, state), generation=state.generation
+                )
+            except Exception as exc:
+                logger.exception("the task generator did not take the results of generation %d", state.generation)
+                error = str(exc) or type(exc).__name__
+                continue
+            mark_delivered(self.task_store, state.generation)
+        return error
+
+
 class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
-    """The generated-task stage: the source sessions, the pace of the rounds, the runner of the generations, and the
-    source of their tasks.
+    """The generated-task stage: the source sessions, the pace of the rounds, and the source of their tasks.
+
+    GenerationRunner owns generation execution, publication and result delivery.
 
     Config: ``GeneratedTaskSettings``. No report trains: the training component trains on the rollouts of the task
     jobs, which are not records, so the stage makes no sample from records. A terminal report owns its sources.
@@ -485,8 +695,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     back each round with its published train tasks.
 
     **Tasks.** The stage hands each published train task of a complete generation to the pipeline
-    (``made_samples``), which stores it as ``generated-tasks/<task name>``; a start hands back each one that the
-    sample store does not hold. A train task is unfinished until it has a result. When a job's end commits
+    (``made_samples``), which saves it as a task item; a start hands back each one that the scenario's items do
+    not hold. A train task is unfinished until it has a result. When a job's end commits
     (``job_ended``), the stage saves ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results` for each task that
     a committed job trained and that has no result. When every train task of a generation has a result, the next
     job sends the generation's results to the generator. A restart sends the results that the generator did not
@@ -517,9 +727,6 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         #: The sessions of a round whose generation is incomplete; the next round takes exactly these.
         self.retry_sources: tuple[ReportContext, ...] = ()
         self.rounds = settings.rounds
-        self.description = settings.description
-        self.generation_attempts = settings.generation_attempts
-        self.generation_deadline_seconds = settings.generation_deadline_seconds
         if self.rounds > 0:
             if task_generator is None:
                 raise ValueError("rounds need a task generator: set pipeline.record2sample.config.generator")
@@ -532,20 +739,28 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                     )
                 generator_service = HttpGenerator(generator_url)
             if context.task_storage is None or context.samples is None:
-                raise ValueError("rounds need the task storage and the sample store of a scenario session")
+                raise ValueError("rounds need the task storage and the samples of a scenario session")
         self.task_generator = task_generator
         self.generator_service = generator_service
         self.worker = worker
-        if self.worker is None and self.rounds > 0:
-            self.worker = BackgroundJobWorker(self, thread_name="generated-task-rounds", concurrency=1)
         if self.task_generator is not None:
             logger.info("scenario %r generates tasks with %s", self.scenario, type(self.task_generator).__name__)
-        self.eval_fraction = settings.eval_fraction
-        self.split_seed = settings.split_seed
         # With no rounds, the stage still trains the train tasks that earlier generations saved.
         self.task_store = None if context.task_storage is None else context.task_storage.open(TASK_STORE_NAME)
-        #: Rollout results that the store could not save; the next job saves them before it delivers.
-        self.unsaved_results: queue.SimpleQueue[TaskRolloutResult] = queue.SimpleQueue()
+        self.generation_runner = GenerationRunner(
+            self.scenario,
+            self.task_store,
+            task_generator,
+            description=settings.description,
+            generation_attempts=settings.generation_attempts,
+            generation_deadline_seconds=settings.generation_deadline_seconds,
+            eval_fraction=settings.eval_fraction,
+            split_seed=settings.split_seed,
+        )
+        if self.worker is None and self.rounds > 0:
+            self.worker = BackgroundJobWorker(
+                self.generation_runner, thread_name="generated-task-rounds", concurrency=1
+            )
         #: Rounds that ended without a job, such as a round of sessions that a complete generation already used.
         self.ended_rounds: list[RoundResult] = []
         #: The scenario's samples as this trainer reads them, where the published train tasks train from.
@@ -680,17 +895,16 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         return tuple((f"{TASK_STORE_NAME}/{task.metadata['task']['name']}", task) for task in made)
 
     def stored_tasks(self) -> dict[str, StoredSample]:
-        """The generated tasks that the sample store holds for this trainer, by task name."""
+        """The generated tasks that the scenario's items hold for this trainer, by task name: the tasks that its
+        stage made."""
         if self.samples is None:
             return {}
-        # The pipeline stores a made sample as <name>, or <component>:<name> for a trainer of several.
         trainer = self.samples.trainer
-        prefix = f"{trainer}:{TASK_STORE_NAME}/" if trainer else f"{TASK_STORE_NAME}/"
         found: dict[str, StoredSample] = {}
         after_sequence = 0
         while page := self.samples.page(after_sequence=after_sequence, kind="task"):
             for stored in page:
-                if stored.component == trainer and stored.sample_id.startswith(prefix):
+                if stored.component == trainer:
                     found[stored.sample.metadata["task"]["name"]] = stored
             after_sequence = page[-1].sequence
         return found
@@ -789,101 +1003,16 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         }
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
-        """Run one job on the worker, after sending the generator any results that it has not received."""
-        if self.task_generator is None or self.task_store is None:
-            raise RuntimeError("a job needs a task generator and a task store")
-        self.save_unsaved_results()
-        delivery_error = await self.deliver_results()
-        if isinstance(job, DeliveryJob):
-            return DeliveryOutcome(receipt=job.receipt, error=delivery_error)
-        if isinstance(job, GenerationJob):
-            generation = await self.run_generation(job)
-            # A generation without train tasks has its complete results now.
-            delivery_error = await self.deliver_results() or delivery_error
-            return replace(generation, error=generation.error or delivery_error)
-        raise TypeError(f"the round worker takes GenerationJob or DeliveryJob, not {type(job).__name__}")
+        """Run a submitted generation or delivery through the stage's execution owner."""
+        return await self.generation_runner.run(job)
 
-    async def run_generation(self, job: GenerationJob) -> GenerationOutcome:
-        """Generate, validate and save one generation; retry a failure to run within the attempts and deadline."""
-        if self.task_store is None:
-            raise RuntimeError("a generation needs a task store")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.generation_deadline_seconds
-        error = ""
-        for attempt in range(1, self.generation_attempts + 1):
-            remaining_seconds = deadline - loop.time()
-            if remaining_seconds <= 0:
-                break
-            # The generator is a deployment's plugin: whatever it raises is a failure to run.
-            try:
-                await asyncio.wait_for(self.generated(job), remaining_seconds)
-            except Exception as exc:
-                error = str(exc) or type(exc).__name__
-                logger.exception(
-                    "generated-task generation %d attempt %d failed on scenario %r",
-                    job.generation,
-                    attempt,
-                    self.scenario,
-                )
-                continue
-            tasks = tuple(
-                task_item(self.task_store, generation, stored)
-                for generation, stored in published_train_tasks(self.task_store)
-                if generation == job.generation
-            )
-            return GenerationOutcome(
-                receipt=job.receipt, generation=job.generation, tasks=tasks, is_complete=True, error=""
-            )
-        return GenerationOutcome(
-            receipt=job.receipt,
-            generation=job.generation,
-            tasks=(),
-            is_complete=False,
-            error=error or "the generation deadline passed",
-        )
+    async def deliver_results(self) -> str:
+        """Deliver completed generations through the stage's execution owner."""
+        return await self.generation_runner.deliver_results()
 
-    async def generated(self, job: GenerationJob) -> None:
-        """One attempt: continue from the saved candidates and validation outcomes, then complete the generation."""
-        if self.task_generator is None or self.task_store is None:
-            raise RuntimeError("a generation needs a task generator and a task store")
-        generation = self.task_store.begin_generation(
-            generation=job.generation,
-            source_record_ids=tuple(record.agent_record_id for record in job.source_records),
-        )
-        if generation.candidates is None:
-            generated = await self.task_generator.generate(
-                TaskGenerationRequest(job.source_records, self.description, generation=job.generation)
-            )
-            with tempfile.TemporaryDirectory(prefix="reef-candidates-") as staging:
-                # One directory for each candidate, because two candidates can have the same name.
-                directories = tuple(
-                    write_harbor_task(task, Path(staging) / str(index)) for index, task in enumerate(generated)
-                )
-                generation = self.task_store.save_candidates(generation=job.generation, directories=directories)
-        candidates = generation.candidates or ()
-        for index in generation.pending_indices:
-            candidate = candidates[index]
-            # The store would take the same files again as the earlier publication, which this generation
-            # does not own, so its results would never be complete.
-            if any(stored.files_digest == candidate.files_digest for stored in self.task_store.tasks()):
-                refusal = f"task {candidate.name!r} is already published"
-                self.task_store.reject_task(generation=job.generation, index=index, reason=refusal)
-                continue
-            task = read_harbor_task(self.task_store.path(candidate.files_digest))
-            validation = await self.task_generator.validate(task)
-            if validation.is_valid:
-                try:
-                    split = assigned_split(
-                        self.task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
-                    )
-                    self.task_store.publish_task(generation=job.generation, index=index, split=split)
-                except (TaskConflict, TaskSplitConflict) as conflict:
-                    self.task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
-            else:
-                self.task_store.reject_task(
-                    generation=job.generation, index=index, reason="; ".join(validation.errors)
-                )
-        self.task_store.complete_generation(generation=job.generation)
+    def save_result(self, result: TaskRolloutResult) -> None:
+        """Save a task's first training result through the stage's execution owner."""
+        self.generation_runner.save_result(result)
 
     def job_ended(self, outcome: JobOutcome) -> None:
         """Save a result for each task that a committed job trained and that has none: its rewards in the job's
@@ -905,74 +1034,28 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                     continue
                 values = tuple(rewards.get(name) or ())
                 if values:
-                    self.save_result(TaskRolloutResult(name, values))
+                    self.generation_runner.save_result(TaskRolloutResult(name, values))
                 else:
-                    self.save_result(TaskRolloutResult(name, error=error, infrastructure_failure=True))
+                    self.generation_runner.save_result(
+                        TaskRolloutResult(name, error=error, infrastructure_failure=True)
+                    )
                 self.unfinished.discard(name)
         self.task_job_ended(finished=outcome.event == "finished")
         self.deliver_later()
-
-    def save_result(self, result: TaskRolloutResult) -> None:
-        """Save ``rollout(n)`` unless the task has a result.
-
-        A result that the store fails to save waits for the next job.
-        """
-        if self.task_store is None:
-            raise RuntimeError("a result needs a task store")
-        try:
-            if result.task_name not in rollout_results(self.task_store):
-                save_rollout_result(self.task_store, result)
-        except TaskStoreError:
-            logger.exception("the result of generated-task %s conflicts with the task store", result.task_name)
-        except Exception:
-            # The task still trained; the next job's end saves the result again before it delivers.
-            logger.exception(
-                "the result of generated-task %s was not saved on scenario %r", result.task_name, self.scenario
-            )
-            self.unsaved_results.put(result)
-
-    def save_unsaved_results(self) -> None:
-        """Save the results that an earlier job's end could not save; one that still fails waits for the next job."""
-        unsaved: list[TaskRolloutResult] = []
-        while not self.unsaved_results.empty():
-            unsaved.append(self.unsaved_results.get_nowait())
-        for result in unsaved:
-            self.save_result(result)
 
     def deliver_later(self) -> None:
         """Send the generator the results that it has not received, on the worker, after the jobs before it."""
         if self.worker is not None:
             self.worker.submit(DeliveryJob(receipt=DELIVERY_RECEIPT))
 
-    async def deliver_results(self) -> str:
-        """Send each generation whose train tasks all have results to the generator, oldest first.
-
-        Returns the error of the last delivery that failed; a failed generation waits for the next job, and later
-        generations still go out.
-        """
-        if self.task_generator is None or self.task_store is None:
-            raise RuntimeError("delivering results needs a task generator and a task store")
-        error = ""
-        for state in deliverable_generations(self.task_store):
-            try:
-                await self.task_generator.record_results(
-                    task_results(self.task_store, state), generation=state.generation
-                )
-            except Exception as exc:
-                logger.exception("the task generator did not take the results of generation %d", state.generation)
-                error = str(exc) or type(exc).__name__
-                continue
-            mark_delivered(self.task_store, state.generation)
-        return error
-
 
 class GeneratedTaskJobData(Sample2Job):
-    """The tasks of the buffer as one task job's data: the ``TaskSample`` values themselves.
+    """The tasks of the next job as one task job's data: the ``TaskSample`` values themselves.
 
-    The generated tasks train from the buffer like any other sample. A job takes at least ``job_samples``
+    The generated tasks train like any other sample. A job takes at least ``job_samples``
     tasks, 1 by default, and at most ``buffer_size``, 4 by default or ``job_samples`` when that is more. The
     training component rolls the tasks out on its own sampler and trains on their rollouts (a task job; see the
-    Tinker component's ``rollout`` job parameter). The commit that submits the job counts the tasks trained;
+    training component's job parameters). The commit that submits the job counts the tasks trained;
     ``GeneratedTaskSamples.job_ended`` saves their results when the job ends. Imported train tasks train the same
     way; only generated tasks get results.
     """

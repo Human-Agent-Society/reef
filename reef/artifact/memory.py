@@ -19,7 +19,7 @@ from reef.artifact.artifact import (
     content_metadata,
 )
 from reef.artifact.files import directory_checksum
-from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
+from reef.artifact.repository import CachedRepositoryBackendFactory, StagedSnapshotRepositoryBackend
 
 
 class _InMemoryStorage:
@@ -46,8 +46,8 @@ class _InMemoryStorage:
         return ref
 
 
-class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
-    """One scenario's releases in process memory, with their files under ``directory`` (a new temporary
+class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
+    """One scenario's snapshots in process memory, with their files under ``directory`` (a new temporary
     directory when ``None``)."""
 
     def __init__(self, scenario: str, *, directory: Path | None = None) -> None:
@@ -67,11 +67,6 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
         if ref is not None:
             return ref
         raise ArtifactNotFound(f"release does not exist: {revision}")
-
-    def index_snapshot(self, ref: SnapshotRef) -> None:
-        """Add immutable ID bindings for a previously stored snapshot."""
-        with self._storage.lock:
-            self.bind_artifact_ids(self.materialize(ref))
 
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._storage.lock:
@@ -97,7 +92,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
 
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         if root.local_path is None or not root.local_path.is_dir():
-            raise ArtifactPublicationError("a root release needs an existing local artifact directory")
+            raise ArtifactPublicationError("a root snapshot needs an existing local artifact directory")
         with self._storage.lock:
             if self._current is not None:
                 return self._current
@@ -146,21 +141,21 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
             )
             self._storage.metadata[ref.revision] = artifact.storage_metadata
             self.bind_artifact_ids(self.materialize(ref))
-            # advance_head=False mints a pending release the head does not move to.
+            # advance_head=False mints a pending snapshot the head does not move to.
             if advance_head:
                 self._current = ref
                 self._metadata = artifact.storage_metadata
             return ref
 
-    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
+    def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._storage.lock:
             current = self.current()
             if self._storage.refs.get(ref.revision) != ref or ref.parent_revision != expected_parent.revision:
-                raise ArtifactPublicationError("committed release differs from its staged identity or parent")
+                raise ArtifactPublicationError("committed snapshot differs from its staged identity or parent")
             if current == ref:
                 return
             if current != expected_parent:
-                raise ArtifactConflict("repository head changed before the staged release was committed")
+                raise ArtifactConflict("repository head changed before the staged snapshot was committed")
             self._current = ref
             self._metadata = dict(self._storage.metadata[ref.revision])
 

@@ -13,18 +13,18 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.slime_backend.test_slime_component import Stack, batch_for
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData
 from reef.core.training_request import TrainingRequest
-from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.jobs import TrainingJob
+from reef.storage.durable_files import read_json, write_json
+from reef.train.component import TrainingJob
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SlimeNativeAlgorithm
 from reef.train.slime_backend.rollout_group import SlimeRolloutGroup
 
-METHOD = TrainingMethod("reef.recipe.dataset:SlimeDatasetObjective")
+OBJECTIVE = "slime_dataset"
 FAMILY = "reef.train.slime_backend.native:SlimeNativeAlgorithm"
 
 
@@ -73,12 +73,14 @@ def dataset_stack(tmp_path: Path, *, rollouts_per_epoch: int = 4) -> tuple[Stack
 
 def dataset_job(stack: Stack, job_id: str, *, epochs: int = 1, save_interval: int | None = 2) -> TrainingJob:
     parameters: dict[str, Any] = {
-        "method": METHOD.to_dict(),
+        "objective": OBJECTIVE,
         "dataset": {"path": "/data/prompts.jsonl", "epochs": epochs},
     }
     if save_interval is not None:
         parameters["save_interval"] = save_interval
-    return TrainingJob(job_id, "slime", stack.start, JobData(f"data-{job_id}", ()), parameters, scenario="s")
+    return TrainingJob(
+        job_id, "slime", stack.start, job_data_ref(JobData(f"data-{job_id}", ())), parameters, scenario="s"
+    )
 
 
 @pytest.fixture
@@ -184,12 +186,19 @@ def test_dataset_jobs_and_the_slime_family_go_together(tmp_path, dataset_args) -
     try:
         with pytest.raises(ValueError, match="trains only dataset jobs"):
             stack.component.submit(
-                TrainingJob("job-0", "slime", stack.start, batch_for(0), {"method": METHOD.to_dict()}, scenario="s")
+                TrainingJob(
+                    "job-0",
+                    "slime",
+                    stack.start,
+                    job_data_ref(batch_for(0)),
+                    {"objective": OBJECTIVE},
+                    scenario="s",
+                )
             )
         job = dataset_job(stack, "job-1")
         with pytest.raises(ValueError, match="has no samples"):
             stack.component.submit(
-                TrainingJob("job-1", "slime", stack.start, batch_for(0), job.parameters, scenario="s")
+                TrainingJob("job-1", "slime", stack.start, job_data_ref(batch_for(0)), job.parameters, scenario="s")
             )
     finally:
         stack.component.close()
@@ -202,15 +211,15 @@ def test_dataset_jobs_and_the_slime_family_go_together(tmp_path, dataset_args) -
 
 
 @pytest.mark.unit
-def test_the_dataset_stage_makes_an_instructions_job_with_its_parameters() -> None:
+def test_the_dataset_stage_makes_a_requests_job_with_its_parameters() -> None:
     from reef.recipe.dataset import DatasetJobData
 
     stage = DatasetJobData.__new__(DatasetJobData)
-    stage.context = SimpleNamespace(job_parameters={"trajectory": {"method": METHOD.to_dict(), "save_interval": 4}})
+    stage.context = SimpleNamespace(job_parameters={"trajectory": {"objective": OBJECTIVE, "save_interval": 4}})
     request = TrainingRequest("train", "s", "r", id="r1", parameters={"dataset": {"path": "/d"}})
-    data = JobData("scenario:instruction:r1", (), request=request)
-    assert stage.make_job_data((), "scenario:instruction:r1").samples == ()
-    assert stage.job_parameters(data) == {"method": METHOD.to_dict(), "save_interval": 4, "dataset": {"path": "/d"}}
+    data = JobData("scenario:request:r1", (), request=request)
+    assert stage.make_job_data((), "scenario:request:r1").samples == ()
+    assert stage.job_parameters(data) == {"objective": OBJECTIVE, "save_interval": 4, "dataset": {"path": "/d"}}
 
 
 @pytest.mark.unit

@@ -4,17 +4,16 @@ On-policy distillation from a separate frozen teacher as a Reef weight-training 
 
 - Method: [Thinking Machines Lab, On-Policy Distillation](https://thinkingmachines.ai/blog/on-policy-distillation/).
 - Reference implementation: the [tinker-cookbook distillation recipe](https://github.com/thinking-machines-lab/tinker-cookbook/tree/dfe4d77e8e8c/tinker_cookbook/recipes/distillation) at `dfe4d77e8e8c`. The Reef implementation configures the Slime backend's distillation base (`reef/train/slime_backend/distill/`) and makes no Tinker API calls.
-- Pins: `slime` pinned to `THUDM/slime@540ea919e45b8b929198abce008a103be9cfc779` (via `pyproject.toml` `dependency-groups.runtime`).
+- Pins: `slime` pinned to `THUDM/slime@8a53b680e82932dabb48cbfcd34f749854400857` (via `pyproject.toml` `dependency-groups.runtime`).
 - Claim scope: the [math example](examples/math/README.md) distils Qwen3-32B into a Qwen3-8B OpenThoughts3-SFT student through the teacher engine and raises AIME'24 accuracy from 41.0% to about 50%.
 
 ## Layout
 
 ```text
 opd/
-  recipe.py          OPDRecipe: training spec, loss family "opd", and its stages; its report contract is TeacherContextReport
+  recipe.py          OPDRecipe: default objective, loss family "opd", and its stages; its report contract is TeacherContextReport
   processor.py       OPDSamples: the student's call, whose rendered sequence is the teacher sequence
-  objective.py       selects the opd loss; one optimizer step per job
-  slime/             the loss family: OPD's defaults on the Slime backend's distillation base
+  slime/             the Slime objective and the loss family: OPD's defaults on the Slime backend's distillation base
   examples/
     math/            DeepMath prompts and AIME'24 evaluation through a direct reef_client campaign driver
 ```

@@ -240,9 +240,10 @@ class ConfigTarget:
 
 
 #: Vendor install kinds Reef can install for runs: an npm
-#: package at a version, or a git checkout at a ref installed editable into
-#: a venv (the channel of a Python agent that publishes no wheel).
-INSTALL_KINDS = ("npm", "git")
+#: package at a version, a git checkout at a ref installed editable into
+#: a venv (the channel of a Python agent that publishes no wheel), or uv at a
+#: version, which runs a Python program as the harness.
+INSTALL_KINDS = ("npm", "git", "uv")
 
 #: Install fields land inside generated shell text, so their charsets are
 #: pinned to what package registries actually use: names may add ``@`` and
@@ -275,16 +276,16 @@ class InstallSpec:
 
 @dataclass(frozen=True)
 class AdapterLayer:
-    """How a person's machine runs the agent with a release over the person's own configuration.
+    """How a person's machine runs the agent with a snapshot over the person's own configuration.
 
-    The client writes the release's layer files (``reef.harness.sync.layer_install``) under a directory of its
+    The client writes the snapshot's layer files (``reef.harness.sync.layer_install``) under a directory of its
     own, the install, and runs the binary with ``args`` added and ``env`` set. The agent still loads the person's
     own configuration, which the client never writes. An agent that loads a part from no path a flag can name
     loads it once the agent's own commands in ``register`` record the install, as ``codex plugin add`` does.
 
     Values: ``args`` are non-empty groups of arguments, such as a flag and its value; ``env`` maps variables to
     values. ``register`` are the agent's commands, each its arguments, that the client runs after it installs a
-    release's files; each must succeed when it runs again. ``unregister`` are the commands that undo them, which
+    snapshot's files; each must succeed when it runs again. ``unregister`` are the commands that undo them, which
     ``disconnect`` runs. Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}`` (the binding's),
     and ``{token}`` (only in ``env``: a command line is visible to other processes).
     Purpose: ``load_descriptor`` parses ``run.layer``; ``reef.harness.sync.layer_install`` fills it in.
@@ -345,7 +346,7 @@ class AdapterDescriptor:
     #: Checks the executor against the rendered tree before launch, in place of the blanket self_isolating
     #: refusal; ``None`` keeps that refusal.
     execution_validator: ExecutionValidator | None = None
-    #: How a person's machine runs the agent with a release over its own configuration; ``None`` when the adapter
+    #: How a person's machine runs the agent with a snapshot over its own configuration; ``None`` when the adapter
     #: does not run on a person's machine.
     layer: AdapterLayer | None = None
 

@@ -1,16 +1,13 @@
 """Real PostgreSQL coverage for the dialect and deployment lifecycle boundaries."""
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
-from threading import Barrier, Event
+from threading import Barrier
 
 import pytest
-from sqlalchemy import func, select
-from tests.support.consumption_receipts import write_consumption_receipt
-from tests.support.conversations import conversation
+from sqlalchemy import create_engine, inspect, text
 
-from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.snapshot import SnapshotRef
@@ -19,10 +16,9 @@ from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.deployment_config import translate_layout
 from reef.service.deploy.service_config import ServiceConfig, service_config_arguments, service_config_from_mapping
 from reef.storage.commits import CommitRecord
-from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
-from reef.storage.records import RecordConflict, RecordRetention
-from reef.storage.sql_records import SQLRecordRetention
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.postgres import OLD_RECORD_TABLES, PostgresRecordDatabase, PostgresScenarioStorage, postgres_url
+from reef.storage.record_items import ItemRecordStore, record_item
+from reef.storage.scenario import ScenarioSettings
 
 
 def record(record_id="first", scenario="math"):
@@ -35,77 +31,24 @@ def record(record_id="first", scenario="math"):
     )
 
 
-def test_namespaces_restart_and_receipt_isolation(postgres_config):
-    url, schema = postgres_config
-    original = record()
-    with closing(PostgresRecordStore(url, schema=schema, name="one")) as first:
-        assert first.append(original) == original
-        write_consumption_receipt(first, "math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
-    with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
-        assert other.existing_receipt(original) is None
-        assert other.consumption_receipts("math") == ()
-        assert other.append_result(original).inserted
-        assert other.get("math", "first") == original
-    with closing(PostgresRecordStore(url, schema=schema, name="one")) as reopened:
-        assert reopened.append_result(original).inserted is False
-        assert reopened.get_for_audit("math", "first").item == original
-        assert len(reopened.consumption_receipts("math")) == 1
-    with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
-        assert other.count("math") == 1
-
-
-def test_large_consumption_receipt_reads_back(postgres_database):
-    with closing(PostgresRecordStore(postgres_database)) as store:
-        store.append(record())
-        ids = frozenset({"first", *(f"record-{index:06d}" for index in range(5000))})
-        write_consumption_receipt(store, "math", ids, receipt_id="large", metadata={"step": 1})
-        store.append(record("later"))
-        assert store.get("math", "later") is not None
-        assert store.consumption_receipts("math")[0]["consumed_ids"] == tuple(sorted(ids))
-
-
-def test_concurrent_append_retry_and_conflict(postgres_database):
-    with (
-        closing(PostgresRecordStore(postgres_database)) as first,
-        closing(PostgresRecordStore(postgres_database)) as second,
-    ):
-        barrier = Barrier(2)
-
-        def append(store):
-            barrier.wait(timeout=5)
-            return store.append_result(record())
-
-        with ThreadPoolExecutor(2) as pool:
-            results = list(pool.map(append, (first, second)))
-        assert sorted(result.inserted for result in results) == [False, True]
-        with pytest.raises(RecordConflict):
-            second.append(replace(record(), payload={"changed": True}))
-        assert first.count("math") == 1
-
-
 def test_concurrent_database_initialization(postgres_config):
     url, schema = postgres_config
     barrier = Barrier(2)
 
-    def initialize_and_append():
+    def initialize():
         barrier.wait(timeout=5)
-        with closing(PostgresRecordStore(url, schema=schema)) as store:
-            return store.append_result(record()).inserted
+        PostgresRecordDatabase(url, schema=schema).close()
 
     with ThreadPoolExecutor(2) as pool:
-        results = [pool.submit(initialize_and_append) for _ in range(2)]
-        assert sorted(result.result() for result in results) == [False, True]
-    with closing(PostgresRecordStore(url, schema=schema)) as store:
-        assert store.count("math") == 1
+        for result in [pool.submit(initialize) for _ in range(2)]:
+            result.result()
 
 
 def test_schema_version_and_database_close(postgres_config):
     url, schema = postgres_config
     database = PostgresRecordDatabase(url, schema=schema)
-    with closing(PostgresRecordStore(database)) as store:
-        store.append(record())
     with database.transaction() as connection:
-        version = database.tables.records.metadata.tables[f"{schema}.schema_version"]
+        version = database.settings_table.metadata.tables[f"{schema}.schema_version"]
         connection.execute(version.update().values(version=999))
     database.close()
     database.close()
@@ -120,175 +63,10 @@ def test_postgres_dependency_is_optional_and_error_is_actionable(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "psycopg", None)
     with pytest.raises(ReefError, match=r"reef-infra\[postgres\]"):
-        PostgresRecordStore("postgresql:///unused")
+        PostgresRecordDatabase("postgresql:///unused")
 
 
-def test_sequence_allocation_waits_for_prior_commit(postgres_database):
-    with (
-        closing(PostgresRecordStore(postgres_database)) as first,
-        closing(PostgresRecordStore(postgres_database)) as second,
-    ):
-        started = Event()
-
-        def append_second():
-            started.set()
-            return second.append(record("second"))
-
-        with ThreadPoolExecutor(1) as pool:
-            with first._transaction(write=True) as connection:
-                first._insert(
-                    connection, first._tables.records, {**first._encode(record())[0]._asdict(), "body_bytes": 30}
-                )
-                pending = pool.submit(append_second)
-                assert started.wait(5)
-                with pytest.raises(TimeoutError):
-                    pending.result(timeout=0.2)
-                with closing(PostgresRecordStore(postgres_database, name="independent")) as independent:
-                    independent.append(record("unblocked"))
-            pending.result(timeout=5)
-        page = first.replay_page("math")
-        assert [item.agent_record_id for _, item in page] == ["first", "second"]
-        assert first.replay_page("math", after_sequence=page[0][0]) == (page[1],)
-
-
-def test_reader_snapshot_and_transaction_rollback(postgres_database):
-    with (
-        closing(PostgresRecordStore(postgres_database)) as first,
-        closing(PostgresRecordStore(postgres_database)) as second,
-    ):
-        original = first.append(record())
-        with first._transaction(write=False) as connection:
-            query = select(first._tables.consumption.c.receipt_id)
-            assert connection.execute(query).all() == []
-            write_consumption_receipt(second, "math", frozenset({"first"}), receipt_id="skip", metadata={})
-            assert connection.execute(query).all() == []
-        assert len(first.consumption_receipts("math")) == 1
-        assert first.get("math", "first") == original
-        assert first.get_for_audit("math", "first").item == original
-        with pytest.raises(RuntimeError, match="rollback"), first._transaction(write=True) as connection:
-            first._insert(
-                connection, first._tables.records, {**first._encode(record("failed"))[0]._asdict(), "body_bytes": 10}
-            )
-            raise RuntimeError("rollback")
-        assert second.get("math", "failed") is None
-        assert second.append_result(record("failed")).inserted
-
-
-def test_archive_generation_retention_and_closed_sessions(postgres_database):
-    old = PostgresRecordStore(postgres_database, name="math")
-    try:
-        old.append(record())
-        write_consumption_receipt(old, "math", frozenset({"first"}), receipt_id="skip", metadata={})
-        old.append(record("active"))
-        archived_id = postgres_database.archive("math")
-        assert archived_id == old.storage_id
-        with pytest.raises(RuntimeError, match="archived"):
-            old.append(record("stale"))
-        with closing(PostgresRecordStore(postgres_database, name="math")) as new:
-            assert new.storage_id != old.storage_id
-            assert new.consumption_receipts("math") == ()
-            assert new.append_result(record()).inserted
-            assert postgres_database.prune(RecordRetention(max_bytes=1)) == 3
-            assert new.count("math") == 0
-            assert new.loss("math").record_count == 1
-            with postgres_database.transaction() as connection:
-                rows = connection.execute(select(postgres_database.tables.records.c.agent_record_id)).scalars().all()
-            assert rows == []
-    finally:
-        old.close()
-        old.close()
-    with pytest.raises(RuntimeError, match="closed"):
-        old.count("math")
-
-
-def test_capacity_counts_all_records_and_preserves_retry_hashes(postgres_database):
-    with closing(PostgresRecordStore(postgres_database)) as store:
-        for name in ("expired", "oldest", "newest", "active"):
-            store.append(record(name))
-        for name in ("expired", "oldest", "newest"):
-            write_consumption_receipt(store, "math", frozenset({name}), receipt_id=name, metadata={})
-        with postgres_database.transaction() as connection:
-            table = postgres_database.tables.records
-            newest_bytes = connection.execute(
-                select(table.c.body_bytes).where(table.c.agent_record_id == "newest")
-            ).scalar_one()
-        assert postgres_database.prune(RecordRetention(max_bytes=newest_bytes)) == 3
-        assert [row.item.agent_record_id for row in store.audit_page("math")] == ["active"]
-        assert store.loss("math").record_count == 3
-        assert store.append_result(record("expired")).inserted is False
-
-
-def test_eviction_keeps_the_nodes_of_each_generation_that_a_remaining_record_needs(postgres_database):
-    tables = postgres_database.tables
-    with (
-        closing(PostgresRecordStore(postgres_database, name="math")) as math,
-        closing(PostgresRecordStore(postgres_database, name="code")) as code,
-    ):
-        math.append(conversation("old", 2, created_at=10.0))
-        code.append(conversation("other", 2, scenario="code", created_at=15.0))
-        math.append(conversation("new", 3, created_at=20.0))
-        assert math.trajectory("math", "new") == ("old", "new")
-        with postgres_database.transaction() as connection:
-            old_row = connection.execute(
-                select(tables.records.c.body_bytes).where(tables.records.c.agent_record_id == "old")
-            ).scalar_one()
-            retained = SQLRecordRetention(tables).retained_bytes(connection)
-        # "new" continues "old" in the same generation, so the eviction frees only the row of "old".
-        assert postgres_database.prune(RecordRetention(max_bytes=retained - old_row)) == 1
-        assert math.replay("math") == (conversation("new", 3, created_at=20.0),)
-        assert code.replay("code") == (conversation("other", 2, scenario="code", created_at=15.0),)
-        assert math.loss("math").body_bytes == old_row
-        with postgres_database.transaction() as connection:
-            counts = dict(
-                connection.execute(
-                    select(tables.nodes.c.storage_id, func.sum(tables.nodes.c.record_count)).group_by(
-                        tables.nodes.c.storage_id
-                    )
-                ).all()
-            )
-        assert counts == {math.storage_id: 2, code.storage_id: 1}
-        assert postgres_database.prune(RecordRetention(max_bytes=1)) == 2
-        with postgres_database.transaction() as connection:
-            assert connection.execute(select(func.count()).select_from(tables.nodes)).scalar_one() == 0
-
-
-def test_an_upgrade_from_version_13_links_the_stored_calls(postgres_config):
-    url, schema = postgres_config
-    calls = [conversation(f"call-{turns}", turns) for turns in (1, 2, 3)]
-    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        with closing(PostgresRecordStore(database)) as records:
-            records.append_many(calls)
-        tables = database.tables
-        with database.transaction() as connection:
-            # Write the rows back as version 13 kept them: the whole payload, and no node table.
-            for call in calls:
-                connection.execute(
-                    tables.records.update()
-                    .where(tables.records.c.agent_record_id == call.agent_record_id)
-                    .values(payload_json=canonical_json(dict(call.payload)))
-                )
-            for column in ("message_field", "payload_sha256"):
-                connection.exec_driver_sql(f"ALTER TABLE {schema}.agent_record DROP COLUMN {column}")
-            tables.nodes.drop(connection)
-            version = tables.records.metadata.tables[f"{schema}.schema_version"]
-            connection.execute(version.update().values(version=13))
-    with (
-        closing(PostgresRecordDatabase(url, schema=schema)) as database,
-        closing(PostgresRecordStore(database)) as records,
-    ):
-        assert records.replay("math") == tuple(calls)
-        assert records.trajectory("math", "call-3") == ("call-1", "call-2", "call-3")
-        with database.transaction() as connection:
-            nodes = database.tables.nodes
-            assert connection.execute(
-                select(func.count(), func.sum(nodes.c.record_count)).select_from(nodes)
-            ).one() == (
-                3,
-                5,
-            )
-
-
-def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypatch):
+def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
     url, schema = postgres_config
     committed = CommitRecord(
         scenario="math",
@@ -306,12 +84,10 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
         closing(factory.open("math")) as store,
     ):
         store.records.append(record())
-
         store.commit_step(expected_step=0, commit=committed)
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory:
         with closing(factory.open("math")) as store:
             assert store.history() == (committed,)
-            assert store.records.count("math") == 1
             assert store.recover(checkpoint=None) == committed
             assert store.records.count("math") == 1
             assert store.records.append_result(record()).inserted is False
@@ -319,8 +95,51 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
         assert archived[0].startswith("postgres://")
         with closing(factory.open("math")) as store:
             assert store.history() == ()
-            assert store.records.append_result(record()).inserted
-        assert factory.prune(max_bytes=1) == 2
+            assert store.records.count("math") == 0
+            assert store.records.append_result(record("second")).inserted
+
+
+def old_record_tables(url: str, schema: str) -> set[str]:
+    engine = create_engine(postgres_url(url), hide_parameters=True)
+    try:
+        with engine.connect() as connection:
+            return set(inspect(connection).get_table_names(schema=schema)) & set(OLD_RECORD_TABLES)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("copied", [True, False], ids=["copied", "not-copied"])
+def test_a_storage_drops_the_old_record_tables_only_when_their_records_are_record_items(
+    postgres_config, tmp_path, copied
+):
+    url, schema = postgres_config
+    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
+        storage.write_settings("math", ScenarioSettings(owner="acme"))
+        storage.write_settings("archived", ScenarioSettings())
+        if copied:
+            storage.data.create("acme", [record_item(record("newest"))])
+        storage.archive("archived")
+    engine = create_engine(postgres_url(url), hide_parameters=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                f"CREATE TABLE {schema}.agent_record (sequence BIGSERIAL PRIMARY KEY, storage_id VARCHAR(32), "
+                "agent_record_id TEXT, scenario TEXT)"
+            )
+        )
+        connection.execute(text(f"CREATE TABLE {schema}.record_eviction (storage_id VARCHAR(32))"))
+        # Each active generation counts, and an archived one does not.
+        connection.execute(
+            text(
+                f"INSERT INTO {schema}.agent_record (storage_id, agent_record_id, scenario) "
+                f"SELECT storage_id, unnest(ARRAY['older', 'newest']), name FROM {schema}.record_store "
+                "WHERE name = 'math' AND active_key IS NOT NULL "
+                f"UNION ALL SELECT storage_id, 'gone', name FROM {schema}.record_store WHERE name = 'archived'"
+            )
+        )
+    engine.dispose()
+    PostgresScenarioStorage(url, tmp_path, schema=schema).close()
+    assert old_record_tables(url, schema) == (set() if copied else {"agent_record", "record_eviction"})
 
 
 @pytest.mark.parametrize(
@@ -328,7 +147,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
     [
         {"record_backend": "unknown"},
         {"record_backend": "reef.storage.scenario:ScenarioStorage"},
-        {"record_backend": {"module": "reef.storage.sqlite:SQLiteRecordStore"}},
+        {"record_backend": {"module": "reef.storage.sqlite:SQLiteScenarioDatabase"}},
         {"record_backend": {"module": "reef.storage.sqlite:SQLiteScenarioStorage", "options": {}}},
         {"record_backend": "postgres"},
         {"record_database_url": "postgresql:///db"},
@@ -392,9 +211,14 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
             "module": "reef.storage.postgres:PostgresScenarioStorage",
             "config": {"database_url": url, "schema": schema},
         }
+        # The records are record items, so a new host needs the data store in PostgreSQL too.
         values = {
             "record_backend": plugin,
             "coordination_backend": "postgres",
+            "data_store": {
+                "module": "reef.storage.sql_data:PostgresDataStore",
+                "config": {"database_url": url, "schema": f"{schema}_data"},
+            },
             "record_database_url": url,
             "record_database_schema": schema,
         }
@@ -406,7 +230,6 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         artifact_cache_dir=str(tmp_path / "cache"),
         **values,
     )
-    expected = PostgresRecordStore if backend.startswith("postgres") else SQLiteRecordStore
     for restart in (False, True):
         if restart and backend.startswith("postgres"):
             # PostgreSQL keeps all scenario state, so a new host starts from an empty record directory.
@@ -414,79 +237,11 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         dispatcher = build_dispatcher(settings)
         try:
             scenario = dispatcher.get_or_create_scenario("math")
-            assert isinstance(scenario.records, expected)
+            # The records are record items of the data store, which follows the record backend (RFC #1219).
+            assert isinstance(scenario.records, ItemRecordStore)
             if restart:
                 assert scenario.records.get("math", "first") == record()
             else:
                 scenario.records.append(record())
         finally:
             dispatcher.close()
-
-
-def test_capacity_metadata_upgrade_preserves_existing_records(postgres_config):
-    url, schema = postgres_config
-    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        with closing(PostgresRecordStore(database)) as records:
-            records.append(record())
-        with database.transaction() as connection:
-            database.tables.eviction.drop(connection)
-            version = database.tables.records.metadata.tables[f"{schema}.schema_version"]
-            connection.execute(version.update().values(version=1))
-    with (
-        closing(PostgresRecordDatabase(url, schema=schema)) as database,
-        closing(PostgresRecordStore(database)) as records,
-    ):
-        assert records.get("math", "first") == record()
-        assert records.loss("math").record_count == 0
-        assert database.prune(RecordRetention(max_bytes=1)) == 1
-        assert records.loss("math").record_count == 1
-
-
-def test_legacy_schema_moves_retirement_to_consumption_and_removes_old_tables(postgres_config):
-    from sqlalchemy import inspect
-
-    url, schema = postgres_config
-    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        with closing(PostgresRecordStore(database, name="one")) as records:
-            records.append(record())
-            write_consumption_receipt(
-                records, "math", frozenset({"earlier"}), receipt_id="skip", metadata={"outcome": "stale"}
-            )
-        with closing(PostgresRecordStore(database, name="two")) as records:
-            records.append(record("other"))
-        with database.transaction() as connection:
-            connection.exec_driver_sql(f'ALTER TABLE "{schema}".record_consumption RENAME TO compaction_receipts')
-            connection.exec_driver_sql(
-                f'ALTER TABLE "{schema}".compaction_receipts RENAME CONSTRAINT record_consumption_pkey TO compaction_receipts_pkey'
-            )
-            connection.exec_driver_sql(
-                f'ALTER TABLE "{schema}".compaction_receipts RENAME COLUMN consumed_ids_json TO compacted_ids_json'
-            )
-            connection.exec_driver_sql(
-                f'ALTER TABLE "{schema}".compaction_receipts RENAME COLUMN consumed_ids_sha256 TO compacted_ids_sha256'
-            )
-            connection.exec_driver_sql(f'ALTER TABLE "{schema}".agent_record ADD COLUMN compacted_at DOUBLE PRECISION')
-            connection.exec_driver_sql(f'UPDATE "{schema}".agent_record SET compacted_at=1')
-            connection.exec_driver_sql(
-                f'CREATE INDEX agent_record_active_type_sequence ON "{schema}".agent_record (scenario, sequence) '
-                "WHERE compacted_at IS NULL"
-            )
-            version = database.tables.records.metadata.tables[f"{schema}.schema_version"]
-            connection.execute(version.update().values(version=2))
-    for _ in range(2):
-        with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-            with closing(PostgresRecordStore(database, name="one")) as records:
-                assert records.get("math", "first") == record()
-                assert {
-                    key for receipt in records.consumption_receipts("math") for key in receipt["consumed_ids"]
-                } == {"first", "earlier"}
-                assert len(records.consumption_receipts("math")) == 2
-            with closing(PostgresRecordStore(database, name="two")) as records:
-                assert records.get("math", "other") == record("other")
-                assert records.consumption_receipts("math")[0]["consumed_ids"] == ("other",)
-            with database.transaction() as connection:
-                inspector = inspect(connection)
-                assert "compaction_receipts" not in inspector.get_table_names(schema=schema)
-                assert "compacted_at" not in {
-                    column["name"] for column in inspector.get_columns("agent_record", schema=schema)
-                }

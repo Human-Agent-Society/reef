@@ -22,9 +22,19 @@ from threading import Lock
 
 from reef.core.evaluation import RolloutScore
 from reef.evaluation.harness.scoring import FailureObservation, ScoredRun, TaskScorer
+from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor.config import (
+    ExecutorSelection,
+    ExecutorSettings,
+    local_gpu_assignments,
+    select_executor,
+    worker_requirements,
+)
+from reef.execution.executor.ray import RayExecutor
+from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import RUN_OWNER_LEASE, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.harbor_task import run_harbor_task
+from reef.harness.harbor.agent import run_harbor_task
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.run import TaskResult, TaskRunError, run_task
 from reef.harness.tasks.trajectory import (
@@ -36,16 +46,6 @@ from reef.harness.tasks.trajectory import (
     stage_path,
 )
 from reef.harness.tree.checks import clip_record_text
-from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.executor.config import (
-    ExecutorSelection,
-    ExecutorSettings,
-    local_gpu_assignments,
-    select_executor,
-    worker_requirements,
-)
-from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.executor.requirements import ExecutionRequirements
 
 #: The record file beside one evaluation run's kept trajectory.
 RECORD_RUN_FILE = "run.json"

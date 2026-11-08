@@ -1,4 +1,4 @@
-"""The harness backend: one evolution step, from the head tree to a release.
+"""The harness backend: one evolution step, from the head tree to a snapshot.
 
 One step runs in three phases, one training job of the harness training
 component (``reef.train.harness_backend.component``):
@@ -16,8 +16,8 @@ component (``reef.train.harness_backend.component``):
     3. Read the tree it left in ``harness/``. An unchanged tree, or one that
        fails validation for the adapter, skips the step.
     4. Add the tree to the history with its parent and the method's
-       summary, and make it a ``HarnessCandidate`` against the head. On an
-       instruction step the method's ``requires`` join the request's, after
+       summary, and make it a ``HarnessCandidate`` against the head. On a
+       request step the method's ``requires`` join the request's, after
        the screens a person's items pass.
 ``evaluate``
     Score the sides that the publication policy names with
@@ -31,7 +31,7 @@ component (``reef.train.harness_backend.component``):
     decides whether it serves, from the tree kinds it changes.
 
 Nothing is restored on a rejection or an abort: the candidate is a new value,
-and the head stays the committed release.
+and the head stays the committed snapshot.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ from reef.train.harness_backend.records import CALLS_FILE, StepRecord
 from reef.train.harness_backend.services import StepServices
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput, Workspace
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 #: The phases of a running step, in order; only an offline step, which rolls out train tasks, has the first.
 STEP_PHASES = ("running tasks", "proposing", "evaluating")
@@ -80,7 +80,7 @@ STEP_PHASES = ("running tasks", "proposing", "evaluating")
 class StepProgress:
     """Where the running step stands, for a page a person watches.
 
-    Values: ``request_id`` names the instruction the step answers, ``None``
+    Values: ``request_id`` names the request the step answers, ``None``
     for an automatic step. ``phase`` is one of
     ``STEP_PHASES``: ``"running tasks"`` while an offline step runs the head
     tree on its train tasks, ``"evaluating"`` while the evaluation's
@@ -268,7 +268,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
         if automatic and self.limits.max_failure_streak and state.failure_streak >= self.limits.max_failure_streak:
             return skipped(state, metrics, f"failure streak of {state.failure_streak} rejections")
         head_tree = HarnessTree(head.files)
-        metrics["head_artifact_id"] = head.artifact_id
+        metrics["head_checksum"] = head_tree.checksum()
         self.history.add_candidate(head_tree, step=step, origin="release" if self.history.candidates else "seed")
         step_tasks = self.tasks.for_step(samples, state.collected_tasks, state.collected_clients, seed=seed_tasks)
         state = replace(
@@ -421,10 +421,10 @@ class HarnessBackend(HarnessCandidateEvaluator):
             self.progress = replace(self.progress, phase="evaluating", runs_total=total)
         return self.evaluator.evaluate(harness_candidate, sides=sides)
 
-    def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
+    def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainingCommit:
         """Fold ``decision`` into the state and the history; a selected tree is the step's kept tree.
 
-        The head the step prepared against is ``prepared.metrics["head_artifact_id"]``; no activation, new training
+        The head the step prepared against is ``prepared.metrics["head_checksum"]``; no activation, new training
         start, import or sync moves it while a step runs. The commit keeps the evaluation's sums, not its score
         vectors: the history holds every run. The metrics gain ``selected`` and ``selection``: the candidate
         id, the decision's ``selected``, ``policy``, ``reason`` and ``metrics``, and the ``evaluation`` that the
@@ -474,14 +474,14 @@ class HarnessBackend(HarnessCandidateEvaluator):
             },
         }
         if not decision.selected:
-            return TrainStepResult(state.to_json(), metrics)
+            return TrainingCommit(state.to_json(), metrics)
         directory = Path(tempfile.mkdtemp(prefix="reef-harness-"))
         candidate.candidate_tree.write(directory)
         artifact = Artifact.local(directory)
         if self.pending_artifact is not None:
             self.pending_artifact.discard()
         self.pending_artifact = artifact
-        return TrainStepResult(state.to_json(), metrics, artifact=artifact)
+        return TrainingCommit(state.to_json(), metrics, artifact=artifact)
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self.progress = None

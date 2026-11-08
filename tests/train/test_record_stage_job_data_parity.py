@@ -23,6 +23,7 @@ from typing import Any, Self
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, job_sized_stages
 from tests.support.samples_service import make_samples
 
@@ -51,12 +52,12 @@ from reef.record2sample.distill import DistillSamples
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
 from reef.sample2job.traces import TraceJobData
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
-from reef.train.instructions import ScenarioInstructions
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineSpec
+from reef.train.training_requests import ScenarioTrainingRequests
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_job_data_goldens.json"
@@ -73,20 +74,15 @@ class Serve:
 
 
 @dataclass(frozen=True)
-class Insert:
-    """A client inserts the stored samples ``sample_ids`` into the trainer's manual buffer at this step."""
+class Train:
+    """A client queues the training request ``request_id``, which names the stored samples ``sample_ids``, at
+    this step (``POST /reef/train``)."""
 
+    request_id: str
     sample_ids: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class Instruct:
-    """A client queues the training instruction ``request_id`` at this step (``POST /reef/train``)."""
-
-    request_id: str
-
-
-Step = AgentRecord | Serve | Insert | Instruct | str
+Step = AgentRecord | Serve | Train | str
 
 
 # ------------------------------------------------------------------- the driver
@@ -147,12 +143,11 @@ class StreamRun:
     training_mode: str = "auto"
     job_samples: int = 1
     serving_artifact_id: str | None = None
-    records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
+    records: ItemRecordStore = field(default_factory=lambda: memory_records("s"))
     consumed: set[str] = field(default_factory=set)
-    high_water: tuple[int, int] | None = None
     commits: list[dict[str, object]] = field(default_factory=list)
-    instructions: ScenarioInstructions = field(
-        default_factory=lambda: ScenarioInstructions(memory_coordination().work_queue, "s")
+    training_requests: ScenarioTrainingRequests = field(
+        default_factory=lambda: ScenarioTrainingRequests(memory_coordination().work_queue, "s")
     )
 
     def build(self) -> Trainer:
@@ -170,28 +165,22 @@ class StreamRun:
         """Rebuild the trainer from durable state, in the order scenario recovery uses."""
         trainer.close()
         rebuilt = self.build()
-        if self.high_water is not None:
-            sequence, offset = self.high_water
-            rebuilt.replay_retained(up_to_sequence=sequence, consumed_ids=frozenset(self.consumed))
-            rebuilt.restore_record_progress(after_sequence=sequence, offset=offset)
-        elif self.consumed:
-            rebuilt.replay_retained(up_to_sequence=0, consumed_ids=frozenset(self.consumed))
+        rebuilt.restore_consumed_records(frozenset(self.consumed))
         return rebuilt
 
     def drain(self, trainer: Trainer) -> None:
         """Make the samples of the new records, as the samples service does, then commit every batch the trainer can
         reserve now."""
         while True:
-            self.instructions.give([trainer])
+            self.training_requests.give([trainer])
             make_samples(trainer)
-            result = trainer.run_once(serving_artifact_id=self.serving_artifact_id)
+            result = trainer.advance_job(serving_artifact_id=self.serving_artifact_id)
             if result is None:
                 return
             batch = trainer.pending_job_data
             prepared = trainer.prepare_commit(result)
-            trainer.commit(prepared)
+            trainer.settle_commit(prepared)
             self.consumed |= prepared.consumed_ids
-            self.high_water = (prepared.high_water_sequence, prepared.high_water_offset)
             if batch is None:
                 # The end of the batch's job: it consumes no batch, so the goldens list only the submissions.
                 continue
@@ -201,7 +190,6 @@ class StreamRun:
                     "request": None if batch.request is None else batch.request.id,
                     "items": [describe_item(item) for item in batch.samples],
                     "consumed": sorted(prepared.consumed_ids),
-                    "released": sorted(prepared.released_ids),
                 }
             )
 
@@ -214,11 +202,14 @@ class StreamRun:
                 elif isinstance(step, Serve):
                     self.serving_artifact_id = step.artifact_id
                     trainer.pipeline.observe_serving_artifact_id(step.artifact_id)
-                elif isinstance(step, Insert):
-                    trainer.change_buffer(step.sample_ids, insert=True)
-                elif isinstance(step, Instruct):
-                    payload = {"text": step.request_id, "session": "session-1", "release_id": "release-1"}
-                    self.instructions.file(step.request_id, normalize_training_request_payload(payload))
+                elif isinstance(step, Train):
+                    payload = {
+                        "text": step.request_id,
+                        "session": "session-1",
+                        "artifact_id": "release-1",
+                        "samples": list(step.sample_ids),
+                    }
+                    self.training_requests.file(step.request_id, normalize_training_request_payload(payload))
                 elif step == CYCLE:
                     self.drain(trainer)
                 elif step == RELOAD:
@@ -262,8 +253,8 @@ def report(record_id: str, *references: str, score: float = 1.0, **metadata: obj
     )
 
 
-def instruction(record_id: str) -> Instruct:
-    return Instruct(record_id)
+def train_step(record_id: str, *sample_ids: str) -> Train:
+    return Train(record_id, sample_ids)
 
 
 def scored(prefix: str, index: int, score: float = 1.0, **metadata: object) -> list[AgentRecord]:
@@ -662,16 +653,13 @@ def trace_steps(mode_requests: bool) -> list[Step]:
     for index in range(6):
         steps += scored("c", index, float(index))
     if mode_requests:
-        # The samples join the manual buffer only by a client's insert; each instruction trains the one inserted
-        # sample, and the other stored samples wait.
+        # Each request trains the one sample that it names, and the other stored samples wait.
         steps += [
             CYCLE,
-            Insert(("r-c-0:0",)),
-            instruction("train-1"),
+            train_step("train-1", "s.r-c-0:0"),
             CYCLE,
             *scored("c", 6),
-            Insert(("r-c-1:0",)),
-            instruction("train-2"),
+            train_step("train-2", "s.r-c-1:0"),
         ]
     return steps
 

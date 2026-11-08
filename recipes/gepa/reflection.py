@@ -56,7 +56,7 @@ def render_prompt(current_text: str, records: Sequence[Mapping[str, Any]]) -> st
 
     The records go in as they are, without ``untrusted_text``, so that the prompt stays upstream's word for
     word. Run GEPA on traffic that you trust, or with the ``never`` activation rule, so a person activates each
-    release.
+    snapshot.
     """
     side_info = "\n\n".join(
         f"# Example {number}\n" + "".join(f"## {key}\n{render_value(value)}" for key, value in record.items())

@@ -24,8 +24,8 @@ from reef.inference.chat import (
     positive_max_tokens,
 )
 from reef.inference.http import RequestHeadersFactory
+from reef.inference.interfaces import InferenceArtifact
 from reef.inference.vllm.versions import TOKEN_RUNTIME_LOAD_IDS_KEY, UNKNOWN_RUNTIME_LOAD_ID
-from reef.runtime.interfaces import InferenceArtifact
 
 VLLM_GENERATE_PATH = "/inference/v1/generate"
 #: vLLM renders logprob tokens as ``token_id:N`` on this route.
@@ -230,7 +230,6 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
-        rollout_continuation: bool = False,
         client: NativeGenerateClient | None = None,
         request_headers: RequestHeadersFactory | None = None,
     ) -> None:
@@ -244,7 +243,6 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
             chat_template_kwargs=chat_template_kwargs,
-            rollout_continuation=rollout_continuation,
             request_headers=request_headers,
         )
 

@@ -140,6 +140,9 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         content = query_int(request, "content", 0)
         if content not in (0, 1):
             raise web.HTTPBadRequest(text="content must be 0 or 1")
+        group_key = request.query.get("group_key")
+        if group_key is None and "group_value" in request.query:
+            raise web.HTTPBadRequest(text="group_value needs group_key")
         listing = await asyncio.to_thread(
             query_items,
             data,
@@ -149,6 +152,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             after=query_int(request, "after", 0),
             limit=query_int(request, "limit", MAX_QUERY_LIMIT),
             content=content == 1,
+            group=None if group_key is None else (group_key, request.query.get("group_value")),
         )
         return web.json_response(listing)
 
@@ -160,6 +164,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             request.match_info["owner"],
             kind=request.query.get("kind") or None,
             key=request.match_info["key"],
+            scenario=request.query.get("scenario") or None,
             before=before or None,
             limit=query_int(request, "limit", MAX_QUERY_LIMIT),
         )

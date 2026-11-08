@@ -1,4 +1,4 @@
-"""A client evaluates an artifact of a release: Reef runs the rollouts and stores their policy evaluation."""
+"""A client evaluates an artifact of a snapshot: Reef runs the rollouts and stores their policy evaluation."""
 
 from __future__ import annotations
 
@@ -9,11 +9,12 @@ import json
 import tarfile
 import time
 import urllib.request
-from collections.abc import Iterator
+import uuid
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import pytest
@@ -23,51 +24,67 @@ from tests.support.trajectory_uploads import dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
-from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
+from reef.evaluation.rollout_worker import (
+    EVALUATIONS_QUEUE,
+    EvaluationRollout,
+    EvaluationRolloutWorker,
+    LocalCandidateEndpoints,
+)
 from reef.harness.adapters import get_adapter
-from reef.harness.sync import create_harness_surface
-from reef.harness.tasks.rollouts import RolloutRow, TaskLab
+from reef.harness.harbor.agent import TreeAgent
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
+from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
+from reef.harness.tree import HarnessTree
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
+from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
+from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
+from reef.storage.data import NewItem
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_weight_surface
 from reef.train.trainer import ComponentTrainer
 
 TOKEN = "artifact-evaluation-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
-class ReleaseHandler(InferenceHandler):
+class ArtifactHandler(InferenceHandler):
     """Answers every chat call, and records the artifact that it was asked to answer from."""
 
     def __init__(self) -> None:
         self.releases: list[str] = []
+        self.models: list[str] = []
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.releases.append(artifact.artifact_id)
+        self.models.append(payload["model"])
         return {"choices": [{"message": {"role": "assistant", "content": "ls"}, "finish_reason": "stop"}]}
 
 
-class ReleaseRuntime(InferenceRuntime):
-    """A runtime that answers each call from the release that the call names, as a sampler for each checkpoint.
+class ArtifactRuntime(InferenceRuntime):
+    """A runtime that answers each call from the snapshot that the call names, as a sampler for each checkpoint.
 
     Its engine serves every scenario under one model name, so control writes the ``served_models`` rows that the
     inference routes answer from."""
 
-    def __init__(self, *, serves_any_release: bool = True) -> None:
+    def __init__(self, *, any_artifact: bool = True) -> None:
         super().__init__(base_url="http://runtime.invalid")
-        self.handler = ReleaseHandler()
-        self.serves_any_release = serves_any_release
+        self.handler = ArtifactHandler()
+        self.served: list[str] = []
+        self.serve_error: str | None = None
+        self.any_artifact = any_artifact
 
     @property
     def inference_handler(self) -> InferenceHandler:
@@ -81,11 +98,17 @@ class ReleaseRuntime(InferenceRuntime):
         return "base"
 
     @property
-    def serves_artifacts_on_request(self) -> bool:
-        return self.serves_any_release
+    def serves_any_artifact(self) -> bool:
+        return self.any_artifact
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}")
+
+    def serve_artifact(self, artifact: Artifact) -> ServedArtifact:
+        self.served.append(artifact.artifact_id)
+        if self.serve_error is not None:
+            raise ValueError(self.serve_error)
+        return ServedArtifact(artifact.artifact_id, self.base_url, f"engine:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
@@ -97,22 +120,22 @@ class WeightRecipe(Recipe):
 
     harness: bool = False
 
-    def build_surface(self, scenario: str) -> Surface:
-        weights = create_weight_surface(kind=self.runtime.served_weight_kind)
-        if not self.harness:
-            return weights
-        return Surface({**weights.components, **create_harness_surface(get_adapter("pi")).components})
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        components = {"weights": ComponentSpec(kind=self.runtime.served_weight_kind)}
+        if self.harness:
+            components[HARNESS_COMPONENT] = ComponentSpec(files=HarnessFiles(get_adapter("pi")), kind="harness_plugin")
+        return ScenarioComponents(components)
 
     def build_trainers(
         self,
         scenario,
         records,
         *,
-        surface,
+        components,
         algorithm_states,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -128,7 +151,7 @@ class WeightRecipe(Recipe):
                     root=root,
                 ),
             )
-            for name in surface.names
+            for name in components.names
         )
 
 
@@ -202,7 +225,7 @@ async def created(client: TestClient, tmp_path: Path, *names: str) -> str:
 
 @pytest.mark.integration
 def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_release_it_names(tmp_path: Path) -> None:
-    runtime = ReleaseRuntime()
+    runtime = ArtifactRuntime()
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
     lab = ModelCallingLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"}))
 
@@ -215,6 +238,12 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             assert response.status == 202, await response.text()
             accepted = await response.json()
             assert accepted["state"] == "running" and accepted["request"]["component"] == "weights"
+            assert (dispatcher.candidate_task("s", "add") / "task.toml").is_file()
+            with pytest.raises(ReefError, match="uses no task"):
+                dispatcher.candidate_task("s", "missing")
+            # A worker in another Pod finds each task by its name: a path here would mean nothing there.
+            queued = dispatcher.queue.items(EVALUATIONS_QUEUE, scenario="s")
+            assert queued and all("task_path" not in item.payload for item in queued)
 
             answer = await finished(client, accepted["evaluation_id"])
             assert answer["state"] == "finished", answer
@@ -229,6 +258,13 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             }
             assert answer["mean_score"] == 0.5
             assert runtime.handler.releases == [artifact_id] * 4, "every call samples the evaluated release"
+            assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
+            assert runtime.served == [artifact_id] * 6, "inference serves the candidate before each trial"
+            routes = dispatcher.coordination.served_models.read_scenario("s")
+            assert set(routes) == {
+                "active",
+                artifact_id,
+            }, "the active artifact's two names, and no route of the evaluation"
             rollouts_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/rollouts"
             rollouts = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
             assert [(rollout["task"], rollout["repeat"], rollout["score"]) for rollout in rollouts] == [
@@ -242,9 +278,6 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             assert {rollout["state"] for rollout in rollouts} == {"finished"}
             missing = await client.get("/reef/scenarios/s/evaluations/missing/rollouts", headers=AUTH)
             assert missing.status == 404
-            contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
-            assert contract["capabilities"]["evaluate"] == ["weights"]
-            assert contract["capabilities"]["serve_beside"] is True
             listing = await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json()
             assert [item["evaluation_id"] for item in listing["evaluations"]] == [accepted["evaluation_id"]]
             # The evaluation keeps no record and changes nothing the scenario serves.
@@ -254,9 +287,268 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
     asyncio.run(run())
 
 
+class TreeCallingLab(TaskLab):
+    """Builds the agent as Harbor does, keeps what it rendered, and calls the model with the rendered binding."""
+
+    def __init__(self, logs: Path) -> None:
+        self.logs = logs
+        self.rendered: dict[str, str] = {}
+        self.overrides: Mapping[str, object] = {}
+        self.agent: TreeAgent | None = None
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        import_path = str(agent["import_path"])
+        assert import_path == "reef.harness.harbor.agent:TreeAgent"
+        kwargs = cast(dict[str, Any], agent["kwargs"])
+        self.overrides = overrides
+        self.agent = TreeAgent(self.logs, **kwargs)
+        files = Path(kwargs["files_dir"])
+        self.rendered = {str(path.relative_to(files)): path.read_text() for path in files.rglob("*") if path.is_file()}
+        body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "solve"}]}).encode()
+        request = urllib.request.Request(
+            f"{kwargs['base_url']}/v1/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        await asyncio.to_thread(lambda: urllib.request.urlopen(request, timeout=10).read())
+        return RolloutRow(rewards={"reward": 1.0})
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+def harness_tree(root: Path) -> str:
+    """The URI of a directory that holds a harness tree for pi, whose skill holds the text of a placeholder."""
+    HarnessTree({"skills/check/SKILL.md": "---\nname: check\ndescription: Check.\n---\nCall {model} once.\n"}).write(
+        root
+    )
+    return f"file://{root}/"
+
+
+def tree_item(
+    dispatcher: Dispatcher, uri: str | None, *, kind: str = "harness_plugin", adapter: str | None = "pi"
+) -> str:
+    """Store an artifact item of a harness in another scenario of the owner of ``s``, and return its ID."""
+    item_id = f"other/artifact:{uuid.uuid4().hex}"
+    metadata = {
+        "kind": "artifact",
+        "origin": {"scenario": "other", "artifact_id": item_id.removeprefix("other/")},
+        **({"adapter": adapter} if adapter else {}),
+    }
+    content = {"source_uri": uri, "kind": kind, "component": "harness"}
+    owner = cast(str, dispatcher.scenario_owner("s"))
+    DataAccess.of(dispatcher).require_store().create(owner, [NewItem(item_id, content, metadata)])
+    return item_id
+
+
+@pytest.mark.integration
+def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item(tmp_path: Path) -> None:
+    runtime = ArtifactRuntime()
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
+    lab = TreeCallingLab(tmp_path / "logs")
+    dispatcher.workers.add(
+        EvaluationRolloutWorker(
+            dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id="trees", lab=lab, agent_host="127.0.0.1"
+        )
+    )
+
+    async def run() -> None:
+        evaluations = ArtifactEvaluations(dispatcher)
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            rule = {
+                "activation": {"module": "evaluated", "config": {"min_mean_score": 0.5}},
+                "artifact_evaluation": {"harness": {"name": "terminus-2"}},
+            }
+            response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=rule)
+            assert response.status == 200, await response.text()
+            activated: list[str] = []
+            evaluations.results.activate = lambda scenario, request: activated.append(request.artifact_id)
+            item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
+            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+            assert activated == [], "a score with a harness from an item activates nothing"
+
+        assert answer["state"] == "finished", answer
+        assert answer["request"]["harness"] == {"item": item_id}
+        evaluation = answer["policy_evaluation"]
+        assert evaluation["harness"]["base"] == "pi"
+        assert evaluation["scores"] == [{"task": "add", "scores": [1.0]}]
+        assert runtime.handler.releases == [artifact_id]
+        rendered = "".join(lab.rendered.values())
+        assert "Call {model} once." in rendered, "the runner fills no placeholder in the tree's own text"
+        assert "http://127.0.0.1:" in rendered, "the rendered binding names the address of the capture proxy"
+        assert "127.0.0.1" not in json.dumps(evaluation["harness"]["plugin"]), "the result keeps no endpoint"
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    lab = TreeCallingLab(tmp_path / "logs")
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
+            body = {"artifact_id": artifact_id, "harness": {"item": item_id}, "environment": "modal"}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+            assert answer["state"] == "finished", answer
+
+    asyncio.run(run())
+    assert lab.overrides["environment"] == {"type": "modal"}
+    assert lab.agent is not None and lab.agent.bridge_port is not None
+    assert f"http://127.0.0.1:{lab.agent.bridge_port}" in "".join(lab.rendered.values())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        ({"kind": "model"}, "not an artifact of the kind harness_plugin"),
+        ({"uri": None}, "only a published artifact"),
+        ({"adapter": None}, "names no adapter"),
+        ({"adapter": "missing"}, "unknown harness adapter"),
+        ({"adapter": "hermes"}, "cannot run in a task's container"),
+        ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
+    ],
+)
+def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
+    tmp_path: Path, options: dict[str, Any], reason: str
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, TreeCallingLab(tmp_path / "logs"))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            uri = options.pop("uri", harness_tree(tmp_path / "tree"))
+            environment = options.pop("environment", "docker")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"item": tree_item(dispatcher, uri, **options)},
+                "environment": environment,
+            }
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and reason in await response.text()
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, TreeCallingLab(tmp_path / "logs"))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
+            item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
+
+            body = {"artifact_id": artifact_id, "harness": {"item": "another/artifact:1"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and "stores no item" in await response.text()
+
+            settings = {"artifact_evaluation": {"harness": {"item": item_id}}}
+            response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=settings)
+            assert response.status == 400 and "not an artifact item" in await response.text()
+
+            monkeypatch.setattr("reef.service.artifact_evaluations.task_agent_tools", lambda task: ("mcp_servers",))
+            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and "mcp_servers" in await response.text()
+
+    asyncio.run(run())
+
+
+class NoCallLab(TaskLab):
+    """A trial whose verifier writes a reward, though the agent reached no model: the endpoint went away."""
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        return RolloutRow(rewards={"reward": 0.0})
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+@pytest.mark.integration
+def test_a_rollout_that_reached_no_model_fails_though_its_verifier_wrote_a_reward(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, NoCallLab())
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+
+        assert answer["policy_evaluation"]["scores"] == [{"task": "add", "scores": ["failed"]}]
+        assert answer["mean_score"] is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_a_candidate_that_inference_cannot_serve_fails_its_rollouts_and_scores_nothing(tmp_path: Path) -> None:
+    runtime = ArtifactRuntime()
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
+    lab = ModelCallingLab({"add": 1.0})
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            runtime.serve_error = "the weights are gone"
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            answer = await finished(client, (await response.json())["evaluation_id"])
+
+        assert answer["policy_evaluation"]["scores"] == [{"task": "add", "scores": ["failed"]}]
+        assert runtime.handler.releases == [], "no trial ran"
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_an_artifact_that_is_not_published_is_refused_before_any_rollout(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, ModelCallingLab({"add": 1.0}))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            monkeypatch.setattr(
+                ScenarioSnapshots, "find_snapshot", lambda self, revision: (SnapshotRef(revision, None), False)
+            )
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 400 and "no durable bytes" in await response.text()
+            monkeypatch.undo()
+            listing = await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json()
+            assert listing["evaluations"] == []
+
+    asyncio.run(run())
+
+
 @pytest.mark.integration
 def test_a_request_that_the_scenario_cannot_run_is_refused_before_any_rollout(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
 
     async def run() -> None:
         app = create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher))
@@ -289,10 +581,6 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
         evaluations = ArtifactEvaluations(dispatcher)
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
             artifact_id = await created(client, root, "add")
-            # The contract tells a client so before it asks: no component can be evaluated.
-            contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
-            assert contract["capabilities"]["evaluate"] == []
-            assert contract["capabilities"]["serve_beside"] is harness
             body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "component": "weights"}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 400 and message in await response.text(), await response.text()
@@ -301,7 +589,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
                 refused = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
                 assert refused.status == 400 and "harness artifact yet" in await refused.text()
 
-    current = ReleaseRuntime(serves_any_release=False)
+    current = ArtifactRuntime(any_artifact=False)
     asyncio.run(
         run(
             dispatcher_for(tmp_path / "current", WeightRecipe(runtime=current)),
@@ -310,7 +598,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
             harness=False,
         )
     )
-    composed = WeightRecipe(runtime=ReleaseRuntime(), harness=True)
+    composed = WeightRecipe(runtime=ArtifactRuntime(), harness=True)
     asyncio.run(
         run(
             dispatcher_for(tmp_path / "harness", composed),
@@ -323,7 +611,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
 
 @pytest.mark.integration
 def test_a_started_evaluation_service_fails_the_evaluations_whose_rollouts_the_queue_lost(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
 
     async def run() -> None:
         evaluations = ArtifactEvaluations(dispatcher)
@@ -354,7 +642,7 @@ def test_a_started_evaluation_service_fails_the_evaluations_whose_rollouts_the_q
 
 @pytest.mark.integration
 def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_the_queue(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
     new_artifacts = NewArtifacts()
 
     async def run() -> None:
@@ -416,7 +704,7 @@ async def settings_of(client: TestClient) -> dict[str, Any]:
 def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_after_a_restart(
     tmp_path: Path,
 ) -> None:
-    recipe = WeightRecipe(runtime=ReleaseRuntime(), activation=activation_reference({"module": "never"}))
+    recipe = WeightRecipe(runtime=ArtifactRuntime(), activation=activation_reference({"module": "never"}))
     (tmp_path / "initial").mkdir()
     # The in-memory repository keeps its registrations in its factory: a restart reuses it.
     factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
@@ -433,6 +721,8 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "effective_activation": {"module": "never", "config": {}},
                 "serving_config": {},
                 "effective_serving_config": {"weights": {}},
+                "traffic_weights": {},
+                "job_parameters": {"trajectory": {}, "task": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": rule})
@@ -468,7 +758,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
 def test_the_evaluated_activation_needs_artifact_evaluation_in_either_order_and_a_plugin_rule_is_refused(
     tmp_path: Path,
 ) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
     evaluated = {"module": "evaluated", "config": {"min_mean_score": 0.5}}
     evaluation = {"harness": {"name": "terminus-2"}}
 
@@ -514,7 +804,7 @@ def test_a_scenario_under_a_deployment_evaluated_rule_without_artifact_evaluatio
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     evaluated = activation_reference({"module": "evaluated", "config": {"min_mean_score": 0.5}})
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime(), activation=evaluated))
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime(), activation=evaluated))
     with caplog.at_level("WARNING", logger="reef.scenario.registry"):
         dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
     assert "activates no new artifact" in caplog.text
@@ -539,13 +829,19 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
     try:
         session = storage.open("s")
         step = {"algorithm_state": {}, "high_water_sequence": 0, "high_water_offset": 0, "scenario": "s"}
-        published = CommitRecord(step=1, snapshot=SnapshotRef("a1", None), checkpoint=True, **step)
+        published = CommitRecord(
+            step=1,
+            snapshot=SnapshotRef("a1", None),
+            checkpoint=True,
+            selection=ArtifactSelection({"model": "a1"}),
+            **step,
+        )
         kept = CommitRecord(step=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
         session.commit_step(expected_step=0, commit=published)
         session.commit_step(expected_step=1, commit=kept)
         assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None, "a1")
         assert new_artifacts.queue.empty(), "a step that publishes nothing reports no artifact"
-        # An activation, even one that publishes a composed release, and a new training start make no artifact.
+        # An activation, even one that publishes a composed snapshot, and a new training start make no artifact.
         operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
         activation = CommitRecord(
             step=3,
