@@ -147,7 +147,7 @@ def create_scenario(client):
 
 def training_rows(client):
     """The catalog's training rows, oldest first; a step in flight holds the catalog, so the caller may wait."""
-    rows = client.get("/reef/harness/artifacts", extra_headers={"x-reef-scenario": SCENARIO})["releases"]
+    rows = client.get("/reef/harness/artifacts", extra_headers={"x-reef-scenario": SCENARIO})["artifacts"]
     return [row for row in rows if row.get("operation") == "training"]
 
 

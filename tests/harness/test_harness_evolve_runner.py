@@ -37,8 +37,9 @@ PUBLISHED = {"selected": True, "wins": 1, "losses": 0, "ties": 2, "candidate_sco
 #: The snapshot a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
 SEED_ARTIFACT = "artifact:seed"
 PUBLISHED_ARTIFACT = "artifact:published"
-#: The route that reports whether inference serves the scenario's model yet.
-STARTUP_STATUS = "/reef/scenarios/harness-evolve-demo/inference/status"
+#: The scenario the runner creates, and the route that reports whether inference serves its model yet.
+SCENARIO = "harness-evolve-demo"
+STARTUP_STATUS = f"/reef/scenarios/{SCENARIO}/inference/status"
 
 
 class StubReefClient:
@@ -97,7 +98,8 @@ class StubReefClient:
 
     def inference_with_record(self, scenario: str, path: str, payload: dict, **kwargs: object) -> tuple[dict, str]:
         if not self.is_inference_ready:
-            raise ReefClientError(503, '{"error": {"type": "inference_starting"}}')
+            body = {"error": {"type": "inference_starting", "message": "The inference engine is starting."}}
+            raise ReefClientError(503, json.dumps(body), "application/json")
         return {"choices": [{"message": {"content": "9592"}}]}, "receipt-1"
 
     def report(self, scenario: str, payload: dict, references: list[str], **kwargs: object) -> dict:
@@ -115,13 +117,15 @@ class StubReefClient:
                 "artifact_id": SEED_ARTIFACT,
                 "state": state,
                 "error": "engine failed" if state == "failed" else None,
+                "engine": "warm" if state == "ready" else None,
+                "engine_detail": None,
             }
         if path == "/reef/harness/artifacts":
             rows = self._step_rows()
             published = any(row["metrics"].get("selected") for row in rows)
             self.published_seen = self.published_seen or published
             self.reads.append(("catalog", {"rows": len(rows), "published": published}))
-            return {"releases": rows}
+            return {"scenario": SCENARIO, "artifacts": rows}
         if path == "/reef/harness":
             release = self.head if self.published_seen else SEED_ARTIFACT
             self.reads.append(("manifest", release))
