@@ -6,6 +6,7 @@ import time
 
 from reef.dispatcher import Dispatcher
 from reef.record2sample.service import SAMPLES_QUEUE, selection_triggers
+from reef.storage.records import RecordStore
 from reef.storage.work_queue import HELD_STATES, JsonValue, WorkItem
 
 #: The most tasks that one page with ``changed=True`` reads to fill the page.
@@ -39,6 +40,7 @@ def processing_item(item: WorkItem) -> dict[str, JsonValue]:
         "background": result.get("background"),
         "records_read": result.get("records_read"),
         "samples_created": result.get("samples_created"),
+        "record_sequences": result.get("record_sequences"),
         "triggers": selection_triggers(item),
         "progress": progress if current else None,
     }
@@ -53,6 +55,46 @@ def get_processing(dispatcher: Dispatcher, scenario: str, task_id: str) -> dict[
     """Return one task of the scenario, or None when the task is unknown or belongs to another scenario."""
     item = dispatcher.queue.get(SAMPLES_QUEUE, task_id)
     return None if item is None or item.scenario != scenario else processing_item(item)
+
+
+def read_processing_log(
+    dispatcher: Dispatcher,
+    scenario: str,
+    task_id: str,
+    *,
+    attempt: int | None = None,
+    after: int = -1,
+    limit: int = 500,
+) -> dict[str, JsonValue] | None:
+    """Return one page of the log of one attempt of a task, or None when the task is unknown or belongs to another
+    scenario.
+
+    ``attempt`` is 1 to the task's ``attempt_count``, and the last attempt when None. The page holds up to ``limit``
+    lines (1 to 1000) with a number above ``after``. ``next`` is the ``after`` of the next page, or null when the page
+    is the end of the lines kept so far. A task that no worker took has no attempt and no lines.
+    """
+    item = dispatcher.queue.get(SAMPLES_QUEUE, task_id)
+    if item is None or item.scenario != scenario:
+        return None
+    chosen = item.attempt_count if attempt is None else attempt
+    if item.attempt_count and not 1 <= chosen <= item.attempt_count:
+        raise ValueError(f"attempt must be 1 to {item.attempt_count}")
+    lines = (
+        dispatcher.queue.read_log(SAMPLES_QUEUE, task_id, chosen, after=after, limit=limit)
+        if item.attempt_count
+        else ()
+    )
+    return {
+        "task_id": task_id,
+        "attempt": chosen if item.attempt_count else None,
+        "attempt_count": item.attempt_count,
+        "running": item.state in HELD_STATES and chosen == item.attempt_count,
+        "lines": [
+            {"number": line.number, "at": line.at, "level": line.level, "logger": line.logger, "message": line.message}
+            for line in lines
+        ],
+        "next": lines[-1].number if len(lines) == limit else None,
+    }
 
 
 def list_processing(
@@ -78,7 +120,8 @@ def list_processing(
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     with dispatcher.locked_scenario(scenario) as current:
-        enabled = any(component.trainer.trains for component in current.trainers)
+        trains = frozenset(component.component for component in current.trainers if component.trainer.trains)
+        records = current.store.records
     rows, hidden, next_cursor = (
         changed_page(dispatcher, scenario, state, before, limit)
         if changed
@@ -86,7 +129,8 @@ def list_processing(
     )
     return {
         "scenario": scenario,
-        "enabled": enabled,
+        "enabled": bool(trains),
+        "records_waiting": records_waiting(dispatcher, scenario, trains, records),
         "read_at": time.time(),
         "retention_seconds": dispatcher.work_retention_seconds,
         "counts": dict(dispatcher.queue.counts(SAMPLES_QUEUE, scenario=scenario)),
@@ -94,6 +138,39 @@ def list_processing(
         "hidden": hidden,
         "next": next_cursor,
     }
+
+
+def records_waiting(dispatcher: Dispatcher, scenario: str, trains: frozenset[str], records: RecordStore) -> int | None:
+    """The number of the scenario's records after the last record that a trainer read, for the trainer furthest
+    behind; None when a trainer that trains has no retained task with ``record_sequences``.
+
+    The newest such task of each trainer gives its cursor. A page reads at most ``MAX_SCANNED_TASKS`` tasks for them.
+    """
+    if not trains:
+        return None
+    cursors: dict[str, int] = {}
+    before: int | None = None
+    for _ in range(MAX_SCANNED_TASKS // SCAN_BATCH):
+        batch = dispatcher.queue.page(
+            SAMPLES_QUEUE, scenario=scenario, state="finished", before_sequence=before, limit=SCAN_BATCH
+        )
+        for item in batch:
+            component = item.payload.get("component")
+            sequences = (item.result or {}).get("record_sequences")
+            if (
+                isinstance(component, str)
+                and component in trains
+                and component not in cursors
+                and isinstance(sequences, list)
+                and isinstance(sequences[-1], int)
+            ):
+                cursors[component] = sequences[-1]
+        if set(cursors) == trains:
+            return records.count(scenario, after_sequence=min(cursors.values()))
+        if len(batch) < SCAN_BATCH:
+            return None
+        before = batch[-1].created_sequence
+    return None
 
 
 def plain_page(

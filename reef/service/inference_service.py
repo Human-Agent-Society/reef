@@ -463,21 +463,25 @@ class InferenceReplica:
             state = "pending"
         else:
             state = "starting"
+        engine, detail = self.engine_state(scenario, model) if state == "ready" else (None, None)
         return {
             "artifact_id": artifact_id,
             "state": state,
             "error": "The inference engine did not start. Check the service logs." if state == "failed" else None,
-            "engine": self.engine_state(scenario, model) if state == "ready" else None,
+            "engine": engine,
+            "engine_detail": detail,
         }
 
-    def engine_state(self, scenario: str, model: str) -> EngineState | None:
-        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``); None without a route or a
-        handler for it."""
+    def engine_state(self, scenario: str, model: str) -> tuple[EngineState | None, str | None]:
+        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), and for a starting engine
+        what it does now (``InferenceHandler.engine_detail``); None without a route or a handler for it."""
         try:
             served = self.cache.read(scenario, model)
-            return self.engines.handler(served).engine_state(served)
+            handler = self.engines.handler(served)
         except (NotServed, StaleServedModels, LookupError):
-            return None
+            return None, None
+        engine = handler.engine_state(served)
+        return engine, handler.engine_detail(served) if engine == "starting" else None
 
     async def resolve(
         self,

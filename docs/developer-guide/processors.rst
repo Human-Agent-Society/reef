@@ -138,6 +138,14 @@ set ``s`` is the item ``<scenario>.<trainer>:<s>:<i>``, or
 and the sample's records. The samples of a unit with more than one sample share
 the item metadata ``group``, so they train in the same job.
 
+A sample that a sample processing task stores also has the metadata
+``stored_by_task``, the ID of that task, and ``read_by_task``, the ID of the
+task that read the last of its records (RFC #1267). The two differ when
+background work, such as a judgment, ends in a later task. A key is left out
+when the task is unknown, as for records read before a restart. A data query
+with ``group_key=stored_by_task`` or ``group_key=read_by_task`` finds the
+samples of one task.
+
 A restart never makes saved samples again: recovery skips the records that the
 trainer's stages consumed. Thus a nondeterministic stage, such as a judge, does
 not run a second time on the same records. A process that stops between the two

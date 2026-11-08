@@ -146,6 +146,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}``                                                        | one sample processing task of the scenario        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs``                                                   | the log of one attempt of a task                  |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/next-job``                                                                           | the samples that the next automatic job trains    |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations``                                                                       | evaluate one artifact of a snapshot               |
@@ -1836,7 +1838,7 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null}
+   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null}
 
 ``model`` defaults to ``active``. It can also name an active artifact alias
 or an artifact selected for serving beside the active one. An unknown name
@@ -1862,6 +1864,9 @@ returns 404.
 * ``idle``: no engine runs. The next request starts one and waits for it.
 
 ``engine`` is null in every other state, and when the handler cannot tell.
+While ``engine`` is ``starting``, ``engine_detail`` can say what the engine
+does now, as one short line, such as ``Loading weights · 0:42``. It is null
+otherwise.
 Reading it starts no engine.
 
 The status describes the selected
@@ -2966,8 +2971,11 @@ Optional query parameters are ``state``, ``before``, ``limit`` and ``changed``.
 With ``true``, the page omits finished tasks that gave the trainer nothing new.
 It reads at most 5,000 tasks to fill the page.
 
-The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``counts``, ``tasks``,
-``hidden`` and ``next``.
+The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``records_waiting``,
+``counts``, ``tasks``, ``hidden`` and ``next``.
+``records_waiting`` is the number of the scenario's records after the last record that a trainer read, for the
+trainer furthest behind. Each trainer's newest finished task with ``record_sequences`` gives that record.
+It is null when a trainer has no such task in the retained history.
 ``enabled`` means the scenario has a trainer that generates samples.
 It does not report worker health. ``counts`` covers all retained tasks, independent of pagination and state filters.
 ``hidden`` lists each run of omitted tasks, and is empty without ``changed=true``.
@@ -2981,14 +2989,20 @@ An unknown task, or a task of another scenario, returns 404.
 
 Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at``, ``started_at``,
 ``ended_at``, ``available_at``, ``error``, ``changed``, ``background``, ``records_read``, ``samples_created``,
-``triggers`` and ``progress``.
+``record_sequences``, ``triggers`` and ``progress``.
 Times are Unix seconds. Unavailable fields are null.
 ``triggers`` lists why the task ran, oldest first. Each entry has ``name`` and ``at``, the time of the first request.
 A name is ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``.
+``background`` comes from a background job of a stage that ended, or from a fallback look while such jobs run.
+The fallback waits 1 second, then twice as long after each look that changed nothing, up to 300 seconds.
 Only ``records`` and ``data`` bring new records. The others let a stage make samples without a new record.
 A task from an older Reef has no triggers.
 ``progress`` holds the counts so far of the attempt that runs now: ``attempt``, ``records_read``,
 ``samples_created`` and ``at``. It is null for a task that does not run.
+``record_sequences`` is ``[first, last]``: the data sequences of the first and last record of the scenario that
+the completed attempt read. It is null when the attempt read none, and for a task from an older Reef.
+A sample that a task stored has the item metadata ``stored_by_task`` and ``read_by_task``.
+A data query with ``group_key`` set to one of them finds the samples of one task.
 ``started_at`` is the first attempt's start. ``error`` can describe a queued task's previous failed attempt.
 
 Processing counts describe the completed attempt only; they exclude earlier failed attempts.
@@ -3000,3 +3014,23 @@ Legacy results report null counts.
 
 Control removes ended tasks after ``storage.work_retention_s``, which defaults to seven days.
 This removes task history, not stored samples. Active tasks do not expire through this retention policy.
+
+``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs`` returns the log of one attempt of a task.
+The samples worker keeps each line that the attempt's work logs.
+This includes the stage's background jobs that the attempt submitted, also when they end after the attempt.
+Reef writes the lines every 2 seconds and when the attempt ends.
+Lines of threads that the work starts by hand are not kept.
+One attempt keeps at most 2,000 lines of at most 4,096 characters.
+The line after the last one says that the log was cut.
+
+Optional query parameters are ``attempt``, ``after`` and ``limit``.
+``attempt`` is 1 to the task's ``attempt_count``, with default the last attempt.
+``after`` is -1 or more, with default -1. The page holds lines with a larger number.
+``limit`` is 1 to 1000, with default 500.
+
+The response includes ``task_id``, ``attempt``, ``attempt_count``, ``running``, ``lines`` and ``next``.
+``attempt`` is null for a task that no worker took.
+``running`` is true while the chosen attempt runs, so more lines can come.
+Each line has ``number``, ``at``, ``level``, ``logger`` and ``message``.
+``next`` is the next page's ``after`` value, or null at the end of the lines kept so far.
+The log goes with its task when the retention deletes the task.

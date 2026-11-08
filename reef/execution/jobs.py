@@ -9,10 +9,12 @@ reef.execution.processes module and shared lifecycle contract.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import queue
 import time
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
 
@@ -113,6 +115,22 @@ class JobContext(Execution):
             self.finished.set()
 
 
+class JobListener(ABC):
+    """Hears that a background job of the work that set it ended.
+
+    Purpose: work sets one in ``JOB_LISTENER`` before it submits jobs; ``BackgroundJobWorker`` calls ``job_ended`` on
+    its loop thread after it puts the job's result, so ``job_ended`` must be quick and must not block on the loop.
+    """
+
+    @abstractmethod
+    def job_ended(self) -> None:
+        """A job that the work submitted has a result to poll."""
+
+
+#: The listener of the work that runs in this context, or None. A job keeps the one of its submit call.
+JOB_LISTENER: ContextVar[JobListener | None] = ContextVar("reef_job_listener", default=None)
+
+
 class BackgroundJobRunner(ABC):
     """An asynchronous job implementation consumed by BackgroundJobWorker.
 
@@ -143,6 +161,10 @@ class BackgroundJobWorker(Execution):
     stopping is set when admission closes. cleanup_error is None or a reported
     job cleanup failure; wait_closed re-raises it after thread exit.
     A runner that refuses cancellation can keep wait_closed returning False.
+    Each job runs in a copy of the context variables of its submit call, so that
+    what the job logs goes to the log of the work that submitted it
+    (reef.execution.work_logs). After a job's result, the worker calls the
+    ``JOB_LISTENER`` of that context.
     """
 
     def __init__(self, runner: BackgroundJobRunner, *, thread_name: str, concurrency: int = 8) -> None:
@@ -155,7 +177,7 @@ class BackgroundJobWorker(Execution):
         self.runner = runner
         self.thread_name = thread_name
         self.concurrency = concurrency
-        self.jobs: queue.SimpleQueue[SupportsReceipt | None] = queue.SimpleQueue()
+        self.jobs: queue.SimpleQueue[tuple[SupportsReceipt, contextvars.Context] | None] = queue.SimpleQueue()
         self.results: queue.SimpleQueue[SupportsReceipt] = queue.SimpleQueue()
         self.thread: Thread | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -174,7 +196,7 @@ class BackgroundJobWorker(Execution):
             if self.thread is None:
                 self.thread = Thread(target=self.run_thread, name=self.thread_name, daemon=True)
                 self.thread.start()
-            self.jobs.put(job)
+            self.jobs.put((job, contextvars.copy_context()))
             if self.loop is not None and self.wake is not None:
                 self.loop.call_soon_threadsafe(self.wake.set)
             return True
@@ -239,11 +261,11 @@ class BackgroundJobWorker(Execution):
                 self.stopping.set()
             while True:
                 try:
-                    job = self.jobs.get_nowait()
+                    submitted = self.jobs.get_nowait()
                 except queue.Empty:
                     break
-                if job is not None:
-                    self.results.put(Failed(job.receipt))
+                if submitted is not None:
+                    self.results.put(Failed(submitted[0].receipt))
 
     async def run_jobs(self) -> None:
         semaphore = asyncio.Semaphore(self.concurrency)
@@ -265,22 +287,29 @@ class BackgroundJobWorker(Execution):
                 logger.exception("background job cleanup failed for receipt %s", submitted.receipt)
                 result = Failed(submitted.receipt)
             self.results.put(result)
+            listener = task.get_context().get(JOB_LISTENER)
+            if listener is not None:
+                try:
+                    listener.job_ended()
+                except Exception:
+                    logger.exception("the listener of receipt %s failed", submitted.receipt)
 
         try:
             while True:
                 try:
-                    job = self.jobs.get_nowait()
+                    submitted = self.jobs.get_nowait()
                 except queue.Empty:
                     await wake.wait()
                     wake.clear()
                     continue
-                if job is None:
+                if submitted is None:
                     break
+                job, variables = submitted
                 if self.closed:
                     self.results.put(Failed(job.receipt))
                     continue
                 context = JobContext()
-                task = asyncio.create_task(self.run_one(job, semaphore, context))
+                task = asyncio.create_task(self.run_one(job, semaphore, context), context=variables)
                 tasks[task] = (job, context)
                 task.add_done_callback(_complete)
                 await asyncio.sleep(0)

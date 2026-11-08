@@ -170,6 +170,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "state": "pending",
                     "error": None,
                     "engine": None,
+                    "engine_detail": None,
                 }
                 assert response.headers["Cache-Control"] == "no-store"
                 assert table.current_request("math") == before
@@ -208,6 +209,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "state": "ready",
                     "error": None,
                     "engine": None,
+                    "engine_detail": None,
                 }
         finally:
             storage.close()
@@ -236,6 +238,7 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
                     "state": "failed",
                     "error": "The inference engine did not start. Check the service logs.",
                     "engine": None,
+                    "engine_detail": None,
                 }
                 response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                 assert response.status == 503
@@ -299,6 +302,7 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
                         "state": "pending",
                         "error": None,
                         "engine": None,
+                        "engine_detail": None,
                     }
                     response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                     assert response.status == 200
@@ -452,6 +456,9 @@ class ColdHandler(HttpInferenceHandler):
     def engine_state(self, served: ServedArtifact) -> Any:
         return self.state
 
+    def engine_detail(self, served: ServedArtifact) -> str:
+        return "Loading weights · 0:42"
+
 
 @pytest.mark.unit
 def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path: Path) -> None:
@@ -477,7 +484,10 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
                 for state in ("idle", "starting", "warm"):
                     ColdHandler.state = state
                     response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
-                    assert (await response.json())["engine"] == state
+                    status = await response.json()
+                    assert status["engine"] == state
+                    # Only a starting engine says what it does now.
+                    assert status["engine_detail"] == ("Loading weights · 0:42" if state == "starting" else None)
         finally:
             ColdHandler.state = "idle"
             storage.close()

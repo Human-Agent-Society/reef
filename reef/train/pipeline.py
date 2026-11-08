@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -65,6 +66,9 @@ from reef.train.types import JobData, Sample, TrajectorySample
 PIPELINE_STAGES = ("record2sample", "sample2job")
 
 logger = logging.getLogger(__name__)
+
+#: The most records whose reading task a pipeline remembers (``TrainingPipeline.read_by``).
+MAX_READ_RECORDS = 100_000
 
 
 @dataclass(frozen=True)
@@ -203,6 +207,12 @@ class TrainingPipeline:
         self.received_input = False
         #: The number of new samples that this pipeline stored.
         self.stored_sample_count = 0
+        #: The ID of the sample processing task whose step runs now, or None (``Trainer.produce_samples``).
+        self.selection_task: str | None = None
+        #: The read number and the task of each of the last ``MAX_READ_RECORDS`` records that a task read, by record
+        #: ID, oldest first. The read number counts the reads of this pipeline.
+        self.read_by: OrderedDict[str, tuple[int, str]] = OrderedDict()
+        self.reads = 0
         #: The stored samples that this trainer has not trained, in store order, each with the sample that job data
         #: trains: an upload rendered by the record-to-sample stage, else the stored sample. Imported tasks do not train.
         self.held: dict[str, tuple[StoredSample, Sample]] = {}
@@ -309,11 +319,34 @@ class TrainingPipeline:
 
     # ------------------------------------------------------------- records
 
+    def note_read(self, record_id: str) -> None:
+        """Remember that the task whose step runs now read ``record_id``; nothing happens outside a task."""
+        if self.selection_task is None:
+            return
+        self.reads += 1
+        self.read_by.pop(record_id, None)
+        self.read_by[record_id] = (self.reads, self.selection_task)
+        if len(self.read_by) > MAX_READ_RECORDS:
+            self.read_by.popitem(last=False)
+
+    def lineage(self, record_ids: tuple[str, ...]) -> dict[str, str]:
+        """The metadata that names the tasks of samples made from ``record_ids`` now: ``stored_by_task``, the task
+        whose step stores them, and ``read_by_task``, the task that read the last of their records. Each is left out
+        when it is unknown, as outside a task or after a restart."""
+        lineage: dict[str, str] = {}
+        if self.selection_task is not None:
+            lineage["stored_by_task"] = self.selection_task
+        reads = [self.read_by[record_id] for record_id in record_ids if record_id in self.read_by]
+        if reads:
+            lineage["read_by_task"] = max(reads)[1]
+        return lineage
+
     def add_record_samples(
         self, group: str | None, record_ids: tuple[str, ...], samples: tuple[tuple[str, Sample], ...]
     ) -> bool:
-        """Save samples (``TrainerSamples.add_record_samples``), count the new ones, and return whether one is new."""
-        added = self.store.add_record_samples(group, record_ids, samples)
+        """Save samples (``TrainerSamples.add_record_samples``) with their tasks (``lineage``), count the new ones,
+        and return whether one is new."""
+        added = self.store.add_record_samples(group, record_ids, samples, lineage=self.lineage(record_ids))
         self.stored_sample_count += added
         return added > 0
 

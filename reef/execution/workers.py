@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from reef.execution.work_logs import capture_log
 from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLost, WorkQueue
 
 logger = logging.getLogger(__name__)
@@ -132,9 +133,13 @@ class QueueWorker(ServiceWorker):
 
     A store error ends the round, and the worker looks again after ``poll_seconds``. Each item that ends
     ``failed`` here, including an expired item with no attempts left, gets one warning in the log.
+
+    A subclass with ``keeps_log`` keeps what its thread logs during each attempt as the attempt's log
+    (``reef.execution.work_logs``).
     """
 
     permanent_errors: tuple[type[Exception], ...] = (ValueError,)
+    keeps_log = False
 
     def __init__(
         self,
@@ -206,6 +211,15 @@ class QueueWorker(ServiceWorker):
         item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
         if item is None:
             return False
+        if not self.keeps_log:
+            self.run_taken(item)
+            return True
+        with capture_log(self.queue, item):
+            self.run_taken(item)
+        return True
+
+    def run_taken(self, item: WorkItem) -> None:
+        """Run the item that this worker took, and end it."""
         try:
             with LeaseExtender(self.queue, item, self.worker_id) as extender:
                 self.queue.start(self.queue_name, item.id, self.worker_id)
@@ -213,19 +227,18 @@ class QueueWorker(ServiceWorker):
             self.finish_item(item, result)
         except WorkLeaseLost:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
-            return True
+            return
         except WorkerStopped:
             self.fail(item, "the worker stopped", retryable=True)
-            return True
+            return
         except ItemFailed as exc:
             self.fail(item, str(exc), retryable=False)
-            return True
+            return
         except Exception as exc:
             logger.exception("worker %s could not run %s", self.worker_id, item.id)
             self.fail(item, f"{type(exc).__name__}: {exc}", retryable=not isinstance(exc, self.permanent_errors))
-            return True
+            return
         self.item_finished(item, result)
-        return True
 
     def fail(self, item: WorkItem, error: str, *, retryable: bool) -> None:
         """Fail ``item`` with ``error`` (``WorkQueue.fail``) and log a warning when it failed for good; nothing

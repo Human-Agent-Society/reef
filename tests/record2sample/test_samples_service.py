@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from reef.record2sample.service import (
     BACKGROUND_POLL_SECONDS,
-    MAX_BACKGROUND_POLL_SECONDS,
     RECORD_SELECTION_KIND,
     SAMPLES_QUEUE,
     ProducedSamples,
@@ -37,9 +38,9 @@ class Producers(SampleProducers):
         self.error = error
         self.changed = changed
 
-    def produce(self, scenario: str, component: str, progress) -> ProducedSamples:
+    def produce(self, scenario: str, component: str, selection) -> ProducedSamples:
         self.calls.append((scenario, component))
-        progress(4, 0)
+        selection.progress(4, 0)
         if self.error is not None:
             raise self.error
         return ProducedSamples(
@@ -86,6 +87,7 @@ def test_the_worker_makes_the_samples_and_comes_back_while_background_work_runs(
         "records_read": 4,
         "samples_created": 2,
         "due_in_seconds": None,
+        "record_sequences": None,
     }
     assert items[1].available_at > items[0].created_at
     producers.background = False
@@ -172,7 +174,7 @@ def test_background_looks_back_off_while_nothing_changes_and_reset_after_a_chang
         waits.append(queued.metadata["background_poll_seconds"])
         # The test does not wait: the queued look becomes available now.
         request_selection(queue, "s", "weights", trigger="records")
-    assert waits == [1.0, 2.0, 4.0, 8.0, 16.0, MAX_BACKGROUND_POLL_SECONDS, MAX_BACKGROUND_POLL_SECONDS]
+    assert waits == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0]
     producers.changed = True
     assert worker.run_once() is True
     assert queue.items(SAMPLES_QUEUE, scenario="s")[-1].metadata["background_poll_seconds"] == BACKGROUND_POLL_SECONDS
@@ -184,10 +186,11 @@ def test_a_running_selection_writes_its_counts_so_far_for_its_attempt():
     seen = []
 
     class Watching(Producers):
-        def produce(self, scenario, component, progress):
-            progress(4, 0)
+        def produce(self, scenario, component, selection):
+            assert selection.task_id == item.id
+            selection.progress(4, 0)
             seen.append(queue.get(SAMPLES_QUEUE, item.id).metadata["progress"])
-            progress(5, 1)  # within the interval: no write
+            selection.progress(5, 1)  # within the interval: no write
             seen.append(queue.get(SAMPLES_QUEUE, item.id).metadata["progress"])
             return ProducedSamples(changed=True, background=False, records_read=5, samples_created=1)
 
@@ -199,3 +202,48 @@ def test_a_running_selection_writes_its_counts_so_far_for_its_attempt():
         "records_read": 4,
         "samples_created": 0,
     }
+
+
+@pytest.mark.unit
+def test_a_background_job_that_a_selection_submits_asks_for_the_next_selection_when_it_ends(monkeypatch):
+    import threading
+
+    from reef.record2sample.service import worker as samples_worker
+
+    # A long fallback look, so only the job's end can make the next selection available soon.
+    monkeypatch.setattr(samples_worker, "BACKGROUND_POLL_SECONDS", 600.0)
+
+    from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
+
+    release = threading.Event()
+
+    class Judge(BackgroundJobRunner):
+        async def run(self, job):
+            import asyncio
+
+            await asyncio.to_thread(release.wait, 5)
+            return job
+
+    background = BackgroundJobWorker(Judge(), thread_name="judge", concurrency=1)
+
+    class Submitting(Producers):
+        def produce(self, scenario, component, selection):
+            assert background.submit(SupportsReceipt("r1"))
+            return ProducedSamples(changed=False, background=True, records_read=0, samples_created=0)
+
+    queue = memory_coordination().work_queue
+    worker = SamplesWorker(queue, Submitting(), worker_id="samples-1")
+    request_selection(queue, "s", "weights", trigger="records")
+    try:
+        assert worker.run_once() is True
+        fallback = queue.items(SAMPLES_QUEUE, scenario="s")[-1]
+        assert fallback.available_at > fallback.created_at + 500, "the fallback look waits"
+        release.set()
+        # The job's end makes the queued selection available now.
+        deadline = time.monotonic() + 5
+        while queue.get(SAMPLES_QUEUE, fallback.id).available_at > fallback.created_at + 1:
+            assert time.monotonic() < deadline, "the job's end asked for no selection"
+            time.sleep(0.01)
+    finally:
+        background.close()
+    assert worker.run_once() is True
