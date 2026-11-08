@@ -19,6 +19,7 @@ from reef.artifact.repository import EnumerableRepositoryBackendFactory, Reposit
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.core.evaluation import EvaluationCall
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
@@ -51,6 +52,7 @@ from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
+from reef.storage.record_items import evaluation_call_item
 from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -914,6 +916,19 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if not isinstance(sample, TaskSample):
             raise ReefError(f"scenario {scenario!r} uses no task {task_name!r}")
         return sample.task_path
+
+    def add_evaluation_call(self, scenario: str, evaluation_id: str, artifact_id: str, call: EvaluationCall) -> None:
+        """Keep ``call`` of evaluation ``evaluation_id`` as a record item of the owner of ``scenario``, for the current
+        generation of the scenario (``CandidateArtifacts``). ``ReefError`` without a data store; ``ScenarioArchived``
+        when the scenario was archived meanwhile."""
+        if self.data_store is None:
+            raise ReefError("this deployment has no data store, so it keeps no evaluation call")
+        with self.locked_scenario(scenario):
+            owner = self.storage.read_settings(scenario).owner or scenario
+            generation = self.data_store.scenario_generation(owner, scenario)
+        self.data_store.create(
+            owner, [evaluation_call_item(scenario, artifact_id, evaluation_id, call)], generation=generation
+        )
 
     def request_artifact_copy(self, scenario: str) -> None:
         """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""
