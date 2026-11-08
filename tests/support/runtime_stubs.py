@@ -175,7 +175,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", artifact.ref.revision)
 
-    def serve_artifact(self, artifact: Artifact) -> ServedArtifact:
+    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact:
         return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:

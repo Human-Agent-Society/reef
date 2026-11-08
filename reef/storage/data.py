@@ -38,9 +38,9 @@ from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
-#: The metadata keys that Reef reads. ``kind``, ``owner``, ``origin``, an artifact's ``serving_profile`` (RFC #1233)
-#: and an evaluation call's ``evaluation_id`` are set at creation and never change.
-FIXED_KEYS = ("kind", "owner", "origin", "serving_profile", "evaluation_id")
+#: The metadata keys that Reef reads. ``kind``, ``owner``, ``origin`` and an evaluation call's ``evaluation_id`` are set
+#: at creation and never change.
+FIXED_KEYS = ("kind", "owner", "origin", "evaluation_id")
 #: What made a record item, its ``origin.source``: a scenario's own traffic, or a call of an evaluation rollout. A record
 #: item without ``source`` is ``inference``.
 RECORD_SOURCES = ("inference", "evaluation")
@@ -180,8 +180,8 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     whose origin source is ``evaluation``, has empty ``scenarios`` and the ``evaluation_id`` of its origin, and no
     other record item has ``evaluation_id``. An artifact may have an origin, with a non-null
     ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
-    when a trainer's stage made it (``check_stage_origin``). Only an artifact may have ``serving_profile``, a non-empty
-    string (RFC #1233). Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
+    when a trainer's stage made it (``check_stage_origin``). Other keys are kept as they are. Raise ``ValueError``
+    for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
@@ -193,9 +193,6 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     created = copy.deepcopy(dict(metadata))
     created["owner"] = owner
     created["scenarios"] = check_scenarios(metadata.get("scenarios", {}), kind)
-    profile = metadata.get("serving_profile")
-    if profile is not None and (kind != "artifact" or not isinstance(profile, str) or not profile):
-        raise ValueError("metadata.serving_profile is a non-empty string of an artifact item")
     if kind == "record":
         created["origin"] = check_record_origin(metadata.get("origin"))
         evaluation = created["origin"].get("evaluation")
