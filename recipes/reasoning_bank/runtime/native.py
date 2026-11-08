@@ -6,6 +6,7 @@ in the ordinary native hook/decision and tool/result session records. The memory
 text or credential; the native runner still records the ordinary task and tool-call arguments.
 """
 
+import hashlib
 import http.client
 import json
 import math
@@ -140,7 +141,12 @@ def read_memory(query: str) -> dict[str, object]:
 
 
 def listen(payload: dict[str, object], next_: Callable[[], dict[str, object]]) -> dict[str, object]:
-    """Add selected notes to a pre_step decision; message mode adds them only at the first model step."""
+    """Inject notes; system mode caches one read attempt per turn and bank, including its settings.
+
+    The runner carries string-valued state between steps, including across hook reloads. The reasoning_bank
+    entry contains this hook's generated bank checksum and read result. Failed reads cache an empty result
+    with status=failed until the bank changes or the next turn starts. Message mode only reads at step one.
+    """
     decision = next_()
     bank = cast(Bank, json.loads(BANK_JSON))
     mode = bank["settings"]["inject"]
@@ -149,8 +155,33 @@ def listen(payload: dict[str, object], next_: Callable[[], dict[str, object]]) -
     query = payload.get("task")
     if not isinstance(query, str):
         raise ValueError("native memory hook needs the turn's task")
-    result = read_memory(query)
+    if mode == "system":
+        state = cast(dict[str, str], decision.get("state", payload.get("state", {})))
+        cached = json.loads(state["reasoning_bank"]) if "reasoning_bank" in state else None
+        version = hashlib.sha256(BANK_JSON.encode("utf-8")).hexdigest()
+        if cached is not None and cached["version"] == version:
+            result = cached["result"]
+        else:
+            try:
+                result = read_memory(query)
+            except (RuntimeError, ValueError):
+                result = {
+                    "text": "",
+                    "memory_read": {
+                        "event": "memory/read",
+                        "entries": [],
+                        "status": "failed",
+                        "reader": bank["settings"]["reader"],
+                        "inject": mode,
+                    },
+                }
+            state = {**state, "reasoning_bank": json.dumps({"version": version, "result": result})}
+        decision["state"] = state
+    else:
+        result = read_memory(query)
     decision["memory_read"] = result["memory_read"]
+    if not result["text"]:
+        return decision
     if mode == "system":
         previous = decision.get("system_suffix", "")
         decision["system_suffix"] = "\n\n".join(

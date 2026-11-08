@@ -108,14 +108,20 @@ the `memory_search` query. The modes behave as follows:
 
 | Mode | pi | native |
 | --- | --- | --- |
-| `system` | Append selected items before each agent turn. | Append selected items to each model step's rebuilt system prompt. |
+| `system` | Append selected items before each agent turn. | Retrieve once per turn and reuse the items in each model step's rebuilt system prompt. |
 | `message` | Add one custom message before each agent turn. | Add one user message at the turn's first model step. |
 | `tool` | Register `memory_search`; read only when the model calls it. | Register the same tool; read only when called. |
 
+Native system mode keeps its cache within the current turn, separately for each subagent. A change to the
+bank's contents or reading settings triggers a new read at the next model step. Reloading the same bank
+preserves the cache. A new turn retrieves again, even when its prompt matches the previous turn.
+
 The text starts with a fixed sentence identifying memories as untrusted data. Each successful read records
 the selected item IDs, reader and injection mode. pi stores a `memory/read` custom session entry. Native stores
-`memory_read` in the hook decision or tool result. Failed reads produce pi error entries or native hook/tool
-errors. A hook failure leaves the turn without retrieved memory; a tool failure returns an error to the model.
+`memory_read` in the hook decision or tool result. Native system mode also records these IDs when reusing
+the cache. A failed system read records `status: failed` and supplies no memory; it retries only after the
+bank changes or a new turn starts. Other failed reads produce pi error entries or native hook/tool errors.
+A hook failure leaves the turn without retrieved memory; a tool failure returns an error to the model.
 
 The reader and its bank travel together in the versioned tree, so evaluation and clients run the same code.
 ReasoningBank owns `skills/rb-*`, `extensions/reasoning_bank.ts`, `native/hooks/reasoning_bank.py` and
@@ -146,7 +152,7 @@ exec /absolute/path/to/pi "$@"
 Use `reef-native` in the wrapper for native. Native's optional per-tool `bwrap` enforcement removes environment
 credentials, so `tool` mode under that enforcement needs a reachable endpoint without bearer authentication.
 No reader embeds a key in a snapshot. Embedding requests are separate from the method's chat-call budget;
-native `system` mode makes a request at every model step.
+native `top_k` with `system` injection makes one request per turn, plus one after each change to the bank or reading settings.
 
 ## Measure whether memory helps
 

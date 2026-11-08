@@ -320,6 +320,39 @@ def test_two_turns_in_one_session_keep_the_messages_and_number_the_turns(tmp_pat
     assert not server.mounts_dir.exists() and not server.socket_path.exists()
 
 
+def test_pre_step_state_survives_mounts_and_resets_for_each_turn(tmp_path: Path, reef: _FakeReef) -> None:
+    hook = native_hook(
+        "counter",
+        "pre_step",
+        "def listen(payload, next):\n"
+        "    decision = next()\n"
+        "    state = dict(payload['state'])\n"
+        "    state['counter'] = str(int(state.get('counter', '0')) + 1)\n"
+        "    decision['state'] = state\n"
+        "    decision['system_suffix'] = 'Visits: ' + state['counter']\n"
+        "    return decision\n",
+    )
+    files = {**RULES, **_tool("shout"), **hook}
+    reef.release("r1", files)
+    reef.replies = [
+        _reply(tool_calls=[_call("shout", {}, "c1")]),
+        _reply("done"),
+        _reply(tool_calls=[_call("shout", {}, "c2")]),
+        _reply("done"),
+        _reply("done"),
+    ]
+    with _running(_tree(tmp_path, reef, "r1")) as server:
+        _wait(lambda: reef.polls >= 1)
+        reef.head_move = _HeadMove("r2", {**files, "rules.md": "New rules."}, server)
+        first, _ = _turn(server, "same prompt")
+        second, _ = _turn(server, "same prompt", session=first["session"])
+        separate, _ = _turn(server, "same prompt")
+        assert first["exit"] == second["exit"] == separate["exit"] == 0
+    prompts = [request["body"]["messages"][0]["content"] for request in reef.requests]
+    assert [prompt.rsplit("Visits: ", 1)[1] for prompt in prompts] == ["1", "2", "1", "2", "1"]
+    assert "New rules." in prompts[1]
+
+
 def test_a_poll_during_a_turn_moves_the_head_and_the_mount_lands_between_two_steps(
     tmp_path: Path, reef: _FakeReef
 ) -> None:

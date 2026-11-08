@@ -596,13 +596,19 @@ five parts that let a method change the loop itself. The starter tree is
    * - ``native/loops/<name>.py``
      - ``run_turn(ctx)`` in place of the ``main`` graph; always reviewed
 
-A ``pre_step`` hook receives ``step``, ``task`` and ``messages``. Its enter
+A ``pre_step`` hook receives ``step``, ``task``, ``messages`` and ``state``. Its enter
 decision may include ``messages`` (user-message strings to append) and
 ``system_suffix`` (text to append to this step's rebuilt system prompt).
 The suffix lasts for one model call. Return it on every step that needs it;
 return messages only once if they should stay in the conversation without
 duplicates. The session's ``hook/decision`` keeps the decision, and
 ``request/header`` records the resulting system prompt when it changes.
+
+``state`` maps string keys to string values and starts empty each turn,
+including each subagent turn. Return ``state`` in the decision to replace it;
+omitting it preserves the previous value. It survives host reloads within
+the turn. Use the hook's name as its key and preserve other hooks' entries.
+State appears in the decision log, so it must not contain credentials.
 
 .. list-table::
    :header-rows: 1

@@ -49,6 +49,9 @@ def embeddings():
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append({"body": body, "authorization": self.headers.get("Authorization")})
+            if body["model"] == "unavailable":
+                self.send_error(503)
+                return
             rows = [
                 {"index": index, "embedding": [1, 0] if "parser" in text.lower() else [0, 1]}
                 for index, text in enumerate(body["input"])
@@ -151,6 +154,66 @@ def test_runtime_selects_injects_and_records_the_same_notes(
 def test_bad_embedding_responses_are_refused(response):
     with pytest.raises(ValueError, match="embedding"):
         embedding_vectors(response, 2)
+
+
+@pytest.mark.parametrize("change", ["content", "settings"])
+def test_native_system_caches_per_task_and_refreshes_changed_memory(tmp_path, embeddings, change):
+    endpoint, requests = embeddings
+    settings = ReadSettings(reader="top_k", embedding_url=endpoint, embedding_model="test-embedding")
+    script = tmp_path / "reader.py"
+    script.write_text(next(iter(runtime_files(NOTES, settings, "native").values())))
+    module = runpy.run_path(str(script))
+    state = {}
+    for step in (1, 2, 3):
+        result = module["listen"]({"step": step, "task": "parser task", "state": state}, lambda: {"kind": "enter"})
+        state = result.get("state", {})
+        assert "Check the parser input." in result["system_suffix"]
+    assert len(requests) == 1
+
+    # A host reload with the same bank keeps the task's cached selection.
+    module = runpy.run_path(str(script))
+    result = module["listen"]({"step": 4, "task": "parser task", "state": state}, lambda: {"kind": "enter"})
+    assert len(requests) == 1
+    if change == "content":
+        notes = (*NOTES[:1], ReadNote("code", "Parser", "Use for parsing", "Check parser boundaries."))
+    else:
+        notes = NOTES
+        settings = ReadSettings(reader="top_k", top_k=2, embedding_url=endpoint, embedding_model="test-embedding")
+    script.write_text(next(iter(runtime_files(notes, settings, "native").values())))
+    module = runpy.run_path(str(script))
+    for step in (5, 6):
+        result = module["listen"]({"step": step, "task": "parser task", "state": state}, lambda: {"kind": "enter"})
+        state = result["state"]
+    assert len(requests) == 2
+    if change == "content":
+        assert "Check parser boundaries." in result["system_suffix"]
+        assert "Check the parser input." not in result["system_suffix"]
+    else:
+        assert result["memory_read"]["entries"] == ["code", "fruit"]
+
+    # A separate task must retrieve even when its prompt is identical.
+    module["listen"]({"step": 1, "task": "parser task", "state": {}}, lambda: {"kind": "enter"})
+    assert len(requests) == 3
+
+
+def test_native_system_caches_failures_without_reusing_old_memory(tmp_path, embeddings):
+    endpoint, requests = embeddings
+    script = tmp_path / "reader.py"
+    state = {}
+    for model in ("test-embedding", "unavailable", "recovered"):
+        settings = ReadSettings(reader="top_k", embedding_url=endpoint, embedding_model=model)
+        script.write_text(next(iter(runtime_files(NOTES, settings, "native").values())))
+        module = runpy.run_path(str(script))
+        for step in (1, 2):
+            result = module["listen"]({"step": step, "task": "parser task", "state": state}, lambda: {"kind": "enter"})
+            state = result["state"]
+            if model == "unavailable":
+                assert "system_suffix" not in result
+                assert result["memory_read"]["status"] == "failed"
+                assert result["memory_read"]["entries"] == []
+            else:
+                assert "Check the parser input." in result["system_suffix"]
+    assert len(requests) == 3
 
 
 def test_runtime_settings_refuse_invalid_configuration():

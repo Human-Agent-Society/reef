@@ -804,6 +804,7 @@ class Server(ServeState, ArtifactUpdateListener):
             run.host = self.host
             run.turn += 1
             run.prompt = prompt
+            run.hook_state.clear()
             run.workdir = workdir
             run.messages.append({"role": "user", "content": prompt})
             run.step, run.tool_calls, run.tool_errors, run.step_open, run.last = 0, 0, 0, False, {}
