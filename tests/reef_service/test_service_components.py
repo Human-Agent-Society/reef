@@ -29,7 +29,13 @@ from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.recipe import CompositeRecipe, Recipe
-from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
+from reef.record2sample.service import (
+    RECORD_SELECTION_KIND,
+    SAMPLES_QUEUE,
+    SamplesWorker,
+    Selection,
+    request_selection,
+)
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app
@@ -267,13 +273,20 @@ def test_failed_assembly_stops_workers_before_closing_their_stores(
                 dispatcher.close()
 
 
+class Quiet(Selection):
+    """A selection that drops its progress."""
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        return
+
+
 @pytest.mark.unit
 def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_the_jobs_to_control() -> None:
     made: list[str] = []
     trainer = SimpleNamespace(trains=True)
     current = SimpleNamespace(
         trainers=(SimpleNamespace(component="weights", trainer=trainer),),
-        produce_samples=lambda component, progress: made.append(component) or False,
+        produce_samples=lambda component, selection: made.append(component) or False,
     )
     loads: list[tuple[str, object]] = []
 
@@ -282,7 +295,7 @@ def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_th
             loads.append((scenario, allow_implicit_creation))
             return current
 
-    assert LocalSampleProducers(Registry(), None).produce("math", "weights", lambda read, made: None) is False
+    assert LocalSampleProducers(Registry(), None).produce("math", "weights", Quiet("t")) is False
     assert made == ["weights"] and loads == [("math", False)]
 
 

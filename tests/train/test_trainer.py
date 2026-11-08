@@ -444,13 +444,37 @@ def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made
 
     # The samples service makes the samples; the next cycle builds the job from them.
     assert trainer.produce_samples() == ProducedSamples(
-        changed=True, background=False, records_read=2, samples_created=1
+        changed=True, background=False, records_read=2, samples_created=1, record_sequences=(1, 3)
     )
     assert trainer.produce_samples() == ProducedSamples(
         changed=False, background=False, records_read=0, samples_created=0
     )
     result = trainer.advance_job()
     assert result is not None and len(trainer.pending_job_data.samples) == 1
+
+
+@pytest.mark.unit
+def test_a_selection_names_the_tasks_that_read_and_stored_each_sample() -> None:
+    from reef.record2sample.service import Selection
+
+    class Recording(Selection):
+        def __init__(self) -> None:
+            super().__init__("task-1")
+            self.reports: list[tuple[int, int]] = []
+
+        def progress(self, records_read: int, samples_created: int) -> None:
+            self.reports.append((records_read, samples_created))
+
+    trainer = preparing_trainer(one_pair_records())
+    selection = Recording()
+    produced = trainer.produce_samples(selection)
+    assert produced.record_sequences == (1, 3) and selection.reports[-1] == (2, 1)
+    store = trainer.pipeline.store.store
+    (item,) = store.data.query(store.owner, kind="trajectory", group=("stored_by_task", "task-1"))
+    assert item.metadata["read_by_task"] == "task-1"
+    assert trainer.pipeline.selection_task is None, "the task ends with the step"
+    # A step outside a task names no task.
+    assert trainer.produce_samples().record_sequences is None
 
 
 @pytest.mark.unit

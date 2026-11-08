@@ -21,7 +21,7 @@ is due. The worker then asks for the next selection at that time.
 
 Each request names its trigger (``TRIGGERS``). The item records the time of the first request of each trigger in
 ``metadata["trigger:<name>"]``, so a reader can tell why the selection ran (RFC #1267). While a selection runs, its
-counts so far are in ``metadata["progress"]``.
+counts so far are in ``metadata["progress"]``. The worker keeps the log of each attempt (``QueueWorker.keeps_log``).
 
 While only background work runs, the next selection waits twice as long as the last one, from
 ``BACKGROUND_POLL_SECONDS`` up to ``MAX_BACKGROUND_POLL_SECONDS``. A selection that changed something resets the wait.
@@ -34,7 +34,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -55,8 +55,46 @@ TRIGGERS = ("records", "data", "commit", "reload", "background", "due")
 #: The shortest time, in seconds, between two progress writes of one selection.
 PROGRESS_INTERVAL_SECONDS = 1.0
 
-#: Reports the counts of a running selection so far: the records read and the samples created.
-SampleProgress = Callable[[int, int], None]
+
+class Selection(ABC):
+    """The attempt of a record selection that runs now, as a trainer sees it.
+
+    Values: ``task_id`` is the ID of the selection's work item, a non-empty string.
+
+    Purpose: the samples worker makes one for each attempt (``ItemSelection``); the trainer reports its counts so far
+    (``progress``) and names ``task_id`` in the metadata of the samples that it stores (RFC #1267).
+    """
+
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+
+    @abstractmethod
+    def progress(self, records_read: int, samples_created: int) -> None:
+        """Report the records read and the samples created so far in this attempt."""
+
+
+class ItemSelection(Selection):
+    """The attempt of the selection ``item`` that a samples worker runs: it writes the counts so far to the item's
+    ``metadata["progress"]``, at most once in ``PROGRESS_INTERVAL_SECONDS``. The result holds the final counts."""
+
+    def __init__(self, queue: WorkQueue, item: WorkItem) -> None:
+        super().__init__(item.id)
+        self.queue = queue
+        self.item = item
+        self.last_write = -math.inf
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        now = time.monotonic()
+        if now - self.last_write < PROGRESS_INTERVAL_SECONDS:
+            return
+        self.last_write = now
+        progress: dict[str, JsonValue] = {
+            "attempt": self.item.attempt_count,
+            "records_read": records_read,
+            "samples_created": samples_created,
+            "at": time.time(),
+        }
+        self.queue.set_metadata(SAMPLES_QUEUE, self.item.id, "progress", progress)
 
 
 def selection_key(scenario: str, component: str) -> str:
@@ -107,6 +145,8 @@ class ProducedSamples:
 
     Counts describe this completed attempt only, not earlier failed attempts. None means unavailable.
     ``records_read`` counts replayed records, including ignored records; ``samples_created`` counts new inserts.
+    ``record_sequences`` is the first and last data sequence of the scenario's own records that the attempt read, or
+    None when it read none of them.
 
     Purpose: ``SampleProducers.produce`` returns it; the samples worker writes it as the selection's result, and
     control wakes the trainer's worker only when ``changed`` is true.
@@ -117,6 +157,7 @@ class ProducedSamples:
     records_read: int | None = None
     samples_created: int | None = None
     due_in_seconds: float | None = None
+    record_sequences: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         for count in (self.records_read, self.samples_created):
@@ -129,6 +170,10 @@ class ProducedSamples:
             raise TypeError("changed and background are booleans")
         if self.samples_created and not self.changed:
             raise ValueError("new samples must change the trainer's input")
+        if self.record_sequences is not None:
+            first, last = self.record_sequences
+            if not 1 <= first <= last:
+                raise ValueError("record_sequences is a pair of positive sequences, the first not after the last")
 
 
 class SampleProducers(ABC):
@@ -138,9 +183,9 @@ class SampleProducers(ABC):
     """
 
     @abstractmethod
-    def produce(self, scenario: str, component: str, progress: SampleProgress) -> ProducedSamples:
+    def produce(self, scenario: str, component: str, selection: Selection) -> ProducedSamples:
         """Make samples of the records that the trainer of ``component`` in ``scenario`` has not used yet, and store
-        them; return what the selection did. Call ``progress`` with the counts so far while the work runs. A
+        them; return what the selection did. Report the counts so far to ``selection`` while the work runs. A
         scenario that is gone, or a trainer that trains nothing, makes nothing."""
 
 
@@ -155,6 +200,8 @@ class SamplesWorker(QueueWorker):
     selection that left only a set that waits for time asks for the next selection after ``due_in_seconds``.
     """
 
+    keeps_log = True
+
     def __init__(
         self, queue: WorkQueue, producers: SampleProducers, *, worker_id: str, poll_seconds: float = 0.2
     ) -> None:
@@ -165,35 +212,16 @@ class SamplesWorker(QueueWorker):
         component = item.payload.get("component")
         if not isinstance(component, str) or not component:
             raise ValueError("a record selection names its component")
-        produced = self.producers.produce(item.scenario, component, self.progress_writer(item))
+        produced = self.producers.produce(item.scenario, component, ItemSelection(self.queue, item))
+        sequences = produced.record_sequences
         return {
             "changed": produced.changed,
             "background": produced.background,
             "records_read": produced.records_read,
             "samples_created": produced.samples_created,
             "due_in_seconds": produced.due_in_seconds,
+            "record_sequences": None if sequences is None else list(sequences),
         }
-
-    def progress_writer(self, item: WorkItem) -> SampleProgress:
-        """A ``SampleProgress`` that writes the counts of this attempt of ``item`` to its metadata, at most once in
-        ``PROGRESS_INTERVAL_SECONDS``. The result holds the final counts."""
-        last_write = -math.inf
-
-        def write(records_read: int, samples_created: int) -> None:
-            nonlocal last_write
-            now = time.monotonic()
-            if now - last_write < PROGRESS_INTERVAL_SECONDS:
-                return
-            last_write = now
-            progress: dict[str, JsonValue] = {
-                "attempt": item.attempt_count,
-                "records_read": records_read,
-                "samples_created": samples_created,
-                "at": time.time(),
-            }
-            self.queue.set_metadata(SAMPLES_QUEUE, item.id, "progress", progress)
-
-        return write
 
     def item_finished(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
         # The next selection is a new item: the finished one keeps its ID until it ends, and an add of the same ID
@@ -225,10 +253,11 @@ __all__ = [
     "RECORD_SELECTION_KIND",
     "SAMPLES_QUEUE",
     "TRIGGERS",
+    "ItemSelection",
     "ProducedSamples",
     "SampleProducers",
-    "SampleProgress",
     "SamplesWorker",
+    "Selection",
     "background_poll_seconds",
     "request_selection",
     "selection_key",

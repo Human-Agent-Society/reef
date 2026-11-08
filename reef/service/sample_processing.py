@@ -39,6 +39,7 @@ def processing_item(item: WorkItem) -> dict[str, JsonValue]:
         "background": result.get("background"),
         "records_read": result.get("records_read"),
         "samples_created": result.get("samples_created"),
+        "record_sequences": result.get("record_sequences"),
         "triggers": selection_triggers(item),
         "progress": progress if current else None,
     }
@@ -53,6 +54,46 @@ def get_processing(dispatcher: Dispatcher, scenario: str, task_id: str) -> dict[
     """Return one task of the scenario, or None when the task is unknown or belongs to another scenario."""
     item = dispatcher.queue.get(SAMPLES_QUEUE, task_id)
     return None if item is None or item.scenario != scenario else processing_item(item)
+
+
+def read_processing_log(
+    dispatcher: Dispatcher,
+    scenario: str,
+    task_id: str,
+    *,
+    attempt: int | None = None,
+    after: int = -1,
+    limit: int = 500,
+) -> dict[str, JsonValue] | None:
+    """Return one page of the log of one attempt of a task, or None when the task is unknown or belongs to another
+    scenario.
+
+    ``attempt`` is 1 to the task's ``attempt_count``, and the last attempt when None. The page holds up to ``limit``
+    lines (1 to 1000) with a number above ``after``. ``next`` is the ``after`` of the next page, or null when the page
+    is the end of the lines kept so far. A task that no worker took has no attempt and no lines.
+    """
+    item = dispatcher.queue.get(SAMPLES_QUEUE, task_id)
+    if item is None or item.scenario != scenario:
+        return None
+    chosen = item.attempt_count if attempt is None else attempt
+    if item.attempt_count and not 1 <= chosen <= item.attempt_count:
+        raise ValueError(f"attempt must be 1 to {item.attempt_count}")
+    lines = (
+        dispatcher.queue.read_log(SAMPLES_QUEUE, task_id, chosen, after=after, limit=limit)
+        if item.attempt_count
+        else ()
+    )
+    return {
+        "task_id": task_id,
+        "attempt": chosen if item.attempt_count else None,
+        "attempt_count": item.attempt_count,
+        "running": item.state in HELD_STATES and chosen == item.attempt_count,
+        "lines": [
+            {"number": line.number, "at": line.at, "level": line.level, "logger": line.logger, "message": line.message}
+            for line in lines
+        ],
+        "next": lines[-1].number if len(lines) == limit else None,
+    }
 
 
 def list_processing(

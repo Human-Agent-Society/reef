@@ -10,6 +10,9 @@ Two fields order the work:
 - Items with the same ``serial_key`` run one at a time, in ``created_sequence`` order: a worker can take one only
   when every earlier item with that key is final. The training jobs of one trainer use this.
 - A worker can take an item only at or after its ``available_at`` time. A polling item uses this to wait.
+
+A worker can also keep the log lines of each attempt of an item (``append_log``, ``read_log``). They go with the item
+when ``delete_final`` deletes it.
 """
 
 from __future__ import annotations
@@ -139,6 +142,39 @@ class WorkItem:
 def is_finite_time(value: object) -> bool:
     """Whether ``value`` is a finite int or float that is not a bool: a time in seconds."""
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
+#: The most log lines that one attempt of a work item keeps.
+MAX_LOG_LINES = 2000
+#: The most characters of one log line's message.
+MAX_LOG_MESSAGE = 4096
+
+
+@dataclass(frozen=True)
+class WorkLogLine:
+    """One log line of one attempt of a work item.
+
+    Values: ``number`` is the line's position in the attempt, an integer from 0, unique in the attempt. ``at`` is
+    the finite time in seconds when the line was logged. ``level`` is the name of a ``logging`` level, such as
+    ``INFO``. ``logger`` is the name of the logger. ``message`` is the text, at most ``MAX_LOG_MESSAGE`` characters.
+
+    Purpose: a worker writes the lines of the attempt that it runs (``WorkQueue.append_log``); readers read them
+    (``WorkQueue.read_log``).
+    """
+
+    number: int
+    at: float
+    level: str
+    logger: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 0:
+            raise ValueError("a log line's number is an integer from 0")
+        if not is_finite_time(self.at):
+            raise ValueError("a log line's time is a finite time")
+        if len(self.message) > MAX_LOG_MESSAGE:
+            raise ValueError(f"a log line's message has at most {MAX_LOG_MESSAGE} characters")
 
 
 @dataclass(frozen=True)
@@ -314,6 +350,18 @@ class WorkQueue(ABC):
         """
 
     @abstractmethod
+    def append_log(self, queue: str, item_id: str, attempt: int, lines: Sequence[WorkLogLine]) -> None:
+        """Keep ``lines`` as log lines of attempt ``attempt`` (from 1) of the item. Each line's number is new in the
+        attempt. No lease is needed: the worker of the attempt is the only writer."""
+
+    @abstractmethod
+    def read_log(
+        self, queue: str, item_id: str, attempt: int, *, after: int = -1, limit: int = 500
+    ) -> tuple[WorkLogLine, ...]:
+        """Up to ``limit`` log lines of attempt ``attempt`` of the item with a number above ``after``, in number
+        order. ``limit`` is 1 to 1000 and ``after`` is from -1; ``ValueError`` otherwise."""
+
+    @abstractmethod
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
         """Return each held item whose lease expired to ``queued``, or make it ``failed``, ended at ``now``, when it
         has no attempts left; return the changed items."""
@@ -369,6 +417,12 @@ def check_page(state: str | None, before_sequence: int | None, limit: int) -> No
         raise ValueError("limit must be 1 to 1000 and before must be positive")
 
 
+def check_log_page(after: int, limit: int) -> None:
+    """Raise ValueError for ``after`` below -1 or ``limit`` outside 1 to 1000 (``WorkQueue.read_log``)."""
+    if after < -1 or not 1 <= limit <= 1000:
+        raise ValueError("after must be -1 or more and limit must be 1 to 1000")
+
+
 def clock(now: float | None) -> float:
     """``now``, or the current time when it is None."""
     return time.time() if now is None else float(now)
@@ -419,6 +473,8 @@ class LeaseExtender:
 __all__ = [
     "FINAL_STATES",
     "HELD_STATES",
+    "MAX_LOG_LINES",
+    "MAX_LOG_MESSAGE",
     "WORK_STATES",
     "JsonValue",
     "LeaseExtender",
@@ -426,8 +482,10 @@ __all__ = [
     "WorkConflict",
     "WorkItem",
     "WorkLeaseLost",
+    "WorkLogLine",
     "WorkQueue",
     "WorkState",
+    "check_log_page",
     "check_page",
     "clock",
     "is_finite_time",

@@ -751,3 +751,25 @@ def test_queue_pages_and_counts_are_scoped_and_newest_first(open_coordination):
     for kwargs in ({"state": "missing"}, {"limit": 0}, {"before_sequence": 0}):
         with pytest.raises(ValueError):
             queue.page("jobs", scenario="s", **kwargs)
+
+
+@pytest.mark.unit
+def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coordination):
+    from reef.storage.work_queue import WorkLogLine
+
+    queue = open_coordination().queue
+    queue.add(job("a"), now=0)
+    queue.take("jobs", "w", ["training_job:tinker"], now=1)
+    queue.append_log("jobs", "a", 1, [WorkLogLine(n, 1.0 + n, "INFO", "reef.test", f"line {n}") for n in range(3)])
+    queue.append_log("jobs", "a", 2, [WorkLogLine(0, 9.0, "ERROR", "reef.test", "second attempt")])
+
+    first = queue.read_log("jobs", "a", 1, limit=2)
+    assert [line.message for line in first] == ["line 0", "line 1"]
+    assert [line.number for line in queue.read_log("jobs", "a", 1, after=first[-1].number)] == [2]
+    assert [line.level for line in queue.read_log("jobs", "a", 2)] == ["ERROR"]
+    with pytest.raises(ValueError):
+        queue.read_log("jobs", "a", 1, limit=0)
+
+    queue.finish("jobs", "a", "w", {}, now=2)
+    assert queue.delete_final(finished_before=3) == 1
+    assert queue.read_log("jobs", "a", 1) == ()
