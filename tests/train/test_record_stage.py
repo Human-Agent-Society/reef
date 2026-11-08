@@ -504,12 +504,9 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
 
 
 @pytest.mark.unit
-def test_a_pipeline_refuses_a_trajectory_that_its_task_to_job_stage_does_not_accept() -> None:
+def test_a_pipeline_does_not_train_a_trajectory_that_its_task_to_job_stage_does_not_accept() -> None:
     context = PipelineContext("s")
     processor = TrainingPipeline(context, sample2job=PairJobData(context, None, None))
-    with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
-        processor.uploaded_sample(TRAJECTORY)
-    # A stored upload does not reach its job data either.
     upload(processor.store.store, "t1")
     assert not processor.ready(1)
     assert processor.status()["ready_samples"] == 0

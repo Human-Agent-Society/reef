@@ -10,9 +10,7 @@ after each write it asks control for the sync with a ``data_sync`` item in contr
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 
-from reef.core.job_data import TrajectorySample
 from reef.storage.data_queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
 from reef.storage.work_queue import WorkItem, WorkQueue
 
@@ -22,7 +20,7 @@ class ScenarioUses(ABC):
 
     ``scenario_owner(scenario)`` is the owner of ``scenario`` in the data store, or None when the scenario does not
     exist. ``check_use(scenario, trajectories, train_tasks)`` raises ``ValueError`` unless ``scenario`` can train
-    on the new ``trajectories`` (pairs of item ID and sample), and on train tasks when ``train_tasks``.
+    on new trajectories when ``trajectories``, and on train tasks when ``train_tasks``.
 
     Purpose: the dispatcher implements it; the data writes (``reef.service.data``) call it before they store.
     """
@@ -31,9 +29,7 @@ class ScenarioUses(ABC):
     def scenario_owner(self, scenario: str) -> str | None: ...
 
     @abstractmethod
-    def check_use(
-        self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
-    ) -> None: ...
+    def check_use(self, scenario: str, trajectories: bool, train_tasks: bool) -> None: ...
 
 
 def request_data_sync(queue: WorkQueue, owner: str, scenario: str) -> WorkItem:

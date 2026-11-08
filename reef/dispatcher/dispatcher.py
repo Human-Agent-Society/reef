@@ -19,7 +19,7 @@ from reef.artifact.repository import EnumerableRepositoryBackendFactory, Reposit
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
-from reef.core.job_data import TaskSample, TrajectorySample
+from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
 from reef.core.serving_config import ServingConfig
@@ -738,9 +738,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         # store; the new owner's store gets the scenario's artifacts too.
         self.request_artifact_copy(scenario)
 
-    def check_use(
-        self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
-    ) -> None:
+    def check_use(self, scenario: str, trajectories: bool, train_tasks: bool) -> None:
         """Raise ``ValueError`` unless ``scenario`` can train on the items that it is to use (``ingest.check_use``)."""
         with self.locked_scenario(scenario) as current:
             ingest.check_use(current, trajectories, train_tasks)
