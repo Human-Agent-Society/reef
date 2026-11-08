@@ -90,12 +90,12 @@ class WorkLogHandler(logging.Handler):
 
 
 HANDLER = WorkLogHandler()
-_install_lock = threading.Lock()
+INSTALL_LOCK = threading.Lock()
 
 
 def install_handler() -> None:
     """Add ``HANDLER`` to the root logger once."""
-    with _install_lock:
+    with INSTALL_LOCK:
         root = logging.getLogger()
         if HANDLER not in root.handlers:
             root.addHandler(HANDLER)
