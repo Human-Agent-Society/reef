@@ -1,4 +1,4 @@
-# AutoEnvScaling on Tinker from a seed pool: the served model trains on TMax-15K seed tasks, and Claude Code writes a
+# AutoEnvScaling on Tinker from seed tasks: the served model trains on TMax-15K seed tasks, and Claude Code writes a
 # harder or simpler variant of each seed the model solves too often or too rarely. The generated-task recipe trains them.
 # Supply TINKER_API_KEY, E2B_API_KEY and CLAUDE_CODE_OAUTH_TOKEN (made with `claude setup-token`) through the shell.
 # REEF_AUTOENVSCALING_STATE_DIR is where this deployment keeps its state; REEF_AUTOENVSCALING_SEEDS_PATH is the seed
@@ -36,7 +36,7 @@ generator:
       model_info: {max_input_tokens: 48000, max_output_tokens: 16384, input_cost_per_token: 0.0, output_cost_per_token: 0.0}
       llm_kwargs:
         api_key: "{api_key}"
-        # The cap of one reply, as the official solver; before #1110, Reef's Tinker chat route gives 1024 tokens.
+        # The cap of one reply, as the official solver.
         max_tokens: 16384
         # Thinking off: a thinking model's rollout trains only its last turn.
         extra_body:
@@ -91,7 +91,7 @@ pipeline:
         config:
           generator_url: ${endpoints.generator}
           state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/generations
-          # The seed pool. Uploaded as train tasks instead, the seeds would train ahead of every generated task.
+          # The seed tasks. Uploaded as train tasks instead, the seeds would train ahead of every generated task.
           seed_tasks_path: ${REEF_AUTOENVSCALING_SEEDS_PATH}
           count: 8
           # A task is in the band when the Reasoning Agent passes a quarter to three quarters of its rollouts.
@@ -129,7 +129,7 @@ training:
     # Rollouts in one optimizer step: a whole job of 8 tasks with 8 rollouts each, so one step per job.
     batch-size: 64
     lora-rank: 32
-    # The rate of the seed-pool run on 2026-11-04.
+    # The learning rate of the Tinker training run in README.md.
     learning-rate: 0.00001
 storage:
   artifact-repository: ${REEF_AUTOENVSCALING_STATE_DIR}/artifacts.git

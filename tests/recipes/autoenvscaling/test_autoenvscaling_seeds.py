@@ -721,7 +721,7 @@ def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
 
 
 @pytest.mark.parametrize(("name", "concurrency"), [("serve-tinker.yaml", 4), ("serve.yaml", 6)])
-def test_the_seed_pool_examples_build_claude_code_on_the_seeds_with_a_refusing_calibration(
+def test_the_seed_task_examples_build_claude_code_on_the_seeds_with_a_refusing_calibration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, concurrency: int
 ) -> None:
     write_seeds(tmp_path / "seeds", 2)

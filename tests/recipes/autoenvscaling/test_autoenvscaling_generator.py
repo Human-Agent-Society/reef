@@ -905,7 +905,7 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
 @pytest.mark.parametrize("name", (*TINKER_EXAMPLES, SLIME_EXAMPLE))
 def test_an_examples_generation_deadline_covers_the_designer_and_the_calibration(name: str) -> None:
     stage = yaml.safe_load((EXAMPLES / name).read_text())["pipeline"]["record2sample"]["config"]
-    # A generation took about 93 minutes in the seed-pool run; the default ends it during the calibration.
+    # A generation took about 93 minutes in the Tinker training run; the default ends it during the calibration.
     assert stage["generation_deadline_seconds"] > DEFAULT_GENERATION_DEADLINE_SECONDS
 
 

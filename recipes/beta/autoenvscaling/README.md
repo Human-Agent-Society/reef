@@ -2,7 +2,7 @@
 
 **Status: beta.** AutoEnvScaling remains under `recipes/beta/autoenvscaling/` until complete, reproducible learning results are published. The tests validate the generator, the Designers, the checks and the band against stand ins; they do not run pi, Claude Code or a model, and they do not establish learning performance. See [issue #422](https://github.com/Human-Agent-Society/reef/issues/422) for this classification.
 
-AutoEnvScaling (preprint forthcoming) as a Reef task generator: a coding agent rebuilds recorded coding-agent sessions as Harbor tasks. The agent writes one task in a workspace from one session and the repository the session changed. It runs the task's oracle and nop check itself through a tool, and revises until the check passes. A pass-rate band marks the tasks that the Reasoning Agent can reach. With `designer: prompt`, the same generator runs the generator service's one-reply prompt Designer on the same sessions, as the baseline ([the prompt Designer baseline](#the-prompt-designer-baseline)). From a pool of seed tasks, such as TMax-15K, the agent instead writes harder or simpler variants of the seeds that the policy solves too often or too rarely ([seed tasks](#seed-tasks)).
+AutoEnvScaling (preprint forthcoming) as a Reef task generator: a coding agent rebuilds recorded coding-agent sessions as Harbor tasks. The agent writes one task in a workspace from one session and the repository the session changed. It runs the task's oracle and nop check itself through a tool, and revises until the check passes. A pass-rate band marks the tasks that the Reasoning Agent can reach. With `designer: prompt`, the same generator runs the generator service's one-reply prompt Designer on the same sessions, as the baseline ([the prompt Designer baseline](#the-prompt-designer-baseline)). From seed tasks, such as TMax-15K, the agent instead writes harder or simpler variants of the seeds that the policy solves too often or too rarely ([seed tasks](#seed-tasks)).
 
 ## Results
 
@@ -30,22 +30,17 @@ On the 15 sessions that both arms ran, the arms give 5 and 6 fair tasks. The che
 
 ### Training runs
 
-Qwen3.5-9B trained on TMax seed tasks and Claude Code's variants of them, with [#1215](#fixes-that-are-not-merged-yet). The runs used the `examples/tmax_seeds/` deployments with these changes:
+Qwen3.5-9B trained on Tinker for 50 steps, on TMax seed tasks and Claude Code's variants of them. Steps 1 to 8 ran `examples/tmax_seeds/serve-tinker.yaml` as written. Steps 9 to 50 ran 11 tasks of 32 rollouts per job (`count` 11, `rollouts_per_task` 32, `batch-size` 256), `jobs_per_round: 0` with `refill_tasks` 16, and the Harbor release of TMax v1.1 as seeds.
 
-- Tinker: steps 1 to 8 ran `serve-tinker.yaml` as written. Steps 9 to 50 ran 11 tasks of 32 rollouts per job (`count` 11, `rollouts_per_task` 32, `batch-size` 256), `jobs_per_round: 0` with `refill_tasks` 16, and the Harbor release of TMax v1.1 as seeds.
-- Slime: steps 1 to 6 ran `serve.yaml` on 8 GPUs. From step 7, 2 rollout engines on 7 GPUs trained, so that the eighth GPU could run the evaluations. The run's image had Slime 540ea919 on Megatron core 0.19.2, built before Reef pinned Slime 8a53b680; this example has not run on the pinned Slime yet.
-
-Each checkpoint ran Terminal-Bench 2.0 (89 tasks, 5 attempts each) with the training agent: `VerifiedTerminus2` with thinking off, as in training. avg@5 is the mean over the 89 tasks of each task's mean reward, with a 95% interval over tasks; attempts that failed for an infrastructure reason are left out (3 for the Tinker base model). The difference to the base model is paired over tasks, with a bootstrap 95% interval. Each backend measured its own base model: on Tinker through Reef's artifact evaluation, on Slime with Harbor against an SGLang engine outside Reef. The two base results differ by 1.9 points. The serving differs too: SGLang ends a rollout at a shorter history than Tinker ([settings](#settings-the-examples-depend-on)).
+Each checkpoint ran Terminal-Bench 2.0 (89 tasks, 5 attempts each) through Reef's artifact evaluation, with the training agent: `VerifiedTerminus2` with thinking off, as in training. avg@5 is the mean over the 89 tasks of each task's mean reward, with a 95% interval over tasks; attempts that failed for an infrastructure reason are left out (3 for the base model). The difference to the base model is paired over tasks, with a bootstrap 95% interval.
 
 | Backend | Steps | Rollouts per step | Checkpoint | avg@5 | Against the base model |
 | --- | --- | --- | --- | --- | --- |
 | Tinker, LoRA rank 32 | 50 | 8 tasks x 8 for 8 steps, then 8 x 32 | base | 20.6 +/- 6.8 | |
 | | | | step 25 | 19.1 +/- 6.7 | -1.5 [-5.2, +2.0] |
 | | | | step 50 | 22.9 +/- 7.3 | +2.4 [-0.4, +5.4] |
-| Slime, all weights | running to 300 | 16 tasks x 16 | base | 18.7 +/- 6.7 | |
-| | | | step 16 | 17.1 +/- 6.0 | -1.6 [-4.7, +1.3] |
 
-No checkpoint differs from its base model by more than the noise yet. The recipe runs end to end on both backends; these runs do not show that it improves Terminal-Bench.
+No checkpoint differs from the base model by more than the noise, so this run does not show that the recipe improves Terminal-Bench.
 
 ## Layout
 
@@ -217,7 +212,7 @@ A retired task does not train again. With `review_interval: 0`, the tasks train 
 | `review_band_high` | 0.75 | the highest pass rate that keeps a task |
 | `review_min_reward_std` | 0.1 | the smallest population standard deviation of the rewards that keeps a task; 0 turns this rule off |
 
-The review keys need `pool_capacity` above 0, and `refill_tasks` must stay 1. The recipe's band keys repeat the generator's `band_low` and `band_high`, because the generator does not read the recipe's settings. Set both bands when you change one. Seeds uploaded as train tasks train once; give the seeds to the generator to keep them in the pool ([seed tasks](#seed-tasks)). The task store keeps each use, review and retired task, and the stage's status shows them under `training_pool`; the [configuration reference](../../../docs/reference/configuration.rst) has the details.
+The review keys need `pool_capacity` above 0, and `refill_tasks` must stay 1. The recipe's band keys repeat the generator's `band_low` and `band_high`, because the generator does not read the recipe's settings. Set both bands when you change one. Seeds uploaded as train tasks train once; give the seeds to the generator to keep them in the training pool ([seed tasks](#seed-tasks)). The task store keeps each use, review and retired task, and the stage's status shows them under `training_pool`; the [configuration reference](../../../docs/reference/configuration.rst) has the details.
 
 This review differs from AutoEnvScaling's. It reads the rewards of recent training rollouts, which can be one pool cycle old; it does not run the current model again. The trainer can take the next job's tasks before the review at the end of the job before it, so a retired task can train once more. It keeps no reserve of tasks, and it asks the generator for no replacement tasks.
 
@@ -284,7 +279,7 @@ pipeline:
           seed_tasks_path: /data/tmax-seeds
 ```
 
-Give the seeds to the generator here. Seeds uploaded as train tasks instead wait in the job queue ahead of every generated task. `examples/tmax_seeds/` holds whole deployments with seeds and no sources file, on Tinker and on Slime ([run the seed pool](#run-the-seed-pool)).
+Give the seeds to the generator here. Seeds uploaded as train tasks instead wait in the job queue ahead of every generated task. `examples/tmax_seeds/` holds whole deployments with seeds and no sources file, on Tinker and on Slime ([run from seed tasks](#run-from-seed-tasks)).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -427,7 +422,7 @@ curl -s -X POST -H "Authorization: Bearer $REEF_AUTOENVSCALING_DESIGNER_TOKEN" -
 
 Optional, for an upstream that serves only the Responses API (a ChatGPT plan): set `agent_api: responses` for the agent, and `model_name: "openai/responses/{model}"` in `generator.agent` for the Reasoning Agent's Harbor agent.
 
-### Run the seed pool
+### Run from seed tasks
 
 Convert TMax tasks into seeds first ([convert TMax tasks](#convert-tmax-tasks)). No Designer's Reef is needed: Claude Code sends its model calls to Anthropic, the seeds have no sessions, and the test review is off. The first round trains seeds only. Each later round gives up to half its slots to Claude Code's variants of the seeds outside the band, and the calibration keeps a variant only when the policy solves it sometimes.
 
@@ -455,31 +450,24 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
   -d '{"name": "autoenvscaling"}' http://127.0.0.1:8900/reef/scenarios
 ```
 
-Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Slime's rollout engines, and 1 runs Reef's serving engine. Each job is one Slime rollout of 16 tasks with 16 rollouts each, trained as one optimizer step (`objective: slime_dataset`, GRPO without the division by the standard deviation). With `jobs_per_round: 0`, the next generation starts while fewer than 16 saved tasks wait, so the Designer works ahead of training. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` reaches the trainer, which runs out of memory on a long sample without it, as it does without the 64K window. In the run of [training runs](#training-runs), a step took about 40 to 65 minutes (55 in the median) on 7 GPUs, most of it in the rollouts. Plan the disk before a long run: Reef keeps every step's weights as an artifact, about 18 GB in the artifact repository and as much again in its cache, and each Megatron checkpoint takes about 135 GB.
+Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Slime's rollout engines, and 1 runs Reef's serving engine. Each job is one Slime rollout of 16 tasks with 16 rollouts each, trained as one optimizer step (`objective: slime_dataset`, GRPO without the division by the standard deviation). With `jobs_per_round: 0`, the next generation starts while fewer than 16 saved tasks wait, so the Designer works ahead of training. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` reaches the trainer, which runs out of memory on a long sample without it, as it does without the 64K window. Plan the disk before a long run: Reef keeps every step's weights as an artifact, about 18 GB in the artifact repository and as much again in its cache, and each Megatron checkpoint takes about 135 GB.
 
 ### Settings the examples depend on
 
 The examples need each of these settings, on Tinker and on Slime:
 
-- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0. A calibration rollout that fills the context ends the same way only with #1215; before it, Reef's inference route turns the engine's refusal into a 502, the rollout does not score, and the calibration gets no measure of a long variant.
-- **The reply cap.** `max_tokens` in `llm_kwargs` caps each reply at 16384 tokens, as the official AutoEnvScaling solver. Before #1215, Reef's Tinker chat route gives a request without `max_tokens` 1024 tokens. Tinker takes a prompt whose length plus `max_tokens` passes the context, so on Tinker the cap does not shorten a rollout's history. SGLang refuses such a prompt, so on Slime a rollout ends at a history of 65536 - 16384 = 49152 tokens; about 12% of the Slime run's training rollouts reached it. On the chat completions route, `model_info` caps nothing: Harbor only names its `max_output_tokens` to the model after a cut reply.
+- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0.
+- **The reply cap.** `max_tokens` in `llm_kwargs` caps each reply at 16384 tokens, as the official AutoEnvScaling solver. Tinker takes a prompt whose length plus `max_tokens` passes the context, so on Tinker the cap does not shorten a rollout's history. SGLang refuses such a prompt, so on Slime a rollout ends at a history of 65536 - 16384 = 49152 tokens. On the chat completions route, `model_info` caps nothing: Harbor only names its `max_output_tokens` to the model after a cut reply.
 - **No compaction, no thinking.** `enable_summarize: false`, as the official solver, and `enable_thinking: false`. Reef trains a rollout as one sample: a summarized history does not assemble into one, and in a thinking history only the last turn trains.
 - **No recording.** `record_terminal_session: false`: the tasks have no network, and on `e2b` the recorder's install hangs the rollout.
 - **The pace of the rounds.** On Tinker, a generation of `count` 8 fills one job of `buffer_size` 8, and `jobs_per_round: 1` starts the next round after that job. On Slime, `jobs_per_round: 0` starts the next round when the last one ends, while fewer than `refill_tasks` saved tasks wait, and `validation_concurrency` checks the candidates of one generation at the same time.
-- **The deadline.** `generation_deadline_seconds` covers the Designer's runs and the calibration of one generation. In the seed-pool run, a generation with 4 variants and 4 seeds took about 93 minutes: about 20 for Claude Code's runs and the rest for the calibration of the variants. The default 1800 s ends such a generation during the calibration.
+- **The deadline.** `generation_deadline_seconds` covers the Designer's runs and the calibration of one generation. In the Tinker run of [training runs](#training-runs), a generation with 4 variants and 4 seeds took about 93 minutes: about 20 for Claude Code's runs and the rest for the calibration of the variants. The default 1800 s ends such a generation during the calibration.
 
 With compaction on, terminus-2's default, terminus-2 summarizes its history before the model's context window only when it knows the window, and it counts tokens with LiteLLM's tokenizer, which runs about 8 to 10% under a Qwen model's own count. On Tinker it knows neither, so a long episode keeps overflowing the window. In a harness with compaction on, set `model_info` in its `kwargs` with `max_input_tokens` well under the window: for a 65536-token window, `{max_input_tokens: 48000, max_output_tokens: 8192, input_cost_per_token: 0.0, output_cost_per_token: 0.0}`.
 
-### Fixes that are not merged yet
-
-The examples need [#1215](https://github.com/Human-Agent-Society/reef/pull/1215) besides this recipe. The runs of [training runs](#training-runs) had it, on Tinker from 2026-11-04 and on Slime from 2026-11-07. Without it:
-
-- On Tinker and on Slime, only the last reply of a multi-turn rollout trains: the sample masks every earlier reply. A calibration rollout that fills the context gets a 502 and does not score.
-- On Tinker, a request without `max_tokens` gets 1024 tokens, one rollout longer than the model's context fails a whole optimizer step, and a sampling client that sat idle too long fails every later call.
-
 ## Time per session, and training from saved tasks
 
-With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a generation of 5 sessions takes about 2 to 3 hours before its tasks run. Claude Code on Opus took 6 to 20 minutes per seed variant in the seed-pool run, 8 in the median of 8 runs. Prompt mode takes about 1 to 2 minutes per session.
+With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a generation of 5 sessions takes about 2 to 3 hours before its tasks run. Claude Code on Opus took 6 to 20 minutes per seed variant in the Tinker run of [training runs](#training-runs), 8 in the median of 8 runs. Prompt mode takes about 1 to 2 minutes per session.
 
 The built-in generated-task recipe trains a generation's tasks only after the whole generation is saved, so the first job waits for the first generation. To start training at once, or to train several runs on the same tasks, save the tasks first, then train from them:
 
@@ -541,6 +529,6 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
 - For training on Tinker, a Tinker API key in `TINKER_API_KEY` and the `tinker` extra. The Tinker examples run where Reef installs: macOS, Linux, or Windows through WSL 2.
 - For training on Slime, one Linux node with 8 NVIDIA GPUs of 80 GB, the Reef image, and a local copy of the model.
 
-Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record-to-sample stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as `examples/recorded_sessions/serve-tinker.yaml` does. The `examples/tmax_seeds/` deployments name the training deployment, because no call goes there: Claude Code calls Anthropic, the seeds have no sessions, and the review is off. Claude Code on E2B has written seed variants (`examples/tmax_seeds/`); no run has used it on Modal or on sessions yet, so start such a run with one session.
+Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record-to-sample stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as `examples/recorded_sessions/serve-tinker.yaml` does. The `examples/tmax_seeds/` deployments name the training deployment, because no call goes there: Claude Code calls Anthropic, the seeds have no sessions, and the review is off. Claude Code on E2B has written seed variants (`examples/tmax_seeds/`); no run has used it on Modal or on sessions, so start such a run with one session.
 
-On Slime, Reef keeps the weights of every step as an artifact, and nothing removes them yet: 300 steps of Qwen3.5-9B take about 10 TB. Slime imports wandb even without `--use-wandb`, and wandb 0.31's console capture can deadlock Slime's rollout manager: in the Slime run, every rollout stopped after about 7 hours and the GPUs went idle. The run then mounted a copy of `wandb/sdk/lib/console_capture.py` that does not patch the console.
+On Slime, Reef keeps the weights of every step as an artifact, and nothing removes them: 300 steps of Qwen3.5-9B take about 10 TB.

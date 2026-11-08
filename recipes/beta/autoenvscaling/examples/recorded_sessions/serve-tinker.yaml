@@ -1,7 +1,6 @@
 # AutoEnvScaling on Tinker: a coding agent rebuilds recorded sessions as Harbor tasks, and the served model trains on them.
 # The built-in generated-task recipe hands the tasks to Tinker, which rolls them out and trains; AutoEnvScaling is the task generator.
-# The harness and training settings are those of examples/tmax_seeds/serve-tinker.yaml, which ran on Tinker; this file has
-# not run with them.
+# The harness and training settings are those of examples/tmax_seeds/serve-tinker.yaml.
 # Supply TINKER_API_KEY, E2B_API_KEY and REEF_AUTOENVSCALING_DESIGNER_TOKEN through the shell, never here.
 # REEF_AUTOENVSCALING_STATE_DIR is where this deployment keeps its state; REEF_AUTOENVSCALING_SOURCES_PATH lists the
 # recorded sessions; REEF_AUTOENVSCALING_DESIGNER_URL is the Reef that serves the agent's model and holds the sessions.
@@ -40,7 +39,7 @@ generator:
       model_info: {max_input_tokens: 48000, max_output_tokens: 16384, input_cost_per_token: 0.0, output_cost_per_token: 0.0}
       llm_kwargs:
         api_key: "{api_key}"
-        # The cap of one reply, as the official solver; before #1110, Reef's Tinker chat route gives 1024 tokens.
+        # The cap of one reply, as the official solver.
         max_tokens: 16384
         # Thinking off: a thinking model's rollout trains only its last turn.
         extra_body:
@@ -125,7 +124,7 @@ training:
     # Rollouts in one optimizer step: a whole job of 8 tasks with 8 rollouts each, so one step per job.
     batch-size: 64
     lora-rank: 32
-    # The rate the seed-pool example trained Qwen3.5-9B at.
+    # The learning rate of the Tinker training run in README.md.
     learning-rate: 0.00001
 storage:
   artifact-repository: ${REEF_AUTOENVSCALING_STATE_DIR}/artifacts.git
