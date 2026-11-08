@@ -50,11 +50,6 @@ from recipes.beta.autoenvscaling.designer import (
 )
 from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator, GeneratorChecks, admitted_task
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource, load_sources, render_session
-from reef.train.algos.registry import register_objective_ref
-
-register_objective_ref(
-    "autoenvscaling", "recipes.beta.autoenvscaling.tinker:AutoEnvScalingTinkerObjective", backend="tinker"
-)
 
 __all__ = [
     "AgentDesigner",
