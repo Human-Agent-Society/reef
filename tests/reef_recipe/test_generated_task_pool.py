@@ -24,9 +24,9 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
+from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, pool_reviews, retired_tasks, task_uses
 from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.results import rollout_results
-from reef.recipe.generated_tasks.review import PoolReview, RetiredTask, pool_reviews, retired_tasks, task_uses
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import stage_item_id

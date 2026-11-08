@@ -26,7 +26,7 @@ them again.
 With ``pool_capacity`` above 0 (``GeneratedTaskSettings``), each train task trains again: when its job ends, the stage
 makes the task's sample of the next use, which waits after the samples that wait already. Rounds then start only
 while fewer train tasks than ``pool_capacity`` are active. Every ``review_interval`` jobs, a review retires the tasks
-whose recent rewards are outside the band or do not spread (:mod:`reef.recipe.generated_tasks.review`), and the
+whose recent rewards are outside the band or do not spread (:mod:`reef.recipe.generated_tasks.pool`), and the
 scenario stops using the sample of a retired task that waits. The task store and the scenario's items hold the pool,
 so a restart continues it.
 
@@ -55,14 +55,7 @@ from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
-from reef.recipe.generated_tasks.results import (
-    TaskRolloutResult,
-    delivered_generations,
-    mark_delivered,
-    rollout_results,
-    save_rollout_result,
-)
-from reef.recipe.generated_tasks.review import (
+from reef.recipe.generated_tasks.pool import (
     ReviewSettings,
     TaskUse,
     TrainingPoolSettings,
@@ -71,6 +64,13 @@ from reef.recipe.generated_tasks.review import (
     review_pool,
     save_task_uses,
     task_uses,
+)
+from reef.recipe.generated_tasks.results import (
+    TaskRolloutResult,
+    delivered_generations,
+    mark_delivered,
+    rollout_results,
+    save_rollout_result,
 )
 from reef.record2sample import Record2Sample, Record2SampleSettings, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.generator.client import Generator, HttpGenerator
@@ -91,13 +91,17 @@ DEFAULT_SPLIT_SEED = 0
 DEFAULT_GENERATION_ATTEMPTS = 3
 DEFAULT_GENERATION_DEADLINE_SECONDS = 1800.0
 DELIVERY_RECEIPT = "delivery"
-# The pool review's defaults follow the AutoEnvScaling pool: a review every 16 solver steps, four rollouts, and
-# the band and reward spread that admit a task.
+#: The task jobs between two pool reviews: AutoEnvScaling reviews its pool every 16 solver steps.
 DEFAULT_REVIEW_INTERVAL = 16
+#: The most recent rewards of a task that a review reads: the four rollouts of AutoEnvScaling's review.
 DEFAULT_REVIEW_WINDOW = 4
+#: The lowest pass rate that keeps a task: the low edge of AutoEnvScaling's band.
 DEFAULT_REVIEW_BAND_LOW = 0.25
+#: The highest pass rate that keeps a task: the high edge of AutoEnvScaling's band.
 DEFAULT_REVIEW_BAND_HIGH = 0.75
+#: The smallest population standard deviation of the rewards that keeps a task, as AutoEnvScaling admits one.
 DEFAULT_REVIEW_MIN_REWARD_STD = 0.1
+#: The rule of the pool reviews when no ``review_*`` key is set.
 DEFAULT_REVIEW_SETTINGS = ReviewSettings(
     interval=DEFAULT_REVIEW_INTERVAL,
     window=DEFAULT_REVIEW_WINDOW,

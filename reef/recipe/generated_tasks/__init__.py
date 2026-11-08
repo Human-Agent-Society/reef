@@ -18,8 +18,9 @@ generator's method:
   generation, validation, task publication and result delivery on the stage's worker.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
-- ``review``: with ``pool_capacity``, each use of a train task, the pool
-  reviews, and the tasks that a review retired, kept in the same documents.
+- ``pool``: the training pool, with ``pool_capacity``: each use of a train
+  task, the pool reviews, and the tasks that a review retired, kept in the same
+  documents.
 - ``recipe``: the report contract. The deployment names the objective in the
   recipe's ``job_parameters``, as a dotted reference to a method that it provides.
 

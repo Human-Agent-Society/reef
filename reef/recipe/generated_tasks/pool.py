@@ -23,25 +23,27 @@ import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from reef.core.atif_payloads import canonical_json
+from reef.core.values import require_text
+from reef.recipe.generated_tasks.generator import check_rewards
 from reef.storage.tasks import TaskStore
 
+#: The key prefix of the documents of the task uses.
 USE_KEY_PREFIX = "use/"
+#: The key prefix of the documents of the retired tasks.
 RETIRED_KEY_PREFIX = "retired/"
+#: The key prefix of the documents of the pool reviews.
 REVIEW_KEY_PREFIX = "review/"
-#: The reasons of a retirement, in the order that a review checks them.
-RETIREMENT_REASONS = ("below_band", "above_band", "no_reward_spread")
+#: Why a review retires a task, in the order that it checks.
+RetirementReason = Literal["below_band", "above_band", "no_reward_spread"]
+RETIREMENT_REASONS: tuple[RetirementReason, ...] = ("below_band", "above_band", "no_reward_spread")
 
 
 def is_whole_number(value: object) -> bool:
     """Whether ``value`` is an int and not a bool."""
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def is_finite_number(value: object) -> bool:
-    """Whether ``value`` is a finite int or float and not a bool."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 @dataclass(frozen=True)
@@ -68,11 +70,13 @@ class ReviewSettings:
             raise ValueError("review_interval must be a non-negative integer")
         if not is_whole_number(self.window) or self.window < 2:
             raise ValueError("review_window must be an integer of at least 2")
-        if not all(is_finite_number(bound) and 0 <= bound <= 1 for bound in (self.band_low, self.band_high)):
-            raise ValueError("review_band_low and review_band_high must be numbers between 0 and 1")
+        for bound in (self.band_low, self.band_high):
+            if isinstance(bound, bool) or not isinstance(bound, (int, float)) or not 0 <= bound <= 1:
+                raise ValueError("review_band_low and review_band_high must be numbers between 0 and 1")
         if self.band_low > self.band_high:
             raise ValueError("review_band_low must not be above review_band_high")
-        if not is_finite_number(self.min_reward_std) or self.min_reward_std < 0:
+        std = self.min_reward_std
+        if isinstance(std, bool) or not isinstance(std, (int, float)) or not math.isfinite(std) or std < 0:
             raise ValueError("review_min_reward_std must be a non-negative number")
 
 
@@ -116,12 +120,14 @@ class TaskUse:
     rewards: tuple[float, ...]
 
     def __post_init__(self) -> None:
-        if not all(isinstance(value, str) and value for value in (self.task_name, self.job_id)):
-            raise ValueError("a task use needs its task name and job id")
+        require_text(self.task_name, "task_name")
+        require_text(self.job_id, "job_id")
         if not is_whole_number(self.use_index) or self.use_index < 0:
             raise ValueError("a task use's use_index must be a non-negative integer")
-        if not isinstance(self.rewards, tuple) or not all(is_finite_number(reward) for reward in self.rewards):
+        if not isinstance(self.rewards, tuple):
             raise ValueError("a task use's rewards must be a tuple of finite numbers")
+        if self.rewards:
+            check_rewards(self.rewards)
 
     @property
     def key(self) -> str:
@@ -148,7 +154,7 @@ class TaskUse:
 
 @dataclass(frozen=True)
 class RetiredTask:
-    """A train task that a pool review took out of the task pool, with the rewards that decided it.
+    """A train task that a pool review took out of the training pool, with the rewards that decided it.
 
     Values: ``task_name`` is a non-empty string. ``review`` is the non-negative number of the review.
     ``rewards`` is a tuple of two or more finite numbers, the last rewards of the task that the review read.
@@ -162,17 +168,15 @@ class RetiredTask:
     task_name: str
     review: int
     rewards: tuple[float, ...]
-    reason: str
+    reason: RetirementReason
 
     def __post_init__(self) -> None:
-        if not isinstance(self.task_name, str) or not self.task_name:
-            raise ValueError("a retired task needs its task name")
+        require_text(self.task_name, "task_name")
         if not is_whole_number(self.review) or self.review < 0:
             raise ValueError("a retired task's review must be a non-negative integer")
-        if not isinstance(self.rewards, tuple) or len(self.rewards) < 2:
+        check_rewards(self.rewards)
+        if len(self.rewards) < 2:
             raise ValueError("a retired task needs two or more rewards")
-        if not all(is_finite_number(reward) for reward in self.rewards):
-            raise ValueError("a retired task's rewards must be finite numbers")
         if self.reason not in RETIREMENT_REASONS:
             raise ValueError(f"a retired task's reason must be one of {', '.join(RETIREMENT_REASONS)}")
 
@@ -221,7 +225,7 @@ class PoolReview:
     review: int
     jobs: int
     kept: int
-    retired: Mapping[str, str]
+    retired: Mapping[str, RetirementReason]
 
     def __post_init__(self) -> None:
         if not is_whole_number(self.review) or self.review < 0:
@@ -293,7 +297,7 @@ def pool_reviews(store: TaskStore) -> tuple[PoolReview, ...]:
     return tuple(sorted(reviews, key=lambda review: review.review))
 
 
-def retirement_reason(rewards: Sequence[float], settings: ReviewSettings) -> str | None:
+def retirement_reason(rewards: Sequence[float], settings: ReviewSettings) -> RetirementReason | None:
     """Return why a review retires a task with these rewards, or None when the review keeps the task.
 
     ``rewards`` holds two or more numbers. Both bounds of the band keep a task.
@@ -325,7 +329,7 @@ def review_pool(store: TaskStore, settings: ReviewSettings, task_names: Sequence
         return None
     saved = retired_tasks(store)
     kept = 0
-    retired_reasons: dict[str, str] = {}
+    retired_reasons: dict[str, RetirementReason] = {}
     for name in task_names:
         if name in saved:
             # An earlier review retired the task, or this review did before a stop or a failed write.
