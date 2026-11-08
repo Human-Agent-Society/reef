@@ -174,9 +174,9 @@ class RetiredTask:
         require_text(self.task_name, "task_name")
         if not is_whole_number(self.review) or self.review < 0:
             raise ValueError("a retired task's review must be a non-negative integer")
-        check_rewards(self.rewards)
-        if len(self.rewards) < 2:
+        if not isinstance(self.rewards, tuple) or len(self.rewards) < 2:
             raise ValueError("a retired task needs two or more rewards")
+        check_rewards(self.rewards)
         if self.reason not in RETIREMENT_REASONS:
             raise ValueError(f"a retired task's reason must be one of {', '.join(RETIREMENT_REASONS)}")
 

@@ -24,7 +24,7 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, pool_reviews, retired_tasks, task_uses
+from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, TaskUse, pool_reviews, retired_tasks, task_uses
 from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.results import rollout_results
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -721,6 +721,43 @@ def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_
 def test_a_malformed_pool_setting_is_refused(config: dict[str, float], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         GeneratedTaskSettings(**config)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"task_name": ""}, "task_name must be a non-empty string"),
+        ({"job_id": " job-1"}, "job_id must be a non-empty string"),
+        ({"use_index": -1}, "use_index must be a non-negative integer"),
+        ({"use_index": True}, "use_index must be a non-negative integer"),
+        ({"rewards": [1.0]}, "a task use's rewards must be a tuple of finite numbers"),
+        ({"rewards": (1.0, float("nan"))}, "rewards must be finite numbers"),
+        ({"rewards": (True,)}, "rewards must be finite numbers"),
+    ],
+)
+def test_a_malformed_task_use_is_refused(fields: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        TaskUse(**{"task_name": TASK_A, "job_id": "job-1", "use_index": 0, "rewards": (1.0, 0.0), **fields})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"task_name": ""}, "task_name must be a non-empty string"),
+        ({"review": -1}, "review must be a non-negative integer"),
+        ({"rewards": ()}, "a retired task needs two or more rewards"),
+        ({"rewards": (1.0,)}, "a retired task needs two or more rewards"),
+        ({"rewards": [1.0, 1.0]}, "a retired task needs two or more rewards"),
+        ({"rewards": (1.0, float("inf"))}, "rewards must be finite numbers"),
+        ({"rewards": (1.0, "1.0")}, "rewards must be finite numbers"),
+        ({"reason": "stale"}, "reason must be one of below_band, above_band, no_reward_spread"),
+    ],
+)
+def test_a_malformed_retired_task_is_refused(fields: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        RetiredTask(**{"task_name": TASK_A, "review": 0, "rewards": (1.0, 1.0), "reason": "above_band", **fields})
 
 
 @pytest.mark.unit
