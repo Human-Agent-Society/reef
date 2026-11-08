@@ -77,9 +77,11 @@ renders each recorded call with the base model's tokenizer and
 ``training.options.chat_template_kwargs``, which must equal the chat template
 arguments of serving, for example ``{enable_thinking: false}``. It computes
 the rollout log probabilities with a forward pass at the job's start, before
-the first optimizer step. A sample that cannot render does not train, and the
-job metric ``unrenderable_samples`` counts it. A task job's own rollouts keep
-the sampled IDs and log probabilities that Tinker returns.
+the first optimizer step. A sample that cannot render, or whose tokens after
+the first are more than the model's context window, does not train, and the
+job metric ``unrenderable_samples`` counts it: Tinker refuses a whole
+optimizer step for one such sample. A task job's own rollouts keep the sampled
+IDs and log probabilities that Tinker returns.
 
 Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
 one training component (``reef.train.tinker_backend``) and one inference

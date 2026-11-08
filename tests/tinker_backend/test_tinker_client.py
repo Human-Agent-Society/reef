@@ -583,6 +583,13 @@ def test_the_sdk_sampler_reads_the_models_context_window_once(sampler):
 
 
 @pytest.mark.unit
+def test_the_sdk_client_reads_the_models_context_window_from_its_service(client):
+    assert client.context_window() == 40960
+    client._model = "Qwen/Qwen3-30B"
+    assert client.context_window() is None, "a model that the service states no window for has none"
+
+
+@pytest.mark.unit
 def test_thinking_rides_reasoning_content_and_the_answer_is_the_content():
     thinking = chat(TextSampler([1, 2], [10, 11, 12], window=4096))
     message = thinking["choices"][0]["message"]

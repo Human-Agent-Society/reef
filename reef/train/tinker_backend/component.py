@@ -77,6 +77,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     samples, and reports in the job's metrics each task's rewards of the
     rollouts that ran (``rollout_rewards``, by task name).
 
+    A sample that cannot render, or whose tokens after the first are more than
+    the model's context window (``TinkerClient.context_window``), does not
+    train; the job metric ``unrenderable_samples`` counts these samples.
+
     With a ``score_centering``, a policy-gradient job trains as score-centered
     ``cispo`` (``prepare_tinker_job``), and a task job's rollouts record the
     sampler's top-k at each sampled token, so they sample at temperature 1
@@ -340,14 +344,23 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             data = JobData(data.data_id, rollouts.samples)
         # A trajectory that serving recorded carries no tokens: the component renders it with the base model's chat
         # template, and the client computes its log probabilities with the weights of the job's start.
+        left_out = 0
         if needs_rendering(data):
-            data, left_out = rendered_job_data(
+            data, unrenderable = rendered_job_data(
                 data, self._client.chat_template(self._config.chat_template_kwargs or {})
             )
-            if left_out:
-                rollout_metrics["unrenderable_samples"] = len(left_out)
-                if not data.samples:
-                    return rollout_metrics
+            left_out += len(unrenderable)
+        # Tinker refuses a whole optimizer step for one row whose targets, every token but the first, are longer than
+        # the model's context window, so such a sample is left out as one that cannot render.
+        window = self._client.context_window()
+        if window is not None:
+            fitting = tuple(sample for sample in trajectories(data) if len(sample.training["tokens"]) - 1 <= window)
+            left_out += len(data.samples) - len(fitting)
+            data = JobData(data.data_id, fitting, request=data.request)
+        if left_out:
+            rollout_metrics["unrenderable_samples"] = left_out
+            if not data.samples:
+                return rollout_metrics
         prepared = prepare_tinker_job(
             data,
             parameters.objective,
@@ -356,7 +369,6 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
             score_centering=self.score_centering,
-            max_sequence_tokens=self._sampler.context_window() if self._sampler is not None else None,
         )
         if prepared.loss is None:
             # The objective skipped the job's data: the job trains nothing and saves no checkpoint.
