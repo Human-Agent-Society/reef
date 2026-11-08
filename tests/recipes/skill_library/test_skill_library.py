@@ -378,6 +378,12 @@ def test_a_reply_after_reasoning_gives_single_line_fields_and_a_cut_description(
     assert fields["name"] == "Sum the rows" and len(fields["description"]) == MAX_DESCRIPTION_CHARS - 1
 
 
+def test_a_closing_think_tag_inside_the_answer_stays_part_of_the_skill() -> None:
+    # Found by test_induced_round_trips_a_well_formed_reply: the reply was cut at the last tag, inside the JSON.
+    fields, _ = induced("</think>" + proposed("Alpha", check="Look for </think> in the answer."))
+    assert fields is not None and fields["check"] == "Look for </think> in the answer."
+
+
 def test_a_replay_runs_the_evaluation_repeats_and_compares_mean_scores(tmp_path: Path) -> None:
     _, result, services = run_step(
         tmp_path,

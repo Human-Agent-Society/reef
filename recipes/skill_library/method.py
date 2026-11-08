@@ -676,9 +676,11 @@ def bullet(line: str) -> str:
 
 
 def json_object(reply: str) -> dict[str, Any]:
-    """The JSON object in a model reply, from the first ``{`` to the last ``}`` after any ``</think>`` reasoning;
-    ``ValueError`` when the reply holds no JSON object."""
-    answer = reply.rpartition("</think>")[2]
+    """The JSON object in a model reply, from the first ``{`` to the last ``}`` after the reasoning, which ends at the
+    reply's first ``</think>``; ``ValueError`` when the reply holds no JSON object."""
+    # Reasoning comes first and ends at its first closing tag; a later "</think>" is text inside the answer.
+    _, tag, after = reply.partition("</think>")
+    answer = after if tag else reply
     start = answer.find("{")
     if start < 0:
         raise ValueError("it holds no JSON object")
