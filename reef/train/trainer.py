@@ -20,7 +20,6 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import CommitPending, TrainingStartRefused
-from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -399,15 +398,6 @@ class Trainer:
                 if state.job is not None:
                     return True
             return self._pipeline.background_jobs_running()
-
-    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
-        """The training sample of an uploaded trajectory (``TrainingPipeline.uploaded_sample``), under the lock.
-
-        Admission calls it from a request thread; the lock keeps the pipeline's stages, such as a tokenizer,
-        to one thread at a time.
-        """
-        with self._lock:
-            return self._pipeline.uploaded_sample(trajectory)
 
     @property
     def state(self) -> Mapping[str, Any]:

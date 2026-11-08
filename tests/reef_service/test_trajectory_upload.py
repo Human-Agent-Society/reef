@@ -169,18 +169,15 @@ def test_the_record_import_does_not_take_a_trajectory(tmp_path, route):
         dispatcher.close()
 
 
-def test_a_trajectory_that_cannot_train_is_refused_and_jobs_get_the_rendered_samples(tmp_path):
+def test_a_trajectory_that_cannot_train_is_skipped_and_jobs_get_the_rendered_samples(tmp_path):
     recipe = UploadRecipe(task_stage=RenderingSamples)
     dispatcher = dispatcher_for(tmp_path, recipe)
 
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             await create_scenario(client)
-            response = await upload_trajectories(client, AUTH, "good", "bad")
-            assert response.status == 400
-            assert "trajectory 'bad' cannot train: it has no agent step" in await response.text()
-            assert dispatcher.data_store.query("s", kind="trajectory") == (), "nothing of it is stored"
-            response = await upload_trajectories(client, AUTH, "t1", "t2")
+            # The write does not render the trajectories: the pipeline skips "bad" when it reads it.
+            response = await upload_trajectories(client, AUTH, "t1", "bad", "t2")
             assert response.status == 201, await response.text()
             await wait_for_batches(recipe, 1)
 
