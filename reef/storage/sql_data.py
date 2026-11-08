@@ -691,13 +691,14 @@ class SQLDataStore(DataStore):
         found = self.read_many(owner, [item_id])
         return found[0] if found else None
 
-    def read_many(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]:
+    def read_many(self, owner: str, item_ids: Sequence[str], *, content: bool = True) -> tuple[StoredItem, ...]:
         check_owner(owner)
         unique_ids = list(dict.fromkeys(item_ids))
         with self.transaction(read_only=True) as connection:
             # One query for the rows, and one segment read for the content of all of them.
             rows = self.rows(connection, owner, unique_ids)
-            return self.stored_items(connection, owner, [rows[item_id] for item_id in unique_ids if item_id in rows])
+            found = [rows[item_id] for item_id in unique_ids if item_id in rows]
+            return self.stored_items(connection, owner, found, content=content)
 
     def query(
         self,

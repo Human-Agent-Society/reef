@@ -21,7 +21,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from harbor.models.task.task import Task as HarborTaskLoader
 
@@ -105,20 +105,18 @@ def item_json(item: StoredItem, *, content: bool) -> dict[str, Any]:
 class Use:
     """One item that one scenario is to use in a split other than before.
 
-    Values: ``item_id`` is the item's ID. ``trajectory`` is the item's content as a ``TrajectorySample`` for a
-    trajectory, else None. ``train_task`` is True exactly for a task in the ``train`` split.
+    Values: ``trajectory`` is True exactly for a trajectory item. ``train_task`` is True exactly for a task item in
+    the ``train`` split.
 
     Purpose: a write collects the new uses of each scenario, and ``check_uses`` checks them before the write.
     """
 
-    item_id: str
-    trajectory: TrajectorySample | None
+    trajectory: bool
     train_task: bool
 
 
-def new_use(item_id: str, kind: str, content: Mapping[str, Any] | None, split: str) -> Use:
-    trajectory = TrajectorySample(content) if kind == "trajectory" and content is not None else None
-    return Use(item_id, trajectory, kind == "task" and split == "train")
+def new_use(kind: str, split: str) -> Use:
+    return Use(kind == "trajectory", kind == "task" and split == "train")
 
 
 def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait: bool = True) -> bool:
@@ -151,8 +149,9 @@ def check_uses(data: DataAccess, owner: str, uses: Mapping[str, list[Use]]) -> N
             continue
         if scenario_owner != owner:
             raise ValueError(f"scenario {scenario!r} has the owner {scenario_owner!r}, not {owner!r}")
-        trajectories = [(use.item_id, use.trajectory) for use in scenario_uses if use.trajectory is not None]
-        data.scenarios.check_use(scenario, trajectories, any(use.train_task for use in scenario_uses))
+        data.scenarios.check_use(
+            scenario, any(use.trajectory for use in scenario_uses), any(use.train_task for use in scenario_uses)
+        )
 
 
 def create_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
@@ -236,9 +235,8 @@ def store_items(data: DataAccess, owner: str, items: Sequence[NewItem], *, wait:
     uses: dict[str, list[Use]] = {}
     for item in items:
         checked = created_metadata(owner, item.metadata)
-        content = cast(Mapping[str, Any], item.content)
         for scenario, split in checked["scenarios"].items():
-            uses.setdefault(scenario, []).append(new_use(item.item_id, checked["kind"], content, split))
+            uses.setdefault(scenario, []).append(new_use(checked["kind"], split))
     check_uses(data, owner, uses)
     stored = data.require_store().create(owner, list(items))
     synced = sync_touched(data, owner, uses, wait=wait)
@@ -277,10 +275,7 @@ def create_task_directories(
             HarborTaskLoader(directory)
         except (ValueError, OSError) as exc:
             raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
-    new_uses = {
-        scenario: [new_use(directory.name, "task", None, split) for directory in directories]
-        for scenario, split in scenarios.items()
-    }
+    new_uses = {scenario: [new_use("task", split) for _ in directories] for scenario, split in scenarios.items()}
     check_uses(data, owner, new_uses)
     stored = data.require_store().create(
         owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
@@ -378,7 +373,7 @@ def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
         touched.update(item.scenarios, after)
         for scenario, split in after.items():
             if item.scenarios.get(scenario) != split:
-                uses.setdefault(scenario, []).append(new_use(item.item_id, item.kind, item.content, split))
+                uses.setdefault(scenario, []).append(new_use(item.kind, split))
     check_uses(data, owner, uses)
     updated = store.update(owner, ids, patch)
     synced = sync_touched(data, owner, touched)
@@ -405,14 +400,14 @@ def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
 
 
 def touched_items(store: DataStore, owner: str, ids: Sequence[object]) -> list[StoredItem]:
-    """The stored items of ``ids``, each once, in the order given, from one read; ``ValueError`` for a bad ID,
-    ``ItemNotFound`` if unknown."""
+    """The stored items of ``ids``, without content, each once, in the order given, from one read; ``ValueError``
+    for a bad ID, ``ItemNotFound`` if unknown."""
     item_ids: list[str] = []
     for item_id in dict.fromkeys(ids):
         if not isinstance(item_id, str) or not item_id:
             raise ValueError("an item ID is a non-empty string")
         item_ids.append(item_id)
-    found = {item.item_id: item for item in store.read_many(owner, item_ids)}
+    found = {item.item_id: item for item in store.read_many(owner, item_ids, content=False)}
     missing = [item_id for item_id in item_ids if item_id not in found]
     if missing:
         raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")

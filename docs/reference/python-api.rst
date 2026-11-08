@@ -1171,7 +1171,7 @@ sample2job=...)``):
   default, ``NoSamples``, makes no sample, so nothing trains.
   ``uploaded_sample(trajectory) -> TrajectorySample`` turns an uploaded ATIF
   trajectory into its training sample. It must be pure, and it raises
-  ``ValueError`` to refuse the upload (see `Uploaded trajectories
+  ``ValueError`` to skip the trajectory (see `Uploaded trajectories
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
 - ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
   Its ``make_job_data(samples, data_id)`` shapes the samples of the next job,
