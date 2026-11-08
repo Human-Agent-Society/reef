@@ -273,10 +273,10 @@ class Record2Sample(ABC, Plugin):
 
         The default fits a backend that reads ATIF trajectories as they are. A stage whose backend trains
         token-level data, and whose sample-to-job stage accepts uploaded trajectories, overrides it to render the
-        trajectory as its backend trains it, such as ``SFTSamples``. The pipeline calls it at upload, from a request
-        thread, to refuse a trajectory that cannot train, and again when it reads the upload. It must be pure: the
-        same trajectory gives the same sample, and the stage's state does not change. A trajectory that cannot
-        become a sample raises ``ValueError`` with the reason.
+        trajectory as its backend trains it, such as ``SFTSamples``. The pipeline calls it when it reads the upload,
+        and skips a trajectory that it refuses. It must be pure: the same trajectory gives the same sample, and the
+        stage's state does not change. A trajectory that cannot become a sample raises ``ValueError`` with the
+        reason.
         """
         return trajectory
 

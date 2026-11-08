@@ -608,13 +608,15 @@ record items only.
 Before Reef stores the items, it checks each scenario that they name. The
 scenario must have the owner, and its recipe must train on the items:
 
-- A trajectory needs a recipe that accepts uploaded trajectories, and the
-  recipe must turn it into a training sample. The SFT recipe trains every
-  agent turn, except the steps marked ``is_copied_context: true`` (`SFT
-  <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__). This
-  check is structural; the training component renders the trajectory with
-  the model's chat template when a job trains it, and leaves out one that
-  cannot render.
+- A trajectory needs a recipe that accepts uploaded trajectories. Reef does
+  not read the trajectories for this check. The recipe turns each one into a
+  training sample when it reads it, and skips one that cannot train with a
+  warning. The SFT recipe trains every agent turn, except the steps marked
+  ``is_copied_context: true`` (`SFT
+  <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__). It skips
+  a trajectory without such a turn. The training component renders the
+  trajectory with the model's chat template when a job trains it, and leaves
+  out one that cannot render.
 - A task in the ``train`` split needs a recipe that trains imported tasks
   (``Sample2Job.accepts_imported_tasks``), such as ``sft``, the
   generated-task recipe, or harness evolution that runs offline (`Offline runs
