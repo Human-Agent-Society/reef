@@ -53,7 +53,7 @@ from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusErr
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
-from reef.inference.interfaces import EngineClients, InferenceArtifact, InferenceHandler
+from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler
 from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.service.streaming import (
     chat_completion_chunk_identity,
@@ -424,7 +424,8 @@ class InferenceReplica:
         return item.agent_record_id
 
     def startup_status(self, scenario: str, model: str = ACTIVE) -> dict[str, str | None]:
-        """Read the current serving work's artifact, state, and safe error without changing it.
+        """Read the current serving work's artifact, state, and safe error without changing it, and for a ready
+        artifact its engine's state (``engine_state``, RFC #1269).
 
         The model is ``active``, an active artifact alias, or an artifact served beside it.
         Unknown models answer 404; an unreadable or invalid work item answers 503.
@@ -457,7 +458,17 @@ class InferenceReplica:
             "artifact_id": artifact_id,
             "state": state,
             "error": "The inference engine did not start. Check the service logs." if state == "failed" else None,
+            "engine": self.engine_state(scenario, model) if state == "ready" else None,
         }
+
+    def engine_state(self, scenario: str, model: str) -> EngineState | None:
+        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``); None without a route or a
+        handler for it."""
+        try:
+            served = self.cache.read(scenario, model)
+            return self.engines.handler(served).engine_state(served)
+        except (NotServed, StaleServedModels, LookupError):
+            return None
 
     async def resolve(
         self,
