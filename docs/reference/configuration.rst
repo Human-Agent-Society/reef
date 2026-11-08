@@ -2090,30 +2090,17 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-The saved train tasks become task items that the scenario uses,
-``<scenario>.generated-tasks.<task name>``, and train like every other
-sample. ``GeneratedTaskJobData`` makes one task job of the next job's tasks,
-whatever Tinker's batch size (``training.options.batch-size``) is:
-
-.. container:: config
-
-   ``pipeline.sample2job.config.job_samples`` : 1
-       the fewest saved tasks of one task job
-
-   ``pipeline.sample2job.config.buffer_size`` : 4
-       the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
-
 With ``pipeline.record2sample.config.pool_capacity`` above 0, the train tasks
 form a training pool. When a task's job ends, the stage saves a new task item
-for the task's next use, ``<scenario>.generated-tasks.<task name>@<k>`` for use
-``k``, after the items that wait. So the tasks train in turn, and each item
-trains once. The trainer can start the next job before the stage reads the end
-of the job before it; the tasks of that next job wait for the end of their own
-job. A new round
-starts only while fewer tasks than ``pool_capacity`` are active, so the pool
-can hold more tasks than the capacity by the train tasks of one generation.
-The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks`` must
-stay 1. Imported train tasks still train once.
+for the task's next use, ``<scenario>.generated-tasks.<task name>@<k>`` for
+use ``k``, after the items that wait. So the tasks train in turn, and each
+item trains once. The trainer can start the next job before the stage reads
+the end of the job before it; the tasks of that next job wait for the end of
+their own job. A new round starts only while fewer tasks than
+``pool_capacity`` are active, so the pool can hold more tasks than the
+capacity by the train tasks of one generation. The ``review_*`` keys need
+``pool_capacity`` above 0, and ``refill_tasks`` must stay 1. Imported train
+tasks still train once.
 
 Two cases break the turn order:
 
@@ -2155,6 +2142,19 @@ that a stop or a failed write cut short runs again at the next job end, and
 it keeps the tasks that it retired already. When a deployment sets
 ``pool_capacity`` on a scenario whose train tasks trained once, those tasks
 join the pool at the start.
+
+The saved train tasks become task items that the scenario uses,
+``<scenario>.generated-tasks.<task name>``, and train like every other
+sample. ``GeneratedTaskJobData`` makes one task job of the next job's tasks,
+whatever Tinker's batch size (``training.options.batch-size``) is:
+
+.. container:: config
+
+   ``pipeline.sample2job.config.job_samples`` : 1
+       the fewest saved tasks of one task job
+
+   ``pipeline.sample2job.config.buffer_size`` : 4
+       the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
 job's start weights, as the ``rollout`` job parameter says. The Slime component runs
