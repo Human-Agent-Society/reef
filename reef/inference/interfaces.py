@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
@@ -196,6 +196,11 @@ class InferenceArtifact:
         return cls(artifact.artifact_id, artifact.local_path, not artifact.ref.local)
 
 
+#: The state of the engine behind a route (RFC #1269): ``warm`` answers now, ``starting`` runs but does not answer
+#: yet, ``idle`` runs no engine, and a request starts one.
+EngineState = Literal["warm", "starting", "idle"]
+
+
 class InferenceHandler(ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
@@ -244,6 +249,14 @@ class InferenceHandler(ABC):
         which the runtime applies to the engine. The inference service sends the body and records it.
         ``ValueError`` for a body that the handler refuses. The default is ``payload`` unchanged."""
         return dict(payload)
+
+    def engine_state(self, served: ServedArtifact) -> EngineState | None:
+        """The state of the engine that answers at ``served`` (``EngineState``), or None when the handler cannot tell.
+
+        It must not start an engine. It may block: the inference service calls it in a thread, for the status of a
+        ready artifact. The default is None.
+        """
+        return None
 
     async def inference_stream(
         self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]

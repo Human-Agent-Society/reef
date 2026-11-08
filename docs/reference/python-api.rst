@@ -127,6 +127,11 @@ methods. Each has a default for a handler or runtime without serving fields:
   changed. After it, the worker reads the scenario's route again with
   ``served_artifact``, so the runtime may move the scenario to another engine.
 
+An ``InferenceHandler`` whose engines scale to zero can report the state of
+the engine behind a route with ``engine_state(served)``: ``"warm"``,
+``"starting"``, ``"idle"`` or None (RFC #1269). The startup status of a ready
+artifact returns it as ``engine``. It must not start an engine.
+
 A runtime that serves several models declares a serving field that chooses the
 model of each artifact (`Serving settings <http-api.rst#serving-settings>`__).
 It reads an artifact's training starts with
