@@ -33,6 +33,7 @@ from reef.core.evaluation import (
     EvaluationCall,
     EvaluationCallSummary,
     PolicyModel,
+    RolloutScore,
 )
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
@@ -376,6 +377,70 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             # The evaluation keeps no record and changes nothing the scenario serves.
             records = await (await client.get("/reef/scenarios/s/records", headers=AUTH)).json()
             assert records["records"] == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    def scored(item: WorkItem, value: float) -> None:
+        queue.start(EVALUATIONS_QUEUE, item.id, "w")
+        queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
+
+    async def queued_rollouts(count: int) -> list[WorkItem]:
+        for _ in range(200):
+            items = [item for item in queue.items(EVALUATIONS_QUEUE, scenario="s") if not item.final]
+            if len(items) == count:
+                return sorted(items, key=lambda item: item.id)
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"the queue did not hold {count} rollouts that are not final")
+
+    async def run() -> None:
+        # No worker runs: the test takes and ends each rollout itself.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 2,
+                "max_concurrent_rollouts": 2,
+            }
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            accepted = await response.json()
+            assert accepted["request"]["task_names"] == ["add", "sort"]
+            assert accepted["request"]["max_concurrent_rollouts"] == 2
+            rollouts_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/rollouts"
+
+            first, second = await queued_rollouts(2)
+            listed = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
+            assert [(row["task"], row["repeat"], row["state"]) for row in listed] == [
+                ("add", 0, "queued"),
+                ("add", 1, "queued"),
+                ("sort", 0, "waiting"),
+                ("sort", 1, "waiting"),
+            ]
+            assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == first.id
+            scored(first, 1.0)
+            still_queued, third = await queued_rollouts(2)
+            assert still_queued.id == second.id and third.id.endswith(":00001:00000")
+            for item in (second, third):
+                assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == item.id
+                scored(item, 0.0)
+            [last] = await queued_rollouts(1)
+            assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == last.id
+            scored(last, 1.0)
+
+            answer = await finished(client, accepted["evaluation_id"])
+            assert answer["state"] == "finished", answer
+            assert answer["policy_evaluation"]["scores"] == [
+                {"task": "add", "scores": [1.0, 0.0]},
+                {"task": "sort", "scores": [0.0, 1.0]},
+            ]
 
     asyncio.run(run())
 
