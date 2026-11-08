@@ -1,6 +1,6 @@
 # AutoEnvScaling on Tinker: a coding agent rebuilds recorded sessions as Harbor tasks, and the served model trains on them.
 # The built-in generated-task recipe hands the tasks to Tinker, which rolls them out and trains; AutoEnvScaling is the task generator.
-# The harness and training settings are those of examples/tinker-seeds/serve.yaml, which ran on Tinker; this file has
+# The harness and training settings are those of examples/tmax_seeds/serve-tinker.yaml, which ran on Tinker; this file has
 # not run with them.
 # Supply TINKER_API_KEY, E2B_API_KEY and REEF_AUTOENVSCALING_DESIGNER_TOKEN through the shell, never here.
 # REEF_AUTOENVSCALING_STATE_DIR is where this deployment keeps its state; REEF_AUTOENVSCALING_SOURCES_PATH lists the

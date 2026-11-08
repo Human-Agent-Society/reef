@@ -720,20 +720,22 @@ def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
 
 
-def test_the_seed_pool_example_builds_claude_code_on_the_seeds_with_a_refusing_calibration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(("name", "concurrency"), [("serve-tinker.yaml", 4), ("serve-slime.yaml", 6)])
+def test_the_seed_pool_examples_build_claude_code_on_the_seeds_with_a_refusing_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, concurrency: int
 ) -> None:
     write_seeds(tmp_path / "seeds", 2)
-    for name, value in {
+    for variable, value in {
         "REEF_TOKEN": "t",
         "REEF_AUTOENVSCALING_STATE_DIR": str(tmp_path),
         "REEF_AUTOENVSCALING_SEEDS_PATH": str(tmp_path / "seeds"),
+        "REEF_AUTOENVSCALING_MODEL_PATH": str(tmp_path / "model"),
         "CLAUDE_CODE_OAUTH_TOKEN": TOKEN,
         "E2B_API_KEY": "e2b-test",
         "TINKER_API_KEY": "tinker-test",
     }.items():
-        monkeypatch.setenv(name, value)
-    example = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples/tinker-seeds/serve.yaml"
+        monkeypatch.setenv(variable, value)
+    example = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples/tmax_seeds" / name
     resolved, _ = resolve_deployment_config(yaml.safe_load(example.read_text()), None, example)
     settings = service_config_from_mapping(resolved)
     assert settings.recipe == "reef.recipe.generated_tasks:GeneratedTaskRecipe"
@@ -741,7 +743,7 @@ def test_the_seed_pool_example_builds_claude_code_on_the_seeds_with_a_refusing_c
     # reef serve publishes the generator's endpoint when it starts the services.
     config = {**section["config"], "generator_url": "http://127.0.0.1:8910"}
     generator = AutoEnvScalingGenerator.from_config(config, scenario="autoenvscaling", environ=os.environ)
-    assert isinstance(generator.designer, ClaudeCodeDesigner) and generator.concurrency == 4
+    assert isinstance(generator.designer, ClaudeCodeDesigner) and generator.concurrency == concurrency
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
     [calibration] = [check for check in generator.task_checks if isinstance(check, CalibrationCheck)]
     assert calibration.is_refusing

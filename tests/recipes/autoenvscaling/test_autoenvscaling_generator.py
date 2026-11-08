@@ -76,6 +76,8 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.tinker_backend.objectives import resolve_tinker_objective
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
+TINKER_EXAMPLES = ("recorded_sessions/serve-tinker.yaml", "tmax_seeds/serve-tinker.yaml")
+SLIME_EXAMPLE = "tmax_seeds/serve-slime.yaml"
 
 
 @pytest.fixture(autouse=True)
@@ -867,7 +869,7 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
         "TINKER_API_KEY": "tinker-test",
     }.items():
         monkeypatch.setenv(name, value)
-    example = EXAMPLES / "tinker/serve.yaml"
+    example = EXAMPLES / "recorded_sessions/serve-tinker.yaml"
     resolved, _ = resolve_deployment_config(yaml.safe_load(example.read_text()), None, example)
     settings = service_config_from_mapping(resolved)
     assert settings.recipe == "reef.recipe.generated_tasks:GeneratedTaskRecipe"
@@ -881,9 +883,9 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
     assert generator.designer.upstream.api_key == "designer-token" and generator.designer.upstream.model == "gpt-6-sol"
 
 
-@pytest.mark.parametrize("name", ["tinker", "tinker-seeds"])
+@pytest.mark.parametrize("name", TINKER_EXAMPLES)
 def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(name: str) -> None:
-    config = yaml.safe_load((EXAMPLES / name / "serve.yaml").read_text())
+    config = yaml.safe_load((EXAMPLES / name).read_text())
     rollout_agent = config["recipe"]["config"]["job_parameters"]["rollout"]["agent"]
     # The calibration measures a task with the agent that trains on it.
     assert config["generator"]["agent"] == rollout_agent
@@ -899,11 +901,43 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
     assert kwargs["llm_kwargs"]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
-@pytest.mark.parametrize("name", ["tinker", "tinker-seeds"])
+@pytest.mark.parametrize("name", (*TINKER_EXAMPLES, SLIME_EXAMPLE))
 def test_an_examples_generation_deadline_covers_the_designer_and_the_calibration(name: str) -> None:
-    stage = yaml.safe_load((EXAMPLES / name / "serve.yaml").read_text())["pipeline"]["record2sample"]["config"]
+    stage = yaml.safe_load((EXAMPLES / name).read_text())["pipeline"]["record2sample"]["config"]
     # A generation took about 93 minutes in the seed-pool run; the default ends it during the calibration.
     assert stage["generation_deadline_seconds"] > DEFAULT_GENERATION_DEADLINE_SECONDS
+
+
+def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimizer_step_per_job() -> None:
+    slime = yaml.safe_load((EXAMPLES / SLIME_EXAMPLE).read_text())
+    tinker = yaml.safe_load((EXAMPLES / "tmax_seeds/serve-tinker.yaml").read_text())
+    parameters = slime["recipe"]["config"]["job_parameters"]
+    # The calibration measures a task with the agent that trains on it, and both backends train the same agent.
+    assert slime["generator"]["agent"] == parameters["harbor"]["agent"]
+    assert parameters["harbor"]["agent"] == tinker["recipe"]["config"]["job_parameters"]["rollout"]["agent"]
+    # The same seeds, Designer, band and calibration as on Tinker.
+    designer_keys = ("designer", "designer_harness", "claude_model", "band_low", "band_high", "adaptive")
+    designer_keys += ("variant_share", "review", "calibration", "seed_tasks_path")
+    generators = [config["pipeline"]["record2sample"]["config"]["generator"] for config in (slime, tinker)]
+    assert generators[0]["module"] == generators[1]["module"]
+    assert {key: generators[0]["config"][key] for key in designer_keys} == {
+        key: generators[1]["config"][key] for key in designer_keys
+    }
+    # Slime's own loop trains each rollout's reward minus its task's mean reward, as the Tinker objective does.
+    options = slime["training"]["options"]
+    assert parameters["objective"] == "slime_dataset"
+    assert options["advantage-estimator"] == "grpo" and options["disable-grpo-std-normalization"] is True
+    assert int(options["n-samples-per-prompt"]) >= 2
+    # One job of buffer_size tasks is one Slime rollout and one optimizer step.
+    tasks = slime["pipeline"]["sample2job"]["config"]["buffer_size"]
+    assert int(options["rollout-batch-size"]) == tasks
+    assert int(options["global-batch-size"]) == tasks * int(options["n-samples-per-prompt"])
+    # The actor, the rollout engines and Reef's serving engine share one node.
+    used = int(options["actor-num-gpus-per-node"]) + int(options["rollout-num-gpus"]) + slime["inference"]["num-gpus"]
+    assert used == int(options["num-gpus-per-node"])
+    # The engines serve the window that the trainer's samples fit in.
+    window = slime["inference"]["options"]["context-length"]
+    assert int(options["sglang-context-length"]) == int(options["rollout-max-context-len"]) == window
 
 
 def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_path: Path) -> None:

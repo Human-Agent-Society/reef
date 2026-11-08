@@ -31,6 +31,10 @@ def deployment_layout(config):
             "REEF_TOKEN": os.environ.get("REEF_TOKEN") or "test-token",
             "GUIDANCE_MODEL_PATH": os.environ.get("GUIDANCE_MODEL_PATH") or "/tmp/reef-test-model",
             "GUIDANCE_STATE_DIR": os.environ.get("GUIDANCE_STATE_DIR") or "/tmp/reef-test-guidance",
+            # The paths that the AutoEnvScaling Slime example reads from the shell.
+            "REEF_AUTOENVSCALING_MODEL_PATH": os.environ.get("REEF_AUTOENVSCALING_MODEL_PATH") or "/tmp/reef-model",
+            "REEF_AUTOENVSCALING_STATE_DIR": os.environ.get("REEF_AUTOENVSCALING_STATE_DIR") or "/tmp/reef-aes",
+            "REEF_AUTOENVSCALING_SEEDS_PATH": os.environ.get("REEF_AUTOENVSCALING_SEEDS_PATH") or "/tmp/reef-seeds",
         },
     ):
         return resolve_deployment_config(config, None, Path(__file__).resolve().parents[2] / "<example>")[0]
