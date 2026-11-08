@@ -2824,8 +2824,12 @@ Status codes
 |        | or an engine that answered under another model name or      |
 |        | aborted the request on both attempts                        |
 +--------+-------------------------------------------------------------+
-| 502    | the engine failed or could not be reached; the body carries |
-|        | the engine's status and message                             |
+| 4xx    | an engine's own 4xx, with its message, such as for a prompt |
+|        | longer than the model's context window                      |
++--------+-------------------------------------------------------------+
+| 502    | the engine failed with a 5xx, answered with no JSON object, |
+|        | or could not be reached; the body carries the engine's      |
+|        | status and message                                          |
 +--------+-------------------------------------------------------------+
 | 503    | the artifact store is unreachable, no loaded scenario is    |
 |        | idle at ``reef.max_loaded_scenarios`` (with                 |

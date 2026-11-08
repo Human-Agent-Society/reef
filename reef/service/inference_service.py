@@ -51,7 +51,7 @@ import aiohttp
 from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
-from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusError, inference_aborted
+from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
@@ -294,12 +294,6 @@ async def read_object(request: web.Request) -> dict[str, Any]:
     return payload
 
 
-def is_refusal(exc: UpstreamStatusError) -> bool:
-    """Whether the engine refused the request itself with a 4xx, such as a prompt past the model's context. The
-    service's error translation answers it with the engine's status and message, as for any upstream."""
-    return 400 <= exc.status < 500
-
-
 def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
     """``response`` as the client gets it and the record keeps it: without a ``training`` block, which an engine
     handler may return. Serving returns no training tensors; a training component computes the ones it needs. The
@@ -539,8 +533,9 @@ class InferenceReplica:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
     async def forward(self, served: ServedArtifact, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """The answer of the engine of ``served`` to ``payload`` under the row's model name: 502 for an error status,
-        an unreachable engine or an answer that is no JSON object, 504 when the engine does not answer in time."""
+        """The answer of the engine of ``served`` to ``payload`` under the row's model name. An engine's 4xx keeps its
+        status and message; a 5xx, an unreachable engine or an answer that is no JSON object is 502, and an engine
+        that does not answer in time 504."""
         handler = self.handler(served)
         try:
             return await asyncio.wait_for(
@@ -549,10 +544,6 @@ class InferenceReplica:
                 ),
                 timeout=self.timeout_seconds,
             )
-        except UpstreamStatusError as exc:
-            if is_refusal(exc):
-                raise
-            raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except (aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
@@ -628,10 +619,6 @@ class InferenceReplica:
             upstream = await handler.inference_stream(
                 InferenceArtifact(served.artifact_id), path, handler.address_model(payload, served.model_name)
             )
-        except UpstreamStatusError as exc:
-            if is_refusal(exc):
-                raise
-            raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except aiohttp.ClientError as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
