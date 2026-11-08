@@ -201,7 +201,7 @@ class TopkSampler(TinkerSampler):
     def render(self, messages, *, template_kwargs):
         return [1, 2, 3]
 
-    def decode(self, tokens):
+    def decode(self, tokens, *, skip_special_tokens=True):
         return "done"
 
     def sample(self, sampler_path, prompt, params, *, topk_logprobs):

@@ -62,6 +62,12 @@ per request, ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
 ``chat_template_kwargs.enable_thinking``. Unknown options, tool calls,
 multimodal messages, and Anthropic routes fail explicitly.
 
+A request without ``max_tokens`` or ``max_completion_tokens`` may reply up to
+the rest of the model's context window, or 1024 tokens when the service states
+no window for the model. A prompt that fills the window gets a ``400`` whose
+message starts with ``context_length_exceeded``. A thinking model's reasoning
+comes in the message's ``reasoning_content``, and its answer in ``content``.
+
 Streaming is buffered: the complete sampled response is emitted as valid
 OpenAI SSE events. It does not provide token-by-token latency. Prompt IDs come
 from the tokenizer's chat template.

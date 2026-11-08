@@ -23,6 +23,14 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from reef.core.reasoning import (
+    PROMPT_TAIL_TOKEN_COUNT,
+    THINK_END,
+    THINK_START,
+    TOOL_CALL_START,
+    is_reasoning_pre_opened,
+    split_reasoning,
+)
 from reef.core.values import JsonValue
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
@@ -32,15 +40,6 @@ from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_da
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
 ANTHROPIC_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
-
-# ``<think>`` and the newline after it can be several tokens; the end of a
-# rendered prompt this long is enough to read an open tag.
-PROMPT_TAIL_TOKEN_COUNT = 8
-# The reasoning tags and the tool-call start that SGLang's Qwen3 reasoning
-# parser reads; a tool call that starts before ``</think>`` ends the reasoning.
-THINK_START = "<think>"
-THINK_END = "</think>"
-TOOL_CALL_START = "<tool_call>"
 
 
 @dataclass(frozen=True)
@@ -143,10 +142,11 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
 class ReasoningStreamSplitter:
     """Split sampled thinking tags without waiting for the full completion.
 
-    Follows SGLang's Qwen3 reasoning parser: the first ``<think>`` starts
-    reasoning and is dropped, the first ``</think>`` or ``<tool_call>`` ends
-    it, and a stream that ends inside it is reasoning. A slice that may be
-    the start of one of these tags is held until the next delta.
+    Follows SGLang's Qwen3 reasoning parser, as ``split_reasoning`` does for
+    a whole reply: the first ``<think>`` starts reasoning and is dropped, the
+    first ``</think>`` or ``<tool_call>`` ends it, and a stream that ends
+    inside it is reasoning. A slice that may be the start of one of these
+    tags is held until the next delta.
     """
 
     def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:
@@ -895,7 +895,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         if self.force_reasoning is not None:
             return self.force_reasoning
         tail = self._require_tokenizer().decode(prompt_ids[-PROMPT_TAIL_TOKEN_COUNT:], skip_special_tokens=False)
-        return tail.rstrip().endswith("<think>")
+        return is_reasoning_pre_opened(tail)
 
     @classmethod
     def _assistant_message(
@@ -913,29 +913,14 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         # (agents, judges, user simulators) sees chain-of-thought as the
         # reply. Training tensors are captured from the raw token stream and
         # are unaffected by this presentation split. The split follows
-        # SGLang's Qwen3 reasoning parser. SGLang forces reasoning whenever
-        # enable_thinking is not false, so a closing tag also starts the
-        # split: it only appears when thinking is on.
-        reasoning: str | None = None
-        if cls.SPLIT_REASONING and (force_reasoning or THINK_START in text or THINK_END in text):
-            body = text
-            while body.startswith(THINK_START):
-                body = body[len(THINK_START) :]
-            head, separator, tail = body.partition(THINK_END)
-            tool_start = body.find(TOOL_CALL_START)
-            if separator:
-                reasoning, text = head, tail.lstrip("\n")
-            elif tool_start != -1:
-                # A tool call that starts before </think> ends the reasoning.
-                reasoning, text = body[:tool_start], body[tool_start:]
-            else:
-                # No closing tag: the generation hit its token cap
-                # mid-thought. The whole sample is reasoning, so fail closed
-                # — handing it back as content is exactly the
-                # chain-of-thought-as-reply this split exists to prevent, and
-                # a judge scoring it scores the wrong text.
-                reasoning, text = body, ""
-            reasoning = reasoning.strip()
+        # SGLang's Qwen3 reasoning parser (``split_reasoning``). SGLang forces
+        # reasoning whenever enable_thinking is not false, so a closing tag
+        # also starts the split: it only appears when thinking is on. A reply
+        # without a closing tag hit its token cap mid-thought, so all of it is
+        # reasoning: a judge that scored it as content would score the wrong text.
+        reasoning = ""
+        if cls.SPLIT_REASONING:
+            reasoning, text = split_reasoning(text, pre_opened=force_reasoning)
         message: dict[str, Any] = {"role": "assistant", "content": text}
         if reasoning:
             message["reasoning_content"] = reasoning

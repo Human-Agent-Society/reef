@@ -5,6 +5,11 @@ The serving runtime ``reef.inference.tinker`` and the training component's rollo
 OpenAI text chat request into messages and sampling parameters, ``TinkerSampler`` renders and samples,
 and ``chat_completion`` shapes the answer with the training capture that Reef records: the token IDs,
 the loss mask, the sampled log probabilities and, when asked, the sampler's top-k at each sampled token.
+
+A request that names no reply limit may reply up to the rest of the model's context window, as on an
+OpenAI-compatible server, or ``DEFAULT_MAX_TOKENS`` when the sampler does not know the window. ``sample_chat``
+splits each reply into its reasoning and its answer as the token-native chat handlers do
+(``reef.core.reasoning``), so the answer's ``reasoning_content`` carries the reasoning of a thinking model.
 """
 
 from __future__ import annotations
@@ -18,16 +23,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.errors import UpstreamStatusError
-from reef.tinker.service import close_service, tinker_sdk
+from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened, split_reasoning
+from reef.tinker.service import close_service, served_context_windows, tinker_sdk
 
-#: The reply length of a request that names none, when the sampler does not know the model's context length.
+#: The reply length of a request that names none, when the sampler does not know the model's context window.
 DEFAULT_MAX_TOKENS = 1024
-#: The thinking tags of Qwen3-style templates, and the tool-call start that also ends reasoning.
-THINK_START = "<think>"
-THINK_END = "</think>"
-TOOL_CALL_START = "<tool_call>"
-#: Prompt tokens that hold the end of the generation prompt, enough to see a pre-opened ``<think>``.
-PROMPT_TAIL_TOKEN_COUNT = 8
+#: The OpenAI code and wording of a context overflow, which agents match to compact their history.
+CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded: the prompt exceeds this model's maximum context length."
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,7 @@ class TinkerSampler(ABC):
     def render(self, messages: list[dict[str, str]], *, template_kwargs: Mapping[str, Any]) -> list[int]: ...
 
     @abstractmethod
-    def decode(self, tokens: Sequence[int]) -> str: ...
+    def decode(self, tokens: Sequence[int], *, skip_special_tokens: bool = True) -> str: ...
 
     @abstractmethod
     def sample(
@@ -91,7 +93,8 @@ class TinkerSampler(ABC):
     def close(self) -> None: ...
 
     def context_window(self) -> int | None:
-        """The model's context length in tokens, prompt and reply together, or None when the sampler does not know it."""
+        """The model's context window in tokens, prompt and reply together, or None when the sampler does not know
+        it."""
         return None
 
 
@@ -112,8 +115,8 @@ class TinkerSDKSampler(TinkerSampler):
     tokenizer: Any | None
     #: The sampling client of each sampler path, made at its first request.
     clients: dict[str, Any]
-    #: The context length of each model that the service serves, read at the first need.
-    context_lengths: dict[str, int]
+    #: The context window of each model that the service serves, read at the first need.
+    context_windows: dict[str, int]
 
     def __init__(
         self,
@@ -135,7 +138,7 @@ class TinkerSDKSampler(TinkerSampler):
         self.base_client = None
         self.tokenizer = None
         self.clients = {}
-        self.context_lengths = {}
+        self.context_windows = {}
 
     def base_sampler(self) -> Any:
         """The base model's sampling client, made at the first call."""
@@ -162,18 +165,13 @@ class TinkerSDKSampler(TinkerSampler):
             )
         )
 
-    def decode(self, tokens: Sequence[int]) -> str:
-        return str(self.base_tokenizer().decode(list(tokens), skip_special_tokens=True))
+    def decode(self, tokens: Sequence[int], *, skip_special_tokens: bool = True) -> str:
+        return str(self.base_tokenizer().decode(list(tokens), skip_special_tokens=skip_special_tokens))
 
     def context_window(self) -> int | None:
-        if not self.context_lengths:
-            capabilities = self._service.get_server_capabilities()
-            self.context_lengths = {
-                model.model_name: int(model.max_context_length)
-                for model in capabilities.supported_models
-                if model.max_context_length
-            }
-        return self.context_lengths.get(self._model)
+        if not self.context_windows:
+            self.context_windows = served_context_windows(self._service)
+        return self.context_windows.get(self._model)
 
     def sampling_client(self, sampler_path: str | None) -> Any:
         """The sampling client of ``sampler_path``, or of the base model for None, made at its first use."""
@@ -212,11 +210,8 @@ class TinkerSDKSampler(TinkerSampler):
                     # Tinker refuses every later call on a client that it poisoned, such as one left idle too long.
                     self.forget_client(sampler_path)
                     continue
-                # An overflow carries OpenAI's code and wording, which agents match to compact their history.
                 if "context window" in message:
-                    message = (
-                        f"context_length_exceeded: the prompt exceeds this model's maximum context length. {message}"
-                    )
+                    message = f"{CONTEXT_LENGTH_EXCEEDED} {message}"
                 raise UpstreamStatusError(message, status=400) from exc
         if len(result.sequences) != 1:
             raise ValueError("Tinker returned an unexpected number of sequences")
@@ -235,25 +230,6 @@ class TinkerSDKSampler(TinkerSampler):
         close_service(self._sdk, self._service, "success", timeout_s=self._timeout_s)
 
 
-def split_reasoning(text: str, *, is_pre_opened: bool) -> tuple[str | None, str]:
-    """Split a whole reply into its reasoning and its answer, as SGLang's Qwen3 reasoning parser does.
-
-    ``is_pre_opened`` says the prompt ended with ``<think>``. The first ``<think>`` starts reasoning and is dropped;
-    the first ``</think>``, or a ``<tool_call>``, ends it, and a reply that ends inside it is all reasoning. A reply
-    with neither an opened nor a pre-opened block has no reasoning: the result is ``(None, text)``.
-    """
-    if not is_pre_opened and THINK_START not in text:
-        return None, text
-    body = text.replace(THINK_START, "", 1)
-    reasoning, separator, answer = body.partition(THINK_END)
-    if separator:
-        return reasoning, answer.lstrip("\n")
-    tool_start = body.find(TOOL_CALL_START)
-    if tool_start != -1:
-        return body[:tool_start], body[tool_start:]
-    return body, ""
-
-
 def chat_completion(
     model: str,
     messages: list[dict[str, str]],
@@ -261,10 +237,10 @@ def chat_completion(
     result: SampleResult,
     content: str,
     runtime_load_id: str,
-    reasoning: str | None = None,
+    reasoning: str = "",
 ) -> dict[str, Any]:
-    """An OpenAI chat completion plus the private training capture Reef records; ``reasoning`` rides the message's
-    ``reasoning_content``, as an OpenAI-compatible server with a reasoning parser returns it."""
+    """An OpenAI chat completion plus the private training capture Reef records; a non-empty ``reasoning`` rides the
+    message's ``reasoning_content``, as an OpenAI-compatible server with a reasoning parser returns it."""
     message = {"role": "assistant", "content": content, **({"reasoning_content": reasoning} if reasoning else {})}
     finish = "length" if result.stop_reason == "length" else "stop"
     return {
@@ -384,8 +360,10 @@ def sample_chat(
     A positive ``topk_logprobs`` records the sampler's top ``topk_logprobs`` log probabilities at each sampled
     token in the capture (``topk_indices``, ``topk_log_probs``). Those must be the log probabilities that the
     trainer reads, of the untruncated distribution at temperature 1, so such a request may set ``temperature``
-    only to 1, ``top_p`` only to 1 and ``top_k`` only to -1. Raise ``UpstreamStatusError`` (400) for a request
-    that Tinker cannot serve or that sets another value.
+    only to 1, ``top_p`` only to 1 and ``top_k`` only to -1. A request that names no reply limit may reply up to
+    the rest of the sampler's context window (``TinkerSampler.context_window``), or ``DEFAULT_MAX_TOKENS`` tokens
+    when the sampler does not know it. Raise ``UpstreamStatusError`` (400) for a request that Tinker cannot serve or
+    that sets another value, and with ``CONTEXT_LENGTH_EXCEEDED`` for such a request whose prompt fills the window.
     """
     messages, params = chat_request(payload)
     if topk_logprobs and (
@@ -400,19 +378,18 @@ def sample_chat(
     if not prompt:
         raise ValueError("Tinker chat template produced an empty prompt")
     if "max_tokens" not in params:
-        # Like an OpenAI-compatible server, a request without a limit may use the rest of the context.
+        # Like an OpenAI-compatible server, a request without a limit may use the rest of the context window.
         window = sampler.context_window()
         if window is None:
             params["max_tokens"] = DEFAULT_MAX_TOKENS
         elif window <= len(prompt):
             raise UpstreamStatusError(
-                f"context_length_exceeded: the prompt exceeds this model's maximum context length. {len(prompt)} prompt "
-                f"tokens > {window}",
+                f"{CONTEXT_LENGTH_EXCEEDED} {len(prompt)} prompt tokens fill the context window of {window}",
                 status=400,
             )
         else:
             params["max_tokens"] = window - len(prompt)
     result = sampler.sample(sampler_path, prompt, params, topk_logprobs=topk_logprobs)
-    is_pre_opened = sampler.decode(prompt[-PROMPT_TAIL_TOKEN_COUNT:]).rstrip().endswith(THINK_START)
-    reasoning, content = split_reasoning(sampler.decode(result.tokens), is_pre_opened=is_pre_opened)
+    pre_opened = is_reasoning_pre_opened(sampler.decode(prompt[-PROMPT_TAIL_TOKEN_COUNT:], skip_special_tokens=False))
+    reasoning, content = split_reasoning(sampler.decode(result.tokens), pre_opened=pre_opened)
     return chat_completion(payload.get("model", model), messages, prompt, result, content, runtime_load_id, reasoning)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from reef.core.errors import UpstreamStatusError
-from reef.tinker.sampling import SampleResult, TinkerSampler, TinkerSDKSampler, sample_chat, split_reasoning
+from reef.tinker.sampling import DEFAULT_MAX_TOKENS, SampleResult, TinkerSampler, TinkerSDKSampler, sample_chat
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
@@ -188,7 +188,7 @@ def sampler(client):
     value.base_client = client.base_client
     value.tokenizer = None
     value.clients = {}
-    value.context_lengths = {}
+    value.context_windows = {}
     return value
 
 
@@ -366,8 +366,9 @@ POISONED = (
 )
 
 
+@pytest.mark.unit
 def test_a_poisoned_sampling_client_is_replaced_and_the_sample_retried_once(client, sampler):
-    # Tinker poisons a client that sat idle too long; a kept client then refused every later request.
+    # Tinker poisons a client that sits idle too long, and refuses every later request on it.
     sampler.base_client.refusal = BadRequestError(POISONED)
     result = sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert result.tokens == (20, 21)
@@ -381,6 +382,7 @@ def test_a_poisoned_sampling_client_is_replaced_and_the_sample_retried_once(clie
     assert sampler.clients["tinker://run/sampler"] is client._service.sampler
 
 
+@pytest.mark.unit
 def test_a_client_poisoned_again_is_the_callers_400_after_one_retry(client, sampler):
     sampler.base_client.refusal = BadRequestError(POISONED)
     client._service.sampler.refusal = BadRequestError(POISONED)
@@ -534,7 +536,7 @@ class TextSampler(TinkerSampler):
     def render(self, messages, *, template_kwargs):
         return list(self.prompt)
 
-    def decode(self, tokens):
+    def decode(self, tokens, *, skip_special_tokens=True):
         return "".join(self.VOCABULARY[token] for token in tokens)
 
     def sample(self, sampler_path, prompt, params, *, topk_logprobs):
@@ -553,8 +555,9 @@ def chat(sampler, **options):
     return sample_chat(sampler, None, payload, model="m", runtime_load_id="start")
 
 
-def test_a_request_without_max_tokens_may_use_the_rest_of_the_context():
-    # An agent such as terminus-2 sends no max_tokens; a fixed 1024 cut its longer replies off mid-answer.
+@pytest.mark.unit
+def test_a_request_without_max_tokens_may_use_the_rest_of_the_context_window():
+    # An agent such as terminus-2 sends no max_tokens, and a fixed limit would cut its longer replies off.
     sampler = TextSampler([1, 3], [12], window=4096)
     chat(sampler)
     assert sampler.params["max_tokens"] == 4096 - 2
@@ -562,21 +565,24 @@ def test_a_request_without_max_tokens_may_use_the_rest_of_the_context():
     assert sampler.params["max_tokens"] == 50, "a request's own limit wins"
     unknown = TextSampler([1, 3], [12], window=None)
     chat(unknown)
-    assert unknown.params["max_tokens"] == 1024, "a sampler that does not know the context keeps the old default"
+    assert unknown.params["max_tokens"] == DEFAULT_MAX_TOKENS, "the default limit, when the window is unknown"
 
 
-def test_a_prompt_that_fills_the_context_is_a_context_length_error():
+@pytest.mark.unit
+def test_a_prompt_that_fills_the_context_window_is_a_context_length_error():
     with pytest.raises(UpstreamStatusError, match=r"^context_length_exceeded") as refused:
         chat(TextSampler([1, 3, 3, 3], [12], window=4))
     assert refused.value.status == 400
 
 
-def test_the_sdk_sampler_reads_the_models_context_length_once(sampler):
+@pytest.mark.unit
+def test_the_sdk_sampler_reads_the_models_context_window_once(sampler):
     assert sampler.context_window() == 40960
     assert sampler.context_window() == 40960
     assert [event for event in sampler._service.events if event[0] == "capabilities"] == [("capabilities",)]
 
 
+@pytest.mark.unit
 def test_thinking_rides_reasoning_content_and_the_answer_is_the_content():
     thinking = chat(TextSampler([1, 2], [10, 11, 12], window=4096))
     message = thinking["choices"][0]["message"]
@@ -585,11 +591,3 @@ def test_thinking_rides_reasoning_content_and_the_answer_is_the_content():
     assert thinking["training"]["response_message"] == message
     direct = chat(TextSampler([1, 3], [12], window=4096))["choices"][0]["message"]
     assert direct == {"role": "assistant", "content": '\n\n{"commands": []}'}, "thinking off: no reasoning field"
-
-
-def test_reasoning_split_follows_sglangs_qwen3_parser():
-    assert split_reasoning("plan</think>\n\nanswer", is_pre_opened=True) == ("plan", "answer")
-    assert split_reasoning("<think>plan</think>answer", is_pre_opened=False) == ("plan", "answer")
-    assert split_reasoning("plan<tool_call>{}", is_pre_opened=True) == ("plan", "<tool_call>{}")
-    assert split_reasoning("cut off while thinking", is_pre_opened=True) == ("cut off while thinking", "")
-    assert split_reasoning("answer", is_pre_opened=False) == (None, "answer")

@@ -89,7 +89,7 @@ class SpindleClient(TinkerClient, TinkerSampler):
     def render(self, messages, *, template_kwargs):
         return [101]
 
-    def decode(self, tokens):
+    def decode(self, tokens, *, skip_special_tokens=True):
         return "hello"
 
     def sample(self, sampler_path, prompt, params, *, topk_logprobs):

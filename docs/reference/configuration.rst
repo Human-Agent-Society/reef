@@ -842,7 +842,8 @@ client rejects a request whose effective ``top_p`` is below 1, ``top_k``
 above 0 or ``min_p`` above 0. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
-Both handlers split each reply into ``content`` and ``reasoning_content`` with
+Both handlers, and the Tinker sampler that serves a Tinker deployment and its
+task rollouts, split each reply into ``content`` and ``reasoning_content`` with
 the rules of SGLang's Qwen3 reasoning parser: ``<think>`` starts reasoning, and
 the first ``</think>`` or ``<tool_call>`` ends it. A reply that ends inside
 reasoning has an empty ``content``.
@@ -853,7 +854,8 @@ handler checks whether each request's rendered prompt ends with ``<think>``.
 The check follows the request's ``chat_template_kwargs``: a Qwen3.5 template
 pre-opens ``<think>`` by default but closes it for ``enable_thinking: false``,
 so such a request keeps its reply in ``content``. An explicit value bypasses
-this check.
+this check. The Tinker sampler takes no ``force_reasoning`` and always checks
+the prompt.
 
 Chat template arguments
 ~~~~~~~~~~~~~~~~~~~~~~~
