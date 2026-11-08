@@ -40,6 +40,8 @@ PUBLISHED_ARTIFACT = "artifact:published"
 #: The scenario the runner creates, and the route that reports whether inference serves its model yet.
 SCENARIO = "harness-evolve-demo"
 STARTUP_STATUS = f"/reef/scenarios/{SCENARIO}/inference/status"
+#: The error the status route answers for a failed startup, word for word as the service sends it.
+STARTUP_FAILED = "The inference engine did not start. Check the service logs."
 
 
 class StubReefClient:
@@ -60,9 +62,10 @@ class StubReefClient:
     ``posts`` is every low-level ``post`` the run makes, in order, as ``(path, scenario, payload)``; the run uses it
     to create its scenario.
 
-    ``startup`` is the inference startup states the status route answers, one per read, the last one repeated.
-    Until a read has answered ``ready``, a model call is HTTP 503, as it is while the service starts the model.
-    Status reads are in ``reads`` as ``("startup", state)``.
+    ``startup`` holds the startup states the status route answers, one per read; the last one repeats. Until the
+    run has created its scenario, the status route answers HTTP 404, as the service does for a scenario with no
+    startup request. Until a read has answered ``ready``, a model call is HTTP 503, as it is while the service
+    starts the model. Status reads are in ``reads`` as ``("startup", state)``.
     """
 
     def __init__(
@@ -75,6 +78,7 @@ class StubReefClient:
     ) -> None:
         self.results = list(results)
         self.startup = list(startup)
+        self.created = False
         self.is_inference_ready = False
         self.head = head
         self.reports: list[dict] = []
@@ -94,6 +98,8 @@ class StubReefClient:
 
     def post(self, path: str, scenario: str, payload: dict, **kwargs: object) -> tuple[dict, dict[str, str]]:
         self.posts.append((path, scenario, payload))
+        if path == "/reef/scenarios":
+            self.created = True
         return {"scenario": payload["name"]}, {}
 
     def inference_with_record(self, scenario: str, path: str, payload: dict, **kwargs: object) -> tuple[dict, str]:
@@ -110,13 +116,15 @@ class StubReefClient:
     def get(self, path: str, **kwargs: object) -> dict:
         self.requested.append(path)
         if path == STARTUP_STATUS:
+            if not self.created:
+                raise ReefClientError(404, f"scenario {SCENARIO!r} has no inference startup request", "text/plain")
             state = self.startup.pop(0) if len(self.startup) > 1 else self.startup[0]
             self.reads.append(("startup", state))
             self.is_inference_ready = state == "ready"
             return {
                 "artifact_id": SEED_ARTIFACT,
                 "state": state,
-                "error": "engine failed" if state == "failed" else None,
+                "error": STARTUP_FAILED if state == "failed" else None,
                 "engine": "warm" if state == "ready" else None,
                 "engine_detail": None,
             }
@@ -325,10 +333,27 @@ def test_a_failed_inference_startup_stops_the_run_before_any_task(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A model that fails to start ends the run with the reason and the log to read, not a 503 on the first task."""
+    """A model that fails to start ends the run with the log to read, not a 503 on the first task."""
     client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("starting", "failed"))
+    # Shortened so a run that misses the failed state fails here instead of waiting out the real deadline.
+    monkeypatch.setattr(runner, "INFERENCE_TIMEOUT_S", 2.0)
 
-    with pytest.raises(SystemExit, match=r"inference did not start: engine failed; check work/reef\.log"):
+    with pytest.raises(SystemExit, match=r"^inference did not start: check work/reef\.log$"):
+        runner.main()
+
+    assert client.reports == [], "no task is sent to a model that did not start"
+
+
+def test_an_inference_startup_past_the_deadline_stops_the_run_before_any_task(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A model that is still starting at ``INFERENCE_TIMEOUT_S`` ends the run with the deadline and the log to read."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("starting",))
+    monkeypatch.setattr(runner, "INFERENCE_TIMEOUT_S", 1.0)
+
+    with pytest.raises(SystemExit, match=r"^inference did not start within 1s; check work/reef\.log$"):
         runner.main()
 
     assert client.reports == [], "no task is sent to a model that did not start"

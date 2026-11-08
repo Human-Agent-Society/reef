@@ -140,7 +140,7 @@ def wait_for_inference(client):
         if startup["state"] == "ready":
             return
         if startup["state"] == "failed":
-            raise SystemExit(f"inference did not start: {startup['error']}; check work/reef.log")
+            raise SystemExit("inference did not start: check work/reef.log")
         time.sleep(0.5)
     raise SystemExit(f"inference did not start within {INFERENCE_TIMEOUT_S:.0f}s; check work/reef.log")
 
