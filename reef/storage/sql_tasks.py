@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String, Table, Text, and_, select
+from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String, Table, Text, and_, func, select
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -254,11 +254,11 @@ class SQLTaskStore(TaskStore):
 
     def documents(self, *, prefix: str = "") -> Mapping[str, str]:
         documents = self.tables.documents
+        # SQLite's LIKE ignores case, so the key's first characters are compared with the prefix itself.
+        starts = func.substr(documents.c.document_key, 1, len(prefix)) == prefix
         with self.database._transaction(write=False) as connection:
             rows = connection.execute(
-                select(documents.c.document_key, documents.c.document).where(
-                    self.matching(documents), documents.c.document_key.startswith(prefix, autoescape=True)
-                )
+                select(documents.c.document_key, documents.c.document).where(self.matching(documents), starts)
             )
             return {row.document_key: row.document for row in rows}
 
