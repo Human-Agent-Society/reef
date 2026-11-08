@@ -2070,13 +2070,12 @@ The generator's pass-rate band does not filter the store.
 
 With ``designer_delay`` d above 0, the task jobs also train the Designer's replies:
 
-- When the generator has taken the results of generation g, it gives the advantage of each Designer reply of g that trains (``TaskGenerator.designer_advantages``). The stage saves them in the task store.
-- The tasks of round g + d wait for these advantages. The first task job that holds a task of that round carries the replies of g, with their advantages, beside its tasks. A round that published no train task passes them to the next round that did.
+- When the generator has taken the results of generation g, it gives the advantage of each Designer reply of g that trains (``TaskGenerator.designer_advantages``). The samples service makes each reply's delayed sample from its inference record and saves the replies in the task store. It holds the records until then.
+- The tasks of round g + d wait for these replies. The first task job that holds a task of that round carries the replies of g, with their advantages, beside its tasks. A round that published no train task passes them to the next round that did. Control reads the replies from the task store, so it can run in another process.
 - A carrying job that fails, or that a new training start cancels, does not train them again. A reply whose data is more than ``max_staleness`` versions behind does not train.
-- Each reply trains from the sample that its served call kept, so the generator must ask for it (SPADE's ``train_designer``). A reply without its sample is skipped. The operational metrics count the carried replies and the skipped records.
-- The stage keeps the Designer's inference records in memory until the carrying job's submission commits. Run control and the samples service in one process.
-- The last d generations of a run have no carrying round. Their records stay held, so a run that continues with more rounds trains their replies.
-- The training component must train delayed samples beside a task job's rollouts.
+- Each reply trains from the sample that its served call kept, so the generator must ask for it (SPADE's ``train_designer``). A reply without its sample is skipped. The operational metrics count the saved replies and the skipped records.
+- The last d generations of a run have no carrying round. Their replies stay in the task store, so a run that continues with more rounds trains them.
+- The training component and the task jobs' objective must train delayed samples beside a task job's rollouts; the deployment refuses ``designer_delay`` otherwise. A job carries only the replies that the component trains: those sampled from its rollout distribution, up to the number that one job takes (``TrainingComponent.delayed_sample_limit``). The others are left out with a warning in the log.
 
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.

@@ -194,6 +194,17 @@ the training component rolls out. The record-to-sample stage makes samples;
 ``job_samples`` and ``buffer_size`` count them. A sample is not a sampling
 call to a model.
 
+Delayed sample
+--------------
+
+A trajectory that an earlier job's policy sampled and that trains in a later
+task job, beside the job's task rollouts, with an advantage that the recipe
+gives it: a ``DelayedSample`` in ``JobData.delayed`` (``reef.core.job_data``).
+It keeps the exact tokens, log-probs and sampling distribution of a served call
+that sent ``x-reef-record-training``. SPADE's Designer replies are delayed
+samples. A training component trains the delayed samples that its
+``delayed_sample_limit`` keeps.
+
 Training objective
 ------------------
 

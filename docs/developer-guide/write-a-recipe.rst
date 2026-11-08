@@ -76,7 +76,7 @@ A weight recipe is four pieces plus the class that binds them.
 .. container:: config
 
    ``training objective``
-       a backend's objective (``SlimeObjective`` or ``TinkerObjective``) declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch or Ray import at module scope.
+       a backend's objective (``SlimeObjective`` or ``TinkerObjective``) declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. A ``SlimeObjective`` for task jobs can also declare ``advantage_rule``, the group rule of its task rollouts, and ``carries_samples``, whether a task job trains the job data's delayed samples. No torch or Ray import at module scope.
 
    ``pipeline stages``
        the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them

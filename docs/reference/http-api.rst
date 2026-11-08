@@ -226,6 +226,18 @@ Headers
 |                                   | The call must not stream (HTTP 400). Only the service   |
 |                                   | token opens it.                                         |
 +-----------------------------------+---------------------------------------------------------+
+| ``x-reef-record-training: 1``     | optional on inference: the record keeps the call's      |
+|                                   | exact sample as ``response.training``: the prompt and   |
+|                                   | reply token IDs, the sampled log-probs and the sampling |
+|                                   | distribution. It is the one exception to the rule that  |
+|                                   | a record keeps no training tensors. The response does   |
+|                                   | not change. HTTP 400 for a call that streams, that      |
+|                                   | names no ``temperature``, ``top_p`` or ``top_k`` in the |
+|                                   | request or the scenario's serving config, or whose      |
+|                                   | engine gives no exact sample with its distribution.     |
+|                                   | ``true`` also asks for it; ``0``, ``false`` or no       |
+|                                   | header keeps no sample.                                 |
++-----------------------------------+---------------------------------------------------------+
 
 Client artifact tags
 ~~~~~~~~~~~~~~~~~~~~
@@ -250,7 +262,9 @@ routes return 404. With the `external router lifecycle
 applies this section to the manifest's Scenarios only, and also serves
 ``GET /readyz``. Send ``POST /reef/report`` to the ``control`` service there.
 Calls with ``x-reef-rollout: 1`` or ``true`` return 400
-(``unsupported_rollout``). Rollout calls remain available when routing is disabled.
+(``unsupported_rollout``), and calls with ``x-reef-record-training: 1`` or ``true`` return 400
+(``unsupported_record_training``): an external provider gives no exact sample. Both remain available when routing
+is disabled.
 
 .. list-table:: Client fields
    :header-rows: 1
@@ -1927,7 +1941,9 @@ check reads it (see `Staleness
 tensors. Reef removes any ``training`` block that an engine handler returns
 from the record, from the client's answer, and from rollout and evaluation
 answers. The training component renders each recorded call and computes the
-log probabilities that it needs.
+log probabilities that it needs. The one exception is a call with
+``x-reef-record-training: 1``: its record keeps the engine's exact sample (see
+`Headers`_), and the client's answer still has no ``training`` block.
 
 Report
 ------

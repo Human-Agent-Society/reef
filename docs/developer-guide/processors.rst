@@ -309,6 +309,7 @@ Format 1 of a directory:
    job.json        {"format": 1, "key", "sample_count", "kind"}
    samples.jsonl   one sample per line, in job order
    tasks/<n>/<directory name>/
+   delayed.jsonl   one delayed sample per line, only for data with delayed samples
 
 - ``job.json`` gives the directory's key, its number of samples, and the kind
   of its samples: ``trajectory``, ``task``, or ``null`` without samples.
@@ -316,6 +317,9 @@ Format 1 of a directory:
   ``task_path`` is relative to the directory: ``tasks/<n>/<directory name>``,
   where ``n`` counts the tasks from 0.
 - ``tasks/`` holds a copy of each task's directory.
+- Each line of ``delayed.jsonl`` is an entry of ``JobData.delayed``
+  (``DelayedSample.to_dict``), in order. Data without delayed samples has no
+  such file.
 
 A directory does not change after Reef writes it, and several jobs can read
 it, so a component must not write in it. A component reads it with
@@ -326,8 +330,8 @@ place ``job.data_uri`` and mounts or copies the directory there.
 The data store keeps the directories (``DataStore.write_job_directory``,
 ``open_job_directory`` and ``delete_unused_job_directories``) in its segment
 store (``storage.segment_backend``), or in
-``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its samples and of the
-files of its tasks (``job_data_key``). So a job of the same samples, such as
+``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its samples, of the
+files of its tasks and of its delayed samples (``job_data_key``). So a job of the same samples, such as
 a second job on one dataset, uses the directory that exists and writes
 nothing. The data store records when a job last used each directory, and its
 periodic work (``DataStore.maintain``, which the data service calls) deletes a
@@ -803,6 +807,18 @@ When every train task of a generation has a result, the next job sends the
 generation's results to ``record_results``. A generation can therefore close
 after later generations started. A generation whose delivery fails waits for
 the next job, and later generations still go out.
+
+With ``designer_delay`` above 0, the task jobs also train the replies of the
+generator's Designer, as delayed samples (``JobData.delayed``). The generator
+gives the advantage of each reply after ``record_results``
+(``designer_advantages``). The delivery makes the delayed sample of each reply
+from its inference record, which the samples service holds until then, and
+saves the replies in the task store before it marks the generation delivered.
+``GeneratedTaskJobData`` reads them from the task store into the first task job
+of a later round, so control builds the job data in its own process. The recipe
+refuses ``designer_delay`` when the training component or the objective trains
+no delayed samples (``TrainingComponent.delayed_sample_limit``), and the job
+data holds only the delayed samples that the limit keeps.
 
 A generator can run rollouts of a task through the generator service, as
 SPADE does for its hint plays; those rollouts are not records, and do not

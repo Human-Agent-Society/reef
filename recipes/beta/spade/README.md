@@ -13,7 +13,7 @@
 beta/spade/
   generation.py   the experience section (results sorted by regret into the frontier, the mastered and the out of reach), the Designer's score and advantages, a generation's records
   generator.py    SpadeTaskGenerator: the Designer's generations through the generator service
-  slime.py        SpadeObjective: trains a task job's rollouts and the Designer replies that it carries, on Slime
+  slime/          SpadeObjective: trains a task job's rollouts and the Designer replies that it carries, on Slime
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
   examples/slime/serve.yaml    a Slime deployment that also trains the Designer, with the paper's Qwen3-4B settings
 ```
@@ -85,9 +85,9 @@ Each task job runs its rollouts at the weights the job starts from, so a task gr
 The Designer trains on its own replies in the task jobs of a later generation. Two settings turn it on:
 
 - `train_designer: true` in the generator's `config`. Each Designer call then asks the generator service to keep the reply's sampled tokens, their log-probs and the sampling distribution in its inference record.
-- `designer_delay` of 1 or more in `pipeline.record2sample.config`. The replies of generation g then train in the first task job of round g + `designer_delay`. The tasks of that round wait until generation g has its advantages. The replies of the last `designer_delay` generations of a run have no such round: their records stay held, and a run that continues with more rounds trains them. See [generated tasks](../../../docs/reference/configuration.rst#generated-tasks) for the rules of the stage.
+- `designer_delay` of 1 or more in `pipeline.record2sample.config`. The replies of generation g then train in the first task job of round g + `designer_delay`. The tasks of that round wait until generation g has its advantages. When the generator gives them, the samples service saves each reply's sample in the task store, and control reads them from there, so the two can run in separate processes. The replies of the last `designer_delay` generations of a run have no such round: they stay in the task store, and a run that continues with more rounds trains them. See [generated tasks](../../../docs/reference/configuration.rst#generated-tasks) for the rules of the stage.
 
-The Designer's score of a train task that ran is the blend of the reference code:
+The Designer's score of a train task that ran follows the reference code:
 
 ```text
 score = plateau_weight * plateau(win rate) + regret_weight * min(1, max(0, regret / regret_scale))
@@ -113,7 +113,7 @@ Slime options for this objective:
 - `--rollout-batch-size` of at least 2, and at least the number of tasks plus `max(1, ceil(replies / n-samples-per-prompt))`, so that one rollout is one step. A job that carries no reply still leads with one group of padding rows.
 - `--rollout-temperature`, `--rollout-top-p` and `--rollout-top-k` equal to the distribution of the Designer's calls.
 
-The training component refuses a job when an option is missing, so the first job of a run shows it. A job that resumes after a restart keeps the replies that its first driver chose. A reply that cannot train is left out of its job, which still trains its tasks: a reply sampled with another distribution, a reply of a job whose objective carries none, and the replies beyond `min(global-batch-size, (rollout-batch-size - 1) * n-samples-per-prompt)`. The job's `delayed_left_out` metric counts them by reason.
+The deployment refuses these options when it loads, and the training component refuses a job that breaks them. A job carries at most `min(global-batch-size, (rollout-batch-size - 1) * n-samples-per-prompt)` replies, each sampled from the rollout distribution. Control leaves the other replies out when it builds the job's data, with a warning in the log, so the job still trains its tasks.
 
 For example, 24 tasks, 24 replies and n = 8 need a rollout batch size of 27. With a global batch size of 192, the step trains the 24 replies and the first 168 plays. A job that carries fewer replies, such as the first job of a run, which carries none, fills the rollout with its first tasks again, as every task job fills its last rollout. Those plays come last, so the step does not train them, but they count toward their tasks' win rates and the Designer's scale.
 
@@ -126,7 +126,7 @@ reef serve -c recipes/beta/spade/examples/slime/serve.yaml
 
 ### Declared divergences
 
-The Slime example follows the reference code's Qwen3-4B paper run in its blend, its band, its weights and its optimizer settings. These parts differ:
+The Slime example follows the reference code's Qwen3-4B paper run in its score, its band, its weights and its optimizer settings. These parts differ:
 
 - The win rate uses the 8 plays of one task job, not 32 plays over 4 steps. So the scale is 8, not 32.
 - The Designer's replies train one task job after their generation, not 4 steps after it.

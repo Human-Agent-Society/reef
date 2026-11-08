@@ -490,6 +490,7 @@ sends it for replies that train later (SPADE's ``train_designer``). The
 service answers ``400`` when such a call streams, when ``temperature``,
 ``top_p`` or ``top_k`` is in neither the call nor the scenario's serving
 config, or when the engine gives no exact sample. A routed external provider refuses it.
+See `Headers <../reference/http-api.rst#headers>`__.
 
 **Control restarts.** While control is down, the inference service continues to
 answer from ``served_models`` and to record. Training jobs, sample requests and
