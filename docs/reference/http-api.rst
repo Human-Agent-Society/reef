@@ -2928,14 +2928,21 @@ Sample processing tasks
 ``GET /reef/scenarios/{scenario}/sample-processing`` reads the samples queue through the data service.
 The scenario must exist. It does not start processing.
 
-Optional query parameters are ``state``, ``before`` and ``limit``.
+Optional query parameters are ``state``, ``before``, ``limit`` and ``changed``.
 ``state`` is ``queued``, ``assigned``, ``running``, ``finished`` or ``failed``.
 ``before`` excludes creation sequences at or above its positive integer value.
 ``limit`` is 1 to 100, with default 50. Tasks appear newest first.
+``changed`` is ``true`` or ``false``, with default ``false``.
+With ``true``, the page omits finished tasks that gave the trainer nothing new.
+It reads at most 5,000 tasks to fill the page.
 
-The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``counts``, ``tasks`` and ``next``.
+The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``counts``, ``tasks``,
+``hidden`` and ``next``.
 ``enabled`` means the scenario has a trainer that generates samples.
 It does not report worker health. ``counts`` covers all retained tasks, independent of pagination and state filters.
+``hidden`` lists each run of omitted tasks, and is empty without ``changed=true``.
+A run has ``after``, ``count``, ``first_created_at`` and ``last_created_at``.
+``after`` is the ID of the shown task just newer than the run, or null at the top of the page.
 ``next`` is the next page's ``before`` value, or null.
 Reads of the page and counts are separate snapshots; tasks can change between them.
 
@@ -2943,8 +2950,15 @@ Reads of the page and counts are separate snapshots; tasks can change between th
 An unknown task, or a task of another scenario, returns 404.
 
 Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at``, ``started_at``,
-``ended_at``, ``available_at``, ``error``, ``changed``, ``background``, ``records_read`` and ``samples_created``.
+``ended_at``, ``available_at``, ``error``, ``changed``, ``background``, ``records_read``, ``samples_created``,
+``triggers`` and ``progress``.
 Times are Unix seconds. Unavailable fields are null.
+``triggers`` lists why the task ran, oldest first. Each entry has ``name`` and ``at``, the time of the first request.
+A name is ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``.
+Only ``records`` and ``data`` bring new records. The others let a stage make samples without a new record.
+A task from an older Reef has no triggers.
+``progress`` holds the counts so far of the attempt that runs now: ``attempt``, ``records_read``,
+``samples_created`` and ``at``. It is null for a task that does not run.
 ``started_at`` is the first attempt's start. ``error`` can describe a queued task's previous failed attempt.
 
 Processing counts describe the completed attempt only; they exclude earlier failed attempts.

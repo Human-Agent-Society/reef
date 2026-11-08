@@ -24,7 +24,7 @@ from reef.core.values import JsonValue
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.record2sample.service import ProducedSamples
+from reef.record2sample.service import ProducedSamples, SampleProgress
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.scenario.snapshots import ServedBesideArtifact
@@ -261,7 +261,7 @@ class Scenario:
         for component_trainer in stepping:
             component_trainer.trainer.set_training_mode(training_mode)
 
-    def produce_samples(self, component: str | None = None) -> ProducedSamples:
+    def produce_samples(self, component: str | None = None, progress: SampleProgress | None = None) -> ProducedSamples:
         """Do the samples service's step for ``component``'s trainer: read its newer commits, then make the samples of
         the new records (``Trainer.produce_samples``).
 
@@ -276,7 +276,7 @@ class Scenario:
         component_trainer.trainer.read_commits(new)
         if new:
             self.job_ends_read_step[component_trainer.component] = new[-1].step
-        return component_trainer.trainer.produce_samples()
+        return component_trainer.trainer.produce_samples(progress)
 
     def next_commit(self, component: str | None = None) -> TrainingCommit | None:
         """Prepare ``component``'s next commit: a job's submission, or a running job's checkpoint or end.
