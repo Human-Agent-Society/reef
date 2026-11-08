@@ -886,9 +886,8 @@ def test_parent_limits_leave_a_limit_the_parent_does_not_set() -> None:
 
 @pytest.mark.unit
 def test_a_slot_has_no_session_exactly_when_it_varies_a_seeded_parent(tmp_path: Path) -> None:
-    seed_id = "seed-" + "0" * 16
     seeded = TaskVariant("t-0", tmp_path, "harder", 1.0, 2, seed_task="tmax-0")
-    proposal = SessionProposal(0, -1, seed_id, parent_task="t-0", direction="harder", seed_task="tmax-0")
+    proposal = SessionProposal(0, -1, SEED_ID, parent_task="t-0", direction="harder", seed_task="tmax-0")
     assert TaskSlot(proposal, None, seeded).source is None
     source = SessionSource("r", "sessions", Repository(url="https://example.com/r", commit="3f2c1ab", path="/app"))
     with pytest.raises(ValueError, match="no session exactly when it varies a seeded parent"):

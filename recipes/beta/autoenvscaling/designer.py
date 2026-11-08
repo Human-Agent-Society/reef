@@ -179,8 +179,8 @@ VARIANT_REASONS = {
     VARIANT_SIMPLER: "the solver passes the parent too rarely to learn from it.",
 }
 
-# A variant of a seeded parent has no session and no repository: the rules below replace AGENT_RULES, the rebuild
-# rules and the review text for it. The variant's directions are upstream's (render_assignment).
+#: The agent's rules for a variant of a seeded parent, which has no session and no repository: they replace
+#: ``AGENT_RULES`` for it. The variant's directions are upstream's (``render_assignment``).
 SEED_AGENT_RULES = """{system_prompt}
 
 You write ONE Harbor task, a variant of a task the solver ran. You work in a workspace and can check the task.
@@ -209,6 +209,7 @@ HOW TO WORK:
 - Finish when a check passes, or when time or checks run out, with the best task you have in ./task/.
 """
 
+#: The rebuild rules for a variant of a seeded parent: they replace ``REBUILD_RULES_TEXT`` for it.
 SEED_RULES_TEXT = """RULES:
 - The agent gets a shell in a container built from environment/Dockerfile and the text of instruction.md. It never sees tests/ or solution/.
 - TWO NETWORK PHASES: the build of environment/Dockerfile has network, so install there every tool and dependency the task and the verifier need; the agent's container and the verifier have no network, so nothing may download at solve or grade time.
@@ -221,15 +222,16 @@ SEED_RULES_TEXT = """RULES:
 - A HARDER task needs a longer horizon or one more skill, so that the solver sometimes fails. A SIMPLER task has fewer compounding steps, a clearer starting state or more scaffolding, so that the solver sometimes succeeds. Keep the parent's domain, and do not copy its tests unchanged.
 - Files are plain text; paths are relative, no directories above the task, at most four levels."""
 
-# The behaviour rule for a run without a session: the same rule, about the agent's own reference solution.
+#: The behaviour rule for a run without a session: the same rule, about the agent's own reference solution.
 SEED_BEHAVIOUR_RULES_TEXT = BEHAVIOUR_RULES_TEXT.replace("the session's own change", "your reference solution")
 
-# REVIEW_TEXT without the session, which a seeded run does not have.
+#: ``REVIEW_TEXT`` without the session, which a seeded run does not have.
 SEED_REVIEW_TEXT = """
 - When the oracle passes, the check also reviews the tests: a reviewer lists each requirement that tests/ checks and
   instruction.md does not state. The task passes only when that list is empty. Fix each finding: test the behaviour
   instead, or name the requirement in instruction.md."""
 
+#: The prompt of a variant of a seeded parent: ``VARIANT_PROMPT`` without the session.
 SEED_VARIANT_PROMPT = (
     "Write a {direction} variant of the task in ../inputs/parent/ as one Harbor task in ./task/, following your "
     "rules. Start with ../inputs/variant.md."
