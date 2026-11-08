@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 
 from recipes.beta.spade import (
-    BlendSettings,
     PlayRecord,
-    blend_score,
+    ScoreSettings,
     centered_advantages,
+    designer_score,
     experience_for,
     experience_text,
     load_experience,
@@ -180,7 +180,7 @@ def test_load_experience_refuses_a_file_that_is_not_a_report(tmp_path: Path) -> 
 
 
 # The reference code's paper runs (cmd/slime/*/0617/train_plateau_6skill.sh): 0.6 * plateau + 0.4 * floored regret.
-PAPER_4B = BlendSettings(
+PAPER_4B = ScoreSettings(
     plateau_low=0.2, plateau_high=0.4, plateau_ramp=0.2, plateau_weight=0.6, regret_weight=0.4, regret_scale=0.15
 )
 
@@ -220,15 +220,15 @@ def test_the_plateau_reward_matches_the_reference_code_at_the_band_edges(
         (PAPER_4B, 0.45, 0.3, 1.0),  # the clip: regret / 0.15 = 3 counts as 1
         (PAPER_4B, 0.06, 0.5, 0.46),  # 0.6 * 0.5 + 0.4 * 0.4
         (PAPER_4B, 0.15, 0.0, 0.4),  # out of the band, full regret
-        (BlendSettings(), 0.5, 0.25, 0.5),  # the defaults score the regret alone
-        (BlendSettings(), -0.25, 0.25, 0.0),
-        (BlendSettings(), 1.5, 0.25, 1.0),
+        (ScoreSettings(), 0.5, 0.25, 0.5),  # the defaults score the regret alone
+        (ScoreSettings(), -0.25, 0.25, 0.0),
+        (ScoreSettings(), 1.5, 0.25, 1.0),
     ],
 )
-def test_the_blend_is_the_weighted_plateau_plus_the_floored_and_clipped_regret(
-    settings: BlendSettings, regret: float, win_rate: float, expected: float
+def test_the_score_is_the_weighted_plateau_plus_the_floored_and_clipped_regret(
+    settings: ScoreSettings, regret: float, win_rate: float, expected: float
 ) -> None:
-    assert blend_score(regret, win_rate, settings) == pytest.approx(expected, abs=1e-12)
+    assert designer_score(regret, win_rate, settings) == pytest.approx(expected, abs=1e-12)
 
 
 @pytest.mark.parametrize(
@@ -242,13 +242,13 @@ def test_the_blend_is_the_weighted_plateau_plus_the_floored_and_clipped_regret(
         ({"regret_weight": float("nan")}, "finite"),
     ],
 )
-def test_blend_settings_refuse_a_band_or_a_weight_that_is_out_of_range(fields: dict[str, float], message: str) -> None:
+def test_score_settings_refuse_a_band_or_a_weight_that_is_out_of_range(fields: dict[str, float], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        BlendSettings(**fields)
+        ScoreSettings(**fields)
 
 
-def scored(name: str, skill: str | None, blend: float, plays: int) -> TaskMeasure:
-    """A measured train task with ``plays`` training rollouts and the Designer's score ``blend``."""
+def scored(name: str, skill: str | None, score: float, plays: int) -> TaskMeasure:
+    """A measured train task with ``plays`` training rollouts and the Designer's score ``score``."""
     return TaskMeasure(
         name=name,
         skill=skill,
@@ -256,7 +256,7 @@ def scored(name: str, skill: str | None, blend: float, plays: int) -> TaskMeasur
         plain_rewards=(0.5,) * plays,
         hint_rewards=(),
         record=record(name, 0.5, 0.5, skill=skill),
-        blend=blend,
+        score=score,
     )
 
 

@@ -12,8 +12,8 @@ and removes it again: the generated-task recipe writes the valid task once more 
 generations started or after a restart. For each train task that the recipe ran and that has
 ``solution/hint.txt``, it plays the task ``hint_plays`` more times through the generator service, with that
 file appended to the instruction. These plays report on the ``hint`` arm, so the recipe does not train on
-them. It reports each proposal's score against the Designer's receipt: the blend of the task's plateau reward and
-its floored regret (``blend_score``), 0 for a refused one. It keeps the generation report under ``state_dir``,
+them. It reports each proposal's score against the Designer's receipt: the mix of the task's plateau reward and
+its floored regret (``designer_score``), 0 for a refused one. It keeps the generation report under ``state_dir``,
 with the advantage of each Designer reply that trains (``centered_advantages``). Eval tasks and tasks that could
 not run get no hint plays and no Designer report, and do not go into the experience. A second call for a closed
 generation does nothing. A restart reads the last report for the experience, and continues numbering after the
@@ -29,7 +29,7 @@ import logging
 import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Self
 
@@ -38,13 +38,13 @@ from pydantic import TypeAdapter
 from recipes.beta.spade.generation import (
     DEFAULT_MAX_DESIGNER_SCALE,
     RECORDED_EXCERPT_CHARS,
-    BlendSettings,
     GenerationRecord,
     PlayRecord,
     ProposalRecord,
+    ScoreSettings,
     TaskMeasure,
-    blend_score,
     centered_advantages,
+    designer_score,
     experience_for,
     experience_text,
     load_experience,
@@ -86,7 +86,9 @@ HINT_FILE = "solution/hint.txt"
 HINT_NAME = "hint.txt"
 HINT_ARM = "hint"
 OPEN_PREFIX = "open-"
-DEFAULT_BLEND = BlendSettings()
+DEFAULT_SCORE_SETTINGS = ScoreSettings()
+#: The config keys of the Designer's score, the fields of ``ScoreSettings``.
+SCORE_KEYS = tuple(entry.name for entry in fields(ScoreSettings))
 CONFIG_KEYS = frozenset(
     {
         "generator_url",
@@ -146,9 +148,10 @@ OPEN_GENERATION = TypeAdapter(OpenGeneration)
 class SpadeTaskGenerator(TaskGenerator):
     """The Designer's generations through the generator service, adapted by the regret of the last one.
 
-    ``blend`` scores each train task that ran (``blend_score``), and ``max_designer_scale`` caps the scale of the
-    advantages of a generation's replies (``centered_advantages``). With ``is_training_designer``, each Designer
-    call keeps its sample, and ``designer_advantages`` gives the recipe the advantages of a closed generation.
+    ``score_settings`` score each train task that ran (``designer_score``), and ``max_designer_scale`` caps the
+    scale of the advantages of a generation's replies (``centered_advantages``). With ``is_training_designer``, each
+    Designer call keeps its sample, and ``designer_advantages`` gives the recipe the advantages of a closed
+    generation.
     """
 
     def __init__(
@@ -165,7 +168,7 @@ class SpadeTaskGenerator(TaskGenerator):
         hint_plays: int = DEFAULT_HINT_PLAYS,
         is_reporting_designer: bool = True,
         served_model: str | None = None,
-        blend: BlendSettings = DEFAULT_BLEND,
+        score_settings: ScoreSettings = DEFAULT_SCORE_SETTINGS,
         max_designer_scale: float = DEFAULT_MAX_DESIGNER_SCALE,
         is_training_designer: bool = False,
     ) -> None:
@@ -193,7 +196,7 @@ class SpadeTaskGenerator(TaskGenerator):
         self.hint_plays = hint_plays
         self.is_reporting_designer = is_reporting_designer
         self.served_model = served_model
-        self.blend = blend
+        self.score_settings = score_settings
         self.max_designer_scale = float(max_designer_scale)
         self.is_training_designer = is_training_designer
         # What the last generation measured, for the next prompt; read back from the state directory.
@@ -226,6 +229,11 @@ class SpadeTaskGenerator(TaskGenerator):
         skill_names = skills.split(",") if isinstance(skills, str) else skills
         grounding_path = str(config.get("grounding_path", "") or "")
         served_model = config.get("served_model")
+        train_designer = config.get("train_designer", False)
+        if not isinstance(train_designer, bool):
+            raise PluginConfigError(
+                f"SpadeTaskGenerator's train_designer must be true or false, got {train_designer!r}"
+            )
         try:
             return cls(
                 scenario=scenario,
@@ -240,16 +248,10 @@ class SpadeTaskGenerator(TaskGenerator):
                 hint_plays=int(config.get("hint_plays", DEFAULT_HINT_PLAYS)),
                 is_reporting_designer=bool(config.get("designer_report", True)),
                 served_model=str(served_model) if served_model else None,
-                blend=BlendSettings(
-                    plateau_low=float(config.get("plateau_low", BlendSettings.plateau_low)),
-                    plateau_high=float(config.get("plateau_high", BlendSettings.plateau_high)),
-                    plateau_ramp=float(config.get("plateau_ramp", BlendSettings.plateau_ramp)),
-                    plateau_weight=float(config.get("plateau_weight", BlendSettings.plateau_weight)),
-                    regret_weight=float(config.get("regret_weight", BlendSettings.regret_weight)),
-                    regret_scale=float(config.get("regret_scale", BlendSettings.regret_scale)),
-                ),
-                max_designer_scale=float(config.get("max_designer_scale", DEFAULT_MAX_DESIGNER_SCALE)),
-                is_training_designer=bool(config.get("train_designer", False)),
+                # The settings refuse a bool or a value that is not a number, by its key.
+                score_settings=ScoreSettings(**{key: config[key] for key in SCORE_KEYS if key in config}),
+                max_designer_scale=config.get("max_designer_scale", DEFAULT_MAX_DESIGNER_SCALE),
+                is_training_designer=train_designer,
             )
         except (OSError, ValueError) as exc:
             raise PluginConfigError(f"invalid SpadeTaskGenerator config: {exc}") from exc
@@ -409,7 +411,7 @@ class SpadeTaskGenerator(TaskGenerator):
                 plain_rewards=plain,
                 hint_rewards=hint,
                 record=play_record,
-                blend=blend_score(play_record.regret, play_record.return_without_hint, self.blend),
+                score=designer_score(play_record.regret, play_record.return_without_hint, self.score_settings),
             )
             proposals.append((replace(proposal, task_name=result.task.name), measure))
         proposals.sort(key=lambda entry: entry[0].index)
@@ -460,7 +462,7 @@ class SpadeTaskGenerator(TaskGenerator):
     async def reported(
         self, proposal: ProposalRecord, measure: TaskMeasure | None, *, generation: int
     ) -> ProposalRecord:
-        """The Designer's report for one proposal: the task's blend score, 0 for a refused one."""
+        """The Designer's report for one proposal: the task's score (``designer_score``), 0 for a refused one."""
         if not self.is_reporting_designer or proposal.split == "eval" or proposal.infrastructure_failure:
             return proposal
         metadata: dict[str, object] = {"generation": generation, **skill_tag(proposal.skill)}
@@ -468,7 +470,7 @@ class SpadeTaskGenerator(TaskGenerator):
             score = 0.0
             metadata["refusal"] = proposal.refusal
         else:
-            score = measure.blend
+            score = measure.score
             metadata["task"] = {"name": measure.name, "digest": measure.digest}
             metadata["outcome"] = measure.outcome
             metadata["regret"] = measure.regret

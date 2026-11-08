@@ -6,7 +6,7 @@ the Environment Designer's adversarial experience section, the hint arm each tas
 based regret as the Designer's signal.
 
 - ``generation``: the experience section (results sorted by regret into the frontier, the mastered and the
-  out of reach), the Designer's score of a task (``blend_score``) and the advantages of a generation's replies
+  out of reach), the Designer's score of a task (``designer_score``) and the advantages of a generation's replies
   (``centered_advantages``), a generation's records and its report file.
 - ``generator``: ``SpadeTaskGenerator``, the Designer's generations through the generator service.
 - ``slime``: ``SpadeObjective``, the objective ``spade`` of Slime task jobs: SPADE's z-score of the plays, and the
@@ -14,13 +14,13 @@ based regret as the Designer's signal.
 """
 
 from recipes.beta.spade.generation import (
-    BlendSettings,
     GenerationRecord,
     PlayRecord,
     ProposalRecord,
+    ScoreSettings,
     TaskMeasure,
-    blend_score,
     centered_advantages,
+    designer_score,
     experience_for,
     experience_text,
     load_experience,
@@ -32,14 +32,14 @@ from reef.train.algos.registry import register_objective_ref
 register_objective_ref("spade", "recipes.beta.spade.slime:SpadeObjective")
 
 __all__ = [
-    "BlendSettings",
     "GenerationRecord",
     "PlayRecord",
     "ProposalRecord",
+    "ScoreSettings",
     "SpadeTaskGenerator",
     "TaskMeasure",
-    "blend_score",
     "centered_advantages",
+    "designer_score",
     "experience_for",
     "experience_text",
     "load_experience",

@@ -5,8 +5,8 @@ the request carries what the agent did on the last generation's environments, so
 regret of Sec. 4.2 into the frontier (the hint turns losses into wins), the mastered (won without it) and
 the out of reach (lost even with it), so the next environment lands where the agent fails without a hint
 and passes with one. ``experience_text`` is that section of the prompt; the generic task designer in
-``reef.record2sample.generator`` carries it as data. ``blend_score`` is the Designer's score of one task, the
-reference code's blend of a flat-top difficulty reward (``plateau_reward``) and the floored regret, and
+``reef.record2sample.generator`` carries it as data. ``designer_score`` is the Designer's score of one task, the
+reference code's mix of a flat-top difficulty reward (``plateau_reward``) and the floored regret, and
 ``centered_advantages`` turns a generation's scores into the advantages that train its replies. The rest of this
 module is the bookkeeping of one generation, which ``SpadeTaskGenerator`` writes under its state directory and reads
 back after a restart.
@@ -159,8 +159,8 @@ class TaskMeasure:
 
     Values: ``name``, ``skill`` and ``digest`` are the task's; ``plain_rewards`` are the rewards of its training
     rollouts and ``hint_rewards`` those of its hint plays, possibly none; ``record`` is its play record, whose
-    returns are the means of the two arms. ``blend`` is a finite non-negative number, the ``blend_score`` that the
-    generator gave the task, 0.0 until it scores the task. The constructor refuses another ``blend``.
+    returns are the means of the two arms. ``score`` is a finite non-negative number, the ``designer_score`` that the
+    generator gave the task, 0.0 until it scores the task. The constructor refuses another ``score``.
     Purpose: ``SpadeTaskGenerator.record_results`` makes one for each train task that ran; the generation report and
     ``centered_advantages`` read it.
     """
@@ -171,16 +171,16 @@ class TaskMeasure:
     plain_rewards: tuple[float, ...]
     hint_rewards: tuple[float, ...]
     record: PlayRecord
-    blend: float = 0.0
+    score: float = 0.0
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.blend, bool)
-            or not isinstance(self.blend, (int, float))
-            or not math.isfinite(self.blend)
-            or self.blend < 0
+            isinstance(self.score, bool)
+            or not isinstance(self.score, (int, float))
+            or not math.isfinite(self.score)
+            or self.score < 0
         ):
-            raise ValueError("a task's blend must be a finite non-negative number")
+            raise ValueError("a task's score must be a finite non-negative number")
 
     @property
     def regret(self) -> float:
@@ -241,8 +241,8 @@ def plateau_reward(win_rate: float, low: float, high: float, ramp: float) -> flo
 
 
 @dataclass(frozen=True)
-class BlendSettings:
-    """The weights and the plateau band of the Designer's score of a task (``blend_score``).
+class ScoreSettings:
+    """The weights and the plateau band of the Designer's score of a task (``designer_score``).
 
     Values: every field is a finite number. ``plateau_low`` and ``plateau_high`` are in [0, 1] with
     ``plateau_low <= plateau_high``; ``plateau_ramp`` and ``regret_scale`` are positive; ``plateau_weight`` and
@@ -250,7 +250,7 @@ class BlendSettings:
     defaults score a task by its regret alone, clipped to [0, 1]; the reference code's paper runs use the weights
     0.6 and 0.4, ``regret_scale`` 0.15, and the band 0.2 to 0.4 with ramp 0.2 for Qwen3-4B, 0.4 to 0.6 with ramp
     0.25 for Qwen3-30B-A3B.
-    Purpose: ``SpadeTaskGenerator`` reads it from its config and scores each task that ran with ``blend_score``.
+    Purpose: ``SpadeTaskGenerator`` reads it from its config and scores each task that ran with ``designer_score``.
     """
 
     plateau_low: float = 0.4
@@ -261,19 +261,9 @@ class BlendSettings:
     regret_scale: float = 1.0
 
     def __post_init__(self) -> None:
-        values = (
-            self.plateau_low,
-            self.plateau_high,
-            self.plateau_ramp,
-            self.plateau_weight,
-            self.regret_weight,
-            self.regret_scale,
-        )
-        if any(
-            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
-            for value in values
-        ):
-            raise ValueError("the blend settings must be finite numbers")
+        for name, value in asdict(self).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
         if not 0 <= self.plateau_low <= self.plateau_high <= 1:
             raise ValueError("the plateau band needs 0 <= plateau_low <= plateau_high <= 1")
         if self.plateau_ramp <= 0 or self.regret_scale <= 0:
@@ -282,8 +272,8 @@ class BlendSettings:
             raise ValueError("plateau_weight and regret_weight must be non-negative")
 
 
-def blend_score(regret: float, win_rate: float, settings: BlendSettings) -> float:
-    """The Designer's score of a task: the reference code's blend with the regret floor.
+def designer_score(regret: float, win_rate: float, settings: ScoreSettings) -> float:
+    """The Designer's score of a task: the reference code's mix with the regret floor.
 
     ``plateau_weight * plateau_reward(win_rate) + regret_weight * min(1, max(0, regret / regret_scale))``, with the
     plateau band of ``settings``. ``win_rate`` is the task's mean plain reward and ``regret`` its mean hint reward
@@ -300,8 +290,8 @@ def centered_advantages(
     """The advantage of each Designer reply of a generation that trains, by the ID of its inference record.
 
     A reply trains when its proposal became a train task that ran rollouts, so it has a measure: refused, eval and
-    failed proposals get no entry. Its advantage is ``scale * (blend - mean)``, where ``mean`` is the mean
-    ``blend`` of the replies of its skill (the replies without a skill form one group), as the reference code
+    failed proposals get no entry. Its advantage is ``scale * (score - mean)``, where ``mean`` is the mean
+    ``score`` of the replies of its skill (the replies without a skill form one group), as the reference code
     centers per skill without a deviation. ``scale = min(plays / replies, max_scale)``: ``plays`` is the number of
     training rollouts of the measured tasks and ``replies`` the number of measured tasks. This is the reference
     code's scale with one task job for each generation.
@@ -314,9 +304,9 @@ def centered_advantages(
     scale = min(plays / len(measured), max_scale)
     by_skill: dict[str | None, list[float]] = defaultdict(list)
     for _, measure in measured:
-        by_skill[measure.skill].append(measure.blend)
-    means = {skill: statistics.fmean(blends) for skill, blends in by_skill.items()}
-    return {record_id: scale * (measure.blend - means[measure.skill]) for record_id, measure in measured}
+        by_skill[measure.skill].append(measure.score)
+    means = {skill: statistics.fmean(scores) for skill, scores in by_skill.items()}
+    return {record_id: scale * (measure.score - means[measure.skill]) for record_id, measure in measured}
 
 
 def skill_tag(skill: str | None) -> dict[str, str]:
@@ -351,7 +341,7 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
                 "hint_rewards": list(measure.hint_rewards),
                 "regret": measure.regret,
                 "outcome": measure.outcome,
-                "blend": measure.blend,
+                "score": measure.score,
             }
             for measure in record.measures
         ],
