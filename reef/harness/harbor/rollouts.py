@@ -37,7 +37,7 @@ from reef_client.client import ReefClient, ReefClientError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
-from reef.harness.capture import CaptureProxy
+from reef.harness.capture import CaptureObserver, CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
 #: LiteLLM routes to api_base only under a provider prefix and strips it before the call, so Reef sees the model name.
@@ -292,7 +292,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     This is the Harbor agent runner of ``RolloutRunner``. It runs the harness ``harness``, the Harbor agent with
     no plugin, and the model ``policy_model``, which ``reef_url`` serves: ``model``, with the LoRA adapter
     ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
-    ``concurrency`` rollouts at a time.
+    ``concurrency`` rollouts at a time. ``capture_observer``, when set, gets each model call of each rollout as it
+    lands, failed calls too (``CaptureObserver``).
     """
 
     def __init__(
@@ -314,6 +315,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         lab: TaskLab | None = None,
         verifier_timeout_reward: float | None = None,
         concurrency: int = 1,
+        capture_observer: CaptureObserver | None = None,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -353,6 +355,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         # The reward for a rollout whose verifier ran past its timeout; None leaves such a rollout unscored.
         self.verifier_timeout_reward = verifier_timeout_reward
         self.concurrency = concurrency
+        self.capture_observer = capture_observer
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -464,6 +467,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             tags=tags,
             listen_host=listen_host,
             is_unrecorded=self.is_unrecorded,
+            observer=self.capture_observer,
         )
         proxy.start()
         try:

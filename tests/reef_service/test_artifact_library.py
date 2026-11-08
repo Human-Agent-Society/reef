@@ -148,6 +148,9 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             assert len((await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]) == len(
                 listed
             )
+            # The data service copies the scenario's first artifact in the background: wait until it did.
+            first_artifact = next(row for row in listed if not row["source"].get("item"))
+            await library_item(other_cell, f"other/{first_artifact['artifact_id']}")
             assert copy_scenario_artifacts(second, "other") == 0
             missing = await client.get(f"{DATA}/other/{receipt['artifact_id']}")
             assert missing.status == 404

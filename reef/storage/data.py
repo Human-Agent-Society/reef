@@ -20,12 +20,13 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
+from reef.core.evaluation import EvaluationCallSummary
 from reef.core.job_data import JobData
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
@@ -37,9 +38,12 @@ from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
-#: The metadata keys that Reef reads. ``kind``, ``owner``, ``origin`` and an artifact's ``serving_profile`` (RFC #1233)
-#: are set at creation and never change.
-FIXED_KEYS = ("kind", "owner", "origin", "serving_profile")
+#: The metadata keys that Reef reads. ``kind``, ``owner``, ``origin``, an artifact's ``serving_profile`` (RFC #1233)
+#: and an evaluation call's ``evaluation_id`` are set at creation and never change.
+FIXED_KEYS = ("kind", "owner", "origin", "serving_profile", "evaluation_id")
+#: What made a record item, its ``origin.source``: a scenario's own traffic, or a call of an evaluation rollout. A record
+#: item without ``source`` is ``inference``.
+RECORD_SOURCES = ("inference", "evaluation")
 #: The most items that one query returns.
 MAX_QUERY_LIMIT = 1000
 
@@ -109,11 +113,72 @@ def check_origin(value: object) -> dict[str, str | None]:
     return {key: value[key] for key in ("scenario", "artifact_id")}
 
 
+def check_record_origin(value: object) -> dict[str, Any]:
+    """Return ``value`` as the ``origin`` of a record item, or raise ``ValueError``.
+
+    The origin is ``{scenario, artifact_id}`` (``check_origin``), with an optional ``source`` from
+    ``RECORD_SOURCES``. The origin of an evaluation call also has ``evaluation``: the non-empty ``evaluation_id``
+    and each field of the call's ``EvaluationCallSummary``, which its constructor checks. The summary is in the
+    metadata so that a reader of the calls of an evaluation needs no content.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError("metadata.origin must be {scenario, artifact_id}")
+    source = value.get("source", "inference")
+    if source not in RECORD_SOURCES:
+        raise ValueError(f"metadata.origin.source must be one of {', '.join(RECORD_SOURCES)}, got {source!r}")
+    keys = {"scenario", "artifact_id"} | ({"source"} if "source" in value else set())
+    if source == "evaluation":
+        keys.add("evaluation")
+    if set(value) != keys:
+        raise ValueError(
+            "metadata.origin of a record is {scenario, artifact_id}, with an optional source, and evaluation exactly "
+            "when the source is evaluation"
+        )
+    origin: dict[str, Any] = check_origin({key: value[key] for key in ("scenario", "artifact_id")})
+    if "source" in value:
+        origin["source"] = source
+    if source == "evaluation":
+        location = value["evaluation"]
+        names = ("evaluation_id", *(entry.name for entry in fields(EvaluationCallSummary)))
+        if not isinstance(location, Mapping) or set(location) != set(names):
+            raise ValueError("metadata.origin.evaluation must be {" + ", ".join(names) + "}")
+        if not isinstance(location["evaluation_id"], str) or not location["evaluation_id"]:
+            raise ValueError("metadata.origin.evaluation.evaluation_id must be a non-empty string")
+        try:
+            EvaluationCallSummary(**{name: location[name] for name in names[1:]})
+        except TypeError as exc:
+            raise ValueError(f"metadata.origin.evaluation is no call summary: {exc}") from exc
+        origin["evaluation"] = {name: location[name] for name in names}
+    return origin
+
+
+def record_source(metadata: Mapping[str, Any]) -> str:
+    """The source of the record item with ``metadata`` (``RECORD_SOURCES``): ``inference`` when its origin has none."""
+    return metadata["origin"].get("source", "inference")
+
+
+def record_link_scope(metadata: Mapping[str, Any]) -> str:
+    """The calls that a record item with ``metadata`` can link to (RFC #1054): those of the same scope.
+
+    The scope of a scenario's own call is its origin scenario. The scope of an evaluation call is its evaluation
+    attempt, ``<scenario>/<evaluation_id>:<task_index>:<repeat>:<attempt>``. A scenario name has no ``/``, so an
+    evaluation call never links to a scenario's own call, nor a scenario's own call to an evaluation call.
+    """
+    origin = metadata["origin"]
+    if record_source(metadata) != "evaluation":
+        return origin["scenario"]
+    location = origin["evaluation"]
+    rollout = ":".join(str(location[name]) for name in ("evaluation_id", "task_index", "repeat", "attempt"))
+    return f"{origin['scenario']}/{rollout}"
+
+
 def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     """The metadata that an item of ``owner`` is created with, from the client's ``metadata``.
 
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
-    defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
+    defaults to ``{}``. ``origin`` is required for a record (``check_record_origin``). An evaluation call, a record
+    whose origin source is ``evaluation``, has empty ``scenarios`` and the ``evaluation_id`` of its origin, and no
+    other record item has ``evaluation_id``. An artifact may have an origin, with a non-null
     ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
     when a trainer's stage made it (``check_stage_origin``). Only an artifact may have ``serving_profile``, a non-empty
     string (RFC #1233). Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
@@ -132,7 +197,12 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     if profile is not None and (kind != "artifact" or not isinstance(profile, str) or not profile):
         raise ValueError("metadata.serving_profile is a non-empty string of an artifact item")
     if kind == "record":
-        created["origin"] = check_origin(metadata.get("origin"))
+        created["origin"] = check_record_origin(metadata.get("origin"))
+        evaluation = created["origin"].get("evaluation")
+        if evaluation is not None and created["scenarios"]:
+            raise ValueError("an evaluation call is the data of no scenario, so metadata.scenarios is empty")
+        if created.get("evaluation_id") != (None if evaluation is None else evaluation["evaluation_id"]):
+            raise ValueError("metadata.evaluation_id is the evaluation of an evaluation call, and only of one")
     elif kind == "artifact" and "origin" in metadata:
         origin = check_origin(metadata["origin"])
         if origin["artifact_id"] is None:
@@ -176,10 +246,9 @@ def merge_patch(target: Any, patch: Any) -> Any:
 def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     """``metadata`` with the JSON merge patch ``patch`` applied, or ``ValueError``.
 
-    The patch may not change ``kind``, ``owner``, ``origin`` or ``serving_profile``, or an ``artifact_id`` that the
-    item has already. The patched ``scenarios`` must be valid for the
+    The patch may not change a key of ``FIXED_KEYS``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
-    that scenario's record store keeps the record. Only ``DataStore.remove_scenario`` removes that use.
+    that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.remove_scenario`` removes that use.
     """
     if not isinstance(patch, Mapping):
         raise ValueError("a metadata patch must be an object")
@@ -194,6 +263,8 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
         origin = metadata["origin"]["scenario"]
         if origin in metadata["scenarios"] and origin not in patched["scenarios"]:
             raise ValueError(f"a record item stays in {origin!r}, the scenario that made it")
+        if record_source(metadata) == "evaluation" and patched["scenarios"]:
+            raise ValueError("an evaluation call is the data of no scenario, so metadata.scenarios stays empty")
     return patched
 
 
@@ -356,17 +427,17 @@ class DataStore(Plugin, ABC):
       new when the scenario has none. A writer of the scenario's records reads it when it opens the scenario, and
       gives it to ``create``. ``create(owner, items, generation=...)`` stores record items of one origin scenario
       only while that generation is current; else it raises ``ScenarioArchived`` and stores nothing.
-    * ``prune_records(max_bytes)`` deletes the oldest record items, across owners, until the record items hold at
-      most ``max_bytes``, and returns their number. Each deleted item adds to the ``RecordLoss`` of its origin
-      scenario. A store counts the bytes that it keeps for a record item: its row and the trajectory nodes that
+    * ``prune_records(max_bytes)`` deletes the oldest record items of the source ``inference``, across owners, until
+      those items hold at most ``max_bytes``, and returns their number. Each deleted item adds to the ``RecordLoss``
+      of its origin scenario. It deletes no evaluation call and does not count its bytes. A store counts the bytes that it keeps for a record item: its row and the trajectory nodes that
       only it needs. A retry of a deleted record stores it again.
     * ``record_loss(owner, scenario)`` returns the ``RecordLoss`` of the record items of ``owner`` that
       ``scenario`` made.
     * ``task_path(item)`` returns a local directory with the files of a task item.
     * ``record_links(owner, item_ids)`` maps each ID of ``item_ids`` that names a stored record item of ``owner``
       with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
-      it, by the rule of ``reef.core.trajectory_index`` among the earlier record items of the same origin scenario,
-      and the link never changes; a deleted ancestor is skipped. Other IDs are left out.
+      it, by the rule of ``reef.core.trajectory_index`` among the earlier record items of the same link scope
+      (``record_link_scope``), and the link never changes; a deleted ancestor is skipped. Other IDs are left out.
     * ``groups(owner, kind, key, before, limit)`` groups the items of ``owner`` and ``kind`` by the string under
       ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
       when given, newest first, at most ``limit``.
@@ -712,7 +783,7 @@ class MemoryDataStore(DataStore):
 
     It keeps the items of each owner in a dict from ID to item, the use sequence of each item, scenario and split
     (``uses``), and the next sequence, which items and uses share. Task directories go to the task file store that it
-    is given. ``trajectories`` links the record items of each owner and origin scenario as
+    is given. ``trajectories`` links the record items of each owner and link scope (``record_link_scope``) as
     they are created; a deleted item stays there as a link of later calls.
     """
 
@@ -789,7 +860,7 @@ class MemoryDataStore(DataStore):
             self.write_uses(owner, item.item_id, metadata["scenarios"])
             if content is not None and metadata["kind"] == "record" and content["request_type"] == "inference":
                 scenario = metadata["origin"]["scenario"]
-                self.trajectories.setdefault((owner, scenario), TrajectoryIndex()).add(
+                self.trajectories.setdefault((owner, record_link_scope(metadata)), TrajectoryIndex()).add(
                     AgentRecord.create(
                         scenario=scenario,
                         request_type=RequestType.INFERENCE,
@@ -977,7 +1048,12 @@ class MemoryDataStore(DataStore):
 
     def prune_records(self, max_bytes: int) -> int:
         records = sorted(
-            (item for stored in self.items.values() for item in stored.values() if item.kind == "record"),
+            (
+                item
+                for stored in self.items.values()
+                for item in stored.values()
+                if item.kind == "record" and record_source(item.metadata) == "inference"
+            ),
             key=lambda item: item.sequence,
         )
         sizes = {item.sequence: len(canonical_json(item.content or {}).encode("utf-8")) for item in records}
@@ -1016,7 +1092,7 @@ class MemoryDataStore(DataStore):
             item = stored.get(item_id)
             if item is None or item.kind != "record":
                 continue
-            index = self.trajectories.get((owner, item.metadata["origin"]["scenario"]))
+            index = self.trajectories.get((owner, record_link_scope(item.metadata)))
             call = None if index is None else index.calls.get(item_id)
             if index is None or call is None:
                 continue

@@ -27,13 +27,20 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
-from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
+from reef.core.evaluation import (
+    ArtifactEvaluationRequest,
+    ArtifactEvaluationSettings,
+    EvaluationCall,
+    EvaluationCallSummary,
+    PolicyModel,
+)
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import (
+    EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
     EvaluationRollout,
     EvaluationRolloutWorker,
@@ -48,12 +55,19 @@ from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
 from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
-from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
+from reef.service.artifact_evaluations import (
+    STOPPED_ERROR,
+    ArtifactEvaluations,
+    NewArtifact,
+    NewArtifacts,
+    attempt_trajectories,
+)
 from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.work_queue import WorkItem
 from reef.train.trainer import ComponentTrainer
 
 TOKEN = "artifact-evaluation-test-token"
@@ -276,6 +290,75 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
                 ("sort", 1, 0.0),
             ]
             assert {rollout["state"] for rollout in rollouts} == {"finished"}
+            assert all(rollout["started_at"] <= rollout["ended_at"] for rollout in rollouts)
+            one_call = {"count": 1, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            assert [rollout["calls"] for rollout in rollouts] == [one_call, one_call, None, None, one_call, one_call]
+            calls_route = f"{rollouts_route}/0/1/calls"
+            # The polled routes read the calls' metadata only: every query is without content, and nothing is read.
+            store = dispatcher.data_store
+            reads: list[tuple[str, bool]] = []
+            query, read_many = store.query, store.read_many
+
+            def spied_query(*args: Any, **kwargs: Any) -> Any:
+                reads.append(("query", kwargs.get("content", True)))
+                return query(*args, **kwargs)
+
+            def spied_read_many(*args: Any, **kwargs: Any) -> Any:
+                reads.append(("read_many", kwargs.get("content", True)))
+                return read_many(*args, **kwargs)
+
+            store.query, store.read_many = spied_query, spied_read_many
+            try:
+                for route in (rollouts_route, calls_route):
+                    assert (await client.get(route, headers=AUTH)).status == 200
+            finally:
+                del store.query, store.read_many
+            assert reads and set(reads) == {("query", False)}
+            listed = await (await client.get(calls_route, headers=AUTH)).json()
+            assert (listed["task_index"], listed["repeat"]) == (0, 1)
+            [summary] = listed["calls"]
+            assert (summary["attempt"], summary["index"], summary["status"], summary["finish_reason"]) == (
+                1,
+                0,
+                200,
+                "stop",
+            )
+            assert summary["duration_s"] >= 0 and "request" not in summary
+            kept = await (await client.get(f"{calls_route}/1/0", headers=AUTH)).json()
+            assert kept["request"]["messages"] == [{"role": "user", "content": "solve add"}]
+            assert kept["response"]["choices"][0]["finish_reason"] == "stop"
+            broken = await (await client.get(f"{rollouts_route}/1/0/calls", headers=AUTH)).json()
+            assert broken["calls"] == [], "a rollout that reached no model keeps no call"
+            for route in (f"{calls_route}/1/1", "/reef/scenarios/s/evaluations/missing/rollouts/0/0/calls"):
+                assert (await client.get(route, headers=AUTH)).status == 404
+            assert (await client.get(f"{rollouts_route}/x/0/calls", headers=AUTH)).status == 400
+            drawer = await (await client.get(f"{rollouts_route}/0/1/trajectories", headers=AUTH)).json()
+            [trajectory] = drawer["trajectories"]
+            assert (drawer["task_index"], drawer["repeat"]) == (0, 1)
+            assert trajectory["extra"]["reef"]["reward"] == 1.0
+            assert trajectory["extra"]["reef"]["evaluation"]["scored"] is True
+            broken = await (await client.get(f"{rollouts_route}/1/0/trajectories", headers=AUTH)).json()
+            assert broken["trajectories"] == []
+            export_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/trajectories"
+            for query in ("", "?attempts=all"):
+                exported = await client.get(f"{export_route}{query}", headers=AUTH)
+                assert exported.headers["Content-Type"] == "application/x-ndjson"
+                lines = [json.loads(line) for line in (await exported.text()).splitlines()]
+                assert [
+                    (line["extra"]["reef"]["evaluation"]["task"], line["extra"]["reef"]["reward"]) for line in lines
+                ] == [("add", 1.0), ("add", 1.0), ("sort", 0.0), ("sort", 0.0)]
+            assert (await client.get(f"{export_route}?attempts=last", headers=AUTH)).status == 400
+            uploaded = await client.post(
+                "/reef/namespaces/s/data/trajectories",
+                headers={**AUTH, "Content-Type": "application/x-ndjson"},
+                data=await (await client.get(export_route, headers=AUTH)).read(),
+            )
+            assert uploaded.status == 201, await uploaded.text()
+            for route in (
+                "/reef/scenarios/s/evaluations/missing/trajectories",
+                "/reef/scenarios/s/evaluations/missing/rollouts/0/0/trajectories",
+            ):
+                assert (await client.get(route, headers=AUTH)).status == 404
             missing = await client.get("/reef/scenarios/s/evaluations/missing/rollouts", headers=AUTH)
             assert missing.status == 404
             listing = await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json()
@@ -285,6 +368,75 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             assert records["records"] == []
 
     asyncio.run(run())
+
+
+def chat_call(attempt: int, index: int, messages: list[dict[str, str]], reply: str, status: int = 200):
+    """A kept chat call of rollout (2, 0) that sent ``messages`` and got ``reply``, or an error when not 200."""
+    response = (
+        {"choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}]}
+        if status == 200
+        else {"error": {"message": reply}}
+    )
+    summary = EvaluationCallSummary(
+        2, 0, attempt, index, "/v1/chat/completions", status, 10.0 * attempt + index, 0.5, None, None,
+        "stop" if status == 200 else None, 0,
+    )  # fmt: skip
+    return EvaluationCall(summary, {"model": "m", "messages": messages}, response)
+
+
+@pytest.mark.unit
+def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_attempt_carries_the_reward() -> None:
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=3,
+        result={"score": 0.75},
+    )
+    first = [{"role": "user", "content": "solve add"}]
+    second = [*first, {"role": "assistant", "content": "ls"}, {"role": "user", "content": "a.txt"}]
+    calls = [
+        chat_call(1, 0, first, "ls"),
+        chat_call(2, 0, first, "the engine stopped", status=502),
+        chat_call(3, 0, first, "ls"),
+        chat_call(3, 1, first, "the engine stopped", status=502),
+        chat_call(3, 2, second, "cat a.txt"),
+    ]
+    earlier, scored = attempt_trajectories("s", "e1", item, calls)
+    assert earlier["extra"]["reef"]["reward"] is None and scored["extra"]["reef"]["reward"] == 0.75
+    assert scored["extra"]["reef"]["evaluation"] == {
+        "evaluation_id": "e1",
+        "task": "add",
+        "task_index": 2,
+        "repeat": 0,
+        "attempt": 3,
+        "scored": True,
+    }
+    # Attempt 2 has no 200 call, so it has no trajectory.
+    assert (earlier["extra"]["reef"]["evaluation"]["attempt"], earlier["extra"]["reef"]["evaluation"]["scored"]) == (
+        1,
+        False,
+    )
+    records = scored["extra"]["reef"]["records"]
+    assert [record["agent_record_id"] for record in records] == ["e1:2:0:3:0", "e1:2:0:3:2"]
+    assert records[0]["created_at"] == 30.0 and records[0]["payload"]["response"]["choices"][0]["message"]["content"]
+    # The second call repeats the first exchange, so the stitched steps hold each message once.
+    assert [step["message"] for step in scored["steps"]] == ["solve add", "ls", "a.txt", "cat a.txt"]
+    running = replace(item, state="running", ended_at=None, result=None, worker_id="w", lease_expires_at=9.0)
+    assert [
+        trajectory["extra"]["reef"]["reward"] for trajectory in attempt_trajectories("s", "e1", running, calls)
+    ] == [
+        None,
+        None,
+    ]
 
 
 class TreeCallingLab(TaskLab):
