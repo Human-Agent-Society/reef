@@ -38,7 +38,7 @@ from reef.record2sample import (
 )
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
-from reef.storage.data import NewItem
+from reef.storage.data import MAX_QUERY_LIMIT, NewItem
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -829,6 +829,30 @@ def test_a_request_names_stored_samples_of_one_kind_that_the_trainer_can_train()
     assert [stored.sample_id for stored, _ in processor.request_entries(training_request("upload", "gone"))] == [
         "upload"
     ]
+
+
+@pytest.mark.unit
+def test_a_request_reads_its_samples_in_batches_and_a_poll_does_not_read_them_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = PipelineContext("s", training_mode="manual")
+    processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
+    names = [f"upload-{index}" for index in range(MAX_QUERY_LIMIT + 1)]
+    upload(processor.store.store, *names)
+    data = processor.store.store.data
+    read_many, reads = data.read_many, []
+
+    def counted(owner: str, item_ids: Any, **options: Any) -> Any:
+        reads.append(len(item_ids))
+        return read_many(owner, item_ids, **options)
+
+    monkeypatch.setattr(data, "read_many", counted)
+    request = training_request(*names)
+    processor.check_request(request)
+    assert reads == [MAX_QUERY_LIMIT, 1]
+    processor.queue_requests([request])
+    assert processor.holds_job_data(None) and processor.holds_job_data(None)
+    assert reads == [MAX_QUERY_LIMIT, 1] * 2, "the pipeline decides once whether it takes a queued request"
 
 
 class TaskJobData(RecordingJobData):
