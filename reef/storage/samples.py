@@ -19,6 +19,7 @@ import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import batched
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -210,16 +211,23 @@ class SampleStore:
         return origin if isinstance(origin, Mapping) and origin.get("scenario") == self.scenario else None
 
     def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
-        """The samples of ``sample_ids`` that the scenario uses, in the order of their items."""
+        """The samples of ``sample_ids`` that the scenario uses, in the order of their items. The store reads them
+        ``MAX_QUERY_LIMIT`` at a time: a request can name tens of thousands of samples, and one read for each would
+        hold the trainer's lock for minutes."""
         items = sorted(
             (
                 item
-                for item_id in dict.fromkeys(sample_ids)
-                if (item := self.data.read(self.owner, item_id)) is not None and self.scenario in item.scenarios
+                for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
+                for item in self.data.read_many(self.owner, batch)
+                if self.scenario in item.scenarios
             ),
             key=lambda item: item.sequence,
         )
-        return self.stored([(item.sequence, item) for item in items])
+        return tuple(
+            stored
+            for batch in batched(items, MAX_QUERY_LIMIT)
+            for stored in self.stored([(item.sequence, item) for item in batch])
+        )
 
     def stored(self, uses: Sequence[tuple[int, StoredItem]]) -> tuple[StoredSample, ...]:
         """The samples of the uses ``uses`` that are trajectories or tasks, with their train counts."""
