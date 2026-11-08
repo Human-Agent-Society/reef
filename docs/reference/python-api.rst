@@ -2016,8 +2016,8 @@ Neither inherits from the other, and no trainer holds a serving engine.
 ``Scenario.served_artifact_id()`` reads the published route when a dispatcher
 owns the scenario. Training staleness checks use this served identity.
 Automatic weight training waits while the selected artifact has no matching
-served route. Deployments without inference keep their existing training
-behavior.
+served route. Manual training does not wait, since a request names its samples.
+Deployments without inference keep their existing training behavior.
 Startup status is available through the inference service's
 ``GET /reef/scenarios/{scenario}/inference/status`` route.
 
