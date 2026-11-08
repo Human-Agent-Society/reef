@@ -165,6 +165,8 @@ class TinkerSDKClient(TinkerClient):
     _service: Any
     #: The frozen base model's sampling client, made at the first KL term.
     base_client: Any | None
+    #: The context window of each model that the service serves, read at the first need.
+    context_windows: dict[str, int]
 
     def __init__(
         self,
@@ -185,6 +187,7 @@ class TinkerSDKClient(TinkerClient):
         # On a service such as Spindle, a sampling client starts a sampler pool, so the frozen base's client is
         # made at the first KL term. Sampling for requests is the inference runtime's.
         self.base_client = None
+        self.context_windows = {}
 
     def _new_service(self) -> Any:
         # The SDK takes no client-wide timeout: each call is bounded with .result(timeout=train_timeout_s).
@@ -342,7 +345,9 @@ class TinkerSDKClient(TinkerClient):
         return result
 
     def context_window(self) -> int | None:
-        return served_context_windows(self._service).get(self._model)
+        if not self.context_windows:
+            self.context_windows = served_context_windows(self._service)
+        return self.context_windows.get(self._model)
 
     def chat_template(self, template_kwargs: Mapping[str, Any]) -> ChatTemplate:
         if self.base_client is None:

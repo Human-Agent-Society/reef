@@ -175,6 +175,7 @@ def client(tmp_path):
     value._api_key = "test-only"
     value._service = Service(value._sdk.events)
     value.base_client = Sampler(value._sdk.events)
+    value.context_windows = {}
     return value
 
 
@@ -583,8 +584,11 @@ def test_the_sdk_sampler_reads_the_models_context_window_once(sampler):
 
 
 @pytest.mark.unit
-def test_the_sdk_client_reads_the_models_context_window_from_its_service(client):
+def test_the_sdk_client_reads_the_models_context_window_from_its_service_once(client):
+    # Each job asks for the window, and the service answers only the first time.
     assert client.context_window() == 40960
+    assert client.context_window() == 40960
+    assert [event for event in client._service.events if event[0] == "capabilities"] == [("capabilities",)]
     client._model = "Qwen/Qwen3-30B"
     assert client.context_window() is None, "a model that the service states no window for has none"
 
