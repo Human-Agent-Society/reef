@@ -61,6 +61,7 @@ from reef.recipe.generated_tasks.results import (
     checked_advantages,
     delivered_generations,
     designer_replies,
+    has_designer_replies,
     mark_delivered,
     rollout_results,
     save_designer_replies,
@@ -414,7 +415,8 @@ class GenerationOutcome(SupportsReceipt):
     ``error`` is empty or names a delivery to the generator that failed. An
     incomplete generation ran out of attempts: it holds no task, and ``error`` names the last failure.
     ``undelivered`` holds the generations whose delivery failed in the job's last delivery, in increasing order.
-    ``designer`` counts the Designer replies that the job's deliveries saved.
+    ``designer`` counts the Designer replies that the job's deliveries saved, and ``saved_record_ids`` names their
+    held records, as in ``DeliveryOutcome``.
     Purpose: the worker hands it back from ``run``; ``GeneratedTaskSamples.finished_rounds`` turns it into a
     ``RoundResult``.
     """
@@ -425,6 +427,7 @@ class GenerationOutcome(SupportsReceipt):
     error: str
     undelivered: tuple[int, ...] = ()
     designer: DesignerSampleCounts = DesignerSampleCounts()
+    saved_record_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.is_complete and (self.tasks or not self.error):
@@ -450,15 +453,17 @@ class DeliveryOutcome(SupportsReceipt):
     Values: ``receipt`` is ``DELIVERY_RECEIPT``. ``error`` is the error of the last generation whose delivery
     failed, or empty when every deliverable generation reached the generator. ``undelivered`` holds the
     generations whose delivery failed, in increasing order; it is empty when ``error`` is empty. ``designer`` counts
-    the Designer replies that the delivery saved.
+    the Designer replies that the delivery saved. ``saved_record_ids`` names the held records of the replies that
+    the delivery saved, with or without a delayed sample: the task store keeps what trains of them.
     Purpose: the worker hands it back; ``GeneratedTaskSamples.finished_rounds`` reads ``error`` into its status,
-    ``undelivered`` into the rounds whose tasks stop waiting for Designer replies, and ``designer`` into its
-    operational metrics.
+    ``undelivered`` into the rounds whose tasks stop waiting for Designer replies, ``designer`` into its
+    operational metrics, and ``saved_record_ids`` into the records that it releases.
     """
 
     error: str
     undelivered: tuple[int, ...] = ()
     designer: DesignerSampleCounts = DesignerSampleCounts()
+    saved_record_ids: frozenset[str] = frozenset()
 
 
 def source_tag_of(setting: str) -> tuple[str, str] | None:
@@ -674,6 +679,7 @@ class GenerationRunner(BackgroundJobRunner):
                 error=generation.error or last_delivery.error or delivery.error,
                 undelivered=last_delivery.undelivered,
                 designer=delivery.designer + last_delivery.designer,
+                saved_record_ids=delivery.saved_record_ids | last_delivery.saved_record_ids,
             )
         raise TypeError(f"the round worker takes GenerationJob or DeliveryJob, not {type(job).__name__}")
 
@@ -792,7 +798,7 @@ class GenerationRunner(BackgroundJobRunner):
         A failed generation waits for the next job, and later generations still go out. With ``designer_delay``
         above 0, a generation that the generator took gets its Designer replies saved before its delivery marker
         (``save_designer_replies``), with delayed samples made of ``designer_records``. The outcome names the error
-        of the last failure, the generations that the generator did not take, and the replies saved.
+        of the last failure, the generations that the generator did not take, the replies saved and their records.
         """
         if self.task_generator is None or self.task_store is None:
             raise RuntimeError("delivering results needs a task generator and a task store")
@@ -800,15 +806,17 @@ class GenerationRunner(BackgroundJobRunner):
         error = ""
         undelivered: list[int] = []
         designer = DesignerSampleCounts()
+        saved_record_ids: set[str] = set()
         for state in deliverable_generations(self.task_store):
             try:
                 await self.task_generator.record_results(
                     task_results(self.task_store, state), generation=state.generation
                 )
                 if self.designer_delay > 0:
-                    designer_error, saved = self.save_designer_replies(state.generation, held)
+                    designer_error, counts, record_ids = self.save_designer_replies(state.generation, held)
                     error = designer_error or error
-                    designer += saved
+                    designer += counts
+                    saved_record_ids |= record_ids
             except Exception as exc:
                 logger.exception("the task generator did not take the results of generation %d", state.generation)
                 error = str(exc) or type(exc).__name__
@@ -816,25 +824,29 @@ class GenerationRunner(BackgroundJobRunner):
                 continue
             mark_delivered(self.task_store, state.generation)
         return DeliveryOutcome(
-            receipt=DELIVERY_RECEIPT, error=error, undelivered=tuple(undelivered), designer=designer
+            receipt=DELIVERY_RECEIPT,
+            error=error,
+            undelivered=tuple(undelivered),
+            designer=designer,
+            saved_record_ids=frozenset(saved_record_ids),
         )
 
     def save_designer_replies(
         self, generation: int, held: Mapping[str, AgentRecord]
-    ) -> tuple[str, DesignerSampleCounts]:
+    ) -> tuple[str, DesignerSampleCounts, frozenset[str]]:
         """Save ``designer(generation)`` unless the store has it: the advantages that the generator gives the
         generation's Designer replies, and the delayed sample of each reply, made of its record in ``held``.
 
         A generator that fails to give the advantages, or gives a value that is not a finite number by a record ID,
         trains no reply of the generation: the saved advantages are empty, and the result names the error. A reply
         whose record ``held`` lacks, or whose record holds no exact sample, gets no delayed sample and does not train;
-        the counts of the result name both. A store that fails to save the replies raises, so the delivery fails and
-        runs again later.
+        the counts of the result name both. The result also names the records of ``held`` whose replies it saved. A
+        store that fails to save the replies raises, so the delivery fails and runs again later.
         """
         if self.task_generator is None or self.task_store is None:
             raise RuntimeError("Designer replies need a task generator and a task store")
-        if designer_replies(self.task_store, generation) is not None:
-            return "", DesignerSampleCounts()
+        if has_designer_replies(self.task_store, generation):
+            return "", DesignerSampleCounts(), frozenset()
         # The generator is a deployment's plugin: whatever it raises leaves the generation's replies untrained.
         try:
             advantages = checked_advantages(self.task_generator.designer_advantages(generation))
@@ -865,7 +877,8 @@ class GenerationRunner(BackgroundJobRunner):
                 uncaptured,
                 missing,
             )
-        return error, DesignerSampleCounts(len(samples), uncaptured, missing)
+        saved_record_ids = frozenset(record_id for record_id in advantages if record_id in held)
+        return error, DesignerSampleCounts(len(samples), uncaptured, missing), saved_record_ids
 
 
 class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
@@ -913,7 +926,9 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     ``designer(g)`` of :mod:`reef.recipe.generated_tasks.results`: the generator's advantages of g's Designer
     replies, and the delayed sample of each reply, made of the record that the stage holds. The stage holds the
     records that can hold a Designer reply of g's train tasks (``held_designer_record_ids``) from the publication of
-    g's train tasks until g is delivered, so a restart before that delivery reads them again. A job's deliveries
+    g's train tasks until g is delivered, so a restart before that delivery reads them again. Then the record of each
+    saved reply ends, whether or not a report owns it, unless a live report or a round still needs it
+    (``saved_designer_records``). A job's deliveries
     get the held records (``designer_records``); after a job's end, the delivery waits for the next ``advance``,
     which comes after the samples service read the records. Let the carrier round of g be the first complete
     generation at or after g + d that published a train task (``carrier_round``). The stage hands the tasks of a
@@ -1008,6 +1023,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         self.deliveries_in_flight = 0
         #: The Designer replies that deliveries saved since this start, and the records that they skipped.
         self.designer_counts = DesignerSampleCounts()
+        #: The read records of the Designer replies that deliveries saved and that the stage has not released.
+        self.saved_designer_records: set[str] = set()
         store = self.task_store
         self.next_round = next_generation(store) if store is not None else 0
         self.completed_rounds = complete_generation_count(store) if store is not None else 0
@@ -1125,7 +1142,14 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         }
         if self.running_round is not None:
             held |= self.running_round.record_ids()
-        return super().releasable_record_ids() - held - self.held_designer_record_ids()
+        held |= self.held_designer_record_ids()
+        # The task store keeps the saved replies, so their records end, even those that no report owns.
+        saved = self.saved_designer_records - self.live_references() - held
+        return (super().releasable_record_ids() - held) | saved
+
+    def release_records(self, agent_record_ids: frozenset[str]) -> None:
+        super().release_records(agent_record_ids)
+        self.saved_designer_records -= agent_record_ids
 
     def background_jobs_running(self) -> bool:
         """Return True while a round runs: its end can start the next round without a new record. With
@@ -1266,6 +1290,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                     self.last_error = outcome.error
                     self.undelivered.update(outcome.undelivered)
                     self.designer_counts += outcome.designer
+                    self.saved_designer_records.update(self.inferences.keys() & outcome.saved_record_ids)
                 else:
                     self.last_error = "the delivery did not finish"
                     if self.designer_delay > 0 and self.task_store is not None:
@@ -1292,6 +1317,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             self.unfinished.update(task.metadata["task"]["name"] for task in outcome.tasks)
             self.undelivered.update(outcome.undelivered)
             self.designer_counts += outcome.designer
+            self.saved_designer_records.update(self.inferences.keys() & outcome.saved_record_ids)
         # A delivery saves Designer replies, and a generation publishes train tasks: both change which tasks wait.
         if outcomes and self.designer_delay > 0:
             self.refresh_designer_state()
@@ -1482,9 +1508,20 @@ class GeneratedTaskJobData(Sample2Job):
         if not rounds:
             return ()
         train_rounds = train_rounds_of(self.task_store)
+        carrying = [
+            (round_number, generations)
+            for round_number in sorted(rounds)
+            if (generations := carried_generations(round_number, train_rounds, self.designer_delay))
+        ]
+        if not carrying:
+            return ()
+        # The train counts page every task of the scenario, so only a round that carries replies reads them.
+        trained = trained_rounds(self.samples)
         carried: list[DelayedSample] = []
-        for round_number in sorted(rounds - trained_rounds(self.samples)):
-            for generation in carried_generations(round_number, train_rounds, self.designer_delay):
+        for round_number, generations in carrying:
+            if round_number in trained:
+                continue
+            for generation in generations:
                 replies = designer_replies(self.task_store, generation)
                 if replies is not None:
                     carried.extend(replies.samples)

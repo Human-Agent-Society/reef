@@ -1377,6 +1377,29 @@ def test_a_round_waits_for_the_designer_replies_it_carries_and_its_first_job_tra
     assert stage.operational_metrics()["saved_designer_samples"] == 2
 
 
+@pytest.mark.unit
+def test_the_records_of_saved_replies_that_no_report_owns_end_once_their_generation_is_delivered(
+    tmp_path: Path,
+) -> None:
+    advantages = {0: {"designer-0-0": 1.0, "designer-0-1": -1.0}}
+    task_generator = DesignerGenerator([designer_tasks(0, 0, 1), designer_tasks(1, 0)], advantages)
+    p, _ = rounds(tmp_path, task_generator, rounds=2, designer_delay=1)
+    # No report owns the replies, as with SPADE's designer_report false; the second kept no sample.
+    p.push(designer_call("designer-0-0"))
+    p.push(designer_call("designer-0-1", is_captured=False))
+    looked(p)
+    stage = stage_of(p)
+    replies = {"designer-0-0", "designer-0-1"}
+    assert not replies & stage.releasable_record_ids(), "generation 0 is not delivered, so the stage holds them"
+    assert train_job(p) == ["harbor-00000-000", "harbor-00000-001"]
+    looked(p)
+    assert stage.task_store is not None and designer_replies(stage.task_store, 0) is not None
+    assert replies <= stage.releasable_record_ids(), "the task store keeps what trains of the replies"
+    stage.release_records(frozenset(replies))
+    assert not replies & stage.inferences.keys() and not replies & stage.releasable_record_ids()
+    assert carried(p.build_job_data(BATCH_SIZE)) == [("designer-0-0", 1.0)]
+
+
 def test_control_reads_the_carried_replies_from_the_task_store_without_the_records(tmp_path: Path) -> None:
     task_generator = DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], {0: {"designer-0-0": 2.0}})
     p, _ = rounds(tmp_path, task_generator, rounds=2, designer_delay=1)

@@ -184,6 +184,11 @@ def designer_replies(store: TaskStore, generation: int) -> DesignerReplies | Non
     return None if document is None else DesignerReplies.from_document(document)
 
 
+def has_designer_replies(store: TaskStore, generation: int) -> bool:
+    """Whether the store has ``designer(generation)``; the check does not parse the document."""
+    return store.document(f"{DESIGNER_KEY_PREFIX}{generation}") is not None
+
+
 def save_designer_replies(store: TaskStore, generation: int, replies: DesignerReplies) -> None:
     """Set ``designer(generation) = replies``. Raises ``TaskStoreError`` if the generation has other replies."""
     store.write_document(key=f"{DESIGNER_KEY_PREFIX}{generation}", document=replies.document())
