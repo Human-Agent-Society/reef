@@ -7,22 +7,32 @@ record-to-sample contracts, not one of them.
 
 from reef.record2sample.service.worker import (
     BACKGROUND_POLL_SECONDS,
+    MAX_BACKGROUND_POLL_SECONDS,
     RECORD_SELECTION_KIND,
     SAMPLES_QUEUE,
+    TRIGGERS,
     ProducedSamples,
     SampleProducers,
+    SampleProgress,
     SamplesWorker,
+    background_poll_seconds,
     request_selection,
     selection_key,
+    selection_triggers,
 )
 
 __all__ = [
     "BACKGROUND_POLL_SECONDS",
+    "MAX_BACKGROUND_POLL_SECONDS",
     "RECORD_SELECTION_KIND",
     "SAMPLES_QUEUE",
+    "TRIGGERS",
     "ProducedSamples",
     "SampleProducers",
+    "SampleProgress",
     "SamplesWorker",
+    "background_poll_seconds",
     "request_selection",
     "selection_key",
+    "selection_triggers",
 ]
