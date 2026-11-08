@@ -224,3 +224,27 @@ def test_sample_processing_reads_the_log_of_each_attempt_of_a_task(tmp_path):
         asyncio.run(run())
     finally:
         dispatcher.close()
+
+
+def test_sample_processing_counts_the_records_after_the_last_one_that_each_trainer_read(tmp_path):
+    from reef.record2sample.service import SAMPLES_QUEUE
+    from reef.service.sample_processing import list_processing
+    from reef.storage.work_queue import NewWork
+
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    queue = dispatcher.queue
+    try:
+        dispatcher.get_or_create_scenario("s")
+        with dispatcher.locked_scenario("s") as current:
+            components = [component.component for component in current.trainers if component.trainer.trains]
+            records = current.store.records
+        assert list_processing(dispatcher, "s")["records_waiting"] is None, "no task says what a trainer read"
+        for number, component in enumerate(components):
+            # An unknown work kind, so no samples worker takes the task.
+            queue.add(NewWork(SAMPLES_QUEUE, f"read-{number}", "s", "inspection", {"component": component}))
+            assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == f"read-{number}"
+            queue.finish(SAMPLES_QUEUE, f"read-{number}", "w", {"changed": True, "record_sequences": [1, 1]})
+        expected = records.count("s", after_sequence=1) if components else None
+        assert list_processing(dispatcher, "s")["records_waiting"] == expected
+    finally:
+        dispatcher.close()
