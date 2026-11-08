@@ -302,6 +302,12 @@ class SourceError(ValueError):
     is not there. A data error, not an outage."""
 
 
+class ModelRefused(ValueError):
+    """The model provider refused the content of one Designer run: its safeguards flagged the session, the parent or
+    the agent's own work. The proposal's failure, not an outage: a run on the same inputs meets the same refusal, so
+    the generator does not try them again."""
+
+
 VariantDirection = Literal["harder", "simpler"]
 """The direction of a variant: harder adds requirements; simpler reduces their scope."""
 
@@ -383,7 +389,7 @@ class TaskDesigner(ABC):
     """An implementation that rebuilds any valid SessionSource as one DesignedTask.
 
     ``design`` reads a session and writes run files to a new work directory. It returns
-    the task reply and ordered model receipts, or raises SourceError or DesignerOutage.
+    the task reply and ordered model receipts, or raises SourceError, ModelRefused or DesignerOutage.
     Implementations may use CandidateChecks; tags label model calls and stop requests cancellation.
     """
 
@@ -397,7 +403,8 @@ class TaskDesigner(ABC):
         tags: Mapping[str, str],
         stop: threading.Event,
     ) -> DesignedTask:
-        """Rebuild source; raise SourceError for an unusable source or DesignerOutage for an outage."""
+        """Rebuild source; raise SourceError for an unusable source, ModelRefused when the model provider refuses the
+        run's content, or DesignerOutage for an outage."""
 
 
 class VariantDesigner(TaskDesigner):

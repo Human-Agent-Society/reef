@@ -24,7 +24,10 @@ from pathlib import Path
 
 import pytest
 from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+    NAMES,
+    REQUEST,
     NoChecks,
+    StandInDesigner,
     autoenvscaling,
     generating_config,
     report,
@@ -49,6 +52,7 @@ from recipes.beta.autoenvscaling.designer import (
     CandidateChecks,
     DesignedTask,
     DesignerOutage,
+    ModelRefused,
     TaskVariant,
     VariantDesigner,
 )
@@ -70,6 +74,14 @@ from reef.recipe.generated_tasks.processor import split_source_ids
 
 TOKEN = "sk-ant-oat01-reef-test-token-7f3a91"
 SESSION_ID = "0b6f2c1e-5d4a-4e8b-9c3f-2a1d7e6b5c40"
+# Claude Code's result text when the model provider refused the run's last model call.
+SAFEGUARDS_TEXT = (
+    "API Error: Opus 4.8's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver "
+    "more capabilities faster, but can sometimes flag legitimate cybersecurity work. Apply to the Cyber Verification "
+    "Program to reduce these interruptions. Learn more: "
+    "https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\n"
+    "Details: `[cyber]`\n\nRequest ID: req_011Cgr2aqWqyhnxgsFFCWiR8"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -563,6 +575,118 @@ def test_max_turns_keeps_workspace_and_model_error_is_outage(
     else:
         assert "port.txt" in designed_in(tmp_path, reef_url, session).reply
     assert session.is_closed.is_set()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        result_json(is_error=True, result=SAFEGUARDS_TEXT),
+        result_json(is_error=True, stop_reason="refusal", result="API Error: Claude can't help with this."),
+    ],
+    ids=("safeguards-text", "refusal-stop-reason"),
+)
+def test_a_run_that_the_model_provider_refused_is_a_refusal_and_not_an_outage(
+    tmp_path: Path, reef_url: str, stdout: str
+) -> None:
+    session = ScriptedClaudeSession(stdout=stdout, exit_code=1)
+    with pytest.raises(ModelRefused, match="the model provider refused Claude Code's run: API Error: ") as raised:
+        designed_in(tmp_path, reef_url, session)
+    assert not isinstance(raised.value, DesignerOutage)
+    assert session.is_closed.is_set()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"result": "Claude AI usage limit reached|1762700000"},
+        {"api_error_status": 429, "result": "API Error: 429 rate_limit_error"},
+        {"result": "Invalid API key. Please run /login"},
+        {"api_error_status": 401, "result": "API Error: 401 OAuth token has expired"},
+        # Only Claude Code's error text starts with the refusal; the same words later in a text are no refusal.
+        {"result": f"Claude AI usage limit reached. {SAFEGUARDS_TEXT}"},
+    ],
+    ids=("usage-limit", "rate-limit", "login", "expired-token", "refusal-words-later"),
+)
+def test_a_spent_plan_or_a_lost_sign_in_stays_an_outage(
+    tmp_path: Path, reef_url: str, fields: dict[str, object]
+) -> None:
+    session = ScriptedClaudeSession(stdout=result_json("success", True, stop_reason="stop_sequence", **fields))
+    with pytest.raises(DesignerOutage, match=r"Claude Code's run ended with an error \(success\)"):
+        designed_in(tmp_path, reef_url, session)
+
+
+@pytest.mark.unit
+def test_a_refused_run_whose_task_holds_the_token_ends_as_a_held_token(tmp_path: Path, reef_url: str) -> None:
+    session = ScriptedClaudeSession(stdout=result_json(is_error=True, result=SAFEGUARDS_TEXT), task_leak=TOKEN)
+    with pytest.raises(CredentialHeld, match="held the run's Claude Code token"):
+        designed_in(tmp_path, reef_url, session)
+    assert not files_holding(tmp_path / "run", TOKEN)
+
+
+class VariantFailingSession(ScriptedClaudeSession):
+    """A sandbox whose Claude Code prints ``variant_stdout`` for a variant's run, and writes a session's task."""
+
+    def __init__(self, variant_stdout: str) -> None:
+        super().__init__()
+        self.variant_stdout = variant_stdout
+
+    def launch(
+        self,
+        argv: Sequence[str],
+        *,
+        root: Path,
+        workspace: Path,
+        env: Mapping[str, str],
+        timeout: float,
+        writable_paths: Sequence[Path] = (),
+        readonly_paths: Sequence[Path] = (),
+    ) -> ProcessOutcome:
+        outcome = super().launch(
+            argv,
+            root=root,
+            workspace=workspace,
+            env=env,
+            timeout=timeout,
+            writable_paths=writable_paths,
+            readonly_paths=readonly_paths,
+        )
+        return outcome if argv[2] == AGENT_PROMPT else ProcessOutcome(1, self.variant_stdout, "")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("variant_stdout", "is_refused"),
+    [
+        (result_json(is_error=True, stop_reason="refusal", result=SAFEGUARDS_TEXT), True),
+        (result_json(is_error=True, stop_reason="stop_sequence", result="Invalid API key. Please run /login"), False),
+    ],
+    ids=("refusal", "login"),
+)
+def test_a_refused_variant_takes_its_parents_slot_and_a_lost_sign_in_leaves_it(
+    tmp_path: Path, reef_url: str, variant_stdout: str, is_refused: bool
+) -> None:
+    first = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True, variant_share=0.5)
+    asyncio.run(first.record_results(run_tasks(first, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    designer = claude_code(tmp_path, reef_url, VariantFailingSession(variant_stdout))
+    generator = autoenvscaling(tmp_path, designer, count=2, is_adaptive=True, variant_share=0.5)
+    if is_refused:
+        [task] = asyncio.run(generator.generate(REQUEST))
+        assert "parent_task" not in task.metadata, "the generation goes on to the session's slot"
+    else:
+        with pytest.raises(DesignerOutage, match="Please run /login"):
+            asyncio.run(generator.generate(REQUEST))
+    [variant] = json.loads(generator.open_path(REQUEST.generation).read_text())["refused"]
+    assert (variant["parent_task"], variant["stage"]) == (NAMES[0], "authoring" if is_refused else "outage")
+    assert ("safeguards flagged this message" in variant["refusal"]) is is_refused
+    [parent] = json.loads((tmp_path / "state" / "adaptive.json").read_text())
+    assert parent["varied"] is is_refused
+    stand_in = StandInDesigner()
+    again = autoenvscaling(tmp_path, stand_in, count=2, is_adaptive=True, variant_share=0.5)
+    asyncio.run(again.generate(REQUEST))
+    varied = [call["variant"].parent for call in stand_in.calls if call["variant"] is not None]
+    assert varied == ([] if is_refused else [NAMES[0]]), "the next generation varies only a parent an outage left"
 
 
 @pytest.mark.unit

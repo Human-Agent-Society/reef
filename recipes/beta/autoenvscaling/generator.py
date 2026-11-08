@@ -71,6 +71,7 @@ from recipes.beta.autoenvscaling.designer import (
     AgentDesigner,
     CandidateChecks,
     DesignerOutage,
+    ModelRefused,
     PromptDesigner,
     SeedVariantDesigner,
     SourceError,
@@ -200,7 +201,8 @@ CURSOR_FILE = "cursor.json"
 OPEN_PREFIX = "open-"
 # Where a session that became no task in the band stopped; a task inside the band has no stage.
 STAGE_SOURCE = "source"  # the source holds no session, or its repository or base commit is not there
-STAGE_AUTHORING = "authoring"  # the Designer made no recorded call, or admission refused its task
+# The Designer made no recorded call, the model provider refused its run, or admission refused its task.
+STAGE_AUTHORING = "authoring"
 STAGE_OUTAGE = "outage"  # the Designer could not run; the generation ends here
 STAGE_CREDENTIAL = "credential"  # the Designer's task held its Claude Code token; the generation ends here
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
@@ -1371,7 +1373,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         names the seed in ``seed_task``, as each variant of a seeded parent does.
 
         Raises ``ValueError`` for a None ``source`` without a ``variant`` and a ``source_record_id``,
-        :class:`ProposalRefused` when the session becomes no task, and ``DesignerOutage`` when the Designer could not run.
+        :class:`ProposalRefused` when the session becomes no task, also when the model provider refused the Designer's
+        run (stage ``authoring``), and ``DesignerOutage`` when the Designer could not run.
         """
         if source is None and (variant is None or not source_record_id):
             raise ValueError("a task without a session is a variant of a seeded parent, with the seed's id")
@@ -1413,6 +1416,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise
         except SourceError as exc:
             raise ProposalRefused(f"the source {record_source} cannot be rebuilt: {exc}", stage=STAGE_SOURCE) from exc
+        except ModelRefused as exc:
+            raise ProposalRefused(str(exc), stage=STAGE_AUTHORING) from exc
         finally:
             # A check the agent left running finishes, and deletes its candidate, before the task is written.
             await asyncio.to_thread(checks.close)

@@ -11,6 +11,9 @@ The Designer supplies the token through the existing executor environment. The s
 values in bubblewrap's command arguments. Claude Code removes the token from its Bash, hook and MCP subprocesses
 (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The Designer redacts its log and error messages and the retained run files.
 It refuses a check of a task that holds the token and admits no such task (:class:`CredentialHeld`).
+
+A run that ends on the model provider's refusal of its content is that proposal's failure (:class:`ModelRefused`);
+every other error of Claude Code's but its turn limit is an outage (:class:`DesignerOutage`).
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from recipes.beta.autoenvscaling.designer import (
     CandidateChecks,
     DesignedTask,
     DesignerOutage,
+    ModelRefused,
     SeedVariantDesigner,
     TaskVariant,
     agent_prompt,
@@ -85,6 +89,11 @@ RUN_VARIABLES = frozenset(
 ERROR_TEXT_CHARS = 500
 #: A Claude Code session id names its transcript file.
 SESSION_ID = re.compile(r"[0-9A-Za-z-]+")
+#: The result's ``stop_reason`` when the model provider refused the content of the run's last model call.
+REFUSAL_STOP_REASON = "refusal"
+#: The start of the error text Claude Code gives that refusal, as in "API Error: Opus 4.8's safeguards flagged this
+#: message. ...".
+REFUSAL_TEXT = re.compile(r"API Error: [^\n]*'s safeguards flagged this message")
 # Appended to the agent's rules: task_check is a command here, not a tool.
 CLAUDE_CHECK_TEXT = """
 HOW TO CHECK:
@@ -122,6 +131,13 @@ def claude_result(stdout: str) -> dict[str, object] | None:
         if isinstance(value, dict) and value.get("type") == "result":
             return value
     return None
+
+
+def is_refusal(result: Mapping[str, object], text: str) -> bool:
+    """Whether Claude Code's error ``result``, whose text is ``text``, ended on the model provider's refusal of the
+    run's content: the stop reason :data:`REFUSAL_STOP_REASON`, or the error text :data:`REFUSAL_TEXT` that Claude
+    Code gives that refusal. A spent plan, a lost sign-in or a failed call is no refusal."""
+    return result.get("stop_reason") == REFUSAL_STOP_REASON or REFUSAL_TEXT.match(text) is not None
 
 
 def transcript_path(work_dir: Path, session_id: str) -> str:
@@ -221,11 +237,14 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         variant of a seeded parent, written from the parent alone. ``tags`` go unused, since Reef records none of its
         model calls.
 
-        Raises :class:`CredentialHeld` when the task holds the token: the task is not admitted.
+        Raises :class:`CredentialHeld` when the task holds the token, also after a refused run: the task is not
+        admitted.
         """
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
         write_inputs(self.reef, source, work_dir, variant)
+        refusal: ModelRefused | None = None
+        transcript = ""
         try:
             if source is not None:
                 shutil.copytree(repository_snapshot(source, self.cache_dir), inputs / "repo", symlinks=True)
@@ -242,12 +261,17 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
                     prompt=agent_prompt(variant, source is None),
                     is_seeded=source is None,
                 )
+            except ModelRefused as exc:
+                # A held token ends the generation and a refusal does not, so the token check comes first.
+                refusal = exc
             finally:
                 gateway.stop()
         finally:
             is_held = clean_run(work_dir, self.claude_token)
         if is_held:
             raise CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
+        if refusal is not None:
+            raise refusal
         # The transcript's path names the file as renamed.
         transcript = scrubbed(transcript, self.claude_token)
         return DesignedTask(reply=workspace_reply(task_dir), record_ids=(), transcript=transcript)
@@ -268,9 +292,10 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         Designer's rules are the seed rules (:func:`agent_rules`): the inputs hold no session. Answers the path of its
         transcript, relative to ``work_dir``, or ``""``.
 
-        Raises :class:`DesignerOutage` when the run could not start or was stopped, and when Claude Code ended with an
-        error other than its turn limit: an outage (a spent plan, a lost sign-in) must not pass for the agent's
-        failure. Every message is redacted.
+        Raises :class:`ModelRefused` when Claude Code ended on the model provider's refusal of the run's content
+        (:func:`is_refusal`): a run on the same inputs meets the same refusal. Raises :class:`DesignerOutage` when the
+        run could not start or was stopped, and when Claude Code ended with any other error but its turn limit: an
+        outage (a spent plan, a lost sign-in) must not pass for the agent's failure. Every message is redacted.
         """
         if stop.is_set():
             raise DesignerOutage("the agent's run was stopped before it started")
@@ -386,5 +411,7 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
             or is_api_error
         ):
             cut = scrubbed(text, self.claude_token)[:ERROR_TEXT_CHARS]
+            if is_refusal(result, text):
+                raise ModelRefused(f"the model provider refused Claude Code's run: {cut}")
             raise DesignerOutage(f"Claude Code's run ended with an error ({subtype}): {cut}")
         return transcript
