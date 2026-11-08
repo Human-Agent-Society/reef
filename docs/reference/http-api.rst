@@ -146,6 +146,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}``                                                        | one sample processing task of the scenario        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs``                                                   | the log of one attempt of a task                  |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/next-job``                                                                           | the samples that the next automatic job trains    |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations``                                                                       | evaluate one artifact of a snapshot               |
@@ -2962,6 +2964,25 @@ A task from an older Reef has no triggers.
 ``started_at`` is the first attempt's start. ``error`` can describe a queued task's previous failed attempt.
 
 Processing counts describe the completed attempt only; they exclude earlier failed attempts.
+
+``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs`` returns the log of one attempt of a task.
+The samples worker keeps each line that its thread logs while the attempt runs.
+It writes them every 2 seconds and when the attempt ends.
+Lines from other threads, such as a stage's background jobs, are not kept.
+One attempt keeps at most 2,000 lines of at most 4,096 characters.
+The line after the last one says that the log was cut.
+
+Optional query parameters are ``attempt``, ``after`` and ``limit``.
+``attempt`` is 1 to the task's ``attempt_count``, with default the last attempt.
+``after`` is -1 or more, with default -1. The page holds lines with a larger number.
+``limit`` is 1 to 1000, with default 500.
+
+The response includes ``task_id``, ``attempt``, ``attempt_count``, ``running``, ``lines`` and ``next``.
+``attempt`` is null for a task that no worker took.
+``running`` is true while the chosen attempt runs, so more lines can come.
+Each line has ``number``, ``at``, ``level``, ``logger`` and ``message``.
+``next`` is the next page's ``after`` value, or null at the end of the lines kept so far.
+The log goes with its task when the retention deletes the task.
 ``records_read`` includes records that replay read but the pipeline ignored.
 ``samples_created`` counts new inserts, excluding duplicate writes.
 Legacy results report null counts.
