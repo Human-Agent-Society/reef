@@ -1269,6 +1269,9 @@ downgrade without restoring a compatible backup.
        the address at which a task's container reaches this host, for an evaluation on ``docker`` whose harness is an
        artifact item. In a remote environment, the agent bridges the container to this host through Harbor's exec
        and needs no address. See `HTTP API <http-api.rst>`__.
+   ``evaluation.max_sandboxes`` : 4
+       the task sandboxes that one process of the evaluation service holds at once, across all evaluations. Each
+       running rollout holds one. Set it to the quota of the sandbox provider, divided by the evaluation processes.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
