@@ -212,6 +212,27 @@ def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, err
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error", "stored"),
+    [
+        (
+            RuntimeError("modal run failed:\n  the export failed\n"),
+            "RuntimeError: modal run failed:\n  the export failed",
+        ),
+        (RuntimeError(), "RuntimeError:"),
+        (ItemFailed(" "), "the work item failed"),
+    ],
+)
+def test_a_worker_stores_an_error_message_with_surrounding_spaces(error, stored):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.add(job("a"))
+        assert FailingWorker(queue, error).run_once()
+        item = queue.get("jobs", "a")
+        assert (item.state, item.error) == ("failed", stored)
+
+
+@pytest.mark.unit
 def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
     with closing(SQLiteCoordinationDatabase(None)) as database:
         queue = SQLWorkQueue(database, lease_seconds=10, max_attempts={"jobs": 1})
