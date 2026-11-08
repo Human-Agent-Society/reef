@@ -597,7 +597,7 @@ class GenerationRunner(BackgroundJobRunner):
         generation_deadline_seconds: float,
         eval_fraction: float,
         split_seed: int,
-        validation_concurrency: int = 1,
+        validation_concurrency: int,
     ) -> None:
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be non-empty text")
@@ -619,9 +619,11 @@ class GenerationRunner(BackgroundJobRunner):
             raise ValueError("eval_fraction must be between 0 and 1")
         if isinstance(split_seed, bool) or not isinstance(split_seed, int):
             raise ValueError("split_seed must be an integer")
-        if isinstance(validation_concurrency, bool) or not isinstance(validation_concurrency, int):
-            raise ValueError("validation_concurrency must be a positive integer")
-        if validation_concurrency < 1:
+        if (
+            isinstance(validation_concurrency, bool)
+            or not isinstance(validation_concurrency, int)
+            or validation_concurrency < 1
+        ):
             raise ValueError("validation_concurrency must be a positive integer")
         self.scenario = scenario
         self.task_store = task_store
@@ -710,7 +712,7 @@ class GenerationRunner(BackgroundJobRunner):
         task_generator, task_store = self.task_generator, self.task_store
         # Up to validation_concurrency candidates are checked at once. Each outcome is saved when its checks end, so
         # a restart checks only the pending candidates.
-        limit = asyncio.Semaphore(self.validation_concurrency)
+        check_slots = asyncio.Semaphore(self.validation_concurrency)
 
         def is_published(files_digest: str) -> bool:
             return any(stored.files_digest == files_digest for stored in task_store.tasks())
@@ -738,7 +740,7 @@ class GenerationRunner(BackgroundJobRunner):
 
         async def check(index: int, earlier: asyncio.Task[None] | None) -> None:
             nonlocal stopped
-            async with limit:
+            async with check_slots:
                 # A copy of an earlier candidate waits for that candidate's outcome, so a copy of a published candidate
                 # is refused without a check. The slots are taken in candidate order, so the earlier one runs or ended.
                 if earlier is not None and not earlier.done():
@@ -867,9 +869,9 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     receive.
 
     **Training pool.** Without one, each train task trains once. With ``pool_capacity`` above 0, the stage has one
-    (``GeneratedTaskSettings.training_pool``). Then a round is due only while fewer train tasks than its capacity are active
-    (``active_task_count``), in place of the ``refill_tasks`` rule, and the last case of the list above is "no task
-    is active" in place of "no train task is unfinished". A train task of a complete generation is active until a
+    (``GeneratedTaskSettings.training_pool``). Then a round is due only while fewer train tasks than its capacity
+    are active (``active_task_count``), in place of the ``refill_tasks`` rule, and the last case of the list above
+    is "no task is active" in place of "no train task is unfinished". A train task of a complete generation is active until a
     review retires it. Each use of a task trains one sample of it: the first use trains the task's sample above, and
     use ``k`` the sample ``generated-tasks/<task name>@<k>``. When a job's end commits, the stage saves the uses that
     the end ends with their rewards (``ended_uses``), runs the review that is due, ends the scenario's use of each

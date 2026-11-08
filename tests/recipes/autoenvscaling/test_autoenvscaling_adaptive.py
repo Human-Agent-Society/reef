@@ -56,6 +56,7 @@ def parents(tmp_path: Path) -> list[dict[str, object]]:
     return kept
 
 
+@pytest.mark.unit
 def test_without_adaptive_the_generator_keeps_no_parents_and_its_report_is_unchanged(tmp_path: Path) -> None:
     designer = StandInDesigner()
     generator = autoenvscaling(tmp_path, designer, count=2)
@@ -68,6 +69,7 @@ def test_without_adaptive_the_generator_keeps_no_parents_and_its_report_is_uncha
     assert [call["variant"] for call in designer.calls] == [None] * 4
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(("training", "direction"), [((1.0, 1.0), "harder"), ((0.0, 0.0), "simpler")])
 def test_a_task_outside_the_band_gets_a_variant_from_its_own_session(
     tmp_path: Path, training: tuple[float, ...], direction: str
@@ -100,6 +102,7 @@ def test_a_task_outside_the_band_gets_a_variant_from_its_own_session(
     assert parents(tmp_path)[0]["varied"] is True
 
 
+@pytest.mark.unit
 def test_the_report_names_each_variant_with_its_parent(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True, variant_share=0.5)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
@@ -109,6 +112,7 @@ def test_the_report_names_each_variant_with_its_parent(tmp_path: Path) -> None:
     assert "parent_task" not in second and second["position"] == 2
 
 
+@pytest.mark.unit
 def test_eval_tasks_and_outages_never_become_parents(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     first, second = asyncio.run(generator.generate(REQUEST))
@@ -120,6 +124,7 @@ def test_eval_tasks_and_outages_never_become_parents(tmp_path: Path) -> None:
     assert not (tmp_path / "state" / "parents").exists()
 
 
+@pytest.mark.unit
 def test_a_generation_closed_again_after_a_crash_adds_its_parent_once(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     results = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
@@ -151,6 +156,7 @@ class TokenHoldingStandIn(StandInDesigner):
         return super().design(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("failing", "is_varied"),
     [(StandInDesigner(unreachable=("session-1",)), False), (TokenHoldingStandIn(), True)],
@@ -175,6 +181,7 @@ def test_an_outage_leaves_the_parent_its_slot_and_a_held_token_takes_it(
     assert varied == ([] if is_varied else [NAMES[0]]), "the next generation varies a parent the outage left"
 
 
+@pytest.mark.unit
 def test_a_restart_keeps_the_parents_and_a_parent_is_varied_once(tmp_path: Path) -> None:
     designer = StandInDesigner()
     generator = autoenvscaling(tmp_path, designer, count=2, is_adaptive=True, variant_share=0.5)
@@ -191,6 +198,7 @@ def test_a_restart_keeps_the_parents_and_a_parent_is_varied_once(tmp_path: Path)
     assert varied == [NAMES[0], variant_name], "each parent is varied once, after a restart too"
 
 
+@pytest.mark.unit
 def test_a_generation_varies_the_newest_unvaried_parents_that_still_have_a_session_and_files(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=4, is_adaptive=True, variant_share=0.5)
     generator.parents = [ParentTask(f"t-{number}", "session-1", number, 1.0, 2, "harder") for number in range(6)]
@@ -202,6 +210,7 @@ def test_a_generation_varies_the_newest_unvaried_parents_that_still_have_a_sessi
     assert [parent.name for parent, _ in generator.variants()] == ["t-2", "t-1"]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(("count", "share", "slots"), [(2, 0.5, 1), (3, 0.5, 1), (100, 0.29, 29), (4, 1, 4)])
 def test_variant_slots_are_the_share_of_count_rounded_down(
     tmp_path: Path, count: int, share: float, slots: int
@@ -210,6 +219,7 @@ def test_variant_slots_are_the_share_of_count_rounded_down(
     assert generator.variant_slots == slots
 
 
+@pytest.mark.unit
 def test_a_task_whose_mean_reward_is_outside_zero_to_one_becomes_no_parent_and_the_generation_closes(
     tmp_path: Path,
 ) -> None:
@@ -220,6 +230,7 @@ def test_a_task_whose_mean_reward_is_outside_zero_to_one_becomes_no_parent_and_t
     assert report(tmp_path)["tasks"] and not generator.open_path(0).exists()
 
 
+@pytest.mark.unit
 def test_the_oldest_parents_and_their_files_go_beyond_the_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -231,6 +242,7 @@ def test_the_oldest_parents_and_their_files_go_beyond_the_bound(
     assert kept == [NAMES[1]]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
@@ -252,6 +264,7 @@ def test_from_config_refuses_an_adaptive_config_that_cannot_run(
         )
 
 
+@pytest.mark.unit
 def test_the_agent_gets_the_parent_and_its_pass_rate_and_the_variant_rules(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -297,6 +310,7 @@ def test_the_agent_gets_the_parent_and_its_pass_rate_and_the_variant_rules(
     )
 
 
+@pytest.mark.unit
 def test_a_variant_run_gives_the_agent_the_variant_rules_and_prompt(tmp_path: Path) -> None:
     variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
     sessions = {"variant": ScriptedSession([]), "rebuild": ScriptedSession([])}
@@ -333,6 +347,7 @@ def test_a_parent_refuses_a_name_that_is_not_a_task_name(name: str) -> None:
         ParentTask(name, "session-1", 0, 1.0, 2, "harder")
 
 
+@pytest.mark.unit
 def test_adaptive_requires_a_designer_that_implements_variants(tmp_path: Path) -> None:
     designer = designer_module.PromptDesigner(
         reef_url="http://127.0.0.1:9", token=None, scenario="autoenvscaling", model="designer", api="openai"
@@ -379,6 +394,7 @@ class BlockingVariantDesigner(VariantDesigner):
         raise DesignerOutage("the agent's run was stopped")
 
 
+@pytest.mark.unit
 def test_a_cancelled_variant_leaves_its_parent_its_slot(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True, variant_share=0.5)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
@@ -398,6 +414,7 @@ def test_a_cancelled_variant_leaves_its_parent_its_slot(tmp_path: Path) -> None:
     assert parents(tmp_path)[0]["varied"] is False, "a cancelled run takes no slot, as it takes no session"
 
 
+@pytest.mark.unit
 def test_with_a_refusing_calibration_a_task_outside_the_band_is_refused_and_becomes_no_parent(
     tmp_path: Path,
 ) -> None:
@@ -456,6 +473,7 @@ def test_parent_rejects_invalid_metadata(changes: dict[str, object]) -> None:
         ParentTask(**{**fields, **changes})
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("duplicate", [True, False])
 def test_restart_rejects_duplicate_or_oversized_parent_files(tmp_path: Path, duplicate: bool) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
@@ -471,6 +489,7 @@ def test_restart_rejects_duplicate_or_oversized_parent_files(tmp_path: Path, dup
         autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
 
 
+@pytest.mark.unit
 def test_restart_recovers_a_parent_written_before_its_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

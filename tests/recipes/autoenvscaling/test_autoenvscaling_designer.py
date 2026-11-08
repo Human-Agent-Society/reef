@@ -142,6 +142,7 @@ def test_a_sources_file_lists_sessions_in_order_and_refuses_a_commit_that_is_no_
         load_sources(tmp_path / "empty.json")
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stop_reason", "is_spent", "is_outage"),
     [("error", False, True), ("aborted", False, True), ("error", True, False), ("length", False, False)],
@@ -163,6 +164,7 @@ def test_only_a_model_failure_with_the_budget_unspent_is_an_outage(
     assert session.is_closed.is_set()
 
 
+@pytest.mark.unit
 def test_a_stop_signal_closes_the_sandbox_and_ends_the_run(tmp_path: Path) -> None:
     stop = threading.Event()
     session = ScriptedSession([], stop=stop)
@@ -191,6 +193,7 @@ def test_a_repository_snapshot_holds_the_base_commit_alone(tmp_path: Path) -> No
     assert repository_snapshot(source, tmp_path / "cache") == snapshot
 
 
+@pytest.mark.unit
 def test_tasks_written_at_once_build_a_repository_snapshot_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -250,6 +253,7 @@ def test_a_repository_snapshot_starts_no_gc_that_could_prune_it_while_it_is_copi
     assert not list((snapshot / ".git" / "objects" / "pack").glob("*.pack"))
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("place", "commit", "error", "message"),
     [
@@ -278,6 +282,7 @@ def test_a_missing_repository_or_commit_is_a_bad_source_and_a_network_failure_an
         repository_snapshot(source, tmp_path / "cache")
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("api", ["openai", "responses"])
 def test_the_prompt_designer_asks_once_with_the_session_cut_to_its_budget(tmp_path: Path, api: str) -> None:
     reply = fenced(DOCUMENT)
@@ -319,6 +324,7 @@ def test_the_prompt_designer_asks_once_with_the_session_cut_to_its_budget(tmp_pa
     assert (tmp_path / "run" / "reply.md").read_text() == reply
 
 
+@pytest.mark.unit
 def test_the_behaviour_rule_reaches_both_designers_and_is_absent_when_off(tmp_path: Path) -> None:
     rule = "TESTS CHECK BEHAVIOUR"
     assert rule in BEHAVIOUR_RULES_TEXT

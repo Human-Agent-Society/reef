@@ -163,34 +163,34 @@ def pipeline(
     return CommittingPipeline(context, session, record2sample=stage, sample2job=jobs)
 
 
-def task_stage(p: TrainingPipeline) -> GeneratedTaskSamples:
-    stage = p.record2sample
+def task_stage(stages: TrainingPipeline) -> GeneratedTaskSamples:
+    stage = stages.record2sample
     assert isinstance(stage, GeneratedTaskSamples)
     return stage
 
 
-def task_store(p: TrainingPipeline) -> TaskStore:
-    store = task_stage(p).task_store
+def task_store(stages: TrainingPipeline) -> TaskStore:
+    store = task_stage(stages).task_store
     assert store is not None
     return store
 
 
-def job_samples(p: TrainingPipeline) -> int:
-    count = p.sample2job.job_samples
+def job_samples(stages: TrainingPipeline) -> int:
+    count = stages.sample2job.job_samples
     assert count is not None
     return count
 
 
-def handed_out(p: TrainingPipeline) -> list[str]:
+def handed_out(stages: TrainingPipeline) -> list[str]:
     """Look for job data, then return the names of the tasks that the next job takes."""
-    p.ready(job_samples(p))
-    return [sample.metadata["task"]["name"] for _, sample in p.auto_entries()]
+    stages.ready(job_samples(stages))
+    return [sample.metadata["task"]["name"] for _, sample in stages.auto_entries()]
 
 
-def waiting(p: TrainingPipeline) -> list[str]:
+def waiting(stages: TrainingPipeline) -> list[str]:
     """Look for job data, then return the names of the tasks whose sample waits, in the order that jobs take them."""
-    p.ready(job_samples(p))
-    samples = task_stage(p).task_items().values()
+    stages.ready(job_samples(stages))
+    samples = task_stage(stages).task_items().values()
     untrained = sorted(
         (sample for found in samples for sample in found if not sample.train_counts),
         key=lambda sample: sample.sequence,
@@ -200,46 +200,49 @@ def waiting(p: TrainingPipeline) -> list[str]:
 
 def finished(job_id: str, rewards: Mapping[str, Sequence[float]]) -> JobOutcome:
     return JobOutcome(
-        job_id, "tinker", "finished", {"rollout_rewards": {name: list(r) for name, r in rewards.items()}}
+        job_id, "tinker", "finished", {"rollout_rewards": {name: list(values) for name, values in rewards.items()}}
     )
 
 
-def submit(p: TrainingPipeline) -> list[str]:
+def submit(stages: TrainingPipeline) -> list[str]:
     """Submit the next task job as the trainer does: its submission's commit counts its tasks trained. Return the
     names of its tasks. A round's tasks are stored on the look after the one that started the round."""
     for _ in range(3):
-        if p.ready(job_samples(p)):
+        if stages.ready(job_samples(stages)):
             break
-    data = p.build_job_data(job_samples(p))
-    p.acknowledge(data.data_id)
+    data = stages.build_job_data(job_samples(stages))
+    stages.acknowledge(data.data_id)
     return [sample.metadata["task"]["name"] for sample in data.samples]
 
 
-def train(p: TrainingPipeline, job_id: str, rewards: Mapping[str, Sequence[float]] | None = None) -> list[str]:
-    """Train the next task job as the trainer does; each task's rollouts earn ``rewards[name]``, 1.0 and 0.0 by default."""
-    names = submit(p)
-    p.job_ended(finished(job_id, {name: (rewards or {}).get(name, (1.0, 0.0)) for name in names}))
+def train(stages: TrainingPipeline, job_id: str, rewards: Mapping[str, Sequence[float]] | None = None) -> list[str]:
+    """Train the next task job as the trainer does; the rollouts of each task earn ``rewards[name]``, by default 1.0
+    and 0.0."""
+    names = submit(stages)
+    stages.job_ended(finished(job_id, {name: (rewards or {}).get(name, (1.0, 0.0)) for name in names}))
     return names
 
 
 # ------------------------------------------------------------------------------------------------- reuse
 
 
+@pytest.mark.unit
 def test_without_pool_capacity_a_task_trains_once_and_leaves_the_pool(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)))
-    assert train(p, "job-1") == [TASK_A, TASK_B]
-    assert waiting(p) == [] and handed_out(p) == []
-    assert task_uses(task_store(p)) == {} and "training_pool" not in p.status()
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)))
+    assert train(stages, "job-1") == [TASK_A, TASK_B]
+    assert waiting(stages) == [] and handed_out(stages) == []
+    assert task_uses(task_store(stages)) == {} and "training_pool" not in stages.status()
 
 
+@pytest.mark.unit
 def test_with_pool_capacity_a_task_returns_to_the_pool_after_its_job_ends(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=0)
-    assert train(p, "job-1") == [TASK_A, TASK_B]
-    assert train(p, "job-2") == [TASK_C, TASK_A], "the tasks go back to the end of the pool"
-    assert waiting(p) == [TASK_B, TASK_C, TASK_A]
-    uses = task_uses(task_store(p))
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=0)
+    assert train(stages, "job-1") == [TASK_A, TASK_B]
+    assert train(stages, "job-2") == [TASK_C, TASK_A], "the tasks go back to the end of the pool"
+    assert waiting(stages) == [TASK_B, TASK_C, TASK_A]
+    uses = task_uses(task_store(stages))
     assert [(use.job_id, use.use_index) for use in uses[TASK_A]] == [("job-1", 0), ("job-2", 1)]
-    samples = task_stage(p).task_items()[TASK_A]
+    samples = task_stage(stages).task_items()[TASK_A]
     assert [sample.sample_id for sample in samples] == [
         stage_item_id("tasks", f"generated-tasks/{TASK_A}"),
         stage_item_id("tasks", f"generated-tasks/{TASK_A}@1"),
@@ -248,147 +251,158 @@ def test_with_pool_capacity_a_task_returns_to_the_pool_after_its_job_ends(tmp_pa
     assert [sample.train_counts for sample in samples] == [{"": 1}, {"": 1}, {}], "each sample trains once"
 
 
+@pytest.mark.unit
 def test_a_repeated_job_end_saves_each_use_once(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=0)
-    train(p, "job-1", {TASK_A: (1.0, 1.0)})
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=0)
+    train(stages, "job-1", {TASK_A: (1.0, 1.0)})
     # The trainer gives the same end again, as after a restart.
-    p.job_ended(finished("job-1", {TASK_A: (0.0, 0.0), TASK_B: (0.0, 0.0)}))
-    uses = task_uses(task_store(p))
+    stages.job_ended(finished("job-1", {TASK_A: (0.0, 0.0), TASK_B: (0.0, 0.0)}))
+    uses = task_uses(task_store(stages))
     assert {name: [(use.use_index, use.rewards) for use in found] for name, found in uses.items()} == {
         TASK_A: [(0, (1.0, 1.0))],
         TASK_B: [(0, (1.0, 0.0))],
     }
-    assert waiting(p) == [TASK_A, TASK_B], "each task has one sample that waits"
+    assert waiting(stages) == [TASK_A, TASK_B], "each task has one sample that waits"
 
 
+@pytest.mark.unit
 def test_a_job_end_repeated_while_the_next_job_runs_saves_nothing_for_the_next_job(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=0)
-    train(p, "job-1")
-    assert submit(p) == [TASK_A, TASK_B]
-    p.job_ended(finished("job-1", {TASK_A: (1.0, 0.0), TASK_B: (1.0, 0.0)}))
-    p.job_ended(finished("job-2", {TASK_A: (0.0, 0.0), TASK_B: (1.0, 1.0)}))
-    uses = task_uses(task_store(p))
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=0)
+    train(stages, "job-1")
+    assert submit(stages) == [TASK_A, TASK_B]
+    stages.job_ended(finished("job-1", {TASK_A: (1.0, 0.0), TASK_B: (1.0, 0.0)}))
+    stages.job_ended(finished("job-2", {TASK_A: (0.0, 0.0), TASK_B: (1.0, 1.0)}))
+    uses = task_uses(task_store(stages))
     assert [(use.job_id, use.use_index, use.rewards) for use in uses[TASK_A]] == [
         ("job-1", 0, (1.0, 0.0)),
         ("job-2", 1, (0.0, 0.0)),
     ]
 
 
+@pytest.mark.unit
 def test_a_job_end_given_again_while_the_next_job_runs_leaves_every_task_of_that_job(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=0)
-    train(p, "job-1")
-    assert waiting(p) == [TASK_C, TASK_A, TASK_B]
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=0)
+    train(stages, "job-1")
+    assert waiting(stages) == [TASK_C, TASK_A, TASK_B]
     # The trainer starts with no running job and gives the stage job-1's end again, but control submits job-2 first.
-    assert submit(p) == [TASK_C, TASK_A]
-    p.job_ended(finished("job-1", {TASK_A: (1.0, 0.0), TASK_B: (1.0, 0.0)}))
-    assert waiting(p) == [TASK_B], "task C trains in job-2, so it does not wait again"
-    p.job_ended(finished("job-2", {TASK_C: (0.0, 1.0), TASK_A: (1.0, 1.0)}))
-    store = task_store(p)
+    assert submit(stages) == [TASK_C, TASK_A]
+    stages.job_ended(finished("job-1", {TASK_A: (1.0, 0.0), TASK_B: (1.0, 0.0)}))
+    assert waiting(stages) == [TASK_B], "task C trains in job-2, so it does not wait again"
+    stages.job_ended(finished("job-2", {TASK_C: (0.0, 1.0), TASK_A: (1.0, 1.0)}))
+    store = task_store(stages)
     assert {name: [(use.job_id, use.rewards) for use in found] for name, found in task_uses(store).items()} == {
         TASK_A: [("job-1", (1.0, 0.0)), ("job-2", (1.0, 1.0))],
         TASK_B: [("job-1", (1.0, 0.0))],
         TASK_C: [("job-2", (0.0, 1.0))],
     }
     assert rollout_results(store)[TASK_C].rollout_rewards == (0.0, 1.0)
-    assert waiting(p) == [TASK_B, TASK_C, TASK_A]
+    assert waiting(stages) == [TASK_B, TASK_C, TASK_A]
 
 
+@pytest.mark.unit
 def test_first_rollout_results_still_reach_the_generator_in_pool_mode(tmp_path: Path) -> None:
     task_generator = FixedTasks(generated(0, 2))
-    p = pipeline(tmp_path, task_generator, pool_capacity=2, review_interval=0)
-    train(p, "job-1", {TASK_A: (0.5, 0.5), TASK_B: (1.0, 0.0)})
-    train(p, "job-2", {TASK_A: (0.0, 0.0), TASK_B: (0.0, 0.0)})
+    stages = pipeline(tmp_path, task_generator, pool_capacity=2, review_interval=0)
+    train(stages, "job-1", {TASK_A: (0.5, 0.5), TASK_B: (1.0, 0.0)})
+    train(stages, "job-2", {TASK_A: (0.0, 0.0), TASK_B: (0.0, 0.0)})
     (results,) = task_generator.results
     assert [(result.task.name, result.rollout_rewards) for result in results if isinstance(result, RolledOutTask)] == [
         (TASK_A, (0.5, 0.5)),
         (TASK_B, (1.0, 0.0)),
     ]
-    assert rollout_results(task_store(p))[TASK_A].rollout_rewards == (0.5, 0.5), "later uses only train"
+    assert rollout_results(task_store(stages))[TASK_A].rollout_rewards == (0.5, 0.5), "later uses only train"
 
 
+@pytest.mark.unit
 def test_a_failed_job_returns_its_tasks_with_uses_that_have_no_rewards(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=0)
-    assert submit(p) == [TASK_A, TASK_B]
-    p.job_ended(JobOutcome("job-1", "tinker", "failed", error="the sampler is gone"))
-    assert {name: [use.rewards for use in found] for name, found in task_uses(task_store(p)).items()} == {
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=0)
+    assert submit(stages) == [TASK_A, TASK_B]
+    stages.job_ended(JobOutcome("job-1", "tinker", "failed", error="the sampler is gone"))
+    assert {name: [use.rewards for use in found] for name, found in task_uses(task_store(stages)).items()} == {
         TASK_A: [()],
         TASK_B: [()],
     }
-    assert waiting(p) == [TASK_C, TASK_A, TASK_B]
+    assert waiting(stages) == [TASK_C, TASK_A, TASK_B]
 
 
+@pytest.mark.unit
 def test_a_job_end_returns_a_cancelled_jobs_tasks_and_leaves_a_later_jobs_tasks(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 3)), job_samples=1, pool_capacity=3, review_interval=0)
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 3)), job_samples=1, pool_capacity=3, review_interval=0)
     # A rollback cancels the first job, so its end never commits; the next job takes the next task.
-    assert submit(p) == [TASK_A]
-    assert submit(p) == [TASK_B]
+    assert submit(stages) == [TASK_A]
+    assert submit(stages) == [TASK_B]
     # The trainer submits the third job before the samples service reads the second job's end.
-    assert submit(p) == [TASK_C]
-    p.job_ended(finished("job-2", {TASK_B: (1.0, 0.0)}))
-    uses = task_uses(task_store(p))
+    assert submit(stages) == [TASK_C]
+    stages.job_ended(finished("job-2", {TASK_B: (1.0, 0.0)}))
+    uses = task_uses(task_store(stages))
     assert {name: [use.job_id for use in found] for name, found in uses.items()} == {
         TASK_A: ["job-2"],
         TASK_B: ["job-2"],
     }
     assert uses[TASK_A][0].rewards == (), "the cancelled job ran no rollout that the end reports"
-    assert waiting(p) == [TASK_A, TASK_B], "task C still trains"
-    p.job_ended(finished("job-3", {TASK_C: (0.0, 1.0)}))
-    assert task_uses(task_store(p))[TASK_C][0].rewards == (0.0, 1.0)
-    assert waiting(p) == [TASK_A, TASK_B, TASK_C]
+    assert waiting(stages) == [TASK_A, TASK_B], "task C still trains"
+    stages.job_ended(finished("job-3", {TASK_C: (0.0, 1.0)}))
+    assert task_uses(task_store(stages))[TASK_C][0].rewards == (0.0, 1.0)
+    assert waiting(stages) == [TASK_A, TASK_B, TASK_C]
 
 
+@pytest.mark.unit
 def test_two_job_ends_read_together_save_each_use_once(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 3)), job_samples=1, pool_capacity=3, review_interval=0)
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 3)), job_samples=1, pool_capacity=3, review_interval=0)
     # The trainer submits the second job before the samples service reads the first job's end, and the service reads
     # both ends before it stores the next samples.
-    assert submit(p) == [TASK_A] and submit(p) == [TASK_B]
-    p.job_ended(finished("job-1", {TASK_A: (1.0, 0.0)}))
-    p.job_ended(finished("job-2", {TASK_B: (0.0, 1.0)}))
-    uses = task_uses(task_store(p))
+    assert submit(stages) == [TASK_A] and submit(stages) == [TASK_B]
+    stages.job_ended(finished("job-1", {TASK_A: (1.0, 0.0)}))
+    stages.job_ended(finished("job-2", {TASK_B: (0.0, 1.0)}))
+    uses = task_uses(task_store(stages))
     assert {name: [(use.job_id, use.rewards) for use in found] for name, found in uses.items()} == {
         TASK_A: [("job-1", (1.0, 0.0))],
         TASK_B: [("job-2", (0.0, 1.0))],
     }
-    assert waiting(p) == [TASK_C, TASK_A, TASK_B]
+    assert waiting(stages) == [TASK_C, TASK_A, TASK_B]
 
 
+@pytest.mark.unit
 def test_with_a_pool_rounds_keep_the_pace_of_jobs_per_round(tmp_path: Path) -> None:
     task_generator = FixedTasks(generated(0, 1), generated(1, 1))
-    p = pipeline(
+    stages = pipeline(
         tmp_path, task_generator, rounds=2, jobs_per_round=2, job_samples=1, pool_capacity=5, review_interval=0
     )
-    train(p, "job-1")
-    handed_out(p)
-    assert len(task_store(p).generations()) == 1, "task A has its result, but it trains again, so a job end comes"
-    train(p, "job-2")
-    handed_out(p)
-    assert len(task_store(p).generations()) == 2
+    train(stages, "job-1")
+    handed_out(stages)
+    assert len(task_store(stages).generations()) == 1, "task A has its result, but it trains again, so a job end comes"
+    train(stages, "job-2")
+    handed_out(stages)
+    assert len(task_store(stages).generations()) == 2
 
 
+@pytest.mark.unit
 def test_rounds_start_only_while_active_tasks_are_below_capacity(tmp_path: Path) -> None:
     task_generator = FixedTasks(generated(0, 2), generated(1, 2), generated(2, 2))
-    p = pipeline(tmp_path, task_generator, rounds=3, job_samples=1, pool_capacity=3, review_interval=0)
-    train(p, "job-1")
-    handed_out(p)
-    assert len(task_store(p).generations()) == 2, "two active tasks are below the capacity, so a round starts"
+    stages = pipeline(tmp_path, task_generator, rounds=3, job_samples=1, pool_capacity=3, review_interval=0)
+    train(stages, "job-1")
+    handed_out(stages)
+    assert len(task_store(stages).generations()) == 2, "two active tasks are below the capacity, so a round starts"
     for job in range(2, 6):
-        train(p, f"job-{job}")
-    assert len(task_store(p).generations()) == 2, "four active tasks fill the capacity, so no round starts"
-    assert p.status()["training_pool"]["active"] == 4
+        train(stages, f"job-{job}")
+    assert len(task_store(stages).generations()) == 2, "four active tasks fill the capacity, so no round starts"
+    assert stages.status()["training_pool"]["active"] == 4
 
 
+@pytest.mark.unit
 def test_a_task_in_a_running_job_counts_as_active_for_the_capacity(tmp_path: Path) -> None:
     task_generator = FixedTasks(generated(0, 3), generated(1, 3))
-    p = pipeline(tmp_path, task_generator, rounds=2, job_samples=1, pool_capacity=3, review_interval=0)
-    train(p, "job-1")
-    assert submit(p) == [TASK_B]
-    assert waiting(p) == [TASK_C, TASK_A]
-    assert len(task_store(p).generations()) == 1, "two waiting tasks and one task in a job fill the capacity"
+    stages = pipeline(tmp_path, task_generator, rounds=2, job_samples=1, pool_capacity=3, review_interval=0)
+    train(stages, "job-1")
+    assert submit(stages) == [TASK_B]
+    assert waiting(stages) == [TASK_C, TASK_A]
+    assert len(task_store(stages).generations()) == 1, "two waiting tasks and one task in a job fill the capacity"
 
 
 # ------------------------------------------------------------------------------------------------- review
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("rewards", "reason"),
     [
@@ -403,118 +417,131 @@ def test_a_task_in_a_running_job_counts_as_active_for_the_capacity(tmp_path: Pat
 def test_a_review_retires_a_task_outside_the_band_or_without_reward_spread(
     tmp_path: Path, rewards: tuple[float, float], reason: str
 ) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=1, review_window=2)
-    train(p, "job-1", {TASK_A: rewards})
-    store = task_store(p)
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=1, review_window=2)
+    train(stages, "job-1", {TASK_A: rewards})
+    store = task_store(stages)
     assert retired_tasks(store) == {TASK_A: RetiredTask(TASK_A, 0, rewards, reason)}
     assert pool_reviews(store) == (PoolReview(0, 1, 1, {TASK_A: reason}),)
-    assert handed_out(p) == [TASK_B], "a retired task is not handed out again"
+    assert handed_out(stages) == [TASK_B], "a retired task is not handed out again"
 
 
+@pytest.mark.unit
 def test_a_review_retires_a_waiting_task_before_it_trains_again(tmp_path: Path) -> None:
-    p = pipeline(
+    stages = pipeline(
         tmp_path, FixedTasks(generated(0, 2)), job_samples=1, pool_capacity=2, review_interval=2, review_window=2
     )
-    train(p, "job-1", {TASK_A: (1.0, 1.0)})
-    assert waiting(p) == [TASK_B, TASK_A]
-    train(p, "job-2")
-    assert set(retired_tasks(task_store(p))) == {TASK_A}
-    assert handed_out(p) == [TASK_B], "task A waited in the pool when the review retired it"
-    assert waiting(p) == [TASK_B], "the scenario no longer uses the sample of task A that waited"
-    (trained,) = task_stage(p).task_items()[TASK_A]
+    train(stages, "job-1", {TASK_A: (1.0, 1.0)})
+    assert waiting(stages) == [TASK_B, TASK_A]
+    train(stages, "job-2")
+    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    assert handed_out(stages) == [TASK_B], "task A waited in the pool when the review retired it"
+    assert waiting(stages) == [TASK_B], "the scenario no longer uses the sample of task A that waited"
+    (trained,) = task_stage(stages).task_items()[TASK_A]
     assert trained.sample_id == stage_item_id("tasks", f"generated-tasks/{TASK_A}"), "the trained sample stays"
 
 
+@pytest.mark.unit
 def test_a_review_takes_a_retired_task_out_of_the_next_jobs_hand_out(tmp_path: Path) -> None:
     task_d, task_e = "harbor-00000-003", "harbor-00000-004"
-    p = pipeline(tmp_path, FixedTasks(generated(0, 5)), pool_capacity=5, review_interval=2, review_window=2)
-    train(p, "job-1", {TASK_A: (1.0, 1.0)})
-    assert submit(p) == [TASK_C, task_d]
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 5)), pool_capacity=5, review_interval=2, review_window=2)
+    train(stages, "job-1", {TASK_A: (1.0, 1.0)})
+    assert submit(stages) == [TASK_C, task_d]
     # While job-2 runs, a look for job data finds the next job's tasks.
-    assert handed_out(p) == [task_e, TASK_A]
-    p.job_ended(finished("job-2", {TASK_C: (1.0, 0.0), task_d: (1.0, 0.0)}))
-    assert set(retired_tasks(task_store(p))) == {TASK_A}
-    assert handed_out(p) == [task_e, TASK_B], "the next job takes the tasks without task A, in pool order"
+    assert handed_out(stages) == [task_e, TASK_A]
+    stages.job_ended(finished("job-2", {TASK_C: (1.0, 0.0), task_d: (1.0, 0.0)}))
+    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    assert handed_out(stages) == [task_e, TASK_B], "the next job takes the tasks without task A, in pool order"
 
 
+@pytest.mark.unit
 def test_a_job_whose_data_was_taken_before_the_review_trains_the_retired_task_once_more(tmp_path: Path) -> None:
     task_d, task_e = "harbor-00000-003", "harbor-00000-004"
-    p = pipeline(tmp_path, FixedTasks(generated(0, 5)), pool_capacity=5, review_interval=2, review_window=2)
-    train(p, "job-1", {TASK_A: (1.0, 1.0)})
-    assert submit(p) == [TASK_C, task_d]
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 5)), pool_capacity=5, review_interval=2, review_window=2)
+    train(stages, "job-1", {TASK_A: (1.0, 1.0)})
+    assert submit(stages) == [TASK_C, task_d]
     # The trainer takes the next job's data as soon as job-2 ends, before the samples service reads that end.
-    data = p.build_job_data(2)
-    p.job_ended(finished("job-2", {TASK_C: (1.0, 0.0), task_d: (1.0, 0.0)}))
-    assert set(retired_tasks(task_store(p))) == {TASK_A}
-    p.acknowledge(data.data_id)
+    data = stages.build_job_data(2)
+    stages.job_ended(finished("job-2", {TASK_C: (1.0, 0.0), task_d: (1.0, 0.0)}))
+    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    stages.acknowledge(data.data_id)
     assert [sample.metadata["task"]["name"] for sample in data.samples] == [task_e, TASK_A]
-    p.job_ended(finished("job-3", {task_e: (1.0, 0.0), TASK_A: (1.0, 1.0)}))
-    assert TASK_A not in waiting(p), "the retired task trains no more"
+    stages.job_ended(finished("job-3", {task_e: (1.0, 0.0), TASK_A: (1.0, 1.0)}))
+    assert TASK_A not in waiting(stages), "the retired task trains no more"
 
 
+@pytest.mark.unit
 def test_a_later_review_leaves_a_retired_task_out(tmp_path: Path) -> None:
-    p = pipeline(
+    stages = pipeline(
         tmp_path, FixedTasks(generated(0, 2)), job_samples=1, pool_capacity=2, review_interval=1, review_window=2
     )
-    train(p, "job-1", {TASK_A: (1.0, 1.0)})
-    train(p, "job-2", {TASK_B: (0.0, 1.0)})
-    assert pool_reviews(task_store(p)) == (PoolReview(0, 1, 1, {TASK_A: "above_band"}), PoolReview(1, 2, 1, {}))
+    train(stages, "job-1", {TASK_A: (1.0, 1.0)})
+    train(stages, "job-2", {TASK_B: (0.0, 1.0)})
+    assert pool_reviews(task_store(stages)) == (PoolReview(0, 1, 1, {TASK_A: "above_band"}), PoolReview(1, 2, 1, {}))
 
 
+@pytest.mark.unit
 def test_a_review_retires_a_task_whose_next_sample_is_not_stored_yet(tmp_path: Path) -> None:
-    p = pipeline(
+    stages = pipeline(
         tmp_path, FixedTasks(generated(0, 2)), job_samples=1, pool_capacity=2, review_interval=2, review_window=2
     )
-    assert submit(p) == [TASK_A] and submit(p) == [TASK_B]
+    assert submit(stages) == [TASK_A] and submit(stages) == [TASK_B]
     # The samples service reads both ends before it stores the sample of task A's next use.
-    p.job_ended(finished("job-1", {TASK_A: (1.0, 1.0)}))
-    p.job_ended(finished("job-2", {TASK_B: (0.0, 1.0)}))
-    assert set(retired_tasks(task_store(p))) == {TASK_A}
-    assert waiting(p) == [TASK_B]
+    stages.job_ended(finished("job-1", {TASK_A: (1.0, 1.0)}))
+    stages.job_ended(finished("job-2", {TASK_B: (0.0, 1.0)}))
+    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    assert waiting(stages) == [TASK_B]
 
 
+@pytest.mark.unit
 def test_a_pass_rate_on_a_band_edge_is_kept(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=1, review_window=2)
-    train(p, "job-1", {TASK_A: (1.0, 0.5), TASK_B: (0.5, 0.0)})
-    assert pool_reviews(task_store(p)) == (PoolReview(0, 1, 2, {}),)
-    assert handed_out(p) == [TASK_A, TASK_B]
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=1, review_window=2)
+    train(stages, "job-1", {TASK_A: (1.0, 0.5), TASK_B: (0.5, 0.0)})
+    assert pool_reviews(task_store(stages)) == (PoolReview(0, 1, 2, {}),)
+    assert handed_out(stages) == [TASK_A, TASK_B]
 
 
+@pytest.mark.unit
 def test_a_review_reads_only_the_most_recent_rewards(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=2, review_window=2)
-    train(p, "job-1", {TASK_A: (0.0, 0.0)})
-    train(p, "job-2", {TASK_A: (1.0, 0.0)})
-    assert pool_reviews(task_store(p)) == (PoolReview(0, 2, 2, {}),), "the older rewards of task A are below the band"
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=2, review_window=2)
+    train(stages, "job-1", {TASK_A: (0.0, 0.0)})
+    train(stages, "job-2", {TASK_A: (1.0, 0.0)})
+    assert pool_reviews(task_store(stages)) == (
+        PoolReview(0, 2, 2, {}),
+    ), "the older rewards of task A are below the band"
 
 
+@pytest.mark.unit
 def test_a_task_with_fewer_rewards_than_the_window_is_kept(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=1, review_window=4)
-    train(p, "job-1", {TASK_A: (1.0, 1.0)})
-    assert pool_reviews(task_store(p)) == (PoolReview(0, 1, 3, {}),)
-    assert retired_tasks(task_store(p)) == {}
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 3)), pool_capacity=3, review_interval=1, review_window=4)
+    train(stages, "job-1", {TASK_A: (1.0, 1.0)})
+    assert pool_reviews(task_store(stages)) == (PoolReview(0, 1, 3, {}),)
+    assert retired_tasks(task_store(stages)) == {}
 
 
+@pytest.mark.unit
 def test_a_review_runs_after_review_interval_jobs_and_not_before(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=2, review_window=2)
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=2, review_window=2)
     reviews = []
     for job in range(1, 5):
-        train(p, f"job-{job}")
-        reviews.append(len(pool_reviews(task_store(p))))
+        train(stages, f"job-{job}")
+        reviews.append(len(pool_reviews(task_store(stages))))
     assert reviews == [0, 1, 1, 2]
-    assert [review.jobs for review in pool_reviews(task_store(p))] == [2, 4]
+    assert [review.jobs for review in pool_reviews(task_store(stages))] == [2, 4]
 
 
+@pytest.mark.unit
 def test_review_interval_zero_reuses_tasks_and_retires_none(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=0)
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=0)
     for job in range(1, 4):
-        assert train(p, f"job-{job}", {TASK_A: (1.0, 1.0), TASK_B: (0.0, 0.0)}) == [TASK_A, TASK_B]
-    store = task_store(p)
+        assert train(stages, f"job-{job}", {TASK_A: (1.0, 1.0), TASK_B: (0.0, 0.0)}) == [TASK_A, TASK_B]
+    store = task_store(stages)
     assert pool_reviews(store) == () and retired_tasks(store) == {}
 
 
 # ------------------------------------------------------------------------------------------------- restart
 
 
+@pytest.mark.unit
 def test_a_restart_keeps_the_pool_order_and_leaves_retired_tasks_out(tmp_path: Path) -> None:
     config = {"pool_capacity": 3, "review_interval": 1, "review_window": 2}
     first = pipeline(tmp_path, FixedTasks(generated(0, 3)), **config)
@@ -526,6 +553,7 @@ def test_a_restart_keeps_the_pool_order_and_leaves_retired_tasks_out(tmp_path: P
     assert again.status()["training_pool"]["active"] == 2
 
 
+@pytest.mark.unit
 def test_a_restart_makes_the_next_samples_that_a_stop_left_out(tmp_path: Path) -> None:
     config = {"pool_capacity": 2, "review_interval": 0}
     first = pipeline(tmp_path, FixedTasks(generated(0, 2)), **config)
@@ -538,6 +566,7 @@ def test_a_restart_makes_the_next_samples_that_a_stop_left_out(tmp_path: Path) -
     assert waiting(again) == [TASK_A, TASK_B]
 
 
+@pytest.mark.unit
 def test_a_pool_set_on_a_scenario_whose_tasks_trained_once_trains_them_again(tmp_path: Path) -> None:
     first = pipeline(tmp_path, FixedTasks(generated(0, 3)))
     assert train(first, "job-1") == [TASK_A, TASK_B]
@@ -553,6 +582,7 @@ def test_a_pool_set_on_a_scenario_whose_tasks_trained_once_trains_them_again(tmp
     assert waiting(again) == [TASK_B, TASK_C, TASK_A]
 
 
+@pytest.mark.unit
 def test_a_restart_after_retirement_repeats_the_same_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = {"pool_capacity": 2, "review_interval": 1, "review_window": 2}
     first = pipeline(tmp_path, FixedTasks(generated(0, 2)), **config)
@@ -579,6 +609,7 @@ def test_a_restart_after_retirement_repeats_the_same_review(tmp_path: Path, monk
     assert waiting(again) == [TASK_B]
 
 
+@pytest.mark.unit
 def test_a_restart_after_a_stop_between_two_uses_reviews_every_use_of_the_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -607,17 +638,18 @@ def test_a_restart_after_a_stop_between_two_uses_reviews_every_use_of_the_job(
     assert waiting(again) == [TASK_A]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("restart", [False, True], ids=["same_service", "restart"])
 def test_a_review_that_a_failed_write_cut_short_keeps_its_retirements_at_a_later_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: bool
 ) -> None:
     config = {"pool_capacity": 2, "review_interval": 2, "review_window": 2}
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), job_samples=1, **config)
-    train(p, "job-1", {TASK_A: (1.0, 1.0)})
-    assert submit(p) == [TASK_B]
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), job_samples=1, **config)
+    train(stages, "job-1", {TASK_A: (1.0, 1.0)})
+    assert submit(stages) == [TASK_B]
     # The trainer submits job-3 before the samples service reads job-2's end.
-    assert submit(p) == [TASK_A]
-    store = task_store(p)
+    assert submit(stages) == [TASK_A]
+    store = task_store(stages)
     write_document = store.write_document
 
     def failing_write_document(*, key: str, document: str) -> None:
@@ -628,19 +660,20 @@ def test_a_review_that_a_failed_write_cut_short_keeps_its_retirements_at_a_later
     # The review of job-2's end saves the retired task A, and then the database fails once.
     monkeypatch.setattr(store, "write_document", failing_write_document)
     with pytest.raises(OSError, match="connection reset"):
-        p.job_ended(finished("job-2", {TASK_B: (1.0, 0.0)}))
+        stages.job_ended(finished("job-2", {TASK_B: (1.0, 0.0)}))
     monkeypatch.undo()
     if restart:
         # job-3 runs at the restart, so the trainer does not give job-2's end again.
-        p.close()
-        p = pipeline(tmp_path, FixedTasks(), job_samples=1, **config)
-    p.job_ended(finished("job-3", {TASK_A: (0.0, 0.0)}))
-    store = task_store(p)
+        stages.close()
+        stages = pipeline(tmp_path, FixedTasks(), job_samples=1, **config)
+    stages.job_ended(finished("job-3", {TASK_A: (0.0, 0.0)}))
+    store = task_store(stages)
     assert pool_reviews(store) == (PoolReview(0, 3, 1, {TASK_A: "above_band"}),)
     assert retired_tasks(store) == {TASK_A: RetiredTask(TASK_A, 0, (1.0, 1.0), "above_band")}
-    assert waiting(p) == [TASK_B]
+    assert waiting(stages) == [TASK_B]
 
 
+@pytest.mark.unit
 def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_path: Path) -> None:
     config = {"pool_capacity": 4, "review_interval": 0}
     task_d = "harbor-00000-003"
@@ -669,6 +702,7 @@ def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_
 # ------------------------------------------------------------------------------------------------- settings and status
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("config", "message"),
     [
@@ -684,22 +718,24 @@ def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_
         ({"review_window": 8}, "need a pool_capacity above 0"),
     ],
 )
-def test_pool_settings_refuse_bad_values(config: dict[str, float], message: str) -> None:
+def test_a_malformed_pool_setting_is_refused(config: dict[str, float], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         GeneratedTaskSettings(**config)
 
 
+@pytest.mark.unit
 def test_a_pool_capacity_refuses_refill_tasks_above_1() -> None:
     config = {"refill_tasks": 2, "pool_capacity": 4}
     with pytest.raises(PluginConfigError, match="leave refill_tasks at 1"):
         GeneratedTaskSettings.parse(config, plugin_class=GeneratedTaskSamples)
 
 
+@pytest.mark.unit
 def test_the_status_reports_retired_tasks_and_their_reasons(tmp_path: Path) -> None:
-    p = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=1, review_window=2)
-    train(p, "job-1", {TASK_A: (0.0, 0.0)})
-    assert handed_out(p) == [TASK_B]
-    assert p.status()["training_pool"] == {
+    stages = pipeline(tmp_path, FixedTasks(generated(0, 2)), pool_capacity=2, review_interval=1, review_window=2)
+    train(stages, "job-1", {TASK_A: (0.0, 0.0)})
+    assert handed_out(stages) == [TASK_B]
+    assert stages.status()["training_pool"] == {
         "capacity": 2,
         "active": 1,
         "retired": 1,

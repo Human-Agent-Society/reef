@@ -217,6 +217,7 @@ def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     assert scenario.samples.page()[-1].sample_id == "t1" and scenario.samples.page()[-1].sequence > last
 
 
+@pytest.mark.unit
 def test_a_trainer_removes_its_own_samples_from_the_scenario_and_no_other_sample(scenario):
     samples = scenario.samples
     scenario.data.create("acme", [upload("upload", math="train")])

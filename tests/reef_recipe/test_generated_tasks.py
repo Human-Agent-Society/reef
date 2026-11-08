@@ -1143,6 +1143,7 @@ def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_
     assert handed_out_names(p) == ["harbor-00001-002", "harbor-00001-003"]
 
 
+@pytest.mark.unit
 def test_with_no_jobs_per_round_the_next_round_follows_the_last_while_few_tasks_wait(tmp_path: Path) -> None:
     # Generation runs ahead of training: each round starts when the last one ends, while fewer than refill_tasks
     # saved tasks wait to train, and no job end has to come first.
@@ -1322,6 +1323,7 @@ def test_a_round_that_ran_out_of_attempts_is_retried_with_the_same_sessions(tmp_
     assert len(task_generator.requests) == 1
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("concurrency", [1, 2])
 def test_an_identical_candidate_in_the_same_generation_is_rejected_as_a_duplicate(
     tmp_path: Path, concurrency: int

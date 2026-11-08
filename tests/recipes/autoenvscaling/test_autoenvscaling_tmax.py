@@ -112,6 +112,7 @@ def harbor_task(
     return task_dir
 
 
+@pytest.mark.unit
 def test_a_tmax_v11_harbor_task_becomes_a_seed_that_keeps_its_verifier_and_settings(tmp_path: Path) -> None:
     harbor_task(tmp_path / "tasks", "task_000007_ab12cd34")
     arguments = ["--harbor", "--tasks", str(tmp_path / "tasks"), "--out", str(tmp_path / "seeds")]
@@ -141,6 +142,7 @@ def test_a_tmax_v11_harbor_task_becomes_a_seed_that_keeps_its_verifier_and_setti
     }
 
 
+@pytest.mark.unit
 def test_a_v11_task_the_audit_did_not_clear_or_with_a_binary_file_is_refused(tmp_path: Path) -> None:
     tasks = tmp_path / "tasks"
     harbor_task(tasks, "task_000001_aaaaaaaa", status="not_validated")
@@ -160,6 +162,7 @@ def test_a_v11_task_the_audit_did_not_clear_or_with_a_binary_file_is_refused(tmp
     assert [entry["task_id"] for entry in result["converted"]] == ["task_000005_eeeeeeee"]
 
 
+@pytest.mark.unit
 def test_a_tmax_task_becomes_a_reef_harbor_task_that_reads_back(tmp_path: Path) -> None:
     tmax_task(tmp_path / "tasks", "Task_007")
     assert tmax.main(["--tasks", str(tmp_path / "tasks"), "--out", str(tmp_path / "seeds")]) == 0
@@ -207,6 +210,7 @@ def test_a_tmax_task_becomes_a_reef_harbor_task_that_reads_back(tmp_path: Path) 
     assert tmax.main(["--tasks", str(tmp_path / "tasks"), "--out", str(tmp_path / "seeds")]) == 0
 
 
+@pytest.mark.unit
 def test_a_tmax_task_with_a_binary_fixture_or_no_from_image_is_reported_not_converted(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -269,6 +273,7 @@ From: ubuntu:22.04
 """
 
 
+@pytest.mark.unit
 def test_each_fixture_keeps_its_own_file_under_a_name_a_variant_can_hold(tmp_path: Path) -> None:
     task_dir = tmax_task(tmp_path / "tasks", "t1", container_def=SHARED_NAMES_DEF)
     for folder, text in (("a", '{"a": 1}\n'), ("b", '{"b": 2}\n')):
@@ -361,6 +366,7 @@ def test_four():
 """
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("test_outputs", "reward"),
     [
@@ -378,6 +384,23 @@ def test_the_tmax_verifier_scores_the_fraction_passed_and_fails_closed(
     assert verifier_reward(tmp_path, test_outputs, planted=True) == reward
 
 
+@pytest.mark.unit
 def test_the_tmax_verifier_gives_pytest_a_config_file_with_an_extension(tmp_path: Path) -> None:
     # Newer pytest refuses an extensionless -c file, and every task would then score 0.
     assert verifier_reward(tmp_path, "def test_one():\n    pass\n", checks_config=True) == "1.0000\n"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("files", "unhandled", "message"),
+    [
+        ((("fixture.txt", ""),), (), "a %files entry is a source and a destination path"),
+        ((), ("labels", "post"), "the conversion reads the sections"),
+    ],
+    ids=("empty-destination", "handled-section"),
+)
+def test_a_container_definition_refuses_a_malformed_value(
+    files: tuple[tuple[str, str], ...], unhandled: tuple[str, ...], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        tmax.ContainerDefinition("ubuntu:24.04", files, (), (), unhandled)

@@ -48,27 +48,34 @@ from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.record2sample.generator.designer import checked_harbor_files
 
+#: The verifier of a converted task: the fraction of its tests that pass.
 VERIFIER = Path(__file__).with_name("tmax_verifier.sh")
+#: The file in the output directory that lists the converted and the refused tasks.
 CONVERSION_FILE = "conversion.json"
+#: The directory of a converted task's environment that holds the files of its ``%files`` entries.
 FIXTURES_DIR = "fixtures"
+#: The build script of a converted task's environment: the ``%post`` lines.
 BUILD_SCRIPT = "tmax_build.sh"
-# The container.def sections the conversion reads; the others are listed as left out.
+#: The container.def sections the conversion reads; the others are listed as left out.
 HANDLED_SECTIONS = ("files", "post", "environment")
+#: The task.json keys that a converted task keeps in its metadata.
 TASK_JSON_KEYS = ("domain", "tier", "skill_type")
+#: The most characters of a converted task's name.
 MAX_NAME_CHARS = 100
-# The most parts of a fixture's path in the task directory that its name under fixtures/ keeps: a reply's file name
-# has at most four parts.
+#: The most parts of a fixture's path in the task directory that its name under fixtures/ keeps: a reply's file name
+#: has at most four parts.
 FIXTURE_PARTS = 3
-# A run of characters that a reply's file name cannot hold, and the start that each part of the name needs.
+#: A run of characters that a reply's file name cannot hold.
 FIXTURE_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+#: The start that each part of a reply's file name needs.
 FIXTURE_START = re.compile(r"\.?[A-Za-z0-9_]")
-# Upstream's budgets: the build and the verifier stay inside the generator service's bound on one oracle trial.
+#: Upstream's budgets: the build and the verifier stay inside the generator service's bound on one oracle trial.
 TASK_CONFIG: dict[str, dict[str, object]] = {
     "agent": {"timeout_sec": 1200},
     "verifier": {"timeout_sec": 600},
     "environment": {"network_mode": "no-network", "build_timeout_sec": 900},
 }
-# The agent's container and the verifier have no network, so the image carries what each one runs.
+#: The agent's container and the verifier have no network, so the image carries what each one runs.
 TOOL_STEPS = (
     "# Reef: the solver's agent needs tmux, and the verifier needs pytest; neither has network.",
     "RUN command -v tmux >/dev/null 2>&1"
@@ -77,12 +84,13 @@ TOOL_STEPS = (
     " || python3 -m pip install -q --break-system-packages pytest"
     " || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pytest)",
 )
-# A v1.1 task has network, but its image may still lack tmux, which the solver's agent needs, or pytest.
+#: A v1.1 task has network, but its image may still lack tmux, which the solver's agent needs, or pytest.
 HARBOR_TOOL_STEPS = ("# Reef: the solver's agent needs tmux, and the verifier needs pytest.", *TOOL_STEPS[1:])
-# The v1.1 task metadata a seed keeps, besides the task id.
+#: The v1.1 task metadata a seed keeps, besides the task id.
 HARBOR_METADATA_KEYS = ("domain", "skill_type")
-# A v1.1 task builds from its published image; this bounds the build like a v1 task's.
+#: A v1.1 task builds from its published image; this bounds the build like a v1 task's.
 HARBOR_BUILD_TIMEOUT_SEC = 900
+#: The reference solution of a converted task, which does nothing.
 SOLVE_SCRIPT = """#!/bin/bash
 # TMax ships no reference solution. This one does nothing, so its oracle trial scores the untouched environment.
 exit 0
@@ -94,9 +102,10 @@ class ContainerDefinition:
     """What the conversion reads from a TMax task's ``container.def``.
 
     Values: ``image`` is the ``From:`` value of the header, or empty when there is none. ``files`` holds each
-    ``%files`` entry as (source, destination); an entry with one path copies it to the same path. ``post`` holds
-    the ``%post`` lines as written, and ``environment`` the ``%environment`` exports without ``export``.
-    ``unhandled_sections`` names, in order, the sections not in :data:`HANDLED_SECTIONS`.
+    ``%files`` entry as (source, destination), two non-empty strings; an entry with one path copies it to the same
+    path. ``post`` holds the ``%post`` lines as written, and ``environment`` the ``%environment`` exports without
+    ``export``. ``unhandled_sections`` names, in order, the sections not in :data:`HANDLED_SECTIONS`. The constructor
+    refuses other values.
     Purpose: :func:`container_definition` makes it, and :func:`converted_task` writes the Dockerfile from it.
     """
 
@@ -105,6 +114,14 @@ class ContainerDefinition:
     post: tuple[str, ...]
     environment: tuple[str, ...]
     unhandled_sections: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for entry in self.files:
+            if len(entry) != 2 or not all(isinstance(path, str) and path for path in entry):
+                raise ValueError(f"a %files entry is a source and a destination path, got {entry!r}")
+        handled = [section for section in self.unhandled_sections if section in HANDLED_SECTIONS]
+        if handled:
+            raise ValueError(f"the conversion reads the sections {handled}, so they are not left out")
 
 
 def container_definition(text: str) -> ContainerDefinition:

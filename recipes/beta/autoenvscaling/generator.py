@@ -116,7 +116,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_COUNT = 8
 DEFAULT_VARIANT_SHARE = 0.5
-# How many tasks of a generation are written at once; 1 writes them in turn.
+#: How many tasks of a generation are written at once; 1 writes them in turn.
 DEFAULT_CONCURRENCY = 1
 # The most parents an adaptive generator keeps; the oldest go first.
 MAX_PARENTS = 256
@@ -124,9 +124,11 @@ FEEDBACK_FILE = "adaptive.json"
 PARENTS_DIR = "parents"
 # A variant or a seed takes no session from the walk, so its proposal has no walk position.
 VARIANT_POSITION = -1
-# A seed's one source record id: this prefix and the first SEED_ID_DIGITS hex digits of its digest.
+#: The start of a seed's one source record id; the first ``SEED_ID_DIGITS`` hex digits of its digest follow.
 SEED_ID_PREFIX = "seed-"
+#: The hex digits of a seed's digest in its source record id.
 SEED_ID_DIGITS = 16
+#: A seed's source record id: ``SEED_ID_PREFIX`` and ``SEED_ID_DIGITS`` hex digits.
 SEED_RECORD_ID = re.compile(f"{re.escape(SEED_ID_PREFIX)}[0-9a-f]{{{SEED_ID_DIGITS}}}")
 DEFAULT_BAND_LOW = 0.25
 DEFAULT_BAND_HIGH = 0.75
@@ -560,13 +562,19 @@ class TaskSlot:
     """A slot of a generation whose task the Designer writes.
 
     Values: ``proposal`` is the slot's proposal; ``source`` is the session the Designer reads, or None for a
-    variant of a seeded parent; ``variant`` is the parent it varies, or None for a task from a session.
+    variant of a seeded parent; ``variant`` is the parent it varies, or None for a task from a session. ``source`` is
+    None exactly when ``variant`` names a ``seed_task``. The constructor refuses other values.
     Purpose: ``generate`` plans its slots, starts writing their tasks, and takes the tasks in slot order.
     """
 
     proposal: SessionProposal
     source: SessionSource | None
     variant: TaskVariant | None = None
+
+    def __post_init__(self) -> None:
+        is_seeded = self.variant is not None and bool(self.variant.seed_task)
+        if (self.source is None) != is_seeded:
+            raise ValueError("a slot has no session exactly when it varies a seeded parent")
 
 
 @dataclass(frozen=True)
@@ -1161,10 +1169,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
         error = ""
         tasks: list[HarborTask] = []
         slots = self.slots()
-        gate = asyncio.Semaphore(self.concurrency)
+        designer_slots = asyncio.Semaphore(self.concurrency)
         stopped = asyncio.Event()
         writing = {
-            index: asyncio.ensure_future(self.slot_task(slot, gate, stopped))
+            index: asyncio.ensure_future(self.slot_task(slot, designer_slots, stopped))
             for index, slot in enumerate(slots)
             if isinstance(slot, TaskSlot)
         }
@@ -1272,14 +1280,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 break
         return slots
 
-    async def slot_task(self, slot: TaskSlot, gate: asyncio.Semaphore, stopped: asyncio.Event) -> HarborTask:
-        """The task of ``slot`` (:meth:`rebuilt`), once ``gate`` lets its writing start.
+    async def slot_task(self, slot: TaskSlot, designer_slots: asyncio.Semaphore, stopped: asyncio.Event) -> HarborTask:
+        """The task of ``slot`` (:meth:`rebuilt`), once one of ``designer_slots`` is free.
 
-        The gate lets the slots start in order. An outage or a cancellation sets ``stopped`` before the gate lets
-        the next slot in, so no slot starts after it: the slots after it end with :class:`DesignerOutage`, and
-        ``generate`` takes none of them.
+        The slots start in order. An outage or a cancellation sets ``stopped`` before it frees its slot, so no slot
+        starts after it: the slots after it end with :class:`DesignerOutage`, and ``generate`` takes none of them.
         """
-        async with gate:
+        async with designer_slots:
             if stopped.is_set():
                 raise DesignerOutage("the generation stopped before this slot started")
             try:

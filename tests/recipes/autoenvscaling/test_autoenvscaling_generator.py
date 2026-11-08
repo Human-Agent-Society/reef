@@ -86,6 +86,7 @@ def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
     stand_in_e2b_package(monkeypatch)
 
 
+@pytest.mark.unit
 def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: Path) -> None:
     designer = StandInDesigner()
     service = StandInGenerator(tmp_path / "tasks")
@@ -119,6 +120,7 @@ def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: 
     assert cursor(tmp_path) == {"next_generation": 1, "next_position": 3}
 
 
+@pytest.mark.unit
 def test_a_restarted_generator_continues_with_the_next_session_and_generation(tmp_path: Path) -> None:
     designer = StandInDesigner()
     first = autoenvscaling(tmp_path, designer, source_count=3, count=2)
@@ -160,6 +162,7 @@ class BlockingDesigner(TaskDesigner):
         raise DesignerOutage("the agent's run was stopped")
 
 
+@pytest.mark.unit
 def test_a_cancelled_generation_stops_its_agent_and_takes_no_session(tmp_path: Path) -> None:
     designer = BlockingDesigner()
     generator = autoenvscaling(tmp_path, designer)
@@ -216,6 +219,7 @@ class GatheringStandIn(StandInDesigner):
                 self.running -= 1
 
 
+@pytest.mark.unit
 def test_tasks_are_written_at_once_up_to_the_concurrency_and_keep_their_order(tmp_path: Path) -> None:
     stand_in = GatheringStandIn(limit=3)
     generator = autoenvscaling(tmp_path, stand_in, source_count=5, count=5, concurrency=3)
@@ -255,6 +259,7 @@ class OutageStandIn(TaskDesigner):
         raise DesignerOutage("the agent's run was stopped")
 
 
+@pytest.mark.unit
 def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(tmp_path: Path) -> None:
     stand_in = OutageStandIn()
     generator = autoenvscaling(tmp_path, stand_in, source_count=4, count=4, concurrency=2)
@@ -269,6 +274,7 @@ def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(tm
     assert cursor(tmp_path)["next_position"] == 1, "the stopped task's session is taken again"
 
 
+@pytest.mark.unit
 def test_a_task_the_authoring_checks_refuse_is_refused_and_names_the_last_call(tmp_path: Path) -> None:
     designer = StandInDesigner(has_tmux=False)
     service = StandInGenerator(tmp_path / "tasks")
@@ -283,6 +289,7 @@ def test_a_task_the_authoring_checks_refuse_is_refused_and_names_the_last_call(t
     assert proposal["refusal"].startswith("the Designer's task is refused") and "tmux" in proposal["refusal"]
 
 
+@pytest.mark.unit
 def test_sessions_without_a_task_are_recorded_by_stage_and_an_outage_ends_the_generation(tmp_path: Path) -> None:
     designer = StandInDesigner(unusable=("session-1",), unreachable=("session-3",))
     service = StandInGenerator(tmp_path / "tasks")
@@ -329,6 +336,7 @@ class RefusingCheck(TaskCheck):
         return CheckResult(self.name, ("the verifier checks the wording of the change",))
 
 
+@pytest.mark.unit
 def test_validation_runs_the_checks_in_order_on_a_written_copy_and_removes_it(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
@@ -352,6 +360,7 @@ def test_validation_runs_the_checks_in_order_on_a_written_copy_and_removes_it(tm
     assert refusing.deleted[-1] == NAMES[0]
 
 
+@pytest.mark.unit
 def test_a_staged_copy_of_the_same_task_passes_validation_and_stays_staged(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
@@ -361,6 +370,7 @@ def test_a_staged_copy_of_the_same_task_passes_validation_and_stays_staged(tmp_p
     assert staged.path.is_dir() and item.name not in service.deleted, "a rollout may be using the staged copy"
 
 
+@pytest.mark.unit
 def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
@@ -369,6 +379,7 @@ def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
     assert asyncio.run(generator.validate(item)).errors == ("refused: duplicate of a task already under the root",)
 
 
+@pytest.mark.unit
 def test_a_check_that_cannot_run_raises_and_the_report_names_it(tmp_path: Path) -> None:
     # Two candidate checks, then the first task's check; the second task's check cannot run.
     service = StandInGenerator(tmp_path / "tasks", check_fail_after=3)
@@ -385,6 +396,7 @@ def test_a_check_that_cannot_run_raises_and_the_report_names_it(tmp_path: Path) 
     assert [entry["stage"] for entry in document["proposals"]] == ["", "unreached"]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("training", "band", "position"),
     [
@@ -434,6 +446,7 @@ def test_eval_tasks_are_held_out_without_a_band_measurement_or_failure(tmp_path:
     assert service.reports == []
 
 
+@pytest.mark.unit
 def test_the_results_name_where_each_refused_task_stopped(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInDesigner(), service)
@@ -459,6 +472,7 @@ def test_the_results_name_where_each_refused_task_stopped(tmp_path: Path) -> Non
     assert service.reports == [], "the generator sends no Designer report"
 
 
+@pytest.mark.unit
 def test_a_request_with_source_records_is_refused_and_named_in_the_report(tmp_path: Path) -> None:
     designer = StandInDesigner()
     generator = autoenvscaling(tmp_path, designer)
@@ -604,6 +618,7 @@ def test_the_history_step_leaves_only_the_base_commit_in_the_repository(tmp_path
     assert git("for-each-ref", "--format=%(refname)", cwd=checkout) == ("refs/heads/work" if is_on_branch else "")
 
 
+@pytest.mark.unit
 def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_call(tmp_path: Path) -> None:
     reef, calls = serving_reef(fenced(DOCUMENT))
     service = StandInGenerator(tmp_path / "tasks")
@@ -632,6 +647,7 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     assert report(tmp_path)["proposals"][0]["designer_record_id"] == "rec-1"
 
 
+@pytest.mark.unit
 def test_from_config_builds_the_designer_and_keeps_one_state_directory_for_each_scenario(tmp_path: Path) -> None:
     environ = {"E2B_API_KEY": "e2b-test", "DESIGNER_TOKEN": "designer-token"}
     generator = AutoEnvScalingGenerator.from_config(
@@ -656,6 +672,7 @@ def test_from_config_builds_the_designer_and_keeps_one_state_directory_for_each_
         AutoEnvScalingGenerator.from_config(generating_config(tmp_path), scenario="three", environ={})
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
@@ -782,6 +799,7 @@ def test_from_config_refuses_a_calibration_that_cannot_run(
         )
 
 
+@pytest.mark.unit
 def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", rewards={"plain": 0.5})
     generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=2)
@@ -807,6 +825,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
 
 
+@pytest.mark.unit
 def test_an_outage_that_makes_no_task_leaves_the_round_incomplete_so_a_restart_gives_it_back(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     stand_in = StandInDesigner(unreachable=("session-1", "session-2"))
@@ -826,6 +845,7 @@ def test_an_outage_that_makes_no_task_leaves_the_round_incomplete_so_a_restart_g
     assert generation.task_store is not None and complete_generation_count(generation.task_store) == 0
 
 
+@pytest.mark.unit
 def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_complete(tmp_path: Path) -> None:
     # The first task's rollouts score; none of the second task's calibration rollouts can run.
     service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0] + [None] * 8)
@@ -857,6 +877,7 @@ def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_comp
     assert [proposal["stage"] for proposal in report(tmp_path)["proposals"]] == ["", "unchecked"]
 
 
+@pytest.mark.unit
 def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -884,6 +905,7 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
     assert generator.designer.upstream.api_key == "designer-token" and generator.designer.upstream.model == "gpt-6-sol"
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("name", TINKER_EXAMPLES)
 def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(name: str) -> None:
     config = yaml.safe_load((EXAMPLES / name).read_text())
@@ -902,6 +924,7 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
     assert kwargs["llm_kwargs"]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("name", (*TINKER_EXAMPLES, SLIME_EXAMPLE))
 def test_an_examples_generation_deadline_covers_the_designer_and_the_calibration(name: str) -> None:
     stage = yaml.safe_load((EXAMPLES / name).read_text())["pipeline"]["record2sample"]["config"]
@@ -909,6 +932,7 @@ def test_an_examples_generation_deadline_covers_the_designer_and_the_calibration
     assert stage["generation_deadline_seconds"] > DEFAULT_GENERATION_DEADLINE_SECONDS
 
 
+@pytest.mark.unit
 def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimizer_step_per_job() -> None:
     slime = yaml.safe_load((EXAMPLES / SLIME_EXAMPLE).read_text())
     tinker = yaml.safe_load((EXAMPLES / "tmax_seeds/serve-tinker.yaml").read_text())
@@ -951,6 +975,7 @@ def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimi
     assert int(options["rollout-max-response-len"]) == harbor["agent"]["kwargs"]["llm_kwargs"]["max_tokens"]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("name", (*TINKER_EXAMPLES, SLIME_EXAMPLE))
 def test_an_examples_stage_settings_parse(name: str) -> None:
     stage = yaml.safe_load((EXAMPLES / name).read_text())["pipeline"]["record2sample"]["config"]
@@ -960,6 +985,7 @@ def test_an_examples_stage_settings_parse(name: str) -> None:
         assert (settings.jobs_per_round, settings.refill_tasks, settings.validation_concurrency) == (0, 16, 16)
 
 
+@pytest.mark.unit
 def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", rewards={"plain": 0.5})
     generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
@@ -977,6 +1003,7 @@ def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_p
     assert report(tmp_path, 0) == document, "a second delivery of a closed generation does nothing"
 
 
+@pytest.mark.unit
 def test_a_task_that_could_not_run_is_an_outage_in_the_report(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), StandInGenerator(tmp_path / "tasks"), count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
@@ -985,6 +1012,7 @@ def test_a_task_that_could_not_run_is_an_outage_in_the_report(tmp_path: Path) ->
     assert [entry["stage"] for entry in report(tmp_path)["proposals"]] == ["outage"]
 
 
+@pytest.mark.unit
 def test_the_generator_refuses_a_band_whose_low_exceeds_its_high(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="band_low must not exceed band_high"):
         autoenvscaling(tmp_path, StandInDesigner(), band_low=0.8, band_high=0.2)

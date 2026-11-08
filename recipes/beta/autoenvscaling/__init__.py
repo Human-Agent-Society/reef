@@ -12,6 +12,9 @@ tasks and trains on them.
   gateway that records its model calls on Reef, and the one-reply prompt Designer.
 - ``claude_designer``: Claude Code as the agent, in the same sandbox, signed in with its owner's OAuth token; it calls
   Anthropic itself and checks its task with the ``task_check`` command.
+- ``designer_credentials``: the checks of Claude Code's token, and its redaction from logs, errors and run files.
+- ``check_gateway``: the loopback gateway that serves a Designer's task checks and their result polls.
+- ``task_check``: Claude Code's ``task_check`` command, which runs its task through the gateway's oracle and nop check.
 - ``checks``: the task checks: Harbor's oracle and nop agents, the contamination check, the test review, the
   solver calibration, and the seed check.
 - ``generator``: ``AutoEnvScalingGenerator``: the sessions walked with a cursor, admission and the history

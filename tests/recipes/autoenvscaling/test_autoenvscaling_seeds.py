@@ -64,6 +64,7 @@ from recipes.beta.autoenvscaling.generator import (
     GenerationCursor,
     ParentTask,
     SessionProposal,
+    TaskSlot,
     seed_record_id,
     seed_tasks,
     with_parent_limits,
@@ -217,6 +218,7 @@ def parents(tmp_path: Path) -> list[dict[str, object]]:
     return kept
 
 
+@pytest.mark.unit
 def test_seeds_fill_the_slots_after_variants_and_before_sessions_once_each(tmp_path: Path) -> None:
     designer = SeedDesigner()
     generator = seeded(tmp_path, designer, source_count=2, count=3)
@@ -248,6 +250,7 @@ def test_seeds_fill_the_slots_after_variants_and_before_sessions_once_each(tmp_p
     assert [task.metadata.get("seed_task") for task in second] == [seeds[0].name, None, None]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "result",
     [
@@ -274,6 +277,7 @@ def test_a_seed_is_admitted_by_its_build_and_its_no_op_solution_failing(tmp_path
     assert proposal["stage"] == "" and len(service.checks) == 1
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("result", "error"),
     [
@@ -298,6 +302,7 @@ def test_a_seed_whose_environment_does_not_build_is_refused(tmp_path: Path, resu
     assert proposal["stage"] == "check" and proposal["checks"][0]["details"]["oracle_reward"] == result.oracle_reward
 
 
+@pytest.mark.unit
 def test_a_seed_skips_the_review_and_the_calibration(tmp_path: Path) -> None:
     server, review_calls = serving_reef('{"findings": []}')
     try:
@@ -335,6 +340,7 @@ def test_a_seed_skips_the_review_and_the_calibration(tmp_path: Path) -> None:
     assert [check["check"] for check in report(tmp_path)["proposals"][0]["checks"]] == ["seed", "contamination"]
 
 
+@pytest.mark.unit
 def test_a_seed_outside_the_band_becomes_a_seeded_parent(tmp_path: Path) -> None:
     designer = SeedDesigner()
     generator = seeded(tmp_path, designer)
@@ -367,6 +373,7 @@ def test_a_seed_outside_the_band_becomes_a_seeded_parent(tmp_path: Path) -> None
     assert [kept["seed_task"] for kept in parents(tmp_path)] == [seeds[0].name, seeds[0].name]
 
 
+@pytest.mark.unit
 def test_the_split_puts_a_seed_variant_with_its_seed(tmp_path: Path) -> None:
     generator = seeded(tmp_path, SeedDesigner())
     first = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
@@ -391,6 +398,7 @@ def test_the_split_puts_a_seed_variant_with_its_seed(tmp_path: Path) -> None:
         assert variant.name in (assigned.train if split == "train" else assigned.eval)
 
 
+@pytest.mark.unit
 def test_a_seed_from_an_earlier_runs_session_task_keeps_its_session_and_is_a_seed_here(tmp_path: Path) -> None:
     # A task an earlier run varied from session-1, used as a seed; this run's sources hold session-1 too.
     earlier = replace(
@@ -423,6 +431,7 @@ def test_a_seed_from_an_earlier_runs_session_task_keeps_its_session_and_is_a_see
     assert asyncio.run(generator.validate(seed)).is_valid
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("is_cancelled", [False, True], ids=("raises", "cancelled"))
 def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is_cancelled: bool) -> None:
     class FailingSessionDesigner(SeedDesigner):
@@ -467,6 +476,7 @@ def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 1, "next_seed": 1}
 
 
+@pytest.mark.unit
 def test_a_seed_variant_runs_the_task_checks_not_the_seed_check(tmp_path: Path) -> None:
     service = ScriptedOracle(tmp_path / "tasks", OracleResult(True, "", oracle_reward=1.0, nop_reward=0.0))
     generator = seeded(tmp_path, SeedDesigner(), service)
@@ -482,6 +492,7 @@ def test_a_seed_variant_runs_the_task_checks_not_the_seed_check(tmp_path: Path) 
     assert [check["check"] for check in proposal["checks"]] == ["oracle"] and proposal["stage"] == "check"
 
 
+@pytest.mark.unit
 def test_an_eval_seed_is_held_out_and_never_varied(tmp_path: Path) -> None:
     designer = SeedDesigner()
     generator = seeded(tmp_path, designer)
@@ -526,6 +537,7 @@ class SnapshotClaudeSession(ScriptedClaudeSession):
         return super().launch(argv, root=root, workspace=workspace, **options)
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("harness", ["pi", "claude-code"])
 def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: str
@@ -602,6 +614,7 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         designer.vary(source, tmp_path / "third", checks, tags={}, stop=threading.Event(), variant=variant)
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("is_reviewing", [True, False])
 @pytest.mark.parametrize("has_behaviour_rule", [True, False])
 def test_the_seed_rules_name_no_session_with_the_review_on_or_off(
@@ -613,6 +626,7 @@ def test_the_seed_rules_name_no_session_with_the_review_on_or_off(
     assert "write a real one" in rules and "at most 6 checks" in rules
 
 
+@pytest.mark.unit
 def test_a_seed_variant_task_has_no_history_step(tmp_path: Path) -> None:
     designer = SeedDesigner()
     generator = seeded(tmp_path, designer, source_count=1)
@@ -638,6 +652,7 @@ def test_a_seed_variant_task_has_no_history_step(tmp_path: Path) -> None:
     assert task.environment["Dockerfile"] == (tmp_path / "task" / "environment" / "Dockerfile").read_text()
 
 
+@pytest.mark.unit
 def test_the_session_rules_and_prompts_are_unchanged(tmp_path: Path) -> None:
     variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
     rules = [
@@ -660,6 +675,7 @@ def test_the_session_rules_and_prompts_are_unchanged(tmp_path: Path) -> None:
     assert hashlib.sha256("\0".join(prompts).encode()).hexdigest() == SESSION_PROMPTS_SHA256
 
 
+@pytest.mark.unit
 def test_a_seeds_only_generation_ends_when_seeds_and_parents_run_out(tmp_path: Path) -> None:
     designer = SeedDesigner()
     generator = seeded(tmp_path, designer, count=4)
@@ -674,6 +690,7 @@ def test_a_seeds_only_generation_ends_when_seeds_and_parents_run_out(tmp_path: P
     assert report(tmp_path, 2)["proposals"] == [] and cursor(tmp_path)["next_seed"] == 2
 
 
+@pytest.mark.unit
 def test_a_restart_continues_with_the_next_seed(tmp_path: Path) -> None:
     generator = seeded(tmp_path, SeedDesigner(), seed_count=3, source_count=1)
     first = asyncio.run(generator.generate(REQUEST))
@@ -684,6 +701,7 @@ def test_a_restart_continues_with_the_next_seed(tmp_path: Path) -> None:
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 1, "next_seed": 3}
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
@@ -720,6 +738,7 @@ def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(("name", "concurrency"), [("serve-tinker.yaml", 4), ("serve.yaml", 6)])
 def test_the_seed_task_examples_build_claude_code_on_the_seeds_with_a_refusing_calibration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, concurrency: int
@@ -750,6 +769,7 @@ def test_the_seed_task_examples_build_claude_code_on_the_seeds_with_a_refusing_c
     assert not any(isinstance(check, ReviewCheck) for check in generator.task_checks)
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "fields",
     [
@@ -763,6 +783,7 @@ def test_a_proposal_at_position_minus_one_is_a_seed_or_a_variant(fields: dict[st
     assert (proposal.position, proposal.seed_task) == (-1, "tmax-0")
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
@@ -781,6 +802,7 @@ def test_a_seed_proposal_is_neither_a_variant_nor_a_session_proposal(changes: di
         SessionProposal(**{**fields, **changes})  # type: ignore[arg-type]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("source_record_id", "seed_task"),
     [("session-1", "tmax-0"), (SEED_ID, "Upper"), (SEED_ID, "../tmax-0"), (SEED_ID, 7)],
@@ -790,6 +812,7 @@ def test_a_seeded_parent_names_a_seed_task_and_has_the_seeds_id(source_record_id
         ParentTask("t-0", source_record_id, 0, 1.0, 2, "harder", seed_task=seed_task)  # type: ignore[arg-type]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("seed_task", ["Upper", "../tmax-0", 7])
 def test_a_variants_seed_task_is_empty_or_a_task_name(seed_task: object) -> None:
     with pytest.raises(ValueError, match="a variant's seed_task"):
@@ -803,6 +826,7 @@ def test_a_variants_seed_task_is_empty_or_a_task_name(seed_task: object) -> None
         )
 
 
+@pytest.mark.unit
 def test_seeds_and_seeded_parents_need_a_designer_that_varies_seeds(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="seed tasks need a SeedVariantDesigner"):
         seeded(tmp_path, StandInDesigner())
@@ -822,6 +846,7 @@ def test_seeds_and_seeded_parents_need_a_designer_that_varies_seeds(tmp_path: Pa
         )
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "fields",
     [{"next_seed": -1}, {"next_seed": "1"}, {"next_seed": True}, {"next_position": -2}, {"next_generation": 1.0}],
@@ -831,6 +856,7 @@ def test_a_cursor_holds_non_negative_ints(fields: dict[str, object]) -> None:
         GenerationCursor(**fields)  # type: ignore[arg-type]
 
 
+@pytest.mark.unit
 def test_a_seed_variant_keeps_its_seeds_time_and_machine(tmp_path: Path) -> None:
     limits = {
         "agent": {"timeout_sec": 1200.0},
@@ -848,6 +874,7 @@ def test_a_seed_variant_keeps_its_seeds_time_and_machine(tmp_path: Path) -> None
     assert variant.config["environment"]["network_mode"] == REPOSITORY_TASK_CONFIG["environment"]["network_mode"]
 
 
+@pytest.mark.unit
 def test_parent_limits_leave_a_limit_the_parent_does_not_set() -> None:
     task = seed_task(0, REPOSITORY_TASK_CONFIG)
     parent = seed_task(1, {"agent": {"timeout_sec": 900}})
@@ -855,3 +882,16 @@ def test_parent_limits_leave_a_limit_the_parent_does_not_set() -> None:
     assert limited.config["agent"]["timeout_sec"] == 900
     assert limited.config["verifier"] == REPOSITORY_TASK_CONFIG["verifier"]
     assert limited.config["environment"] == REPOSITORY_TASK_CONFIG["environment"]
+
+
+@pytest.mark.unit
+def test_a_slot_has_no_session_exactly_when_it_varies_a_seeded_parent(tmp_path: Path) -> None:
+    seed_id = "seed-" + "0" * 16
+    seeded = TaskVariant("t-0", tmp_path, "harder", 1.0, 2, seed_task="tmax-0")
+    proposal = SessionProposal(0, -1, seed_id, parent_task="t-0", direction="harder", seed_task="tmax-0")
+    assert TaskSlot(proposal, None, seeded).source is None
+    source = SessionSource("r", "sessions", Repository(url="https://example.com/r", commit="3f2c1ab", path="/app"))
+    with pytest.raises(ValueError, match="no session exactly when it varies a seeded parent"):
+        TaskSlot(proposal, source, seeded)
+    with pytest.raises(ValueError, match="no session exactly when it varies a seeded parent"):
+        TaskSlot(SessionProposal(0, 0, "r"), None)

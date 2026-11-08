@@ -281,6 +281,7 @@ class CountingChecks(CandidateChecks):
         return {"check": self.count, "ran": True, "passed": True, "oracle_reward": 1.0, "nop_reward": 0.0}
 
 
+@pytest.mark.unit
 def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, reef_url: str) -> None:
     session = ScriptedClaudeSession()
     designed = designed_in(tmp_path, reef_url, session)
@@ -330,6 +331,7 @@ def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, r
     assert session.is_closed.is_set()
 
 
+@pytest.mark.unit
 def test_task_check_script_waits_and_rechecks(tmp_path: Path) -> None:
     release = threading.Event()
     held = CountingChecks(release=release)
@@ -357,6 +359,7 @@ def test_task_check_script_waits_and_rechecks(tmp_path: Path) -> None:
         gateway.stop()
 
 
+@pytest.mark.unit
 def test_task_check_script_stops_waiting_at_the_run_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(task_check, "WAIT_SECONDS", 30.0)
     release = threading.Event()
@@ -505,6 +508,7 @@ def test_claude_variant_shares_parent_split(tmp_path: Path, reef_url: str) -> No
         assert task.name in (assigned.train if split == "train" else assigned.eval)
 
 
+@pytest.mark.unit
 def test_claude_vary_gives_claude_code_the_parent_and_the_variant_rules(tmp_path: Path, reef_url: str) -> None:
     parent_dir = write_harbor_task(
         task_for("harbor-00000-000-autoenvscaling", "designer-1", 8100), tmp_path / "parents"
@@ -525,6 +529,7 @@ def test_claude_vary_gives_claude_code_the_parent_and_the_variant_rules(tmp_path
     assert designed.record_ids == () and "port.txt" in designed.reply
 
 
+@pytest.mark.unit
 def test_adaptive_config_builds_claude_code_as_a_variant_designer(tmp_path: Path) -> None:
     generator = AutoEnvScalingGenerator.from_config(
         generating_config(tmp_path, designer_harness="claude-code", adaptive=True, count=2),
@@ -535,6 +540,7 @@ def test_adaptive_config_builds_claude_code_as_a_variant_designer(tmp_path: Path
     assert generator.variant_designer is generator.designer
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stdout", "exit_code", "error"),
     [
@@ -559,6 +565,7 @@ def test_max_turns_keeps_workspace_and_model_error_is_outage(
     assert session.is_closed.is_set()
 
 
+@pytest.mark.unit
 def test_timeout_keeps_the_task_and_names_the_newest_transcript(tmp_path: Path, reef_url: str) -> None:
     older = tmp_path / "run" / "claude" / "projects" / "-elsewhere" / "older.jsonl"
     older.parent.mkdir(parents=True)
@@ -571,6 +578,7 @@ def test_timeout_keeps_the_task_and_names_the_newest_transcript(tmp_path: Path, 
     assert session.is_closed.is_set()
 
 
+@pytest.mark.unit
 def test_token_never_reaches_errors_logs_run_dir_or_task(
     tmp_path: Path, reef_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -591,6 +599,7 @@ def test_token_never_reaches_errors_logs_run_dir_or_task(
     assert not any(TOKEN in record.getMessage() for record in caplog.records)
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stdout", "stderr"),
     [(result_json(is_error=True, result="x" * 480 + TOKEN), ""), ("not json", TOKEN + "y" * 480)],
@@ -603,6 +612,7 @@ def test_cut_error_text_keeps_no_part_of_the_token(tmp_path: Path, reef_url: str
     assert "[redacted]" in str(raised.value) and not holds_part_of_token(str(raised.value))
 
 
+@pytest.mark.unit
 def test_result_fields_are_redacted_in_the_log_and_the_error(
     tmp_path: Path, reef_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -615,6 +625,7 @@ def test_result_fields_are_redacted_in_the_log_and_the_error(
     assert "many-[redacted] turns" in ended and TOKEN not in ended
 
 
+@pytest.mark.unit
 def test_launch_error_and_close_warning_are_redacted(
     tmp_path: Path, reef_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -627,6 +638,7 @@ def test_launch_error_and_close_warning_are_redacted(
     assert "did not stop" in warning and "still up: [redacted]" in warning and TOKEN not in warning
 
 
+@pytest.mark.unit
 def test_a_name_holding_the_token_is_renamed(tmp_path: Path, reef_url: str) -> None:
     designed = designed_in(tmp_path, reef_url, ScriptedClaudeSession(session_name=TOKEN, is_timeout=True))
     run_dir = tmp_path / "run"
@@ -649,6 +661,7 @@ def test_a_name_that_cannot_take_the_redacted_name_is_deleted(tmp_path: Path) ->
     ]
 
 
+@pytest.mark.unit
 def test_check_and_admission_refuse_a_task_link_to_the_token(tmp_path: Path, reef_url: str) -> None:
     checks = CountingChecks()
     session = ScriptedClaudeSession(checks=([],), link_leak=TOKEN)
@@ -670,6 +683,7 @@ def test_task_holding_token_ends_generation_with_stage_credential(tmp_path: Path
     assert not files_holding(tmp_path / "state", TOKEN)
 
 
+@pytest.mark.unit
 def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None:
     checks = CountingChecks()
     session = ScriptedClaudeSession(checks=([],), task_leak=TOKEN)
@@ -680,6 +694,7 @@ def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None
     assert checks.count == 0, "the generator service never saw the task"
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("fields", "environ", "message"),
     [
@@ -743,6 +758,7 @@ def test_claude_config_refusals(
     assert TOKEN not in str(raised.value) and "leak-me" not in str(raised.value)
 
 
+@pytest.mark.unit
 def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: str) -> None:
     session = ScriptedClaudeSession()
     designed_in(tmp_path / "probe", reef_url, session)
@@ -766,6 +782,7 @@ def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: 
     assert dict(generator.designer.executor.env) == {"OWNER_SETTING": "1"}
 
 
+@pytest.mark.unit
 def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) -> None:
     generator = AutoEnvScalingGenerator.from_config(
         generating_config(
@@ -780,6 +797,7 @@ def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) 
     assert designer.reef.token == "reef-token" and designer.cache_dir == tmp_path / "state" / "one" / "repositories"
 
 
+@pytest.mark.unit
 def test_stop_signal_closes_claude_sandbox(tmp_path: Path, reef_url: str) -> None:
     stop = threading.Event()
     session = ScriptedClaudeSession(stop=stop)

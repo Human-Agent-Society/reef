@@ -50,6 +50,8 @@ beta/autoenvscaling/
   designer.py         the Designer contract; the agent: pi in an E2B sandbox behind a gateway that records its calls; the prompt Designer
   designer_tools.ts   the agent's task_check tool
   claude_designer.py  Claude Code as the agent, signed in with its owner's OAuth token, behind a gateway that serves only the checks
+  designer_credentials.py  the checks of Claude Code's token, and its redaction from logs, errors and run files
+  check_gateway.py    the loopback gateway that serves a Designer's task checks and their result polls
   task_check.py       Claude Code's task_check command
   checks.py           the task checks: Harbor's oracle and nop agents, the contamination check, the test review and the solver calibration
   generator.py        AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band, the parents and the seeds

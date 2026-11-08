@@ -65,8 +65,9 @@ RECORD_READ_TIMEOUT_SECONDS = 120.0
 # The prompt Designer reads the session from its prompt: the eval's session budget.
 PROMPT_SESSION_CHARS = 240_000
 GIT_TIMEOUT_SECONDS = 1800.0
-# One lock for each repository snapshot, by its cache path; the second lock guards the first's dict.
+#: One lock for each repository snapshot, by its cache path.
 SNAPSHOT_LOCKS: dict[Path, threading.Lock] = {}
+#: The lock that guards ``SNAPSHOT_LOCKS``.
 SNAPSHOT_LOCKS_LOCK = threading.Lock()
 # What git says when a clone finds no repository: deleted, private (it asks for credentials) or a wrong URL.
 MISSING_REPOSITORY_ERRORS = (
