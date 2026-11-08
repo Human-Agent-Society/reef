@@ -20,12 +20,13 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
+from reef.core.evaluation import EvaluationCallSummary
 from reef.core.job_data import JobData
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
@@ -116,9 +117,9 @@ def check_record_origin(value: object) -> dict[str, Any]:
     """Return ``value`` as the ``origin`` of a record item, or raise ``ValueError``.
 
     The origin is ``{scenario, artifact_id}`` (``check_origin``), with an optional ``source`` from
-    ``RECORD_SOURCES``. The origin of an evaluation call also has ``evaluation``: ``{evaluation_id, task_index,
-    repeat, attempt, index}``, a non-empty evaluation ID, the rollout's task index and repeat and the call's index,
-    integers from 0, and the call's 1-based attempt.
+    ``RECORD_SOURCES``. The origin of an evaluation call also has ``evaluation``: the non-empty ``evaluation_id``
+    and each field of the call's ``EvaluationCallSummary``, which its constructor checks. The summary is in the
+    metadata so that a reader of the calls of an evaluation needs no content.
     """
     if not isinstance(value, Mapping):
         raise ValueError("metadata.origin must be {scenario, artifact_id}")
@@ -138,15 +139,15 @@ def check_record_origin(value: object) -> dict[str, Any]:
         origin["source"] = source
     if source == "evaluation":
         location = value["evaluation"]
-        names = ("evaluation_id", "task_index", "repeat", "attempt", "index")
+        names = ("evaluation_id", *(entry.name for entry in fields(EvaluationCallSummary)))
         if not isinstance(location, Mapping) or set(location) != set(names):
             raise ValueError("metadata.origin.evaluation must be {" + ", ".join(names) + "}")
         if not isinstance(location["evaluation_id"], str) or not location["evaluation_id"]:
             raise ValueError("metadata.origin.evaluation.evaluation_id must be a non-empty string")
-        for name in names[1:]:
-            number = location[name]
-            if isinstance(number, bool) or not isinstance(number, int) or number < (1 if name == "attempt" else 0):
-                raise ValueError(f"metadata.origin.evaluation.{name} must be an integer from {int(name == 'attempt')}")
+        try:
+            EvaluationCallSummary(**{name: location[name] for name in names[1:]})
+        except TypeError as exc:
+            raise ValueError(f"metadata.origin.evaluation is no call summary: {exc}") from exc
         origin["evaluation"] = {name: location[name] for name in names}
     return origin
 

@@ -18,13 +18,13 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
 
 from reef.core.atif_payloads import canonical_json
+from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
-from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
 from reef.storage.record_items import evaluation_call_item, record_item, stored_evaluation_call

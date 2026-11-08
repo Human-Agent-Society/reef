@@ -51,6 +51,7 @@ from sqlalchemy import (
     exists,
     func,
     insert,
+    literal_column,
     select,
     update,
 )
@@ -123,6 +124,16 @@ UNUSED_SEGMENT_SECONDS = 24 * 3600
 PRUNE_PAGE_SIZE = 256
 #: The most items that one transaction of a group commit writes.
 GROUP_COMMIT_ITEMS = 200
+
+
+def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
+    """The ``evaluation_id`` of the metadata of an item row, in the form of the index ``data_item_by_evaluation``.
+
+    The JSON path is a literal, not a parameter, so that a query with the same expression can use the index.
+    """
+    if sqlite:
+        return func.json_extract(items.c.metadata_json, literal_column("'$.evaluation_id'"))
+    return cast(items.c.metadata_json, JSONB).op("->>")(literal_column("'evaluation_id'"))
 
 
 def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table, Table, Table]:
@@ -223,6 +234,9 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("last_sequence", BigInteger, nullable=False),
         PrimaryKeyConstraint("owner", "scenario"),
     )
+    # The calls of one evaluation are read by their evaluation_id (``SQLDataStore.query``), so a read does not scan
+    # all the record items of an owner. ``migrate_data_indexes`` adds the index to an older table.
+    Index("data_item_by_evaluation", items.c.owner, item_evaluation_id(items, sqlite=sqlite))
     return items, scenarios, nodes, segments, job_directories, generations, losses
 
 
@@ -346,6 +360,11 @@ class SQLDataStore(DataStore):
     def record_source(self) -> ColumnElement[str]:
         """The source of the record item of an item row (``reef.storage.data.record_source``): its
         ``origin.source``, or ``inference`` when it has none."""
+
+    @abstractmethod
+    def evaluation_id(self) -> ColumnElement[Any]:
+        """The ``evaluation_id`` of the metadata of an item row, as the index ``data_item_by_evaluation`` holds it
+        (``item_evaluation_id``)."""
 
     def is_inference(self) -> ColumnElement[bool]:
         """The condition that an item row is a record item of the source ``inference``, which ``prune_records``
@@ -737,6 +756,9 @@ class SQLDataStore(DataStore):
         if group is not None:
             value = self.metadata_string(group[0])
             statement = statement.where(value.is_(None) if group[1] is None else value == group[1])
+            if group[0] == "evaluation_id" and group[1] is not None:
+                # The same condition in the form of the index data_item_by_evaluation, which finds the rows.
+                statement = statement.where(self.evaluation_id() == group[1])
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
@@ -1335,6 +1357,9 @@ class SQLiteDataStore(SQLDataStore):
     def record_source(self) -> ColumnElement[str]:
         return func.coalesce(func.json_extract(self.items_table.c.metadata_json, "$.origin.source"), "inference")
 
+    def evaluation_id(self) -> ColumnElement[Any]:
+        return item_evaluation_id(self.items_table, sqlite=True)
+
     def close(self) -> None:
         with self.lock:
             if self.connection is not None:
@@ -1432,6 +1457,9 @@ class PostgresDataStore(SQLDataStore):
     def record_source(self) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
         return func.coalesce(metadata[("origin", "source")].astext, "inference")
+
+    def evaluation_id(self) -> ColumnElement[Any]:
+        return item_evaluation_id(self.items_table, sqlite=False)
 
     @contextmanager
     def pack_lock(self, owner: str) -> Iterator[bool]:

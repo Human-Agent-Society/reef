@@ -31,7 +31,14 @@ from typing import Any, cast
 from reef_client.serve import CapturedTurn
 
 from reef.core.errors import ReefError
-from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
+from reef.core.evaluation import (
+    EvaluationCall,
+    EvaluationCallSummary,
+    PolicyHarness,
+    PolicyModel,
+    RolloutRequest,
+    RolloutScore,
+)
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
@@ -41,7 +48,6 @@ from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import tree_agent
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
-from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 

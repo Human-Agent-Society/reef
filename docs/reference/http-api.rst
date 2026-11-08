@@ -723,19 +723,23 @@ a scenario's own record item:
 - Its ID is ``<scenario>/<agent_record_id>``, with the record ID
   ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``.
 - Its content is a record of an inference. The payload is the request body,
-  plus ``response``, the response body or null, and ``evaluation_call``:
-  ``{path, status, duration_s, prompt_tokens, completion_tokens,
-  finish_reason, tool_calls}``. ``created_at`` is the start of the call.
+  plus ``response``, the response body or null. ``created_at`` is the start
+  of the call.
 - Its metadata is ``{"kind": "record", "scenarios": {}, "evaluation_id",
-  "origin": {"scenario", "artifact_id", "source": "evaluation", "evaluation":
-  {"evaluation_id", "task_index", "repeat", "attempt", "index"}}}``.
-  ``artifact_id`` names the evaluated artifact.
+  "origin": {"scenario", "artifact_id", "source": "evaluation", "evaluation"}}``.
+  ``artifact_id`` names the evaluated artifact. ``evaluation`` holds the
+  ``evaluation_id`` and the call's summary: ``task_index``, ``repeat``,
+  ``attempt``, ``index``, ``path``, ``status``, ``started_at``,
+  ``duration_s``, ``prompt_tokens``, ``completion_tokens``,
+  ``finish_reason`` and ``tool_calls``, as `Model calls of a rollout`_
+  describes them. So a list of the calls reads no content.
 
 An evaluation call is the data of no scenario: a patch that adds a scenario to
 its ``scenarios`` returns 400, so no scenario trains on it. The scenario's
 records route does not list it. To read the calls of one evaluation, query
 the data with ``kind=record``, ``group_key=evaluation_id`` and the
-evaluation's ID as ``group_value``. An evaluation call links only to the
+evaluation's ID as ``group_value``. An index on the owner and
+``evaluation_id`` finds them. An evaluation call links only to the
 earlier calls of the same attempt, so its trajectory node keeps only
 the messages after its parent's. A scenario's own call never links to an
 evaluation call.

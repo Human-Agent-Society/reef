@@ -35,6 +35,8 @@ from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
+    EvaluationCall,
+    EvaluationCallTotals,
     PolicyEvaluation,
     PolicyModel,
     RolloutScore,
@@ -60,11 +62,11 @@ from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
 from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
-from reef.storage.data import DataStore, record_source
-from reef.storage.evaluations import EvaluationCall, EvaluationCallTotals, StoredEvaluation
+from reef.storage.data import DataStore, StoredItem, record_source
+from reef.storage.evaluations import StoredEvaluation
 from reef.storage.item_kinds import evaluation_call_id
 from reef.storage.observer import RecordObserver
-from reef.storage.record_items import evaluation_call_items, stored_evaluation_call
+from reef.storage.record_items import evaluation_call_items, evaluation_call_summary, stored_evaluation_call
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
@@ -647,15 +649,16 @@ class ArtifactEvaluations:
         ``state`` is the rollout's queue state, and ``started_at`` and ``ended_at`` are its work item's times.
         ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``error`` is the reason of a
         failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept calls as JSON, or
-        null when the data store keeps no call of it. It reads every kept call of the evaluation with its content.
+        null when the data store keeps no call of it. It reads the metadata of the evaluation's calls, not their
+        content.
         """
         if self.get(scenario, evaluation_id) is None:
             return None
         totals: dict[tuple[int, int], EvaluationCallTotals] = {}
         place = self.call_store(scenario)
-        kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=True)
+        kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
         for call_item in kept:
-            summary = stored_evaluation_call(call_item).summary
+            summary = evaluation_call_summary(call_item)
             key = (summary.task_index, summary.repeat)
             found = totals.get(key)
             totals[key] = EvaluationCallTotals(
@@ -692,32 +695,48 @@ class ArtifactEvaluations:
         data = self.dispatcher.data_store
         return None if data is None or owner is None else (data, owner)
 
+    def rollout_items(self, scenario: str, evaluation_id: str, task_index: int, repeat: int) -> list[StoredItem]:
+        """The items of the kept calls of rollout ``(task_index, repeat)`` of one evaluation, without their content, in
+        attempt and then index order."""
+        place = self.call_store(scenario)
+        found = [
+            item
+            for item in (
+                () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
+            )
+            if (item.metadata["origin"]["evaluation"]["task_index"], item.metadata["origin"]["evaluation"]["repeat"])
+            == (task_index, repeat)
+        ]
+        return sorted(
+            found,
+            key=lambda item: (
+                item.metadata["origin"]["evaluation"]["attempt"],
+                item.metadata["origin"]["evaluation"]["index"],
+            ),
+        )
+
     def rollout_calls(
         self, scenario: str, evaluation_id: str, task_index: int, repeat: int
     ) -> tuple[EvaluationCall, ...]:
         """The kept calls of rollout ``(task_index, repeat)`` of one evaluation, with their bodies, in attempt and
-        then index order. It finds them by their metadata, and reads the content of this rollout's calls only."""
+        then index order. It reads the content of this rollout's calls only."""
         place = self.call_store(scenario)
-        if place is None:
+        items = self.rollout_items(scenario, evaluation_id, task_index, repeat)
+        if place is None or not items:
             return ()
         data, owner = place
-        item_ids = [
-            item.item_id
-            for item in evaluation_call_items(data, owner, scenario, evaluation_id, content=False)
-            if (item.metadata["origin"]["evaluation"]["task_index"], item.metadata["origin"]["evaluation"]["repeat"])
-            == (task_index, repeat)
-        ]
-        calls = [stored_evaluation_call(item) for item in data.read_many(owner, item_ids)]
-        return tuple(sorted(calls, key=lambda call: (call.summary.attempt, call.summary.index)))
+        read = {item.item_id: item for item in data.read_many(owner, [item.item_id for item in items])}
+        return tuple(stored_evaluation_call(read[item.item_id]) for item in items if item.item_id in read)
 
     def calls_json(
         self, scenario: str, evaluation_id: str, task_index: int, repeat: int
     ) -> list[dict[str, JsonValue]] | None:
         """The summaries of the kept calls of rollout ``(task_index, repeat)`` of one evaluation as JSON, in attempt
-        and then index order; None when ``scenario`` has no evaluation ``evaluation_id``."""
+        and then index order; None when ``scenario`` has no evaluation ``evaluation_id``. It reads no content."""
         if self.get(scenario, evaluation_id) is None:
             return None
-        return [call.summary.to_json() for call in self.rollout_calls(scenario, evaluation_id, task_index, repeat)]
+        items = self.rollout_items(scenario, evaluation_id, task_index, repeat)
+        return [evaluation_call_summary(item).to_json() for item in items]
 
     def call_json(
         self, scenario: str, evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int

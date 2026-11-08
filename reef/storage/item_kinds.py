@@ -202,7 +202,11 @@ class RecordRules(JsonItemRules):
         origin = metadata["origin"]["scenario"]
         record = copied_record(item_id, content, origin, origin)
         location = metadata["origin"].get("evaluation")
-        if location is not None and record.agent_record_id != f"{origin}/{evaluation_call_id(**location)}":
+        names = ("evaluation_id", "task_index", "repeat", "attempt", "index")
+        if (
+            location is not None
+            and record.agent_record_id != f"{origin}/{evaluation_call_id(*map(location.get, names))}"
+        ):
             raise ValueError(
                 f"an evaluation call has the ID {origin}/<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>"
             )

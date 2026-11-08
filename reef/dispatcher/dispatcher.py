@@ -19,6 +19,7 @@ from reef.artifact.repository import EnumerableRepositoryBackendFactory, Reposit
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.core.evaluation import EvaluationCall
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
@@ -51,7 +52,6 @@ from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
-from reef.storage.evaluations import EvaluationCall
 from reef.storage.record_items import evaluation_call_item
 from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample

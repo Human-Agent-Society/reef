@@ -27,7 +27,13 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
-from reef.core.evaluation import ArtifactEvaluationRequest, ArtifactEvaluationSettings, PolicyModel
+from reef.core.evaluation import (
+    ArtifactEvaluationRequest,
+    ArtifactEvaluationSettings,
+    EvaluationCall,
+    EvaluationCallSummary,
+    PolicyModel,
+)
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
@@ -59,7 +65,6 @@ from reef.service.artifact_evaluations import (
 from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
-from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import WorkItem
@@ -289,6 +294,26 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             one_call = {"count": 1, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
             assert [rollout["calls"] for rollout in rollouts] == [one_call, one_call, None, None, one_call, one_call]
             calls_route = f"{rollouts_route}/0/1/calls"
+            # The polled routes read the calls' metadata only: every query is without content, and nothing is read.
+            store = dispatcher.data_store
+            reads: list[tuple[str, bool]] = []
+            query, read_many = store.query, store.read_many
+
+            def spied_query(*args: Any, **kwargs: Any) -> Any:
+                reads.append(("query", kwargs.get("content", True)))
+                return query(*args, **kwargs)
+
+            def spied_read_many(*args: Any, **kwargs: Any) -> Any:
+                reads.append(("read_many", kwargs.get("content", True)))
+                return read_many(*args, **kwargs)
+
+            store.query, store.read_many = spied_query, spied_read_many
+            try:
+                for route in (rollouts_route, calls_route):
+                    assert (await client.get(route, headers=AUTH)).status == 200
+            finally:
+                del store.query, store.read_many
+            assert reads and set(reads) == {("query", False)}
             listed = await (await client.get(calls_route, headers=AUTH)).json()
             assert (listed["task_index"], listed["repeat"]) == (0, 1)
             [summary] = listed["calls"]

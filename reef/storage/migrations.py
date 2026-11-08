@@ -9,6 +9,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import Column, MetaData, Table, Text, bindparam, delete, func, inspect, literal, select, tuple_, update
 from sqlalchemy.engine import Connection
+from sqlalchemy.schema import CreateIndex
 
 from reef.core.atif_payloads import call_shape, canonical_json
 from reef.core.trajectory_index import call_key
@@ -107,9 +108,11 @@ def migrate_data_indexes(connection: Connection, items: Table) -> None:
     """Create each index of ``items`` that the table does not have yet, such as ``data_item_by_kind``.
 
     Run in the caller's schema transaction, after ``create_all``, which makes no index for a table that exists.
+    ``IF NOT EXISTS`` checks by name, because the inspector does not list an index on an expression, such as
+    ``data_item_by_evaluation``.
     """
     for index in items.indexes:
-        index.create(connection, checkfirst=True)
+        connection.execute(CreateIndex(index, if_not_exists=True))
 
 
 def migrate_data_trajectories(connection: Connection, items: Table, nodes: Table) -> None:

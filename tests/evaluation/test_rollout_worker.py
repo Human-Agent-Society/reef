@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from reef_client.serve import CapturedTurn
 
-from reef.core.evaluation import PolicyModel
+from reef.core.evaluation import EvaluationCall, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -24,7 +24,6 @@ from reef.evaluation.rollout_worker import (
     reply_summary,
     rollout_item_id,
 )
-from reef.storage.evaluations import EvaluationCall
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 from reef.storage.work_queue import NewWork
 

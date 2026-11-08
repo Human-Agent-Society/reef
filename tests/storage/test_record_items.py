@@ -8,9 +8,9 @@ from dataclasses import replace
 import pytest
 from tests.support.conversations import conversation
 
+from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.data import MemoryDataStore, ScenarioArchived
-from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.item_kinds import copied_record
 from reef.storage.record_items import ItemRecordStore, evaluation_call_item, record_item, used_record, used_records
 from reef.storage.records import AppendResult, RecordConflict

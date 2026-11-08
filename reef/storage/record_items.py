@@ -26,9 +26,10 @@ evaluation attempt (``reef.storage.data.record_link_scope``), and ``prune_record
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any, cast
 
+from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
 from reef.core.values import JsonValue
@@ -41,7 +42,6 @@ from reef.storage.data import (
     item_digest_matches,
     record_source,
 )
-from reef.storage.evaluations import EvaluationCall, EvaluationCallSummary
 from reef.storage.item_kinds import copied_record, evaluation_call_id, record_digest
 from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
 
@@ -78,43 +78,21 @@ def record_item(record: AgentRecord) -> NewItem:
     )
 
 
-#: The payload key of an evaluation call that holds its status and reply summary, beside the request body and
-#: ``response``.
-EVALUATION_CALL_KEY = "evaluation_call"
-
-
 def evaluation_call_item(scenario: str, artifact_id: str, evaluation_id: str, call: EvaluationCall) -> NewItem:
     """The record item of ``call``, a call of evaluation ``evaluation_id`` of ``scenario`` to the candidate
     ``artifact_id``.
 
     Its ID is ``<scenario>/<evaluation_call_id>``. Its content is the record of an inference: the payload is the
-    request body, with ``response``, the response body or null, and ``EVALUATION_CALL_KEY``, the summary's fields
-    but its place and start; ``created_at`` is the call's start. Its metadata is ``kind: record``, empty
-    ``scenarios``, the ``evaluation_id``, and the origin ``{scenario, artifact_id, source: evaluation, evaluation:
-    {evaluation_id, task_index, repeat, attempt, index}}``.
+    request body with ``response``, the response body or null, and ``created_at`` is the call's start. Its metadata
+    is ``kind: record``, empty ``scenarios``, the ``evaluation_id``, and the origin ``{scenario, artifact_id, source:
+    evaluation, evaluation}``, where ``evaluation`` holds the ``evaluation_id`` and every field of the call's summary.
     """
     summary = call.summary
     record_id = evaluation_call_id(evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index)
-    details = {key: value for key, value in summary.to_json().items() if key not in ("attempt", "index", "started_at")}
+    payload = {**(call.request or {}), "response": None if call.response is None else dict(call.response)}
     record = AgentRecord(
-        record_id,
-        scenario,
-        RequestType.INFERENCE,
-        {
-            **(call.request or {}),
-            "response": None if call.response is None else dict(call.response),
-            EVALUATION_CALL_KEY: details,
-        },
-        summary.started_at,
-        artifact_id=artifact_id,
+        record_id, scenario, RequestType.INFERENCE, payload, summary.started_at, artifact_id=artifact_id
     )
-    location = {
-        "evaluation_id": evaluation_id,
-        "task_index": summary.task_index,
-        "repeat": summary.repeat,
-        "attempt": summary.attempt,
-        "index": summary.index,
-    }
     return NewItem(
         f"{scenario}/{record_id}",
         record_content(record),
@@ -126,30 +104,30 @@ def evaluation_call_item(scenario: str, artifact_id: str, evaluation_id: str, ca
                 "scenario": scenario,
                 "artifact_id": artifact_id,
                 "source": "evaluation",
-                "evaluation": location,
+                "evaluation": {"evaluation_id": evaluation_id, **asdict(summary)},
             },
         },
     )
 
 
+def evaluation_call_summary(item: StoredItem) -> EvaluationCallSummary:
+    """The summary of the evaluation call ``item``, from its metadata alone, so the item can be read without its
+    content. ``ValueError`` for an item that is no evaluation call."""
+    if item.kind != "record" or record_source(item.metadata) != "evaluation":
+        raise ValueError(f"item {item.item_id!r} is no evaluation call")
+    location = dict(item.metadata["origin"]["evaluation"])
+    location.pop("evaluation_id")
+    return EvaluationCallSummary(**location)
+
+
 def stored_evaluation_call(item: StoredItem) -> EvaluationCall:
     """The ``EvaluationCall`` that ``evaluation_call_item`` stored as ``item``, read with its content."""
-    if item.content is None or record_source(item.metadata) != "evaluation":
-        raise ValueError(f"item {item.item_id!r} is no evaluation call read with its content")
+    if item.content is None:
+        raise ValueError(f"item {item.item_id!r} was read without its content")
     payload = dict(item.content["payload"])
-    details = payload.pop(EVALUATION_CALL_KEY)
     response = payload.pop("response")
-    location = item.metadata["origin"]["evaluation"]
-    summary = EvaluationCallSummary(
-        task_index=location["task_index"],
-        repeat=location["repeat"],
-        attempt=location["attempt"],
-        index=location["index"],
-        started_at=float(item.content["created_at"]),
-        **details,
-    )
     # The item keeps an absent request as an empty payload, so an empty request reads as None too.
-    return EvaluationCall(summary, cast(dict[str, JsonValue], payload) or None, response)
+    return EvaluationCall(evaluation_call_summary(item), cast(dict[str, JsonValue], payload) or None, response)
 
 
 def evaluation_call_items(
@@ -398,11 +376,11 @@ class ItemRecordStore(RecordStore):
 
 
 __all__ = [
-    "EVALUATION_CALL_KEY",
     "RECORD_PAGE_SIZE",
     "ItemRecordStore",
     "evaluation_call_item",
     "evaluation_call_items",
+    "evaluation_call_summary",
     "old_record_copied",
     "record_content",
     "record_item",

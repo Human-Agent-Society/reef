@@ -19,9 +19,9 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, UpstreamStatusError
+from reef.core.evaluation import EvaluationCall
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
-from reef.storage.evaluations import EvaluationCall
 
 #: The model call routes that the endpoint answers, as Reef's own inference routes do.
 MODEL_CALL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
