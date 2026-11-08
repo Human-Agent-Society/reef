@@ -292,8 +292,12 @@ class Scenario:
         runtime = self.runtime
         weights_load = self._binding.components.loaded_component is not None and runtime is not None
         serving = self.served_artifact_id() if weights_load else None
+        # Automatic training waits until the selected artifact serves, so that it does not train the samples of the
+        # artifact before. A request names its samples (``TrainingPipeline.request_entries``), so manual training
+        # does not wait, also when the selected artifact does not start.
         if (
-            weights_load
+            trainer.pipeline.training_mode == "auto"
+            and weights_load
             and runtime is not None
             and runtime.serves_requests
             and self._binding.served_models is not None
