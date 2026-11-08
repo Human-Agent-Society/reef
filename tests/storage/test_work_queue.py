@@ -1,6 +1,7 @@
 import logging
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
@@ -242,6 +243,77 @@ def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
             assert not FailingWorker(queue, ItemFailed("unused")).run_once()
         assert queue.get("jobs", "a").state == "failed"
         assert warnings_of(caplog) == ["work item jobs/a of scenario s failed: the worker's lease expired"]
+
+
+class WaitingWorker(QueueWorker):
+    """A worker whose items run until ``release`` is set, or until the worker stops."""
+
+    def __init__(self, queue: WorkQueue, slots: int) -> None:
+        super().__init__(queue, "jobs", ["training_job:tinker"], worker_id="w", poll_seconds=0.01, slots=slots)
+        self.release = threading.Event()
+        self.lock = threading.Lock()
+        self.running: set[str] = set()
+        self.most_running = 0
+
+    def run_item(self, item, lease_lost):
+        with self.lock:
+            self.running.add(item.id)
+            self.most_running = max(self.most_running, len(self.running))
+        try:
+            while not self.release.wait(0.01):
+                if self.stopped.is_set():
+                    raise WorkerStopped
+            return {}
+        finally:
+            with self.lock:
+                self.running.discard(item.id)
+
+
+def wait_until(condition) -> None:
+    deadline = time.monotonic() + 5
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("the condition did not become true in 5 s")
+        time.sleep(0.01)
+
+
+@pytest.mark.unit
+def test_a_worker_runs_at_most_its_slots_of_items_at_once(tmp_path):
+    with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        for item_id in "abcde":
+            queue.add(job(item_id, serial_key=None))
+        worker = WaitingWorker(queue, slots=3)
+        worker.start()
+        try:
+            wait_until(lambda: len(worker.running) == 3)
+            assert [queue.get("jobs", item_id).state for item_id in "de"] == ["queued", "queued"]
+            worker.release.set()
+            wait_until(lambda: all(queue.get("jobs", item_id).state == "finished" for item_id in "abcde"))
+        finally:
+            worker.stop()
+        assert worker.most_running == 3
+
+
+@pytest.mark.unit
+def test_a_stopped_worker_returns_every_item_in_progress_to_the_queue(tmp_path):
+    with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        for item_id in "ab":
+            queue.add(job(item_id, serial_key=None))
+        worker = WaitingWorker(queue, slots=2)
+        worker.start()
+        wait_until(lambda: len(worker.running) == 2)
+        worker.stop()
+        assert worker.item_threads == []
+        assert [queue.get("jobs", item_id).state for item_id in "ab"] == ["queued", "queued"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("slots", [0, True, 1.5])
+def test_a_worker_needs_a_positive_integer_of_slots(slots):
+    with closing(SQLiteCoordinationDatabase(None)) as database, pytest.raises(ValueError, match="slots"):
+        WaitingWorker(SQLWorkQueue(database, lease_seconds=10), slots=slots)
 
 
 @pytest.mark.unit

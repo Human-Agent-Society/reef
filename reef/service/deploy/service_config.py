@@ -253,6 +253,13 @@ class ServiceConfig:
         public_path=("evaluation", "agent_host"),
         help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
     )
+    #: The rollouts that one process of the evaluation service runs at once, across evaluations. Each one holds a
+    #: sandbox of its task.
+    evaluation_max_sandboxes: int = config_option(
+        4,
+        public_path=("evaluation", "max_sandboxes"),
+        help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -458,6 +465,9 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        sandboxes = self.evaluation_max_sandboxes
+        if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
+            raise ValueError("evaluation.max_sandboxes must be a positive integer")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:
