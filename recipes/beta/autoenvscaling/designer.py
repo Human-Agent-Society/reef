@@ -304,8 +304,8 @@ class SourceError(ValueError):
 
 class ModelRefused(ValueError):
     """The model provider refused the content of one Designer run: its safeguards flagged the session, the parent or
-    the agent's own work. The proposal's failure, not an outage: a run on the same inputs meets the same refusal, so
-    the generator does not try them again."""
+    the agent's own work. The proposal's failure, not an outage: a run on the same inputs is likely to meet the same
+    refusal, so the generator does not try them again."""
 
 
 VariantDirection = Literal["harder", "simpler"]

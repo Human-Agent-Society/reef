@@ -293,7 +293,7 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         transcript, relative to ``work_dir``, or ``""``.
 
         Raises :class:`ModelRefused` when Claude Code ended on the model provider's refusal of the run's content
-        (:func:`is_refusal`): a run on the same inputs meets the same refusal. Raises :class:`DesignerOutage` when the
+        (:func:`is_refusal`): a run on the same inputs is likely to meet the same refusal. Raises :class:`DesignerOutage` when the
         run could not start or was stopped, and when Claude Code ended with any other error but its turn limit: an
         outage (a spent plan, a lost sign-in) must not pass for the agent's failure. Every message is redacted.
         """

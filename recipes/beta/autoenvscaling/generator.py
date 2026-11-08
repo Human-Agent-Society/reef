@@ -201,7 +201,7 @@ CURSOR_FILE = "cursor.json"
 OPEN_PREFIX = "open-"
 # Where a session that became no task in the band stopped; a task inside the band has no stage.
 STAGE_SOURCE = "source"  # the source holds no session, or its repository or base commit is not there
-# The Designer made no recorded call, the model provider refused its run, or admission refused its task.
+# The Designer made no recorded call, the model provider refused its Claude Code run, or admission refused its task.
 STAGE_AUTHORING = "authoring"
 STAGE_OUTAGE = "outage"  # the Designer could not run; the generation ends here
 STAGE_CREDENTIAL = "credential"  # the Designer's task held its Claude Code token; the generation ends here
@@ -1417,6 +1417,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         except SourceError as exc:
             raise ProposalRefused(f"the source {record_source} cannot be rebuilt: {exc}", stage=STAGE_SOURCE) from exc
         except ModelRefused as exc:
+            logger.warning("AutoEnvScaling generation %d: %s", self.generation, exc)
             raise ProposalRefused(str(exc), stage=STAGE_AUTHORING) from exc
         finally:
             # A check the agent left running finishes, and deletes its candidate, before the task is written.
