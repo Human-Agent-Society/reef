@@ -258,6 +258,12 @@ class InferenceHandler(ABC):
         """
         return None
 
+    def engine_detail(self, served: ServedArtifact) -> str | None:
+        """What the starting engine at ``served`` does now, as one short line for a person, such as "Loading weights
+        · 0:42"; None when the handler cannot tell, the default. Reef asks it only while ``engine_state`` is
+        ``starting``, under the same rules."""
+        return None
+
     async def inference_stream(
         self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
     ) -> InferenceStream:

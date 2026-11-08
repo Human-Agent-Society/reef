@@ -1822,7 +1822,7 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null}
+   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null}
 
 ``model`` defaults to ``active``. It can also name an active artifact alias
 or an artifact selected for serving beside the active one. An unknown name
@@ -1848,6 +1848,9 @@ returns 404.
 * ``idle``: no engine runs. The next request starts one and waits for it.
 
 ``engine`` is null in every other state, and when the handler cannot tell.
+While ``engine`` is ``starting``, ``engine_detail`` can say what the engine
+does now, as one short line, such as ``Loading weights · 0:42``. It is null
+otherwise.
 Reading it starts no engine.
 
 The status describes the selected
