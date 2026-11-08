@@ -271,10 +271,10 @@ class CandidateEndpoints(ABC):
 
 
 class LocalCandidateEndpoints(CandidateEndpoints):
-    """The candidate's model, on loopback in the process of the evaluation workers: an ``ArtifactEndpoint`` that
+    """The candidate's model, on loopback in the process of the evaluation worker: an ``ArtifactEndpoint`` that
     sends each call to the engine that inference started, or to its scenario's runtime for an engine with no address.
 
-    Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation workers open it around each
+    Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation worker opens it around each
     rollout.
     """
 
@@ -412,14 +412,14 @@ class RolloutCalls(CaptureObserver):
 
 
 class EvaluationRolloutWorker(QueueWorker):
-    """One worker of the evaluation service.
+    """The worker of the evaluation service.
 
-    Values: as ``QueueWorker``, on the rollouts of the evaluations queue; ``endpoints`` opens the candidate's model
-    for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's lab; ``agent_host`` is the address at which
-    a task's container reaches this host. Every failed rollout is retried:
-    a trial fails for reasons outside its input, such as a sandbox that did not start.
+    Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
+    ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
+    lab; ``agent_host`` is the address at which a task's container reaches this host. Every failed rollout is
+    retried: a trial fails for reasons outside its input, such as a sandbox that did not start.
 
-    Purpose: the evaluation service starts one or more (``start``) and stops them (``stop``).
+    Purpose: the evaluation service starts one (``start``) and stops it (``stop``).
     """
 
     permanent_errors = ()
@@ -433,9 +433,15 @@ class EvaluationRolloutWorker(QueueWorker):
         lab: TaskLab | None = None,
         agent_host: str = DEFAULT_AGENT_HOST,
         poll_seconds: float = 0.5,
+        slots: int = 1,
     ) -> None:
         super().__init__(
-            queue, EVALUATIONS_QUEUE, [EVALUATION_ROLLOUT_KIND], worker_id=worker_id, poll_seconds=poll_seconds
+            queue,
+            EVALUATIONS_QUEUE,
+            [EVALUATION_ROLLOUT_KIND],
+            worker_id=worker_id,
+            poll_seconds=poll_seconds,
+            slots=slots,
         )
         self.endpoints = endpoints
         self.lab = lab
