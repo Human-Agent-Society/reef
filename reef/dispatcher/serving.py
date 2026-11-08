@@ -250,7 +250,7 @@ class ServingWorker(QueueWorker):
             component = require_text(value.get("component"), "component")
             if component == components.loaded_component:
                 beside_model = runtime.serve_artifact(
-                    components.component_artifact(selected_artifact(value), component)
+                    components.component_artifact(selected_artifact(value), component), scenario=item.scenario
                 )
                 if beside_model is None:
                     raise ValueError("the inference runtime provides no route for a beside artifact")
@@ -276,7 +276,8 @@ class ServingWorker(QueueWorker):
         component = require_text(item.payload.get("component"), "component")
         components = self.recipe.scenario_components(item.scenario)
         artifact = components.component_artifact(self.repository(item.scenario).select(selection), component)
-        served = runtime.serve_artifact(artifact)
+        runtime.apply_serving_config(item.scenario, self.routes.read_serving_config(item.scenario))
+        served = runtime.serve_artifact(artifact, scenario=item.scenario)
         return {"served": None if served is None else dict(served.to_json())}
 
     def finish_item(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:

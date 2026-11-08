@@ -138,24 +138,20 @@ class ItemIdentity:
     """What an artifact made from an artifact item takes from the item, besides its files.
 
     Values: ``item_id`` is the item's non-empty ID. ``artifact_id`` is the item's artifact ID, which the new artifact
-    keeps (RFC #1218), or None for a new one. ``serving_profile`` is the item's ``metadata.serving_profile``, which
-    the new artifact names (RFC #1233), or None. Construction checks these types.
+    keeps (RFC #1218), or None for a new one. Construction checks these types.
 
     Purpose: ``reef.service.artifact_imports`` makes it from a stored item; a scenario's root (``ItemStart``) and an
-    import (``ScenarioCommitter.import_artifact``) read it. It is the only way that a profile reaches an artifact
-    from outside Reef.
+    import (``ScenarioCommitter.import_artifact``) read it.
     """
 
     item_id: str
     artifact_id: str | None = None
-    serving_profile: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or not self.item_id:
             raise ValueError("an item identity names a non-empty item_id")
-        for name, value in (("artifact_id", self.artifact_id), ("serving_profile", self.serving_profile)):
-            if value is not None and (not isinstance(value, str) or not value):
-                raise ValueError(f"an item identity's {name} is a non-empty string or None")
+        if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
+            raise ValueError("an item identity's artifact_id is a non-empty string or None")
 
 
 __all__ = [

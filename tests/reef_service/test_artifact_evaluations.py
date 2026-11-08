@@ -97,6 +97,9 @@ class ArtifactRuntime(InferenceRuntime):
         super().__init__(base_url="http://runtime.invalid")
         self.handler = ArtifactHandler()
         self.served: list[str] = []
+        #: The scenario of each served artifact, and each serving config that inference applied.
+        self.serve_scenarios: list[str] = []
+        self.applied: list[str] = []
         self.serve_error: str | None = None
         self.any_artifact = any_artifact
 
@@ -118,8 +121,12 @@ class ArtifactRuntime(InferenceRuntime):
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}")
 
-    def serve_artifact(self, artifact: Artifact) -> ServedArtifact:
+    def apply_serving_config(self, scenario, override):
+        self.applied.append(scenario)
+
+    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact:
         self.served.append(artifact.artifact_id)
+        self.serve_scenarios.append(scenario)
         if self.serve_error is not None:
             raise ValueError(self.serve_error)
         return ServedArtifact(artifact.artifact_id, self.base_url, f"engine:{artifact.artifact_id}")
@@ -274,6 +281,9 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             assert runtime.handler.releases == [artifact_id] * 4, "every call samples the evaluated release"
             assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
             assert runtime.served == [artifact_id] * 6, "inference serves the candidate before each trial"
+            assert (
+                runtime.serve_scenarios == ["s"] * 6 and runtime.applied.count("s") >= 6
+            ), "inference serves the candidate with the scenario's serving config"
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
                 "active",
