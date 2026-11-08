@@ -130,7 +130,9 @@ methods. Each has a default for a handler or runtime without serving fields:
 An ``InferenceHandler`` whose engines scale to zero can report the state of
 the engine behind a route with ``engine_state(served)``: ``"warm"``,
 ``"starting"``, ``"idle"`` or None (RFC #1269). The startup status of a ready
-artifact returns it as ``engine``. It must not start an engine.
+artifact returns it as ``engine``. It must not start an engine. While an
+engine is ``"starting"``, ``engine_detail(served)`` can give one short line
+for a person, which the status returns as ``engine_detail``.
 
 A runtime that serves several models declares a serving field that chooses the
 model of each artifact (`Serving settings <http-api.rst#serving-settings>`__).
