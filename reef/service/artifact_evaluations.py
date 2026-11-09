@@ -6,7 +6,8 @@ when a commit publishes a checkpoint as a new artifact, Reef queues its evaluati
 checks each request against the scenario and stores it in the scenario's evaluation store. It adds one
 ``evaluation_rollout`` item for each rollout to the ``evaluations`` work queue, where the evaluation service's
 workers run them (``reef.evaluation.rollout_worker``). With ``max_concurrent_rollouts``, it keeps at most that many
-rollouts that are not final in the queue, and adds the next ones as rollouts end (RFC #1276). When every rollout of an
+rollouts that are not final in the queue, and adds the next ones as rollouts end (RFC #1276). With
+``max_failed_fraction``, it stops an evaluation whose ended rollouts fail too often (RFC #1287). When every rollout of an
 evaluation is final, ``EvaluationResults`` reads the scores, stores their ``PolicyEvaluation``, and gives it to the
 scenario's activation rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No aiohttp types
 appear here.
@@ -44,6 +45,7 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
     harness_item,
+    mean_score,
 )
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
@@ -77,6 +79,12 @@ logger = logging.getLogger(__name__)
 STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
 #: The error of an evaluation that a client cancelled.
 CANCELLED_ERROR = "cancelled by request"
+#: The error of each rollout that was not final when its evaluation stopped for failed rollouts.
+FAILURES_ERROR = "stopped: too many rollouts failed"
+#: The rollouts that must end before Reef checks ``max_failed_fraction``; a smaller evaluation checks at its end.
+FAILURE_CHECK_ROLLOUTS = 10
+#: The last seconds whose ended rollouts give the rate of an evaluation's time left.
+ETA_WINDOW_SECONDS = 1200.0
 #: The owner that every evaluation of the work queue stores: any service instance reads its rollouts.
 QUEUE_OWNER = "evaluations-queue"
 #: How many of a scenario's newest evaluations ``fail_stopped`` reads.
@@ -148,6 +156,52 @@ def request_settings(body: object) -> tuple[str, ArtifactEvaluationSettings]:
     return artifact_id, ArtifactEvaluationSettings.from_json(
         {key: value for key, value in body.items() if key != "artifact_id"}
     )
+
+
+def rollout_failed(item: WorkItem) -> bool:
+    """Whether ``item``, a final rollout, failed: its work item failed, or it finished with no score."""
+    if item.state != "finished":
+        return True
+    return RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"]).is_failed
+
+
+def rollout_cancelled(item: WorkItem) -> bool:
+    """Whether a cancel or a stop of its evaluation ended ``item``, and not the rollout's own work."""
+    return item.state == "failed" and item.error in (CANCELLED_ERROR, FAILURES_ERROR)
+
+
+def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now: float) -> dict[str, JsonValue]:
+    """The progress of ``stored`` from ``items``, its rollouts in the queue (RFC #1287): ``{total, ended, scored,
+    failed, cancelled, running, mean_score, eta_seconds}``.
+
+    ``ended`` counts the final rollouts that no cancel or stop ended. ``mean_score`` is the mean of their number
+    scores. ``eta_seconds`` divides the rollouts left by the rate at which rollouts ended in the last
+    ``ETA_WINDOW_SECONDS``; it is None when none ended in that time, or when the evaluation ended.
+    """
+    request = stored.request
+    total = len(request.task_names) * request.rollouts_per_task
+    ended = [item for item in items if item.final and not rollout_cancelled(item)]
+    scores = [
+        RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
+        for item in ended
+        if item.state == "finished"
+    ]
+    scored = sum(not score.is_failed for score in scores)
+    window = min(ETA_WINDOW_SECONDS, now - stored.created_at)
+    recent = sum(item.ended_at is not None and item.ended_at >= now - window for item in ended)
+    eta = None
+    if stored.state in ("queued", "running") and recent and window > 0:
+        eta = (total - len(ended)) * window / recent
+    return {
+        "total": total,
+        "ended": len(ended),
+        "scored": scored,
+        "failed": len(ended) - scored,
+        "cancelled": sum(rollout_cancelled(item) for item in items),
+        "running": sum(item.state in ("assigned", "running") for item in items),
+        "mean_score": mean_score(scores),
+        "eta_seconds": eta,
+    }
 
 
 def rollout_work(rollout: EvaluationRollout) -> NewWork:
@@ -276,14 +330,31 @@ class EvaluationResults:
                 self.stopped.wait(RESULT_POLL_SECONDS)
 
     def settle(self, scenario: str, evaluation_id: str) -> None:
-        """Start the evaluation once a worker took one of its rollouts; add the rollouts that wait while fewer than
-        ``max_concurrent_rollouts`` are not final; end the evaluation once all of them are in the queue and final."""
+        """Start the evaluation once a worker took one of its rollouts; stop it when too many of its ended rollouts
+        failed (``max_failed_fraction``); add the rollouts that wait while fewer than ``max_concurrent_rollouts`` are
+        not final; end the evaluation once all of them are in the queue and final."""
         items = self.rollouts(evaluation_id, scenario)
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = current.store.evaluations.get(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
                 return
             request = stored.request
+            ended = [item for item in items if item.final]
+            failed = sum(rollout_failed(item) for item in ended)
+            total = len(request.task_names) * request.rollouts_per_task
+            limit = request.max_failed_fraction
+            if limit is not None and len(ended) >= min(FAILURE_CHECK_ROLLOUTS, total) and failed > limit * len(ended):
+                error = (
+                    f"too many rollouts failed: {failed} of {len(ended)} ended ({failed / len(ended):.0%}), "
+                    f"over the limit of {limit:.0%}"
+                )
+                logger.warning("evaluation %s of %s stopped: %s", evaluation_id, scenario, error)
+                # The rollouts end first, so that a reader that sees the failed evaluation counts them. Under this
+                # lock, no settle adds a rollout to the evaluation meanwhile.
+                for item in items:
+                    self.queue.cancel(EVALUATIONS_QUEUE, item.id, FAILURES_ERROR)
+                current.store.evaluations.fail(evaluation_id, error=error, finished_at=time.time())
+                return
             # The queue holds a prefix of the rollouts in task and repeat order. Each next rollout has a fixed ID, so
             # two settles at once add it once.
             waiting = len(request.task_names) * request.rollouts_per_task - len(items)
@@ -847,6 +918,28 @@ class ArtifactEvaluations:
         with self.dispatcher.locked_scenario(scenario) as current:
             return current.store.evaluations.get(evaluation_id)
 
+    def status_json(self, scenario: str, evaluations: Sequence[StoredEvaluation]) -> list[dict[str, object]]:
+        """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
+        ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the queue
+        once for all of them."""
+        rollouts: dict[str, list[WorkItem]] = {}
+        if evaluations:
+            for item in self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND):
+                # The payload names the evaluation; ``EvaluationRollout`` wrote it (``to_payload``).
+                rollouts.setdefault(str(item.payload["evaluation_id"]), []).append(item)
+        now = time.time()
+        return [
+            {
+                **stored.to_json(),
+                "progress": (
+                    evaluation_progress(stored, rollouts[stored.evaluation_id], now)
+                    if stored.evaluation_id in rollouts
+                    else None
+                ),
+            }
+            for stored in evaluations
+        ]
+
     def newest(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations of ``scenario``, newest first."""
         with self.dispatcher.locked_scenario(scenario) as current:
@@ -855,6 +948,7 @@ class ArtifactEvaluations:
 
 __all__ = [
     "CANCELLED_ERROR",
+    "FAILURES_ERROR",
     "QUEUE_OWNER",
     "STOPPED_ERROR",
     "ArtifactEvaluations",
