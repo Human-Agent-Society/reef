@@ -9,7 +9,8 @@ import pytest
 from tests.support.conversations import conversation, turn
 
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.trajectory_index import CallKey, TrajectoryIndex, call_key, sha256_text, trajectory_calls
+from reef.core.trajectories import make_trajectory
+from reef.core.trajectory_index import CallKey, TrajectoryIndex, call_key, conversations, sha256_text, trajectory_calls
 from reef.storage.record_items import record_item
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
@@ -34,10 +35,44 @@ def test_prefix_hashes_are_equal_exactly_as_long_as_the_shape_the_tools_and_the_
     for other in others:
         assert other is not None and set(other.prefix_sha256).isdisjoint(first.prefix_sha256)
     anthropic = call_key({"system": "Be precise", "messages": [USER]})
-    assert anthropic is not None and anthropic.request == ("Be precise", USER)
+    assert anthropic is not None and anthropic.request == (
+        [{"source": "system", "message": "Be precise"}],
+        [{"source": "user", "message": "海 🐟"}],
+    ), "each request value is in its ATIF form"
     assert call_key({"prompt": "hi"}) is None
     empty = call_key({"messages": []})
     assert empty is not None and empty.list_sha256 == empty.trajectory_sha256
+
+
+def test_calls_link_when_a_client_spells_a_resent_message_another_way() -> None:
+    """Claude Code sends the last message as text parts with cache_control, and the same message as a string when it
+    resends it (RFC #1300)."""
+    cached = {"type": "ephemeral"}
+    task = {"role": "user", "content": [{"type": "text", "text": "Judge the run.", "cache_control": cached}]}
+    reply = {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "/a"}}],
+    }
+    result = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "READY", "cache_control": cached}],
+    }
+    first = {"system": "Judge.", "messages": [task], "response": {"type": "message", **reply}}
+    resent = {"role": "user", "content": "Judge the run."}
+    answer = {"role": "assistant", "content": [{"type": "text", "text": "yes"}]}
+    second = {"system": "Judge.", "messages": [resent, reply, result], "response": {"type": "message", **answer}}
+    records = [
+        AgentRecord(name, "s", RequestType.INFERENCE, payload, float(index))
+        for index, (name, payload) in enumerate([("first", first), ("second", second)])
+    ]
+    first_key, second_key = call_key(first), call_key(second)
+    assert first_key is not None and second_key is not None
+    assert second_key.prefix_sha256[:2] == first_key.prefix_sha256
+    assert second_key.continues(first_key.entry_count, first_key.reply_count, first_key.reply_sha256)
+    (linked,) = conversations(records)
+    assert [record.agent_record_id for record in linked] == ["first", "second"]
+    steps = make_trajectory(linked).trajectory["steps"]
+    assert [step["source"] for step in steps] == ["system", "user", "agent", "agent"], "no resent step repeats"
 
 
 def test_a_key_checks_its_hashes() -> None:
