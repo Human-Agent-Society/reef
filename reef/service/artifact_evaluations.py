@@ -50,6 +50,7 @@ from reef.core.evaluation import (
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
+from reef.core.trajectory_index import TrajectoryIndex
 from reef.dispatcher import Dispatcher
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -214,15 +215,18 @@ def rollout_work(rollout: EvaluationRollout) -> NewWork:
 def attempt_trajectories(
     scenario: str, evaluation_id: str, item: WorkItem, calls: Sequence[EvaluationCall]
 ) -> list[dict[str, Any]]:
-    """The ATIF trajectory of each attempt of the rollout of ``item`` that has a 200 call among ``calls``, in attempt
-    order. ``calls`` are kept calls of that rollout, in attempt and then index order.
+    """The ATIF trajectories of each attempt of the rollout of ``item`` that has a 200 call among ``calls``, in
+    attempt order. ``calls`` are kept calls of that rollout, in attempt and then index order.
 
-    ``make_trajectory`` stitches the 200 calls of one attempt, in index order. Each call is one ``AgentRecord``: its
-    ID is ``{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}``, its payload the request body plus
-    ``response``, the response body, and its time the call's ``started_at``. The attempt that the rollout's score
-    came from is the last attempt of a finished rollout: its trajectory has the score's value as its reward, null
-    for a failed score, and every other trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``:
-    ``{evaluation_id, task, task_index, repeat, attempt, scored}``.
+    Each 200 call of an attempt is one ``AgentRecord``: its ID is ``{evaluation_id}:{task_index}:{repeat}:{attempt}:
+    {index}``, its payload the request body plus ``response``, the response body, and its time the call's
+    ``started_at``. ``TrajectoryIndex`` links the calls of one attempt into conversations, as it links the records of
+    training samples: an agent that plays several roles, each with its own messages, has one conversation for each.
+    ``make_trajectory`` stitches each conversation, without the calls that a retry replaced; the conversations are in
+    the order of their first calls. The attempt that the rollout's score came from is the last attempt of a finished
+    rollout: each of its trajectories has the score's value as its reward, null for a failed score, and every other
+    trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``: ``{evaluation_id, task, task_index,
+    repeat, attempt, conversation, scored}``, where ``conversation`` counts from 0 in its attempt.
     """
     rollout = EvaluationRollout.from_item(item)
     finished = item.state == "finished" and item.result is not None
@@ -242,17 +246,31 @@ def attempt_trajectories(
     trajectories = []
     for attempt, records in sorted(attempts.items()):
         scored = finished and attempt == item.attempt_count
-        trajectory = make_trajectory(records, reward=score if scored else None).trajectory
-        evaluation = {
-            "evaluation_id": evaluation_id,
-            "task": rollout.task_name,
-            "task_index": rollout.task_index,
-            "repeat": rollout.repeat,
-            "attempt": attempt,
-            "scored": scored,
-        }
-        extra = trajectory["extra"]
-        trajectories.append({**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}})
+        index = TrajectoryIndex()
+        for record in records:
+            index.add(record)
+        by_id = {record.agent_record_id: record for record in records}
+        order = {record_id: position for position, record_id in enumerate(by_id)}
+        conversations = sorted(
+            (index.trajectory(record.agent_record_id) for record in records if index.is_end(record.agent_record_id)),
+            key=lambda conversation: order[conversation[0]],
+        )
+        for conversation, calls_of in enumerate(conversations):
+            stitched = [by_id[record_id] for record_id in calls_of]
+            trajectory = make_trajectory(stitched, reward=score if scored else None).trajectory
+            evaluation = {
+                "evaluation_id": evaluation_id,
+                "task": rollout.task_name,
+                "task_index": rollout.task_index,
+                "repeat": rollout.repeat,
+                "attempt": attempt,
+                "conversation": conversation,
+                "scored": scored,
+            }
+            extra = trajectory["extra"]
+            trajectories.append(
+                {**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}}
+            )
     return trajectories
 
 
@@ -887,7 +905,7 @@ class ArtifactEvaluations:
     def trajectories_json(
         self, scenario: str, evaluation_id: str, task_index: int, repeat: int
     ) -> list[dict[str, Any]] | None:
-        """The trajectory of each attempt of rollout ``(task_index, repeat)`` of one evaluation
+        """The trajectories of each attempt of rollout ``(task_index, repeat)`` of one evaluation
         (``attempt_trajectories``), in attempt order; None when ``scenario`` has no evaluation ``evaluation_id``. A
         rollout that the queue does not hold has none."""
         if self.get(scenario, evaluation_id) is None:
