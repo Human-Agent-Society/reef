@@ -573,6 +573,15 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.scenario_committed(current)
             return changed
 
+    def redeploy(self, scenario: str) -> None:
+        """Deploy the engines of what ``scenario`` serves again, also when they run its current settings (RFC #1299):
+        a new serving request replaces the current one, and stops its work. A scenario that serves nothing, or a
+        dispatcher without serving, changes nothing."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.require(scenario)
+            if self.publisher is not None:
+                self.publisher.publish(current, redeploy=True)
+
     def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` of ``component`` beside the active selection of ``scenario``; that snapshot stays."""
         with self.registry.lock_for(scenario):
