@@ -266,6 +266,50 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_an_artifact_that_serves_already_stays_ready_while_another_one_starts_or_fails(tmp_path: Path) -> None:
+    """One request serves the active artifact and each beside one: the start of a beside artifact, and its failure,
+    do not change the state of the active artifact that a route serves already."""
+
+    async def check() -> None:
+        coordination = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        table, queue = coordination.served_models, coordination.work_queue
+        lease = coordination.control_lease.acquire("control")
+        table.write(
+            ScenarioModel("math", ACTIVE),
+            ServedArtifact("release-1", "http://127.0.0.1:9", "math-v1"),
+            control_lease_number=lease.number,
+        )
+        payload = {
+            "artifact_id": "release-1",
+            "aliases": [],
+            "beside": {"release-0": {"component": "weights", "artifact_id": "release-0"}},
+        }
+        table.request("math", payload, control_lease_number=lease.number)
+        app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                path = "/reef/scenarios/math/inference/status"
+
+                async def states() -> tuple[str, str]:
+                    active = await (await client.get(path, headers=HEADERS)).json()
+                    beside = await (await client.get(path + "?model=release-0", headers=HEADERS)).json()
+                    return active["state"], beside["state"]
+
+                assert await states() == ("ready", "pending")
+                taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
+                queue.start(SERVING_QUEUE, taken.id, "worker")
+                assert await states() == ("ready", "starting")
+                queue.fail(SERVING_QUEUE, taken.id, "worker", "the beside engine did not start", retryable=False)
+                assert await states() == ("ready", "failed")
+        finally:
+            storage.close()
+            coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
 def test_startup_status_does_not_guess_readiness_when_the_store_fails(tmp_path: Path, monkeypatch) -> None:
     async def check() -> None:
         coordination = memory_coordination()
