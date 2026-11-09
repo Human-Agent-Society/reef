@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -55,6 +57,14 @@ class TrajectoryReader(ABC):
     @abstractmethod
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         """Read the trajectory directory and return ordered event objects."""
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        """The run in the trajectory directory as ATIF documents, in order (RFC #1290).
+
+        Each document after the first continues the one before it, after a compaction. A format without a
+        converter gives no documents, and so does a directory that holds no session.
+        """
+        return ()
 
 
 class _CallableTrajectoryReader(TrajectoryReader):
@@ -140,6 +150,21 @@ def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:
     return tuple(events)
 
 
+def _harbor_atif(path: Path, layout: str, convert: Callable[[Path], Any]) -> tuple[dict[str, Any], ...]:
+    """The ATIF document of Harbor's converter for the sessions in ``path``, or none.
+
+    ``layout`` is where Harbor's agent keeps the sessions under its log directory, and ``convert`` takes that
+    directory and gives a Harbor ``Trajectory`` or ``None``. Harbor's converters read the agent's main session.
+    """
+    if not Path(path).is_dir():
+        return ()
+    with tempfile.TemporaryDirectory(prefix="reef-atif-") as temporary:
+        logs_dir = Path(temporary)
+        shutil.copytree(path, logs_dir / layout, symlinks=True)
+        trajectory = convert(logs_dir)
+    return () if trajectory is None else (trajectory.to_json_dict(),)
+
+
 @register_trajectory_reader
 class PiSessionReader(TrajectoryReader):
     """Read pi session JSONL trees: every ``*.jsonl`` under ``path``, in order."""
@@ -148,6 +173,15 @@ class PiSessionReader(TrajectoryReader):
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return _read_jsonl_tree(path, "pi session")
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        from harbor.agents.installed.pi import Pi
+
+        def convert(logs_dir: Path) -> Any:
+            loaded = Pi(logs_dir=logs_dir)._load_trajectory()
+            return None if loaded is None else loaded[0]
+
+        return _harbor_atif(path, Pi._SESSIONS_DIRECTORY, convert)
 
 
 @register_trajectory_reader
@@ -166,6 +200,13 @@ class ClaudeSessionReader(TrajectoryReader):
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return _read_jsonl_tree(path, "claude session")
 
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        from harbor.agents.installed.claude_code import ClaudeCode
+
+        return _harbor_atif(
+            path, "sessions/projects", lambda logs_dir: ClaudeCode(logs_dir=logs_dir).convert_trajectory(logs_dir)
+        )
+
 
 @register_trajectory_reader
 class CodexSessionReader(TrajectoryReader):
@@ -180,6 +221,11 @@ class CodexSessionReader(TrajectoryReader):
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return _read_jsonl_tree(path, "codex session")
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        from harbor.agents.installed.codex import Codex
+
+        return _harbor_atif(path, "sessions", lambda logs_dir: Codex(logs_dir=logs_dir).convert_trajectory(logs_dir))
 
 
 @register_trajectory_reader
