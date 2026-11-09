@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import shutil
 import socket
 from collections.abc import Mapping
 from dataclasses import replace
@@ -148,11 +149,38 @@ def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instructio
     asyncio.run(agent.install(environment))
     asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
 
-    install, run = environment.commands[1], environment.commands[-1]
+    install, run = environment.commands[1], environment.commands[-2]
     assert f"curl -LsSf https://astral.sh/uv/{python.install.version}/install.sh" in install
     assert 'agent="$HOME/.local/bin/uv"' in run
     assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
     assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
+
+
+def test_the_agent_writes_the_atif_of_its_sessions_for_the_verifier_and_drops_a_planted_one(tmp_path: Path) -> None:
+    pi = get_adapter("pi")
+    logs = tmp_path / "logs"
+    shutil.copytree(Path(__file__).parent / "data" / "pi_session_real", logs / "sessions")
+    (logs / "trajectory.cont-3.json").write_text('{"steps": []}')
+    agent = AdapterAgent(logs, **adapter_agent_kwargs(pi, pi.install, tmp_path / "files", 60.0))
+    agent.populate_context_post_run(AgentContext())
+    assert sorted(path.name for path in logs.glob("trajectory*.json")) == ["trajectory.json"]
+    document = json.loads((logs / "trajectory.json").read_text())
+    assert document["steps"][-1]["message"] == "READY"
+    assert "continued_trajectory_ref" not in document
+
+
+def test_a_run_in_segments_writes_one_file_for_each_segment_with_its_continuation(tmp_path: Path) -> None:
+    pi = get_adapter("pi")
+    agent = AdapterAgent(tmp_path, **adapter_agent_kwargs(pi, pi.install, tmp_path / "files", 60.0))
+    agent.reader = SimpleNamespace(to_atif=lambda path: ({"steps": [1]}, {"steps": [2]}, {"steps": [3]}))
+    agent.populate_context_post_run(AgentContext())
+    first, second, third = (
+        json.loads((tmp_path / name).read_text())
+        for name in ["trajectory.json", "trajectory.cont-1.json", "trajectory.cont-2.json"]
+    )
+    assert first == {"steps": [1], "continued_trajectory_ref": "trajectory.cont-1.json"}
+    assert second == {"steps": [2], "continued_trajectory_ref": "trajectory.cont-2.json"}
+    assert third == {"steps": [3]}
 
 
 class BridgedContainer(RecordingEnvironment):

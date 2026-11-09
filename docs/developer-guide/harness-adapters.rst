@@ -112,7 +112,8 @@ How Reef runs an agent
    * - Harbor task
      - Starts the task's container, installs the pinned agent with npm (or
        uv), copies in the tree, runs ``run.task`` with the instruction, and
-       scores the tests' reward.
+       scores the tests' reward. The verifier can read the run as ATIF in
+       ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
      - an npm or uv ``install``
    * - A person's machine
      - ``reef-client harness`` installs the snapshot as the agent's plugin,
@@ -534,7 +535,9 @@ Connect a new agent
       at first.
    #. Add a ``TrajectoryReader`` with ``@register_trajectory_reader`` when the
       session log has a new format (`trajectory.py
-      <../../reef/harness/tasks/trajectory.py>`__).
+      <../../reef/harness/tasks/trajectory.py>`__). Give it ``to_atif``, so
+      that a task's verifier can read the run. Wrap Harbor's converter for
+      the agent when Harbor has one.
    #. Add the name to ``BUILTIN_ADAPTERS``, or register through the
       ``reef.harness_adapters`` entry point.
    #. Add ``render.py`` only for what the file cannot state.
