@@ -133,10 +133,10 @@ def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:
     Each file tolerates one torn final line, the residue a crash mid-write
     leaves behind; a corrupt line anywhere else is an error naming ``label``.
     """
-    return tuple(event for file in sorted(Path(path).rglob("*.jsonl")) for event in _read_jsonl_file(file, label))
+    return tuple(event for file in sorted(Path(path).rglob("*.jsonl")) for event in read_jsonl_file(file, label))
 
 
-def _read_jsonl_file(file: Path, label: str) -> list[dict[str, Any]]:
+def read_jsonl_file(file: Path, label: str) -> list[dict[str, Any]]:
     """One event object per line of ``file``, with the tolerance of ``_read_jsonl_tree``."""
     events: list[dict[str, Any]] = []
     lines = file.read_text(encoding="utf-8").removesuffix("\n").split("\n")
@@ -155,7 +155,7 @@ def _read_jsonl_file(file: Path, label: str) -> list[dict[str, Any]]:
     return events
 
 
-def _harbor_atif(path: Path, layout: str, convert: Callable[[Path], Any]) -> tuple[dict[str, Any], ...]:
+def harbor_atif(path: Path, layout: str, convert: Callable[[Path], Any]) -> tuple[dict[str, Any], ...]:
     """The ATIF document of Harbor's converter for the sessions in ``path``, or none.
 
     ``layout`` is where Harbor's agent keeps the sessions under its log directory, and ``convert`` takes that
@@ -170,7 +170,7 @@ def _harbor_atif(path: Path, layout: str, convert: Callable[[Path], Any]) -> tup
     return () if trajectory is None else (trajectory.to_json_dict(),)
 
 
-def _chat_document(session_id: str, agent: str, model: Any, messages: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def chat_document(session_id: str, agent: str, model: Any, messages: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """An ATIF document of OpenAI chat ``messages``, with the steps that Reef makes of recorded calls."""
     from reef.core.atif_payloads import OPENAI_CHAT, folded_steps, message_entry
 
@@ -187,7 +187,7 @@ def _chat_document(session_id: str, agent: str, model: Any, messages: Sequence[M
 LogItem = tuple[str, Any]
 
 
-def _log_documents(
+def log_documents(
     path: Path, agent: str, translate: Callable[[Mapping[str, Any]], Iterable[LogItem]]
 ) -> tuple[dict[str, Any], ...]:
     """The ATIF documents of a log of ``{type, seq, time, data}`` events, as native and dsh write it.
@@ -199,7 +199,7 @@ def _log_documents(
     for file in sorted(Path(path).rglob("*.jsonl")):
         model, system = None, None
         segments: list[list[dict[str, Any]]] = [[]]
-        for event in _read_jsonl_file(file, f"{agent} session"):
+        for event in read_jsonl_file(file, f"{agent} session"):
             for kind, value in translate(event):
                 if kind == "header":
                     model, system = value
@@ -212,15 +212,15 @@ def _log_documents(
                     segments.append([*head, {"role": "user", "content": f"Summary of the earlier steps:\n{value}"}])
         session_id = file.relative_to(path).as_posix()
         documents.extend(
-            _chat_document(session_id, agent, model, messages)
+            chat_document(session_id, agent, model, messages)
             for messages in segments
             if any(message["role"] != "system" for message in messages)
         )
     return tuple(documents)
 
 
-def _native_items(event: Mapping[str, Any]) -> list[LogItem]:
-    """What one native session event is to the model (``_log_documents``)."""
+def native_items(event: Mapping[str, Any]) -> list[LogItem]:
+    """What one native session event is to the model (``log_documents``)."""
     data = event.get("data") or {}
     match event.get("type"):
         case "session" if data.get("task"):
@@ -240,7 +240,7 @@ def _native_items(event: Mapping[str, Any]) -> list[LogItem]:
     return []
 
 
-def _block_text(blocks: Any, kind: str = "text") -> str:
+def block_text(blocks: Any, kind: str = "text") -> str:
     """The text of the ``kind`` blocks of a dsh content list, or the value itself when it is text."""
     if isinstance(blocks, str):
         return blocks
@@ -248,15 +248,15 @@ def _block_text(blocks: Any, kind: str = "text") -> str:
     return "\n".join(text for text in texts if text)
 
 
-def _dsh_items(event: Mapping[str, Any]) -> list[LogItem]:
-    """What one dsh session event is to the model (``_log_documents``)."""
+def dsh_items(event: Mapping[str, Any]) -> list[LogItem]:
+    """What one dsh session event is to the model (``log_documents``)."""
     data = event.get("data") or {}
     match event.get("type"):
         case "request/header":
             header = data.get("header") or {}
             return [("header", ((header.get("config") or {}).get("model"), header.get("system")))]
         case "user/message":
-            return [("message", {"role": "user", "content": _block_text(data.get("content"))})]
+            return [("message", {"role": "user", "content": block_text(data.get("content"))})]
         case "assistant/message":
             blocks = (data.get("message") or {}).get("content") or []
             calls = [
@@ -275,8 +275,8 @@ def _dsh_items(event: Mapping[str, Any]) -> list[LogItem]:
                 for block in blocks
                 if isinstance(block, dict) and block.get("type") == "tool-call"
             ]
-            message = {"role": "assistant", "content": _block_text(blocks)}
-            if reasoning := _block_text(blocks, "reasoning"):
+            message = {"role": "assistant", "content": block_text(blocks)}
+            if reasoning := block_text(blocks, "reasoning"):
                 message["reasoning_content"] = reasoning
             return [("message", {**message, **({"tool_calls": calls} if calls else {})})]
         case "tool/result":
@@ -287,14 +287,14 @@ def _dsh_items(event: Mapping[str, Any]) -> list[LogItem]:
                     {
                         "role": "tool",
                         "tool_call_id": block.get("toolCallId"),
-                        "content": _block_text(block.get("content")),
+                        "content": block_text(block.get("content")),
                     },
                 )
                 for block in blocks
                 if isinstance(block, dict) and block.get("type") == "tool-result"
             ]
         case "compaction/summary":
-            return [("compacted", _block_text(data.get("summary")))]
+            return [("compacted", block_text(data.get("summary")))]
     return []
 
 
@@ -314,7 +314,7 @@ class PiSessionReader(TrajectoryReader):
             loaded = Pi(logs_dir=logs_dir)._load_trajectory()
             return None if loaded is None else loaded[0]
 
-        return _harbor_atif(path, Pi._SESSIONS_DIRECTORY, convert)
+        return harbor_atif(path, Pi._SESSIONS_DIRECTORY, convert)
 
 
 @register_trajectory_reader
@@ -336,7 +336,7 @@ class ClaudeSessionReader(TrajectoryReader):
     def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
         from harbor.agents.installed.claude_code import ClaudeCode
 
-        return _harbor_atif(
+        return harbor_atif(
             path, "sessions/projects", lambda logs_dir: ClaudeCode(logs_dir=logs_dir).convert_trajectory(logs_dir)
         )
 
@@ -358,7 +358,7 @@ class CodexSessionReader(TrajectoryReader):
     def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
         from harbor.agents.installed.codex import Codex
 
-        return _harbor_atif(path, "sessions", lambda logs_dir: Codex(logs_dir=logs_dir).convert_trajectory(logs_dir))
+        return harbor_atif(path, "sessions", lambda logs_dir: Codex(logs_dir=logs_dir).convert_trajectory(logs_dir))
 
 
 @register_trajectory_reader
@@ -386,7 +386,7 @@ class DeepseekSessionReader(TrajectoryReader):
         return tuple(events)
 
     def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
-        return _log_documents(path, "dsh", _dsh_items)
+        return log_documents(path, "dsh", dsh_items)
 
 
 @register_trajectory_reader
@@ -563,7 +563,7 @@ class NativeSessionReader(TrajectoryReader):
         return PiSessionReader()(path)
 
     def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
-        return _log_documents(path, "reef-native", _native_items)
+        return log_documents(path, "reef-native", native_items)
 
 
 def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
