@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from reef_client.serve import CapturedTurn
 
+from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.evaluation.rollout_worker import (
@@ -28,6 +29,8 @@ from reef.evaluation.rollout_worker import (
     run_while_held,
     verifier_output,
 )
+from reef.evaluation.trials import EvaluationTrial, TrialObserver
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 from reef.storage.work_queue import NewWork, WorkLeaseLost
 
@@ -78,6 +81,73 @@ class UnreachableEndpoints(CandidateEndpoints):
 
     def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
         self.trajectories.append(trajectory)
+
+
+class OpenEndpoints(UnreachableEndpoints):
+    """Endpoints that open an address that no agent calls, for tasks under ``root``."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = self.root / rollout.task_name
+        task.mkdir(parents=True, exist_ok=True)
+        (task / "task.toml").write_text("")
+        return task
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        yield CandidateEndpoint("http://127.0.0.1:9", None)
+
+
+class NoSandboxLab(TaskLab):
+    """A lab whose trial writes its exception to its trial directory under ``root`` and ends with no call."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        trial = self.root / key
+        trial.mkdir(parents=True)
+        (trial / "exception.txt").write_text("SandboxError: the image did not build")
+        return RolloutRow(rewards={}, error="the sandbox did not start", trial_uri=trial.as_uri())
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+class ReadingObserver(TrialObserver):
+    """Keeps each trial and the exception text in its directory; raises after it keeps them when ``failing``."""
+
+    def __init__(self, failing: bool = False) -> None:
+        self.trials: list[tuple[EvaluationTrial, str]] = []
+        self.failing = failing
+
+    def observe(self, trial: EvaluationTrial) -> None:
+        assert trial.directory is not None
+        self.trials.append((trial, (trial.directory / "exception.txt").read_text()))
+        if self.failing:
+            raise OSError("the log store is gone")
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing(tmp_path, caplog, failing):
+    observer = ReadingObserver(failing)
+    worker = ServedWorker(
+        memory_coordination().work_queue,
+        OpenEndpoints(tmp_path / "tasks"),
+        worker_id="w",
+        lab=NoSandboxLab(tmp_path / "trials"),
+        trial_observer=observer,
+    )
+    with pytest.raises(ReefError, match="the rollout reached no model: the sandbox did not start"):
+        worker.score(rollout(), threading.Event(), 2)
+    [(trial, exception)] = observer.trials
+    assert trial == EvaluationTrial("s", "e1", 2, "add", 0, 2, trial.directory, "the sandbox did not start")
+    assert exception == "SandboxError: the image did not build"
+    failed = "the trial observer failed on rollout evaluation_rollout:e1:00002:00000"
+    assert (failed in caplog.text) == failing
 
 
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:

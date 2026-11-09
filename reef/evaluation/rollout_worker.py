@@ -11,7 +11,8 @@ and waits until the engine is ready. It answers the agent's model calls from tha
 no call is a record, so an evaluation never trains the scenario. The worker keeps each call of the rollout, failed
 calls too, as a record item of the scenario's owner in the data store as the call ends (``RolloutCalls``), so a client can read the calls
 of a rollout while it runs. After each attempt, it also keeps the model calls and trajectories that the task's verifier
-wrote to ``/logs/verifier/judge/`` (``verifier_output``, RFC #1293).
+wrote to ``/logs/verifier/judge/`` (``verifier_output``, RFC #1293), and gives the trial to the deployment's
+``TrialObserver``, when it names one.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ from reef.core.evaluation import (
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
+from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
@@ -566,8 +568,9 @@ class EvaluationRolloutWorker(QueueWorker):
 
     Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
-    lab; ``agent_host`` is the address at which a task's container reaches this host. Every failed rollout is
-    retried: a trial fails for reasons outside its input, such as a sandbox that did not start.
+    lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
+    address at which a task's container reaches this host. Every failed rollout is retried: a trial fails for reasons
+    outside its input, such as a sandbox that did not start.
 
     Purpose: the evaluation service starts one (``start``) and stops it (``stop``).
     """
@@ -581,6 +584,7 @@ class EvaluationRolloutWorker(QueueWorker):
         *,
         worker_id: str,
         lab: TaskLab | None = None,
+        trial_observer: TrialObserver | None = None,
         agent_host: str = DEFAULT_AGENT_HOST,
         poll_seconds: float = 0.5,
         slots: int = 1,
@@ -595,6 +599,7 @@ class EvaluationRolloutWorker(QueueWorker):
         )
         self.endpoints = endpoints
         self.lab = lab
+        self.trial_observer = trial_observer
         self.agent_host = agent_host
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
@@ -660,8 +665,22 @@ class EvaluationRolloutWorker(QueueWorker):
                 result = asyncio.run(run_while_held(runner, request, lease_lost))
             finally:
                 calls.close()
-            # The trial directory is under ``work``, so read the verifier's files before the block removes it.
-            self.keep_verifier_output(rollout, attempt, trial_directory(result.trial_uri))
+            # The trial directory is under ``work``, so read it before the block removes it.
+            trial = trial_directory(result.trial_uri)
+            self.keep_verifier_output(rollout, attempt, trial)
+            self.observe_trial(
+                rollout,
+                EvaluationTrial(
+                    rollout.scenario,
+                    rollout.evaluation_id,
+                    rollout.task_index,
+                    rollout.task_name,
+                    rollout.repeat,
+                    attempt,
+                    trial,
+                    result.error,
+                ),
+            )
             if not result.turns:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
                 # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
@@ -669,6 +688,16 @@ class EvaluationRolloutWorker(QueueWorker):
                 raise ReefError(f"the rollout reached no model: {result.error or 'the agent made no model call'}")
             score = runner.rollout_score(result)
             return score, None if score.is_failed else verifier_rewards(result.rewards)
+
+    def observe_trial(self, rollout: EvaluationRollout, trial: EvaluationTrial) -> None:
+        """Give ``trial`` of ``rollout`` to the trial observer, when there is one. Its failure is logged, and the
+        rollout and its score do not change."""
+        if self.trial_observer is None:
+            return
+        try:
+            self.trial_observer.observe(trial)
+        except Exception:
+            logger.exception("the trial observer failed on rollout %s", rollout.item_id())
 
     def keep_verifier_output(self, rollout: EvaluationRollout, attempt: int, trial: Path | None) -> None:
         """Keep the calls and trajectories that the verifier of attempt ``attempt`` of ``rollout`` wrote to the trial

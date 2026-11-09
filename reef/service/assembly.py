@@ -25,6 +25,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
+from reef.evaluation.trials import TrialObserver
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
@@ -537,6 +538,13 @@ def build_dispatcher(
                     dispatcher.queue,
                     LocalCandidateEndpoints(dispatcher),
                     worker_id=instance_id("evaluation"),
+                    trial_observer=(
+                        None
+                        if settings.evaluation_trial_observer is None
+                        else TrialObserver.from_setting(
+                            settings.evaluation_trial_observer, setting="evaluation.trial_observer"
+                        )
+                    ),
                     agent_host=settings.evaluation_agent_host,
                     slots=settings.evaluation_max_sandboxes,
                 )
