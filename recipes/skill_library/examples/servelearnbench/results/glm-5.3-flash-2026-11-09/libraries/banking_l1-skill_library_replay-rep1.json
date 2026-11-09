@@ -1,0 +1,62 @@
+[
+ {
+  "slug": "decide-pending-outbound-transfers",
+  "name": "Decide pending outbound transfers",
+  "description": "Applies when deciding a flagged pending outbound transfer case after pulling the case, account, and payee details.",
+  "procedure": "- Pull the case, then the account and payee details.\n- Check each documented transfer rule against the facts: reporting threshold, restricted-payee indications, account verification level, account standing, and any documented corridor or jurisdiction rule.\n- Treat a reason code's mere existence in the reason list as NOT evidence that it applies; each code must map to a concrete fact about the case.\n- If every documented check passes, approve; do not deny or escalate on speculation about hidden practice.\n- If a documented rule fails, apply its reason code; if a value in the docs conflicts with the case facts, trust the case facts and note the discrepancy.",
+  "check": "Before issuing the decision, walk the full reason-code list and confirm each code has no matching fact in the case data (or cite the matching fact for the one chosen); recompute any threshold comparison.",
+  "known_bad": "Denying a below-threshold transfer from a verified, good-standing account to an established business payee solely because a reason code like corridor_blocked appears in the documentation's code list — the check fails because no case fact matches that code.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "decide-credit-limit-increase-requests",
+  "name": "Decide credit limit increase requests",
+  "description": "Applies when deciding a pending credit limit-increase request after pulling the case and account details, because standing rules and an approvable cap must both be checked before the single decision call.",
+  "procedure": "- Pull the case to confirm it is a limit increase and read the account, current limit, requested limit, and status.\n- Pull account details: standing flag, recent chargebacks, verification level, tenure.\n- Read the limits policy section and check disqualifying conditions first (e.g., recent chargeback or bad standing), which override the amount entirely.\n- If no disqualifying condition applies, compare the requested limit to the documented approvable cap: within the cap approve, above it deny with the cap-exceeded reason.\n- Check whether policy imposes any account-attribute requirement (verification level, tenure) before assuming a simple amount comparison is enough.\n- Issue exactly one decision tool call, then finish.",
+  "check": "Before the decision call, re-read the account and the policy rule list and recompute: confirm no denial condition applies to the account and state whether the requested amount is within or above the cap, matching the reason you are about to submit.",
+  "known_bad": "Approving a limit increase for an account with a recent chargeback or bad standing: the check fails because the policy rule requires denial regardless of amount, so the recomputation surfaces a denial condition the approval ignored.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "approve-unlisted-category-card-transactions",
+  "name": "Approve unlisted category card transactions",
+  "description": "Applies when deciding a pending card transaction whose merchant category does not appear in the documented instant-approve limits table, so an amount restriction is being assumed or dismissed.",
+  "procedure": "- Pull the case, account, and merchant details and note the merchant category.\n- Read the documented instant-approve limits table. If the category has no listed limit, treat it as having no amount restriction; never borrow a limit from another category.\n- Check only the conditions the transactions policy actually states (e.g., category is serviceable, no region restriction, account standing). Do not invent extra requirements the policy does not list, such as a specific verification level; an account in good standing with basic verification still qualifies.\n- If every stated condition holds, approve without escalation.\n- If the category does have a listed limit and the amount exceeds it, escalate with reason over_limit instead; the documented limit may also be stale, so weigh that case separately.",
+  "check": "Re-read the limits table and confirm the category genuinely has no listed entry, then re-scan the policy section for each stated condition and confirm the account fails none of them before calling approve.",
+  "known_bad": "A charge in a category that the table does list with a limit (for example, electronics above $500) gets approved as if the category were unlisted; the check fails because re-reading the table shows an entry for that category.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 5
+ },
+ {
+  "slug": "approve-in-limit-card-transactions",
+  "name": "Approve in-limit card transactions",
+  "description": "Applies when deciding a pending card transaction whose merchant category has a documented instant-approve limit and the amount is at or below that limit, so the approval conditions must all be confirmed before the single decision call.",
+  "procedure": "- Pull the case details, then the merchant details (category, region) and the account details (verification, standing, credit limit).\n- Read the transaction policy section to get the documented instant-approve limit for the merchant's category and confirm the category is serviceable.\n- Compare the transaction amount against the documented category limit; if it is at or below the limit, no escalation is needed.\n- Confirm no region restriction applies to the category or merchant.\n- Confirm the account is verified, in good standing, and its credit limit covers the amount.\n- If every documented condition holds, approve the case; otherwise escalate with the reason the policy specifies.",
+  "check": "Before approving, re-read the policy section and recompute the comparison of the transaction amount against the documented category limit, re-confirming the category is serviceable and the account conditions hold.",
+  "known_bad": "Approving a charge whose amount exceeds the category's documented instant-approve limit fails the check, because the recomputed comparison shows the amount above the limit and the policy requires escalation with an over-limit reason instead of approval.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 26
+ },
+ {
+  "slug": "stale-category-limit-escalation",
+  "name": "Stale category limit escalation",
+  "description": "Applies when deciding a pending or held card transaction whose amount exceeds the documented category instant-approve limit, because documented limits can be out of date and the escalation must be justified by the in-force limit before it is made.",
+  "procedure": "- Pull the case, account, and merchant details; confirm the category's documented instant-approve limit and that the amount exceeds it.\n- Establish the in-force limit bound from prior scored outcomes: for electronics, a $586.84 charge on a clean account was approved against a documented $500 limit and scored full marks, so the in-force electronics limit is above $586.84.\n- On a clean account (good standing, acceptable verification, sufficient credit limit, serviceable category, no region restriction), do not escalate an amount that is at or below the highest amount known to have been approved in force.\n- Escalate with reason over_limit only when the amount plainly exceeds the known in-force bound or adverse account factors independently justify it.\n- Approve with a single decision call once all conditions are confirmed.",
+  "check": "Before escalating, recompute: the amount must exceed the highest in-force bound established by scored approvals (for electronics, above $586.84), or adverse account factors must independently justify escalation; if the amount is at or below that bound on a clean account, the decision should be an approval, not an escalation.",
+  "known_bad": "Escalating an electronics charge of $560 on a clean account with reason over_limit fails the check, because $560 is below the $586.84 in-force bound that a scored approval established; the documented $500 limit is stale and such an escalation is scored wrong.",
+  "verified": false,
+  "wins": 5,
+  "losses": 0,
+  "step": 28
+ }
+]

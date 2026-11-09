@@ -1,0 +1,38 @@
+[
+ {
+  "slug": "decide-flagged-outbound-transfer",
+  "name": "Decide flagged outbound transfer",
+  "description": "Applies when a pending outbound transfer case must be resolved with exactly one final decision (approve, deny, or escalate with a reason).",
+  "procedure": "- Fetch the case details, account details, and payee details before deciding; if the protocol allows only one tool call per turn, issue them one at a time.\n- Read the transfers section of the policy and list its explicit triggers (thresholds, restricted-payee rule).\n- Deny with `restricted_payee` only if a fetched source confirms the payee is restricted; an unpublished or unavailable roster is not evidence of restriction and must not trigger a deny.\n- Escalate with `reportable_amount` when the amount exceeds the documented reporting threshold.\n- Treat a foreign payee jurisdiction, or good account standing, as neutral unless the policy names them as triggers.\n- Record exactly one final decision with the reason matching the single condition that actually fired.",
+  "check": "Before recording, recompute the decision: for each policy trigger, confirm from the fetched data whether it fired, and verify the recorded reason is the one attached to the fired trigger and nothing else.",
+  "known_bad": "A transfer is denied as `restricted_payee` merely because the restricted-payee roster is unpublished or cannot be checked; the check fails because no fetched source confirms the payee is on the roster, so the deny reason has no supporting trigger.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 11
+ },
+ {
+  "slug": "settle-limit-increase-request",
+  "name": "Settle limit increase request",
+  "description": "Applies when a ceiling or limit-increase request for an account must be settled with exactly one final decision (approve or deny with a reason).",
+  "procedure": "- Fetch the case details and the account details; note the current limit, the requested limit, the account's verification, and its standing (e.g., recent chargebacks, disputes).\n- Check account standing before the amount: if the account has a disqualifying standing flag, deny with the standing-based reason regardless of how small the request is.\n- Otherwise compare the requested limit against the approvable cap documented in the policy limits section: within the cap, approve; above the cap, deny with the cap-based reason.\n- Submit exactly one final decision with the appropriate reason, then finish.",
+  "check": "Before trusting the decision, re-derive it in order: standing rule first, then cap comparison. If the decision rests only on one of the two tests, re-verify the other — a denial for standing must not need to pass the cap test, and an approval must confirm both that standing is clean and that the amount is within the cap.",
+  "known_bad": "Approving a request for an account that has a recent chargeback solely because the requested amount is within the documented cap fails the check — the standing rule was not applied first and overrides the amount test.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 20
+ },
+ {
+  "slug": "record-card-transaction-decision",
+  "name": "Record card transaction decision",
+  "description": "Applies when a pending card transaction (authorization) on an account must be decided with exactly one final decision (approve, deny, or escalate with a reason code).",
+  "procedure": "- Fetch case details, then account details and merchant details.\n- Read the current policy section on card transactions; note the instant-approve limit for the merchant's category.\n- If the category has a listed instant-approve limit, compare the amount against it; above the limit, escalate with reason over_limit.\n- If the category has no listed instant-approve limit, treat it as having no amount restriction — do not escalate or deny for amount alone.\n- Verify eligibility conditions stated in policy (verification, standing, tier and region rules); if nothing fires, approve.\n- If any documented rule is contradicted by the scoring of a later run, trust the scored behavior over the document.",
+  "check": "Re-read the policy's limit table and confirm every fired condition (limit exceeded, category or region restriction, account standing) actually applies to this transaction's amount, category, and account; if no condition applies, approving must be consistent with the table.",
+  "known_bad": "A transaction in a category absent from the limit table (e.g., a category other than the ones with listed limits) that is escalated as over_limit purely because no limit was listed — the check fails since an unlisted category has no amount restriction to exceed.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 27
+ }
+]

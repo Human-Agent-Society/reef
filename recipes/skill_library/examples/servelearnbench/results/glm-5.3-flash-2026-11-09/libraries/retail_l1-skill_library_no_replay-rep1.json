@@ -1,0 +1,98 @@
+[
+ {
+  "slug": "exchange-item-in-delivered-order",
+  "name": "Exchange item in delivered order",
+  "description": "Applies when a customer with a delivered order wants to swap an item for a different variant of the same product, with any price difference charged or refunded.",
+  "procedure": "- Authenticate the customer (name + zip), fetch the order, and confirm its status is delivered.\n- Verify the requested new item is a variant of the same product, is available and non-clearance, and that delivery was within the category's return window (electronics 14 / apparel 30 / home 30 days after delivery; clearance is final sale).\n- Compute the price difference as new variant price minus old item price, using catalog prices from product details, never figures quoted by the customer.\n- If the new variant costs more, charge the difference to a payment method on file (a gift card only if its balance covers it); if cheaper, refund the difference.\n- Call the exchange action with the old item ids, new item ids, order id, and payment method id, then confirm the new status in the response.",
+  "check": "Recompute the price difference from the product catalog and compare it to the exchange_price_difference in the tool response, and confirm the response shows the new item under exchange_new_items and an exchange-requested status before telling the customer it is done.",
+  "known_bad": "An exchange where the charged difference was taken from the customer's message or from the old item's price instead of the new variant's catalog price, or where the new item is a clearance/unavailable variant of a different product — the recomputed difference or variant verification fails.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "modify-item-in-pending-order",
+  "name": "Modify item in pending order",
+  "description": "Applies when a customer asks to change an item in a not-yet-shipped (pending) order to a different variant of the same product, with the price difference charged or refunded.",
+  "procedure": "- Authenticate the customer and confirm the order belongs to them and its status is still pending; modifications are only allowed before shipment.\n- Look up the requested replacement item under the same product; verify it is available and not clearance.\n- Compute the price difference as the new item price minus the old item price.\n- Settle the difference via the original payment method, or a gift card with sufficient balance when there is an upcharge; use only a method the policy allows and the customer specified.\n- Call the modify-pending-order-items action with the order, the old and new item ids, and the chosen payment method.",
+  "check": "Re-read the order afterwards: the item must now be the new variant with its new price, and the payment history must show a difference transaction whose amount equals new price minus old price, charged to the allowed payment method.",
+  "known_bad": "A modification to a clearance or unavailable variant, or a difference charged to a method that is neither the original payment method nor a gift card with enough balance, leaves the order unchanged or with a wrong charge, so the check fails.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "cancel-a-pending-customer-order",
+  "name": "Cancel a pending customer order",
+  "description": "Applies when a customer asks to cancel an existing order (rather than return items from a delivered order) and the order's eligibility to be cancelled must be verified before acting.",
+  "procedure": "- Identify the user by name and zip, then fetch user details to learn their membership tier.\n- Fetch the order, confirm it belongs to the user, and confirm its status is **pending**; refuse if it is processed, delivered, or already cancelled.\n- Compute the order total and compare it to the tier's cancellation threshold (bronze $200, silver $300, gold $500); if the total exceeds the limit, refuse with reason `over_threshold`.\n- Check the stated reason is one of \"no longer needed\" or \"ordered by mistake\"; otherwise refuse.\n- If eligible, cancel free of charge and refund the payment to the payment method(s) used.",
+  "check": "Before deciding, recompute the order total from the item prices and re-verify it against the membership tier's threshold and the allowed reason list; refuse if either fails.",
+  "known_bad": "Approving cancellation of a bronze member's pending order totalling $450: the check fails because $450 exceeds the $200 bronze limit, so the correct result is a refusal with `over_threshold`.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "cancel-pending-order-with-limit-check",
+  "name": "Cancel pending order with limit check",
+  "description": "Applies when a customer asks to cancel a pending order and eligibility, including any per-order spending limit tied to the customer's membership tier, must be verified before approving or refusing.",
+  "procedure": "- Authenticate the customer by name and zip to get the user id, then fetch user details to read their membership tier and orders.\n- Fetch the order details; verify the order belongs to this customer and its status is still pending (shipped or delivered orders are not cancellable this way).\n- Sum the prices of all line items to get the order total and compare it to the total shown in the payment history; they must match.\n- Compare the order total against the cancellation limit in force for the membership tier. A run showed a gold-member pending order totalling 1458.55 was scored correct when refused as over threshold, while a documented limit of 500 was applied for gold members; if the total exceeds the tier's limit, refuse with the over-threshold reason instead of cancelling.\n- If the order passes the eligibility and limit checks, proceed with the cancellation and refund per policy.",
+  "check": "Recompute the order total from the line-item prices and re-check it against the membership-tier limit before sending the decision; confirm the decision reason matches the failed condition (pending vs. over threshold).",
+  "known_bad": "A pending order with a total above the tier's cancellation limit (for example 750 under a 500 limit for a gold member) would be approved for cancellation; the check fails because the recomputed total exceeds the limit and the decision must be a refusal.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 8
+ },
+ {
+  "slug": "refuse-expired-delivered-order-returns",
+  "name": "Refuse expired delivered-order returns",
+  "description": "Applies when a customer asks to return an item from a delivered order and the return window, clearance status, and refund destination must be checked before approving or refusing.",
+  "procedure": "- Authenticate the customer and confirm the order belongs to them and is **delivered**.\n- Fetch product details for the item to get its **category** and **clearance** flag; clearance items can never be returned (refuse `final_sale`).\n- Count days from the order's **delivered_at** date (not the placement date) to the current date.\n- Compare against the category window in force: apparel **30** days, electronics **14** days, home **30** days; outside the window, refuse with `window_expired`.\n- If within the window, compute the refund minus the restocking fee by membership tier (bronze **15%**, silver **10%**, gold **5%**).\n- Refund to a gift card on the customer's account is always an accepted destination.",
+  "check": "Before refusing or approving, recompute the elapsed days from `delivered_at` to the current timestamp and re-verify the item's category and clearance flag from product details; confirm the refusal or approval matches that recomputation.",
+  "known_bad": "A home-category item delivered 45 days ago gets approved for return because the days were counted from the order's placement date instead of `delivered_at`; recomputing from the delivery date shows 45 > 30, so the request must be refused with `window_expired`.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 11
+ },
+ {
+  "slug": "process-delivered-order-return-requests",
+  "name": "Process delivered-order return requests",
+  "description": "Applies when a customer asks to return items from a delivered order and receive a refund, requiring window, clearance, reason, restocking-fee, and destination checks before registering the return.",
+  "procedure": "- Authenticate the customer, fetch the order, and confirm its status is `delivered` and the items belong to it.\n- Confirm the stated reason is one of: defective, no longer needed, wrong item; otherwise refuse.\n- Compute days since delivery and check the category window: apparel 30, electronics 14, home 30 days; outside the window, refuse.\n- Refuse if any item is marked clearance (final sale).\n- Compute the refund as item price times (1 minus the restocking rate for the customer's membership tier: bronze 15%, silver 10%, gold 5%), rounded to cents.\n- Accept any payment method on the customer's account as the refund destination (a gift card on the account is always accepted) and register the return; the refund is issued at registration.",
+  "check": "Recompute the refund from the item price and the tier's restocking rate and compare it to the `return_refund_amount` in the return tool's response before finishing.",
+  "known_bad": "Refunding the full item price with no restocking fee deducted for a bronze-tier member fails the check, since the recomputed refund (price × 0.85) does not match the recorded full-price refund.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 16
+ },
+ {
+  "slug": "accept-system-recorded-refund-amounts",
+  "name": "Accept system-recorded refund amounts",
+  "description": "Applies when a return or cancellation refund is recorded by the system and the agent's own computed amount differs from it because the fee leaves a sub-cent remainder.",
+  "procedure": "- Compute the expected refund: item price minus any membership-tier percentage restocking fee.\n- Perform the refund action and read the refund amount recorded in the tool's response.\n- If the recorded amount differs from your computation by less than one cent, treat the recorded amount as authoritative and quote it to the customer.\n- Never re-issue, adjust, or recompute a refund to force it to match your own rounding convention; sub-cent remainders are settled by the system, not by the agent.",
+  "check": "Re-read the order's payment history and confirm the refund amount you reported to the customer matches the refund transaction actually recorded there.",
+  "known_bad": "A percentage fee on a price whose reduced amount ends in exactly half a cent is quoted rounded up (e.g. a computed $9.995 reported as $10.00) while the system recorded $9.99; the payment-history check fails because the reported refund does not match the recorded one.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 21
+ },
+ {
+  "slug": "refuse-upcharge-beyond-restricted-payment-method",
+  "name": "Refuse upcharge beyond restricted payment method",
+  "description": "Applies when a customer requests an exchange or order modification whose price difference exceeds the balance of the single payment method they have restricted the charge to.",
+  "procedure": "- Confirm the order qualifies for the swap (status, eligibility window, requested variant available and not blocked).\n- Compute the upcharge: requested variant price minus current item price.\n- Identify the payment method or methods the customer permits for the difference.\n- If the permitted method's current balance is less than the upcharge and no other method is allowed, refuse with the computed difference and the method's balance stated.\n- If other methods are permitted, charge the remainder to them instead of refusing.",
+  "check": "Recompute the upcharge from the order item's price and the variant's price, then compare it to the permitted method's balance fetched fresh; the balance must be greater than or equal to the upcharge before approving, otherwise the refusal reason must be insufficient balance.",
+  "known_bad": "Approving a variant swap with an upcharge of 91.76 to be paid entirely from a gift card whose balance is 22.94 fails this check, because 22.94 is less than 91.76 and no fallback method was permitted.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 22
+ }
+]

@@ -1,0 +1,1235 @@
+{
+ "banking_l1": {
+  "blind": [
+   {
+    "repeat": 0,
+    "H": 0.0,
+    "F": 94.6809,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 86.9565,
+     "2": 95.4545,
+     "3": 95.8333
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 1,
+    "H": 0.0,
+    "F": 95.7447,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 95.6522,
+     "2": 86.3636,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 2,
+    "H": 0.0,
+    "F": 93.617,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 96.0,
+     "1": 91.3043,
+     "2": 100.0,
+     "3": 87.5
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 0
+   }
+  ],
+  "oracle": [
+   {
+    "repeat": 0,
+    "H": 100.0,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 1,
+    "H": 100.0,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 2,
+    "H": 100.0,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 0
+   }
+  ],
+  "rag": [
+   {
+    "repeat": 0,
+    "H": 67.8571,
+    "F": 90.4255,
+    "H_by_window": {
+     "0": 87.5,
+     "1": 50.0,
+     "2": 85.0,
+     "3": 58.3333
+    },
+    "F_by_window": {
+     "0": 84.0,
+     "1": 91.3043,
+     "2": 90.9091,
+     "3": 95.8333
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336
+   },
+   {
+    "repeat": 1,
+    "H": 75.0,
+    "F": 93.617,
+    "H_by_window": {
+     "0": 87.5,
+     "1": 62.5,
+     "2": 80.0,
+     "3": 75.0
+    },
+    "F_by_window": {
+     "0": 96.0,
+     "1": 95.6522,
+     "2": 90.9091,
+     "3": 91.6667
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336
+   },
+   {
+    "repeat": 2,
+    "H": 65.4762,
+    "F": 92.5532,
+    "H_by_window": {
+     "0": 75.0,
+     "1": 50.0,
+     "2": 75.0,
+     "3": 66.6667
+    },
+    "F_by_window": {
+     "0": 92.0,
+     "1": 91.3043,
+     "2": 95.4545,
+     "3": 91.6667
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336
+   }
+  ],
+  "reasoning_bank": [
+   {
+    "repeat": 0,
+    "H": 0.0,
+    "F": 92.5532,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 96.0,
+     "1": 86.9565,
+     "2": 100.0,
+     "3": 87.5
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 50,
+    "replay_episodes": 0,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 841272,
+     "output": 465048
+    }
+   },
+   {
+    "repeat": 1,
+    "H": 0.0,
+    "F": 88.2979,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 84.0,
+     "1": 100.0,
+     "2": 81.8182,
+     "3": 87.5
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 50,
+    "replay_episodes": 0,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 891360,
+     "output": 597241
+    }
+   },
+   {
+    "repeat": 2,
+    "H": 0.0,
+    "F": 85.1064,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 88.0,
+     "1": 82.6087,
+     "2": 95.4545,
+     "3": 75.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 50,
+    "replay_episodes": 0,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 893479,
+     "output": 487269
+    }
+   }
+  ],
+  "skill_library_no_replay": [
+   {
+    "repeat": 0,
+    "H": 0.0,
+    "F": 93.617,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 75.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 3,
+    "replay_episodes": 0,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 497389,
+     "output": 194812
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 0,
+     "tie": 0
+    }
+   },
+   {
+    "repeat": 1,
+    "H": 0.0,
+    "F": 95.7447,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 84.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 3,
+    "replay_episodes": 0,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 482590,
+     "output": 212055
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 0,
+     "tie": 0
+    }
+   },
+   {
+    "repeat": 2,
+    "H": 0.0,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 6,
+    "replay_episodes": 0,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 558420,
+     "output": 293587
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 0,
+     "tie": 0
+    }
+   }
+  ],
+  "skill_library_replay": [
+   {
+    "repeat": 0,
+    "H": 13.0952,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 37.5,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 20.8333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 4,
+    "replay_episodes": 237,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 504396,
+     "output": 197515
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 3,
+     "win": 0,
+     "tie": 49
+    }
+   },
+   {
+    "repeat": 1,
+    "H": 23.8095,
+    "F": 97.8723,
+    "H_by_window": {
+     "0": 37.5,
+     "1": 16.6667,
+     "2": 30.0,
+     "3": 16.6667
+    },
+    "F_by_window": {
+     "0": 92.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 5,
+    "replay_episodes": 219,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 542441,
+     "output": 191245
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 1,
+     "tie": 48
+    }
+   },
+   {
+    "repeat": 2,
+    "H": 26.1905,
+    "F": 91.4894,
+    "H_by_window": {
+     "0": 37.5,
+     "1": 16.6667,
+     "2": 30.0,
+     "3": 25.0
+    },
+    "F_by_window": {
+     "0": 92.0,
+     "1": 91.3043,
+     "2": 90.9091,
+     "3": 91.6667
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 9,
+    "replay_episodes": 243,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 616347,
+     "output": 204200
+    },
+    "verified_at_end": 2,
+    "retired": 0,
+    "ablations": {
+     "loss": 2,
+     "win": 0,
+     "tie": 51
+    }
+   }
+  ],
+  "skill_library_replay_f97bff77": [
+   {
+    "repeat": 0,
+    "H": 26.1905,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 37.5,
+     "1": 16.6667,
+     "2": 30.0,
+     "3": 25.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 6,
+    "replay_episodes": 223,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 534882,
+     "output": 175040
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 1,
+     "win": 0,
+     "tie": 48
+    }
+   },
+   {
+    "repeat": 1,
+    "H": 29.7619,
+    "F": 89.3617,
+    "H_by_window": {
+     "0": 37.5,
+     "1": 16.6667,
+     "2": 40.0,
+     "3": 29.1667
+    },
+    "F_by_window": {
+     "0": 96.0,
+     "1": 95.6522,
+     "2": 72.7273,
+     "3": 91.6667
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 23,
+    "replay_episodes": 240,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 683965,
+     "output": 234939
+    },
+    "verified_at_end": 14,
+    "retired": 0,
+    "ablations": {
+     "loss": 13,
+     "win": 0,
+     "tie": 38
+    }
+   },
+   {
+    "repeat": 2,
+    "H": 58.3333,
+    "F": 82.9787,
+    "H_by_window": {
+     "0": 37.5,
+     "1": 50.0,
+     "2": 65.0,
+     "3": 75.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 91.3043,
+     "2": 77.2727,
+     "3": 62.5
+    },
+    "test_tasks": {
+     "hidden": 84,
+     "fully_specified": 94
+    },
+    "serving_episodes": 336,
+    "steps": 28,
+    "items_at_end": 21,
+    "replay_episodes": 222,
+    "learner_calls": 336,
+    "learner_tokens": {
+     "input": 765897,
+     "output": 227345
+    },
+    "verified_at_end": 10,
+    "retired": 0,
+    "ablations": {
+     "loss": 7,
+     "win": 4,
+     "tie": 41
+    }
+   }
+  ]
+ },
+ "retail_l1": {
+  "blind": [
+   {
+    "repeat": 0,
+    "H": 11.25,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 10.0,
+     "1": 10.0,
+     "2": 17.5,
+     "3": 15.0,
+     "4": 7.5,
+     "5": 8.3333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 1,
+    "H": 7.5,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 5.0,
+     "1": 5.0,
+     "2": 10.0,
+     "3": 12.5,
+     "4": 5.0,
+     "5": 6.6667
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 2,
+    "H": 13.75,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 10.0,
+     "1": 17.5,
+     "2": 17.5,
+     "3": 20.0,
+     "4": 10.0,
+     "5": 8.3333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 0
+   }
+  ],
+  "oracle": [
+   {
+    "repeat": 0,
+    "H": 99.5833,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 98.3333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 1,
+    "H": 98.75,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 95.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 0
+   },
+   {
+    "repeat": 2,
+    "H": 99.5833,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 98.3333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 0
+   }
+  ],
+  "rag": [
+   {
+    "repeat": 0,
+    "H": 52.5,
+    "F": 95.8333,
+    "H_by_window": {
+     "0": 95.0,
+     "1": 50.0,
+     "2": 45.0,
+     "3": 65.0,
+     "4": 35.0,
+     "5": 48.3333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 87.5,
+     "4": 91.6667,
+     "5": 95.8333
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720
+   },
+   {
+    "repeat": 1,
+    "H": 53.75,
+    "F": 94.4444,
+    "H_by_window": {
+     "0": 85.0,
+     "1": 70.0,
+     "2": 67.5,
+     "3": 57.5,
+     "4": 35.0,
+     "5": 33.3333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 91.6667,
+     "4": 91.6667,
+     "5": 83.3333
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720
+   },
+   {
+    "repeat": 2,
+    "H": 48.75,
+    "F": 96.5278,
+    "H_by_window": {
+     "0": 90.0,
+     "1": 47.5,
+     "2": 47.5,
+     "3": 70.0,
+     "4": 37.5,
+     "5": 30.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 95.8333,
+     "3": 95.8333,
+     "4": 91.6667,
+     "5": 95.8333
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720
+   }
+  ],
+  "reasoning_bank": [
+   {
+    "repeat": 0,
+    "H": 17.0833,
+    "F": 99.3056,
+    "H_by_window": {
+     "0": 20.0,
+     "1": 20.0,
+     "2": 12.5,
+     "3": 32.5,
+     "4": 20.0,
+     "5": 5.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 95.8333,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 50,
+    "replay_episodes": 0,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2819021,
+     "output": 1160629
+    }
+   },
+   {
+    "repeat": 1,
+    "H": 9.1667,
+    "F": 97.2222,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 15.0,
+     "2": 20.0,
+     "3": 20.0,
+     "4": 0.0,
+     "5": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 91.6667,
+     "2": 100.0,
+     "3": 91.6667,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 50,
+    "replay_episodes": 0,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2610145,
+     "output": 1061386
+    }
+   },
+   {
+    "repeat": 2,
+    "H": 16.25,
+    "F": 98.6111,
+    "H_by_window": {
+     "0": 20.0,
+     "1": 20.0,
+     "2": 20.0,
+     "3": 32.5,
+     "4": 15.0,
+     "5": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 91.6667,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 50,
+    "replay_episodes": 0,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2774928,
+     "output": 1153229
+    }
+   }
+  ],
+  "skill_library_no_replay": [
+   {
+    "repeat": 0,
+    "H": 1.6667,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 0.0,
+     "1": 0.0,
+     "2": 5.0,
+     "3": 2.5,
+     "4": 2.5,
+     "5": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 7,
+    "replay_episodes": 0,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2123910,
+     "output": 1425665
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 0,
+     "tie": 0
+    }
+   },
+   {
+    "repeat": 1,
+    "H": 1.25,
+    "F": 99.3056,
+    "H_by_window": {
+     "0": 15.0,
+     "1": 0.0,
+     "2": 0.0,
+     "3": 0.0,
+     "4": 0.0,
+     "5": 0.0
+    },
+    "F_by_window": {
+     "0": 95.8333,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 8,
+    "replay_episodes": 0,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2030813,
+     "output": 1316550
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 0,
+     "tie": 0
+    }
+   },
+   {
+    "repeat": 2,
+    "H": 1.25,
+    "F": 99.3056,
+    "H_by_window": {
+     "0": 10.0,
+     "1": 2.5,
+     "2": 0.0,
+     "3": 0.0,
+     "4": 0.0,
+     "5": 0.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 95.8333,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 9,
+    "replay_episodes": 0,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2160226,
+     "output": 1220919
+    },
+    "verified_at_end": 0,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 0,
+     "tie": 0
+    }
+   }
+  ],
+  "skill_library_replay": [
+   {
+    "repeat": 0,
+    "H": 24.1667,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 20.0,
+     "1": 20.0,
+     "2": 20.0,
+     "3": 40.0,
+     "4": 25.0,
+     "5": 20.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 15,
+    "replay_episodes": 623,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2252667,
+     "output": 1079797
+    },
+    "verified_at_end": 1,
+    "retired": 0,
+    "ablations": {
+     "loss": 0,
+     "win": 0,
+     "tie": 113
+    }
+   },
+   {
+    "repeat": 1,
+    "H": 21.25,
+    "F": 99.3056,
+    "H_by_window": {
+     "0": 20.0,
+     "1": 20.0,
+     "2": 17.5,
+     "3": 35.0,
+     "4": 22.5,
+     "5": 15.0
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 95.8333,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 17,
+    "replay_episodes": 649,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2355939,
+     "output": 1203789
+    },
+    "verified_at_end": 2,
+    "retired": 0,
+    "ablations": {
+     "loss": 3,
+     "win": 1,
+     "tie": 106
+    }
+   },
+   {
+    "repeat": 2,
+    "H": 23.75,
+    "F": 100.0,
+    "H_by_window": {
+     "0": 20.0,
+     "1": 20.0,
+     "2": 20.0,
+     "3": 40.0,
+     "4": 25.0,
+     "5": 18.3333
+    },
+    "F_by_window": {
+     "0": 100.0,
+     "1": 100.0,
+     "2": 100.0,
+     "3": 100.0,
+     "4": 100.0,
+     "5": 100.0
+    },
+    "test_tasks": {
+     "hidden": 240,
+     "fully_specified": 144
+    },
+    "serving_episodes": 720,
+    "steps": 62,
+    "items_at_end": 15,
+    "replay_episodes": 675,
+    "learner_calls": 720,
+    "learner_tokens": {
+     "input": 2317585,
+     "output": 1241169
+    },
+    "verified_at_end": 4,
+    "retired": 0,
+    "ablations": {
+     "loss": 2,
+     "win": 3,
+     "tie": 108
+    }
+   }
+  ]
+ }
+}

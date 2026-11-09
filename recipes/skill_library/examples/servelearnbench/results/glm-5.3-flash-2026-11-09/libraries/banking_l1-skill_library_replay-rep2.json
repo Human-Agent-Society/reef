@@ -1,0 +1,110 @@
+[
+ {
+  "slug": "approve-unlisted-category-card-transactions",
+  "name": "Approve unlisted-category card transactions",
+  "description": "Card transaction review where the policy lists instant-approve limits for some categories and the transaction's category is not one of them.",
+  "procedure": "- Read the category limit table and locate the transaction's category.\n- If the category is listed, compare the amount against its limit; exceeding it means escalate with an over-limit reason.\n- If the category is not listed, treat it as having no amount restriction: approve rather than escalate or invent a safety limit.\n- Apply only the restrictions the policy actually states (tier or region rules); do not assume restrictions for categories it declares serviceable.\n- Separately confirm the amount is within the account's credit limit before approving.",
+  "check": "Re-read the limit section and confirm the transaction's category does not appear in the listed-limit set under any name, and that the amount is within the account's credit limit; if the category is listed, recompute the limit comparison.",
+  "known_bad": "Approving a purchase in a category that does appear in the limit table with an amount above its listed limit; the check fails because the category is found in the table and the recomputed decision is escalate, not approve.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "verify-stale-limits-before-over-limit-escalation",
+  "name": "Verify stale limits before over-limit escalation",
+  "description": "Card transaction review where the amount exceeds the documented instant-approve limit for its category and escalation with over_limit is being considered.",
+  "procedure": "- Read the documented category limit and compute how far the amount exceeds it.\n- Treat the documented limit as potentially stale at any exceedance size; do not assume only small exceedances (e.g., 5-10%) indicate a stale value.\n- Search for a second source corroborating the limit (another policy section, workflow notes, or account-tier rules); the policy section that first stated the limit does not confirm itself.\n- If no other source corroborates the documented limit, do not escalate with over_limit on that number alone; prefer the action that does not depend on the possibly stale value.\n- Note in the case record that the documented limit was uncorroborated.",
+  "check": "Before trusting an over_limit escalation, recompute the exceedance and re-lookup the limit from a document section other than the one that first stated it; if the limit appears in only one section, treat the escalation as unverified.",
+  "known_bad": "A $260 purchase in a category documented at $200, where the $200 figure appears only in one policy section and nowhere else, is escalated with over_limit; the check fails because the sole-source limit cannot be corroborated, mirroring a run where escalating $642.24 against a single-source documented $500 electronics limit scored 0, showing the limit in force was higher than documented.",
+  "verified": true,
+  "wins": 1,
+  "losses": 1,
+  "step": 3
+ },
+ {
+  "slug": "documented-limits-may-be-stale",
+  "name": "Documented limits may be stale",
+  "description": "Transaction-review tasks where the decision hinges on a numeric threshold read from policy documents, especially when the amount is near or above the documented limit.",
+  "procedure": "- When a decision hinges on a numeric threshold from policy documents, do not treat the documented number as the one in force on its own.\n- Look for corroboration in other doc sections or in structured data (e.g., account or merchant fields) before relying on the number.\n- If no other source corroborates the threshold, prefer the decision that does not depend on it.\n- Runs show this is not limited to amounts near the limit: approval of a transaction 18% above a documented category instant-approve limit scored correct, so a documented category limit can be entirely absent from the rules in force, not just slightly off.\n- When the threshold is uncorroborated, account-level checks such as verification, standing, and credit limit can carry the decision instead.",
+  "check": "Before finalizing, confirm that the chosen decision does not depend on the uncorroborated documented threshold, and re-verify that no other doc section or data field states a different in-force value.",
+  "known_bad": "Escalating a transaction as over_limit purely because its amount exceeds a category limit stated in one policy section, with no other section or data field corroborating that limit. The check fails because the escalation depends entirely on the uncorroborated number.",
+  "verified": false,
+  "wins": 1,
+  "losses": 0,
+  "step": 8
+ },
+ {
+  "slug": "treat-uncorroborated-limits-as-stale",
+  "name": "Treat uncorroborated limits as stale",
+  "description": "Card transaction review where the amount exceeds a category instant-approve limit read from policy documents and the decision is between plain approval and an over_limit escalation.",
+  "procedure": "- Read the transactions section for the category's documented instant-approve limit.\n- Search every other policy and workflow section (limits, accounts, reasons, etc.) for any second mention of that limit or category cap.\n- If a second source corroborates the limit, treat it as in force: above it, escalate with reason over_limit.\n- If the limit appears in only one section with no corroboration, treat it as not in force and approve, provided no other trigger applies (verification, account standing, restricted payee, reporting).\n- Runs show such single-source limits are stale: approving a charge about 22% above a documented $500 category limit scored correct, so the effective limit in force was above the charged amount, not the documented one.\n- Record exactly one decision for the case.",
+  "check": "Before trusting the decision, recompute the corroboration result: list each section read and state whether it mentions the category limit. If the limit is found in only one section, an over_limit escalation is forbidden and approval is required (absent other triggers); if found in two or more, escalate when above. Also confirm no other reason code applies.",
+  "known_bad": "A transaction $100 above its category's documented instant-approve limit, where that limit is stated in only one policy section and no other section mentions it: the corroboration check finds no second source, so any over_limit escalation on such a case fails the check and the case must instead be approved.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 8
+ },
+ {
+  "slug": "credit-limit-increase-decisions",
+  "name": "Credit limit increase decisions",
+  "description": "Limit-increase review tasks where a pending request must be approved or denied against account standing rules and an approvable cap, with the decision recorded.",
+  "procedure": "- Pull the case details and the account details; note verification level, standing, tenure, and any adverse events such as chargebacks.\n- Read the policy section covering limits to get the standing rules and the approvable cap in force.\n- Read the other policy sections (e.g. accounts) for extra restrictions that could block approval even when the amount is under the cap.\n- Deny with reason account_standing if the account fails a standing rule; deny with reason cap_exceeded if the requested limit is above the cap; otherwise approve.\n- Record exactly one decision on the case.",
+  "check": "Before recording, recompute the decision against each rule found in every policy section read: confirm no standing rule is violated and the requested amount is at or below the cap in force; if any rule fails, the approval is wrong.",
+  "known_bad": "A request just under the cap from an account that violates a standing rule stated in a non-limits section (e.g. an accounts section) is approved because only the limits section was checked; the recomputation against all sections catches it.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 11
+ },
+ {
+  "slug": "decide-outbound-transfer-payment-reviews",
+  "name": "Decide outbound transfer payment reviews",
+  "description": "Payment-review tasks where an account proposes an outbound transfer to a payee and exactly one decision must be recorded against screening, threshold, and corridor rules.",
+  "procedure": "- Pull the case, account, and payee details.\n- Read the transfers policy for the screening rule and the reporting threshold.\n- Read the workflow reason-code list and treat it as the complete set of possible denial/escalation grounds; for each code, gather the evidence that shows whether it applies.\n- If a reason code (such as a closed payment corridor) has no corresponding rule in any readable policy section, it does not fire: absence of a documented restriction is not a restriction, and payee jurisdiction alone does not block approval.\n- Approve only when the amount is below the reporting threshold and every reason code is excluded by evidence; otherwise deny or escalate citing the one matching code.\n- Record exactly one final decision; decisions are final.",
+  "check": "Before trusting an approve, re-walk the full reason-code list and recompute the amount against the threshold, confirming each code is excluded by cited evidence; if any code cannot be excluded or the amount is at or above the threshold in force, do not approve.",
+  "known_bad": "Approving a transfer whose amount exactly equals the documented reporting threshold on the strength of 'above the threshold' wording, when the threshold in force treats at-or-above as reportable, fails the re-walk because reportable_amount cannot be excluded.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 15
+ },
+ {
+  "slug": "undocumented-conditions-do-not-fire-codes",
+  "name": "Undocumented conditions do not fire codes",
+  "description": "Outbound transfer or payment review where a reason code's underlying condition (such as corridor status or an unpublished roster) cannot be directly observed and the agent is choosing between plain approval and a deny or escalate reason code.",
+  "procedure": "- Fire a deny or escalate reason code only when a readable policy section or an account/payee/case record affirmatively establishes the blocking condition (a roster hit, a documented closed corridor, failed verification, etc.).\n- Absence of documentation is not evidence of a block: a code that appears only in the workflow reason list, with no corresponding rule in any policy section, does not fire. Do not infer a closed corridor from an undocumented jurisdiction.\n- Data maintained elsewhere and not published (e.g., a compliance roster the agent cannot query) must not be assumed to contain a hit; no affirmative hit means no block.\n- Approve when the amount is below the documented reporting threshold, required observable conditions pass, and no reason code is affirmatively established.",
+  "check": "Before denying or escalating, cite the specific sentence or record field that establishes the blocking condition. If no readable source states it, the decision fails the check; approve instead.",
+  "known_bad": "Denying an outbound transfer with corridor_blocked because the payee's jurisdiction's corridor status is not documented as open anywhere the agent can read, when no policy section documents any closed corridor. A run making exactly this denial scored 0, so undocumented corridor status does not support the code.",
+  "verified": true,
+  "wins": 1,
+  "losses": 0,
+  "step": 24
+ },
+ {
+  "slug": "require-affirmative-evidence-to-deny",
+  "name": "Require affirmative evidence to deny",
+  "description": "Outbound transfer or payment review where policy mentions a screen the agent cannot directly observe (such as an unpublished compliance roster) and the agent is choosing between plain approval and a deny or escalate reason code.",
+  "procedure": "- Read every readable policy section and list the blocking condition each deny or escalate reason code requires.\n- Fire a deny or escalate code only when a readable policy section or a case, account, or payee record affirmatively establishes the blocking condition, and cite that sentence or field.\n- A screen the agent cannot query is not evidence of a hit: the absence of an affirmative hit means the screen passes, even when policy names the screen.\n- Approve when the amount is below the documented threshold and no reason code's blocking condition is affirmatively established.",
+  "check": "Before denying or escalating, point to the exact policy sentence or record field that states the blocking condition; if no readable source states it, the deny or escalate fails the check and the decision must be approval.",
+  "known_bad": "Denying an outbound transfer below the documented reporting threshold by citing a reason code whose blocking condition (a closed corridor or a roster entry) appears in no readable document or record scores 0; such a case must be approved.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 25
+ },
+ {
+  "slug": "unconfirmed-screens-are-not-passes",
+  "name": "Unconfirmed screens are not passes",
+  "description": "Payment or transfer review where a required screen (restricted-payee roster, corridor status, or any other condition behind a reason code) depends on data the agent cannot directly observe, there is affirmative indication that the screen failed (a case flag, hint, or corroborating fact), and the agent is choosing a deny or escalate reason code.",
+  "procedure": "- Confirm the screen is unobservable and that some affirmative evidence indicates it failed (a case flag, a hint, or a corroborating fact), not merely that its data is unpublished.\n- Read every policy section and the reason-code list; identify the code whose action a policy section explicitly defines for the failing screen.\n- Cite only that code; never cite a code whose blocking condition or action is defined nowhere in the documents.\n- If a second screen also fails but no section defines an action for its code, do not cite that code; cite the one with a defined action.\n- If no screen affirmatively fails, treat the unobservable screens as passing and decide on the observable facts alone (threshold, verification, standing) with plain approval where nothing blocks it.",
+  "check": "Before recording the decision, re-read the policy sections and confirm the cited code's blocking condition is affirmatively established by evidence in the case and its action is explicitly defined by a policy section; if either is missing, re-decide on observable facts only.",
+  "known_bad": "Denying an ordinary below-threshold transfer to an ordinary payee citing the restricted-roster code merely because the roster is unpublished and no hit was observed; the check fails because no affirmative failure evidence exists and the decision rests on unobservability alone.",
+  "verified": false,
+  "wins": 2,
+  "losses": 1,
+  "step": 26
+ }
+]

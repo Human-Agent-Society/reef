@@ -1,0 +1,38 @@
+[
+ {
+  "slug": "decide-limit-increase-request",
+  "name": "Decide limit increase request",
+  "description": "Applies when settling a pending limit/ceiling increase request for an account, where documented policy defines standing-based denial triggers and an approvable amount cap.",
+  "procedure": "- Fetch the case details to get the request kind, account, and requested limit.\n- Fetch the account details and note standing, verification, and tenure fields.\n- Read the policy's limits section for denial triggers and the cap rule.\n- Evaluate standing-based denial triggers first; if one matches (e.g., a recent chargeback), deny with the policy's exact reason regardless of the requested amount.\n- Otherwise compare the requested limit to the approvable cap: within it, approve; above it, deny with the cap reason.",
+  "check": "Before submitting the decision, re-read the policy section and re-evaluate every denial trigger in order against the account's fields, confirming the chosen reason token matches the policy's wording exactly.",
+  "known_bad": "An account with a recent chargeback requesting an amount well under the cap: approving it on the cap check alone fails the check, because the standing trigger denies the request no matter the amount.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "decide-card-transaction-case",
+  "name": "Decide card transaction case",
+  "description": "Applies when settling a pending card transaction decision where policy defines per-category instant-approve amount limits and the decision hinges on whether the transaction's category is listed.",
+  "procedure": "- Fetch the case, then the account details (standing, verification, tier) and the merchant details (category, region).\n- Read the transactions section of the policy and extract the per-category instant-approve limit table.\n- If the transaction's category is listed and the amount exceeds its limit, escalate with reason over_limit.\n- If the category is not listed, it carries no amount restriction; approve on amount grounds provided no stated restriction blocks it.\n- Before approving, confirm the account passes any stated conditions (standing, verification, tier eligibility) and that the policy places no category or region restriction on the merchant.",
+  "check": "Re-read the policy's limit table and re-state the decision rule against it: a listed category with an amount over its limit must be escalated, an unlisted category has no amount restriction; verify the recorded action matches the category's presence in the table and the amount.",
+  "known_bad": "Approving a transaction whose category appears in the instant-approve table with an amount above that category's listed limit — the check fails because a listed category over its limit must be escalated, not approved.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 13
+ },
+ {
+  "slug": "decide-flagged-transfer-case",
+  "name": "Decide flagged transfer case",
+  "description": "Applies when deciding a held or pending outbound transfer case where documented policy defines a small set of deny/escalate triggers and the default action is otherwise approval.",
+  "procedure": "- Fetch the case, then the account and payee details.\n- Read the transfers policy section and note its stated triggers (restricted-payee roster, reporting threshold, etc.).\n- Also read the workflow reason-code list and treat every transfer-relevant reason code there as a possible trigger, including ones the policy section does not document (e.g., a code described only as closed \"under current practice\").\n- For each reason code, test it against the fetched facts: amount vs. threshold, payee roster status, corridor/country, account verification and standing.\n- If no trigger fires, approve; if one fires, deny or escalate with that code's reason.",
+  "check": "Re-read the workflow reason-code list and, before approving, confirm each transfer-relevant code was explicitly ruled out with a concrete fact from the fetched case, account or payee details; if any code cannot be ruled out with evidence, do not approve.",
+  "known_bad": "Approving a transfer whose origin or destination falls under a reason code that appears in the workflow reason list but is never mentioned in the policy section (for example, a corridor closed \"under current practice\" for that jurisdiction); the check fails because that code cannot be ruled out with a fetched fact.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 24
+ }
+]

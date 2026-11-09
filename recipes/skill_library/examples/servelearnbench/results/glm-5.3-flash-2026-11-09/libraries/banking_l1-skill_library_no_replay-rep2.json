@@ -1,0 +1,74 @@
+[
+ {
+  "slug": "settle-limit-increase-request",
+  "name": "Settle limit increase request",
+  "description": "Applies when a ceiling or credit-limit-increase request case must be settled with a single approve or deny decision.",
+  "procedure": "- Pull the case details and the account details for the account in the request.\n- Read the policy section governing limits and note the approvable cap and any standing-based denial rules.\n- List the account's attributes (verification level, standing, tenure, current limit) and, for any attribute the limits section does not address, check the other policy sections to confirm whether a rule governs it before ignoring it.\n- Compare the requested limit against the cap and apply any standing rule that fires.\n- Issue exactly one decision tool call; cite a reason code when denying, then finish.",
+  "check": "Before trusting the decision, recompute the cap comparison and re-scan every policy section read for a rule triggered by the account's attributes; confirm each triggered rule is reflected in the decision.",
+  "known_bad": "Approving a request solely because it is under the documented cap while the account carries an attribute (such as an unverified level) that another policy section could govern, without having read that section — the check fails because a possibly triggered rule was never looked up.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "settle-card-queue-transaction-decision",
+  "name": "Settle card queue transaction decision",
+  "description": "Applies when a pending card transaction case must be settled with a single approve, deny, or escalate decision.",
+  "procedure": "- Pull the case, then the account and merchant details.\n- Read the transactions policy section and list the categories that carry an instant-approve cap; only listed categories are capped, unlisted ones have no amount restriction.\n- Check the category is serviceable and note any region rules from the same section.\n- Check account standing and that the amount is within the credit limit.\n- If an account attribute (e.g., verification level) might restrict transactions but the transactions section is silent, read the accounts section to confirm before assuming either way; act only on rules actually documented.\n- Approve when no documented rule supports deny or escalate; otherwise escalate with the documented reason.",
+  "check": "Before approving, re-read the instant-approve limit list and confirm the transaction's category is absent from it (or the amount is at or below its cap), and re-confirm standing, credit limit, and serviceability; before denying or escalating, cite the exact documented rule that requires it.",
+  "known_bad": "Approving a transaction whose category is listed with a cap lower than the transaction amount fails the check, because the limit list contains the category and the amount exceeds its cap.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 2
+ },
+ {
+  "slug": "review-held-outbound-transfer-ticket",
+  "name": "Review held outbound transfer ticket",
+  "description": "Applies when reviewing an operations ticket for a held or pending outbound payment and a single decision (approve, deny, or escalate) must be issued.",
+  "procedure": "- Fetch the case, the sending account, and the payee details.\n- Read the policy's transfers section to get the rules in force: restricted-payee screening and the reporting threshold.\n- If the payee is verifiably on the restricted roster, deny with reason `restricted_payee`.\n- If the amount exceeds the documented reporting threshold, escalate with reason `reportable_amount` even when the restricted-payee roster is unpublished and cannot be checked (an unpublished roster is not evidence of restriction).\n- Otherwise approve.\n- Issue exactly one decision.",
+  "check": "Recompute the transfer amount against the threshold taken from the policy section just read, confirm the chosen reason matches the rule that fires, and confirm exactly one decision was recorded.",
+  "known_bad": "An outbound transfer whose amount is just below the reporting threshold escalated as `reportable_amount`: the recomputation against the threshold shows the amount does not exceed it, so the check fails.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 2
+ },
+ {
+  "slug": "check-other-policy-sections",
+  "name": "Check other policy sections",
+  "description": "Applies when deciding a policy-governed case and the primary policy section for the decision is silent on a relevant case attribute, so other sections must be consulted before concluding no rule applies.",
+  "procedure": "- Pull case, account, and merchant details and list every attribute that a rule could plausibly govern (amount, category, standing, limits, verification, region, tenure).\n- Read the policy section that directly governs the decision type and evaluate each attribute against its rules.\n- For any attribute the primary section does not address, treat that as unresolved, not as clearance: read the other policy sections that define that attribute.\n- Only decide after every attribute is either matched to a rule or confirmed unaddressed across the sections read.\n- Recompute the decision explicitly against each applicable rule before acting.",
+  "check": "Before acting, confirm for each case attribute that either a rule was evaluated against it or a lookup in the relevant policy section showed no rule exists; recompute the decision citing that per-attribute basis.",
+  "known_bad": "Approving a transaction because the transactions section sets no rule for an attribute like verification level, when a different section does restrict it — the check fails because that attribute has no recorded lookup in its own section.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 3
+ },
+ {
+  "slug": "treat-unverifiable-screening-source-as-clear",
+  "name": "Treat unverifiable screening source as clear",
+  "description": "Applies when a policy requires screening a case against a list, roster, or data source that is not accessible or published, and a decision must still be issued.",
+  "procedure": "- Fetch the case, account, and counterparty details and read the governing policy section.\n- Evaluate every documented, checkable rule (thresholds, status, standing, jurisdiction) with explicit recomputation.\n- When a required screening source is unpublished or unreachable, note that it cannot be checked but do not treat the inability to check as evidence of a hit.\n- Decide from the checkable rules alone: approve when none of them supports deny or escalate; escalate only when a documented rule that can be evaluated fires.",
+  "check": "Before approving, recompute each documented numeric threshold and rule from the policy section and confirm that no checkable rule fires for this case; if one does, the approve is wrong.",
+  "known_bad": "Denying a transaction solely because a screening roster could not be consulted, when the amount is below a documented threshold and the account is in good standing — the threshold recomputation shows no documented basis for deny, so the check fails on this case.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 3
+ },
+ {
+  "slug": "match-category-limit-before-approving",
+  "name": "Match category limit before approving",
+  "description": "Applies when a card transaction must be decided against a policy that lists instant-approve amount limits per merchant category and the transaction's category may or may not have a listed cap.",
+  "procedure": "- Read the transactions policy section and extract the full list of category-to-limit mappings.\n- Identify the transaction's merchant category from merchant details.\n- If the category has a listed limit, compare the transaction amount against that limit and escalate with the documented reason when it exceeds it.\n- If the category has no listed limit, treat it as having no amount restriction; do not borrow a cap from another category.\n- Still check other attributes (account standing, verification, region rules, other policy sections) before deciding, since an uncapped category is not automatically approvable.",
+  "check": "Before approving or escalating, re-verify that the limit figure used comes from a mapping for the transaction's exact category, and that no other section imposes a restriction on the case's attributes.",
+  "known_bad": "A transaction in a category with no listed limit is escalated for exceeding a cap that is documented only for a different category (e.g., a jewelry charge escalated against a cap listed solely for electronics); the check fails because the cited limit maps to the wrong category.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 6
+ }
+]

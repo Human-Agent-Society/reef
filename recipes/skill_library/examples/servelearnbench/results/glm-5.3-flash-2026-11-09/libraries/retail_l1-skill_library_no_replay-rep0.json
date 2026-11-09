@@ -1,0 +1,86 @@
+[
+ {
+  "slug": "cancel-a-pending-order",
+  "name": "Cancel a pending order",
+  "description": "Applies when a customer asks to cancel an existing order; the order must be verified against the cancellation policy, including the membership-tier cancellation threshold, before being cancelled and refunded.",
+  "procedure": "- Authenticate the customer and fetch the order details.\n- Verify the order status is **pending**; refuse for processed, delivered, or already cancelled orders.\n- Verify the cancellation reason is \"no longer needed\" or \"ordered by mistake\".\n- Look up the customer's membership tier and compare the order total (sum of item prices) against the tier's cancellation limit: bronze **$200**, silver **$300**, gold **$500**. A run confirmed that a pending order above the bronze limit of $200 could not be cancelled even though a documented threshold might suggest otherwise, so always apply the tier limit before agreeing.\n- If over the limit, refuse with reason over_threshold; otherwise cancel the order and refund the payment to the payment method(s) used.\n- Cancellation is free of charge.",
+  "check": "Recompute the order total from the item prices in the order details and compare it against the customer's tier limit from the policy before deciding to cancel or refuse.",
+  "known_bad": "Cancelling a pending order whose item prices sum to more than the customer's membership-tier limit (e.g. a $450 order for a bronze member) — the recomputed total exceeds the tier's threshold, so the cancellation must be refused instead.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 9
+ },
+ {
+  "slug": "modify-items-on-a-pending-order",
+  "name": "Modify items on a pending order",
+  "description": "Applies when a customer asks to change or swap an item on an existing order for a different variant of the same product, regardless of the word the customer uses; the order status must be checked first to decide between a modification (pending) and an exchange (delivered).",
+  "procedure": "- Authenticate the customer by name and zip, then fetch the order and read its status.\n- Route by status: a pending order is modified with the modification tool; a delivered order is an exchange (customers often say \"modify\" for a delivered order), so follow the exchange procedure instead.\n- Look up the product's variants: confirm the requested replacement is the same product, is available, and is not clearance.\n- Compute the price difference as the new variant price minus the current item price, and confirm the customer has approved a payment method on file that covers it.\n- Submit the modification or exchange with the correct item IDs and payment method, then read the returned order to confirm the status and recorded price difference.",
+  "check": "Recompute the price difference from the variant prices in the product data, and confirm the tool used matches the order status (modification only for pending, exchange for delivered); a status of 'exchange requested' on what was submitted as a modification, or a mismatched difference, means the wrong operation or amount was used.",
+  "known_bad": "Charging the absolute value of the price difference when the replacement is cheaper than the original item, so the customer is billed instead of refunded; the recomputed signed difference will not match the amount on the returned order.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 12
+ },
+ {
+  "slug": "process-a-customer-return-request",
+  "name": "Process a customer return request",
+  "description": "Applies when a customer asks to return items from a delivered order; eligibility (delivery status, return window by product category, clearance status, valid reason) must be verified and the restocking-fee-adjusted refund computed before registering the return.",
+  "procedure": "- Authenticate the customer, fetch the order, and confirm the order is delivered and the items belong to it.\n- Verify the reason is one of the accepted reasons (e.g. defective, no longer needed, wrong item).\n- Look up the product's category to get the return window in days after delivery, and confirm the item is not a clearance final sale; refuse if outside the window or clearance.\n- Apply the restocking fee for the customer's membership tier (a percentage withheld from the item price).\n- Compute the refund as item price minus the fee, truncating to cents (drop extra decimals); do not round up.\n- Refund to a gift card on the customer's account is always an accepted destination; register the return, which issues the refund.",
+  "check": "Recompute the refund independently as floor(price × (1 − fee_rate) × 100) / 100 and confirm it equals the refund amount recorded by the system in the payment history; if the system's amount is lower than a rounded computation, trust the system (truncation) and report that amount.",
+  "known_bad": "On a return of an item priced at 99.99 for a membership tier with a 15% restocking fee, a rounded computation gives 84.99, but the correct truncating result is 84.99; for a price where the fee produces a third decimal of 5 or more, such as 125.00 at 15% (106.25 exactly, or a case like 62.50 at 15% = 53.125), trusting a rounded-up value of 53.13 fails because the system records the truncated 53.12.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 12
+ },
+ {
+  "slug": "count-days-to-a-window-limit",
+  "name": "Count days to a window limit",
+  "description": "Applies when a return, exchange, or cancellation decision hinges on whether the days elapsed since delivery (or placement) exceed a policy window, especially when the count lands near the limit.",
+  "procedure": "- Take the start date from the order record itself (delivered_at for returns and exchanges, placed_at for cancellations), not from the customer's wording.\n- Count elapsed days by walking month by month and using each month's real length; do not assume every month has 30 or 31 days.\n- Compare the elapsed count against the documented window for the product category; refuse only if the count is strictly greater than the limit.\n- When the count is close to the limit, recount before refusing or accepting; an off-by-one or wrong month length changes the decision.",
+  "check": "Recompute the elapsed days a second way, e.g. day-of-year arithmetic ((day-of-year of today) minus (day-of-year of the start date), adjusted for a year rollover), and confirm it matches the month-by-month count before acting on the decision.",
+  "known_bad": "Counting a delivery on May 1 with today June 1 as 30 elapsed days because 'one month' has passed; the recount gives 31, so a 30-day window is already expired rather than just met — the check exposes the wrong month length.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 30
+ },
+ {
+  "slug": "exchange-items-on-a-delivered-order",
+  "name": "Exchange items on a delivered order",
+  "description": "Applies when a customer asks to exchange an item from a delivered order for a different variant of the same product and restricts how the price difference must be paid; eligibility, the price difference, and the customer's payment restriction must be verified before submitting or refusing the exchange.",
+  "procedure": "- Confirm the order is delivered (pending means modify, not exchange) and verify eligibility: within the product category's exchange window from the delivery date, new variant available and not clearance.\n- Compute the price difference as new variant price minus old variant price.\n- Honor the customer's payment restriction literally: use only the payment instrument they designated.\n- Treat an explicit restriction in the customer's message (e.g., 'only on X', 'do not charge Y') as a standing decline of all other methods — do not ask again or offer alternatives; ask only when the customer named no restriction at all.\n- If the designated method's balance is below the difference and the customer has declined alternatives, refuse with the reason that the payment method has insufficient balance; otherwise submit the exchange charged to the designated method.",
+  "check": "Before refusing for insufficient balance, recompute the price difference from the two variant prices and look up the designated method's current balance: the refusal is valid only if the balance is strictly less than the difference and the customer has restricted payment to that method.",
+  "known_bad": "A customer designates a gift card with a $50.00 balance for a $27.59 price difference; refusing with insufficient_balance fails the check because the recomputed difference is less than the balance, so the exchange should be submitted instead.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 43
+ },
+ {
+  "slug": "trust-the-system-s-recorded-refund-amount",
+  "name": "Trust the system's recorded refund amount",
+  "description": "Applies when you compute a refund or charge by hand (e.g., an item price minus a percentage-based fee) and must decide how to round and which figure to report when the system records a different amount after submission.",
+  "procedure": "- Compute the expected amount as price × (1 − fee rate) and round half up to the nearest cent; do not truncate the extra decimal.\n- Submit the action using the customer's chosen destination and the valid reason.\n- Compare the system's recorded amount with your hand computation; if they differ, treat the system's recorded amount as correct.\n- Report the system's recorded amount to the customer, noting the withheld fee and its percentage.",
+  "check": "Recompute the amount with round-half-up to the nearest cent and confirm it matches the system's recorded figure; the figure reported to the customer must equal the recorded figure, not the truncated one.",
+  "known_bad": "For an item where price × (1 − fee rate) yields a third decimal (e.g., a 10% fee on 111.23 giving 100.107), truncating to 100.10 fails the check because the system records 100.11; reporting the truncated figure is wrong.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 52
+ },
+ {
+  "slug": "resolve-ambiguous-timestamps-for-window-checks",
+  "name": "Resolve ambiguous timestamps for window checks",
+  "description": "Applies when a policy time window (return, cancellation, exchange) must be checked against dates but the task header gives only a bare numeric timestamp with no units or explicit date.",
+  "procedure": "- Read the current date only from the task header's bare numeric timestamp; never adopt a 'today' date from memory or assumption that the environment does not actually state.\n- Interpret the bare timestamp relative to the order's dates: as a month/day (M/D) reading that falls near the order's delivery or placement date, or as a day offset from those dates.\n- Count the days elapsed since delivery (or placement) using the resolved current date, and compare against the policy window for the product category.\n- If plausible interpretations differ, prefer the one consistent with the order record, and refuse for an expired window only if the window is exceeded under every consistent reading.\n- When a consistent reading places the request inside the window, proceed with the request even if some other assumed calendar date would put it outside.",
+  "check": "Recompute the elapsed days under every plausible reading of the header timestamp; if any consistent reading places the request inside the policy window, a refusal with window_expired fails this check.",
+  "known_bad": "A request on an item delivered a few weeks earlier, with a header timestamp that can be read as a month/day inside the window: treating the timestamp as a far-future calendar date (or an invented 'today') and refusing with window_expired is wrong when the month/day reading is consistent with the order record.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 53
+ }
+]

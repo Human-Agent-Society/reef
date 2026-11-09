@@ -1,0 +1,50 @@
+[
+ {
+  "slug": "decide-ceiling-increase-requests",
+  "name": "Decide ceiling increase requests",
+  "description": "Applies when asked to settle a limit-increase (ceiling) request for an account, where a standing rule and an approvable cap govern the outcome.",
+  "procedure": "- Fetch the case details to get the account, requested limit, and status.\n- Fetch the account details to check verification, standing, tenure, and current limit.\n- Read the policy section on limits for the standing rule and the approvable cap.\n- Apply the standing rule first: an account with bad standing (e.g. recent chargeback) is denied with the standing reason, regardless of amount.\n- Otherwise approve if the requested limit is within the cap; if above the cap, deny with the cap-exceeded reason.",
+  "check": "Before submitting, re-derive the decision from the policy text: confirm which rule fires (standing vs cap) and that the reason code submitted matches that rule; re-read the account's standing field rather than relying on memory.",
+  "known_bad": "Approving a limit-increase request for an account with bad standing merely because the requested amount is under the documented cap; the re-derivation shows the standing rule fires first and the check fails.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 1
+ },
+ {
+  "slug": "decide-flagged-transfer-cases",
+  "name": "Decide flagged transfer cases",
+  "description": "Applies when asked to decide a flagged outbound (or inbound) transfer case between an account and a payee, where screening must rely on the payee record because the restricted-payee roster is not published, and the reporting threshold must be read from the transfers policy.",
+  "procedure": "- Fetch the case details, then the account and payee details in parallel.\n- Read the transfers policy section for the reporting threshold and restricted-payee rules in force.\n- Treat the payee record (name, type, jurisdiction, any restriction flags) as the screening signal, since roster entries are unpublished and no other screen may be available.\n- Compare the amount against the documented reporting threshold; escalate with `reportable_amount` if it is above the threshold.\n- Deny with `restricted_payee` only when the payee record or the case itself indicates a restriction.\n- Do not block on account standing or tenure; established practice is that they do not gate transfers.\n- Approve when the amount is under the threshold and no restriction is indicated.",
+  "check": "Before deciding, re-read the transfers policy section and recompute the amount against the documented threshold; confirm the payee record was actually fetched and reviewed for restriction signals rather than assumed clean.",
+  "known_bad": "A transfer whose amount exceeds the documented reporting threshold, approved without escalation: the recomputation in the check exceeds the threshold, so the decision must instead be an escalation with reason `reportable_amount`.",
+  "verified": false,
+  "wins": 0,
+  "losses": 0,
+  "step": 24
+ },
+ {
+  "slug": "settle-pending-card-transactions",
+  "name": "Settle pending card transactions",
+  "description": "Applies when asked to decide a pending card transaction (card queue entry) for a charge at a merchant on an account, where the documented category instant-approve limit may be out of date and scored run evidence establishes how far the limit in force extends.",
+  "procedure": "- Gather the case, account, merchant, and the transactions policy section.\n- If the amount is at or below the documented category limit, approve (checking standing and any region/category restrictions).\n- If the amount exceeds the documented limit, search the skill library for a scored run result in the same category where escalating a charge at some amount B was scored wrong; treat that as proof the limit in force is at least B.\n- Approve when the charge amount is at or below the recorded bound B; escalate with reason over_limit when the amount is above B.\n- Never extend approval past the recorded bound: prior evidence bounds the limit from below only up to the amount actually tested.",
+  "check": "Recompute the comparison: confirm the charge amount is at or below a recorded bound B that comes from an actual scored result (an escalation at B scored wrong), not from documentation alone; if the amount is above every recorded bound, an approval must not be trusted.",
+  "known_bad": "A charge above the documented category limit where the only recorded bound in the library is smaller than the charge amount: approving it fails the check, because the effective limit may sit between the recorded bound and the charge.",
+  "verified": false,
+  "wins": 1,
+  "losses": 2,
+  "step": 26
+ },
+ {
+  "slug": "decide-card-transaction-cases",
+  "name": "Decide card transaction cases",
+  "description": "Applies when asked to decide a pending card transaction (card queue entry) for a charge at a merchant on an account, where the documented category instant-approve limit may be out of date and recorded scored-run evidence about the limit in force takes precedence over the documentation.",
+  "procedure": "- Fetch the case, the account, and the merchant in parallel to get amount, category, standing, and merchant details.\n- Read the transactions policy section for the documented category instant-approve limits.\n- Treat the documented limit as possibly out of date: before escalating for over_limit, check recorded scored-run evidence for that category.\n- For electronics, recorded evidence shows the limit in force extends to at least $611.25 (an electronics charge of $611.25 was wrongly escalated in a prior scored run, and an approval below that bound scored correct), so treat the effective electronics instant-approve limit as at least $611.25 despite a documented $500.\n- If the amount is at or below the highest recorded approvable bound for the category, approve; if it exceeds that bound, escalate with the documented reason (for example over_limit).\n- Categories without a listed limit have no amount restriction, gift cards are available to all tiers, and no category is restricted by merchant region.",
+  "check": "Recompute the decision against the highest recorded approvable bound for the category before acting: approve only if amount <= that bound, escalate only if amount > that bound; confirm the bound comes from scored-run evidence rather than the possibly outdated documented limit.",
+  "known_bad": "An electronics charge above the documented $500 limit but below the recorded $611.25 bound, such as a $540 electronics charge, would be escalated as over_limit by the documented rule alone; the check fails because the recorded bound shows the limit in force covers it and it must be approved.",
+  "verified": false,
+  "wins": 9,
+  "losses": 1,
+  "step": 28
+ }
+]

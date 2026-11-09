@@ -16,6 +16,8 @@ of the outcomes for and against it and leaves when the count turns against it, a
 - Method: `recipes.skill_library:SkillLibrary` in [method.py](method.py), with its prompt in
   [prompts/induce.md](prompts/induce.md)
 - Example deployment: [examples/serve.yaml](examples/serve.yaml), on pi with `policy: compare`
+- Results on ServeLearnBench `banking_l1` and `retail_l1` with GLM-5.3-Flash:
+  [examples/servelearnbench/results/glm-5.3-flash-2026-11-09/](examples/servelearnbench/results/glm-5.3-flash-2026-11-09/README.md)
 - Tests: [tests/recipes/skill_library/](../../tests/recipes/skill_library/)
 
 ## What one step does
