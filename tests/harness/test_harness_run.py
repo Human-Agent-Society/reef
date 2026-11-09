@@ -387,6 +387,62 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
     assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
 
 
+def write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+
+def test_claude_codex_and_pi_sessions_convert_to_atif_with_harbors_converters(tmp_path: Path) -> None:
+    session = "11111111-1111-1111-1111-111111111111"
+    write_jsonl(
+        tmp_path / "claude" / "-app" / f"{session}.jsonl",
+        [
+            {"type": "user", "sessionId": session, "uuid": "u1", "message": {"role": "user", "content": "Say hi"}},
+            {
+                "type": "assistant",
+                "sessionId": session,
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+            },
+        ],
+    )
+    write_jsonl(
+        tmp_path / "codex" / "2026" / "11" / "09" / "rollout-s1.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "s1", "cwd": "/app"}},
+            {
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Say hi"}]},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hi"}],
+                },
+            },
+        ],
+    )
+    pi_session = Path(__file__).parent / "data" / "pi_session_real"
+    for format_, path, final in [
+        ("claude-session-jsonl", tmp_path / "claude", "hi"),
+        ("codex-session-jsonl", tmp_path / "codex", "hi"),
+        ("pi-session-jsonl", pi_session, "READY"),
+    ]:
+        (document,) = reader_for(format_).to_atif(path)
+        assert document["schema_version"].startswith("ATIF-")
+        assert document["steps"][-1]["source"] == "agent"
+        assert document["steps"][-1]["message"] == final
+        assert reader_for(format_).to_atif(tmp_path / "missing") == ()
+
+
+def test_a_format_without_a_converter_gives_no_atif(tmp_path: Path) -> None:
+    write_jsonl(tmp_path / "session.jsonl", [{"type": "message"}])
+    assert reader_for("python-jsonl").to_atif(tmp_path) == ()
+
+
 @pytest.mark.parametrize("answer", ["reef-ok", "wrong", None])
 def test_codex_run_reads_only_assistant_output_text(tmp_path: Path, answer: str | None) -> None:
     events = [
