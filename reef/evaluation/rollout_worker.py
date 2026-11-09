@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import tempfile
 import threading
 import time
@@ -79,6 +80,8 @@ VERIFIER_JUDGE_DIR = Path("verifier") / "judge"
 VERIFIER_CALLS_FILE = "calls.jsonl"
 #: The pattern of the names of the verifier's ATIF trajectory files in ``VERIFIER_JUDGE_DIR``.
 VERIFIER_TRAJECTORY_FILES = "trajectory*.json"
+#: The most rewards of its verifier that a rollout keeps.
+MAX_VERIFIER_REWARDS = 64
 #: The most calls that Reef keeps of the verifier of one attempt.
 MAX_VERIFIER_CALLS = 2000
 #: The most bytes of verifier files that Reef reads for one attempt.
@@ -495,6 +498,13 @@ def verifier_output(
     return calls, trajectories, skipped
 
 
+def verifier_rewards(rewards: Mapping[str, float]) -> dict[str, JsonValue] | None:
+    """The rewards that a rollout keeps beside its score (RFC #1297): the first ``MAX_VERIFIER_REWARDS`` finite
+    rewards of its verifier, by name, or None when the verifier wrote none. Nothing reads them to score."""
+    kept = {name: value for name, value in rewards.items() if math.isfinite(value)}
+    return dict(list(kept.items())[:MAX_VERIFIER_REWARDS]) or None
+
+
 class RolloutCalls(CaptureObserver):
     """Keeps each call of one attempt of an evaluation rollout in the data store, as the call ends.
 
@@ -588,7 +598,8 @@ class EvaluationRolloutWorker(QueueWorker):
         self.agent_host = agent_host
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
-        return {"score": self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count).to_json()}
+        score, rewards = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
+        return {"score": score.to_json(), "rewards": rewards}
 
     def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
         """Ask inference to serve the candidate of ``rollout``, wait until it is ready, and return the value that
@@ -612,9 +623,12 @@ class EvaluationRolloutWorker(QueueWorker):
             time.sleep(SERVE_POLL_S)
         raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
 
-    def score(self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int) -> RolloutScore:
-        """Run ``rollout`` once, when its candidate is ready, and return its score. ``attempt`` is the 1-based attempt
-        of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``)."""
+    def score(
+        self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int
+    ) -> tuple[RolloutScore, dict[str, JsonValue] | None]:
+        """Run ``rollout`` once, when its candidate is ready, and return its score and the rewards of its verifier
+        (``verifier_rewards``). ``attempt`` is the 1-based attempt of the rollout's work item; the rollout's calls are
+        kept under it (``RolloutCalls``)."""
         task_directory = self.endpoints.task_directory(rollout)
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
@@ -653,7 +667,8 @@ class EvaluationRolloutWorker(QueueWorker):
                 # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
                 # the rollout is retried as any other failed attempt.
                 raise ReefError(f"the rollout reached no model: {result.error or 'the agent made no model call'}")
-            return runner.rollout_score(result)
+            score = runner.rollout_score(result)
+            return score, None if score.is_failed else verifier_rewards(result.rewards)
 
     def keep_verifier_output(self, rollout: EvaluationRollout, attempt: int, trial: Path | None) -> None:
         """Keep the calls and trajectories that the verifier of attempt ``attempt`` of ``rollout`` wrote to the trial

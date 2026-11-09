@@ -1148,7 +1148,7 @@ null when the evaluations queue no longer holds them:
 shows the progress of an evaluation while it runs. It answers ``{scenario,
 evaluation_id, rollouts}``: each rollout in task and repeat order, as
 ``{task, task_index, repeat, state, attempt_count, started_at, ended_at,
-score, error, calls, verifier_calls}``.
+score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
   ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
@@ -1157,6 +1157,11 @@ score, error, calls, verifier_calls}``.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at``
   when it finished or failed, in epoch seconds. Each is null until then.
 - ``score`` is the rollout's score once it finished, else null.
+- ``rewards`` holds every finite reward that the rollout's verifier wrote, by
+  name, for example ``{"reward": 0.9, "rule": 1.0, "judge": 0.8}``. The
+  score is the primary reward among them. It is null for a rollout that has
+  not finished, that failed, whose verifier wrote no reward, or that finished
+  before Reef kept rewards. Reef keeps at most 64. Nothing else reads them.
 - ``error`` is the reason that a failed rollout failed, else null.
 - ``calls`` holds the totals of the rollout's model calls over all its
   attempts: ``{count, failed, prompt_tokens, completion_tokens}``. ``failed``
