@@ -5,10 +5,16 @@ a ``StartupReporter`` of its serving work item and to the artifact that it serve
 adds the report to the item's progress. The startup status reads the reports back as ``StartupSteps``
 (``reported_steps``). An ``InferenceHandler`` reports
 ``start`` and ``load`` of a ready artifact whose engine starts again from zero (``InferenceHandler.engine_steps``).
+
+The serving worker also binds what a runtime reads while it serves (RFC #1299, ``serving_work``): whether a newer
+request replaced the work (``stopping``), and whether a person asked to deploy the engines again (``redeploying``). A
+runtime raises ``StartupStopped`` when it stops for ``stopping``, and ``StartupFailed`` for a failure whose message a
+person may read.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
@@ -19,6 +25,46 @@ from reef.inference.interfaces import PHASES, StartupPhase, StartupStep, Startup
 
 #: The key of a startup report in a serving work item's progress.
 PROGRESS_KEY = "startup"
+#: The start of the error of a serving work item that failed with ``StartupFailed``: the status gives the rest.
+STARTUP_FAILED_PREFIX = "startup failed: "
+
+
+class StartupFailed(Exception):
+    """The artifact did not start, for a reason that a person can read and fix, such as an engine argument that the
+    model refuses. The message must hold no secret: the startup status gives it."""
+
+
+class StartupStopped(Exception):
+    """The runtime stopped serving work because ``stopping`` became true."""
+
+
+#: The stop event and the redeploy flag of the serving work that runs in this context (``serving_work``).
+WORK: ContextVar[tuple[threading.Event, bool] | None] = ContextVar("reef_serving_work", default=None)
+
+
+@contextmanager
+def serving_work(stop: threading.Event, *, redeploy: bool) -> Iterator[None]:
+    """Bind ``stopping`` in the block to ``stop``, and ``redeploying`` to ``redeploy``. A thread that the block starts
+    sees them only when it runs in a copy of the context (``contextvars.copy_context``)."""
+    token = WORK.set((stop, redeploy))
+    try:
+        yield
+    finally:
+        WORK.reset(token)
+
+
+def stopping() -> bool:
+    """Whether the serving work that runs in this context should stop: a newer request replaced it, or its worker lost
+    it. A runtime reads it in long steps and then raises ``StartupStopped``. Outside a serving work, False."""
+    work = WORK.get()
+    return work is not None and work[0].is_set()
+
+
+def redeploying() -> bool:
+    """Whether a person asked to deploy the engines of this serving work again, also when they run the current
+    settings (``POST /reef/scenarios/{s}/redeploy``). Outside a serving work, False."""
+    work = WORK.get()
+    return work is not None and work[1]
 
 
 class StartupReporter(ABC):
@@ -102,8 +148,14 @@ def reported_steps(
 
 __all__ = [
     "PROGRESS_KEY",
+    "STARTUP_FAILED_PREFIX",
+    "StartupFailed",
     "StartupReporter",
+    "StartupStopped",
+    "redeploying",
     "report_startup",
     "reported_steps",
     "reporting_startup",
+    "serving_work",
+    "stopping",
 ]
