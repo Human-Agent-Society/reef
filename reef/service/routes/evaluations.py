@@ -14,10 +14,12 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
     async def evaluation(request: web.Request) -> web.Response:
         evaluation_id = request.match_info["evaluation_id"]
-        stored = await asyncio.to_thread(evaluations.get, request.match_info["scenario"], evaluation_id)
+        scenario = request.match_info["scenario"]
+        stored = await asyncio.to_thread(evaluations.get, scenario, evaluation_id)
         if stored is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
-        return web.json_response(stored.to_json(), headers={"Cache-Control": "no-store"})
+        [view] = await asyncio.to_thread(evaluations.status_json, scenario, [stored])
+        return web.json_response(view, headers={"Cache-Control": "no-store"})
 
     async def rollouts(request: web.Request) -> web.Response:
         scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
@@ -96,8 +98,9 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
         scenario = request.match_info["scenario"]
         # A limit that is not a positive integer is a ValueError, which answers HTTP 400.
         listed = await asyncio.to_thread(evaluations.newest, scenario, limit=int(request.query.get("limit", "50")))
+        views = await asyncio.to_thread(evaluations.status_json, scenario, listed)
         return web.json_response(
-            {"scenario": scenario, "evaluations": [stored.to_json() for stored in listed]},
+            {"scenario": scenario, "evaluations": views},
             headers={"Cache-Control": "no-store"},
         )
 
