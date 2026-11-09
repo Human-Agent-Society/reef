@@ -50,7 +50,7 @@ from reef.core.evaluation import (
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
-from reef.core.trajectory_index import TrajectoryIndex
+from reef.core.trajectory_index import conversations
 from reef.dispatcher import Dispatcher
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -246,17 +246,7 @@ def attempt_trajectories(
     trajectories = []
     for attempt, records in sorted(attempts.items()):
         scored = finished and attempt == item.attempt_count
-        index = TrajectoryIndex()
-        for record in records:
-            index.add(record)
-        by_id = {record.agent_record_id: record for record in records}
-        order = {record_id: position for position, record_id in enumerate(by_id)}
-        conversations = sorted(
-            (index.trajectory(record.agent_record_id) for record in records if index.is_end(record.agent_record_id)),
-            key=lambda conversation: order[conversation[0]],
-        )
-        for conversation, calls_of in enumerate(conversations):
-            stitched = [by_id[record_id] for record_id in calls_of]
+        for conversation, stitched in enumerate(conversations(records)):
             trajectory = make_trajectory(stitched, reward=score if scored else None).trajectory
             evaluation = {
                 "evaluation_id": evaluation_id,
