@@ -58,6 +58,7 @@ from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import (
     CANCELLED_ERROR,
+    FAILURES_ERROR,
     STOPPED_ERROR,
     ArtifactEvaluations,
     NewArtifact,
@@ -734,6 +735,82 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
             body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 400 and "mcp_servers" in await response.text()
+
+    asyncio.run(run())
+
+
+def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_reports_its_progress(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def end(score: float | None) -> None:
+        for _ in range(200):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            if item is not None:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("no rollout was queued")
+        queue.start(EVALUATIONS_QUEUE, item.id, "w")
+        queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(score).to_json()})
+
+    async def status(client: TestClient, route: str, ended: int) -> dict[str, Any]:
+        for _ in range(200):
+            answer = await (await client.get(route, headers=AUTH)).json()
+            if answer["progress"]["ended"] == ended:
+                return answer
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"the evaluation did not count {ended} ended rollouts")
+
+    async def run() -> None:
+        # No worker runs: the test takes and ends each rollout itself, 12 rollouts of 2 tasks, 2 at once.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 6,
+                "max_concurrent_rollouts": 2,
+                "max_failed_fraction": 0.5,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            assert accepted["request"]["max_failed_fraction"] == 0.5
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+
+            # 9 ended, 6 of them failed: more than half, but fewer than 10 ended, so the evaluation runs on.
+            for score in (1.0, 0.5, 0.0, None, None, None, None, None, None):
+                await end(score)
+            answer = await status(client, route, 9)
+            assert answer["state"] == "running"
+            progress = answer["progress"]
+            assert {key: progress[key] for key in ("total", "ended", "scored", "failed", "cancelled")} == {
+                "total": 12,
+                "ended": 9,
+                "scored": 3,
+                "failed": 6,
+                "cancelled": 0,
+            }
+            # The mean leaves out the failed rollouts.
+            assert progress["mean_score"] == 0.5
+            assert progress["eta_seconds"] is not None and progress["eta_seconds"] > 0
+            listed = (await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json())["evaluations"]
+            assert listed[0]["progress"] == progress | {"eta_seconds": listed[0]["progress"]["eta_seconds"]}
+
+            # The tenth: 7 of 10 failed, over 50%. The evaluation fails, and the queued rollout is stopped.
+            await end(None)
+            answer = await finished(client, accepted["evaluation_id"])
+            assert answer["state"] == "failed"
+            assert answer["error"] == "too many rollouts failed: 7 of 10 ended (70%), over the limit of 50%"
+            assert answer["progress"]["ended"] == 10
+            assert answer["progress"]["eta_seconds"] is None
+            # The rollouts that did not end are stopped, and the ones that wait never start.
+            rows = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+            stopped = [row for row in rows if row["error"] == FAILURES_ERROR]
+            assert answer["progress"]["cancelled"] == len(stopped)
+            assert len(stopped) + [row["state"] for row in rows].count("waiting") == 2
 
     asyncio.run(run())
 

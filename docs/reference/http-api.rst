@@ -1076,6 +1076,15 @@ The body takes these fields:
   sandbox and sends model calls to the candidate, so set it to what the
   sandbox provider and the candidate's serving can take. Reef adds the next
   rollouts to the queue as earlier ones end.
+- ``max_failed_fraction``: the largest fraction of failed rollouts, a number
+  greater than 0 and less than 1, or null (the default) for no limit. A
+  rollout fails when its work fails or when it ends with no score. After at
+  least 10 rollouts end (or all of them, for a smaller evaluation), Reef stops
+  the evaluation when more than this fraction of the ended rollouts failed. It
+  fails with an error such as ``too many rollouts failed: 37 of 45 ended
+  (82%), over the limit of 50%``. Each rollout that did not end fails with
+  ``stopped: too many rollouts failed``, and the rollouts that wait never
+  start (RFC #1287).
 
 The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
@@ -1086,20 +1095,39 @@ it runs and after it ends:
    {"evaluation_id": "1d0e...", "state": "finished",
     "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
                 "model": null, "task_names": ["sum-391"], "rollouts_per_task": 2, "environment": "docker",
-                "max_concurrent_rollouts": null},
+                "max_concurrent_rollouts": null, "max_failed_fraction": 0.5},
     "created_at": 1793169552.2, "finished_at": 1793169840.7,
     "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
                           "model": {"name": "Qwen/Qwen3-8B", "adapter": "tinker://.../sampler"},
                           "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
-    "mean_score": 0.5, "error": null}
+    "mean_score": 0.5, "error": null,
+    "progress": {"total": 2, "ended": 2, "scored": 2, "failed": 0, "cancelled": 0, "running": 0,
+                 "mean_score": 0.5, "eta_seconds": null}}
 
 ``state`` is ``queued``, ``running``, ``finished`` or ``failed``. A finished
 evaluation holds its ``policy_evaluation``: the harness and the model that its
 rollouts ran, and each rollout's score by task (see `Rollout
 <glossary.rst#rollout>`__). A failed one holds its ``error``. An evaluation
 that was queued or running when the service stopped reads as ``failed``; Reef
-does not resume it. ``GET /reef/scenarios/{scenario}/evaluations`` lists the
-evaluations, newest first, at most ``limit`` (50 by default).
+does not resume it. ``mean_score`` is the mean of the rollouts that have a
+score: a failed rollout does not count as 0. ``GET
+/reef/scenarios/{scenario}/evaluations`` lists the evaluations, newest first,
+at most ``limit`` (50 by default).
+
+``progress`` counts the rollouts of the evaluation, also while it runs. It is
+null when the evaluations queue no longer holds them:
+
+- ``total`` is every rollout of the evaluation: its tasks times
+  ``rollouts_per_task``.
+- ``ended`` counts the rollouts that finished or failed. ``scored`` counts the
+  ended rollouts with a score, and ``failed`` the others.
+- ``cancelled`` counts the rollouts that a cancel or a stop for failed
+  rollouts ended. They are not in ``ended``.
+- ``running`` counts the rollouts that a worker holds now.
+- ``mean_score`` is the mean of the scores so far, or null.
+- ``eta_seconds`` estimates the seconds until every rollout ends: the
+  rollouts left at the rate at which rollouts ended in the last 20 minutes. It
+  is null when no rollout ended in that time, or when the evaluation ended.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
 shows the progress of an evaluation while it runs. It answers ``{scenario,

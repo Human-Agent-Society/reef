@@ -309,7 +309,8 @@ class ArtifactEvaluationRequest:
     harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
     ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
     ``max_concurrent_rollouts`` is the most rollouts of the evaluation that run at once, a positive int, or None for
-    no limit.
+    no limit. ``max_failed_fraction`` is the largest fraction of failed rollouts, a number greater than 0 and less
+    than 1, above which Reef stops the evaluation; None for no limit.
     Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
     """
 
@@ -321,6 +322,7 @@ class ArtifactEvaluationRequest:
     rollouts_per_task: int = 1
     environment: str = "docker"
     max_concurrent_rollouts: int | None = None
+    max_failed_fraction: float | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -361,6 +363,11 @@ class ArtifactEvaluationRequest:
         limit = self.max_concurrent_rollouts
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             raise ValueError("an artifact evaluation's max_concurrent_rollouts is a positive integer or null")
+        fraction = self.max_failed_fraction
+        if fraction is not None and (
+            isinstance(fraction, bool) or not isinstance(fraction, int | float) or not 0 < fraction < 1
+        ):
+            raise ValueError("an artifact evaluation's max_failed_fraction is a number between 0 and 1, or null")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -372,16 +379,17 @@ class ArtifactEvaluationRequest:
             "rollouts_per_task": self.rollouts_per_task,
             "environment": self.environment,
             "max_concurrent_rollouts": self.max_concurrent_rollouts,
+            "max_failed_fraction": self.max_failed_fraction,
         }
 
     @classmethod
     def from_json(cls, value: object) -> ArtifactEvaluationRequest:
         """The request that ``to_json`` gave; raise ``ValueError`` for any other value. A request stored before
-        ``max_concurrent_rollouts`` existed has no limit."""
+        ``max_concurrent_rollouts`` or ``max_failed_fraction`` existed has no such limit."""
         keys = {"artifact_id", "component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
         if (
             not isinstance(value, Mapping)
-            or set(value) - {"max_concurrent_rollouts"} != keys
+            or set(value) - {"max_concurrent_rollouts", "max_failed_fraction"} != keys
             or not isinstance(value["task_names"], list)
         ):
             raise ValueError(f"an artifact evaluation request is an object of {sorted(keys)}")
@@ -394,6 +402,7 @@ class ArtifactEvaluationRequest:
             value["rollouts_per_task"],
             value["environment"],
             value.get("max_concurrent_rollouts"),
+            value.get("max_failed_fraction"),
         )
 
 
@@ -403,8 +412,8 @@ class ArtifactEvaluationSettings:
     ``artifact_id``.
 
     Values: ``component`` is None, for the one component of the snapshots that has a kind, or a non-empty
-    component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task``, ``environment`` and
-    ``max_concurrent_rollouts`` meet the conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation
+    component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task``, ``environment``,
+    ``max_concurrent_rollouts`` and ``max_failed_fraction`` meet the conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation
     request is these settings and an artifact ID, and a scenario keeps settings to evaluate each new artifact with;
     ``request`` makes the request of one artifact.
     """
@@ -416,6 +425,7 @@ class ArtifactEvaluationSettings:
     rollouts_per_task: int = 1
     environment: str = "docker"
     max_concurrent_rollouts: int | None = None
+    max_failed_fraction: float | None = None
 
     def __post_init__(self) -> None:
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -435,6 +445,7 @@ class ArtifactEvaluationSettings:
             self.rollouts_per_task,
             self.environment,
             self.max_concurrent_rollouts,
+            self.max_failed_fraction,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -446,6 +457,7 @@ class ArtifactEvaluationSettings:
             "rollouts_per_task": self.rollouts_per_task,
             "environment": self.environment,
             "max_concurrent_rollouts": self.max_concurrent_rollouts,
+            "max_failed_fraction": self.max_failed_fraction,
         }
 
     @classmethod
@@ -465,6 +477,7 @@ class ArtifactEvaluationSettings:
             "rollouts_per_task",
             "environment",
             "max_concurrent_rollouts",
+            "max_failed_fraction",
         }
         unknown = sorted(set(value) - known)
         if unknown:
@@ -480,6 +493,7 @@ class ArtifactEvaluationSettings:
             value.get("rollouts_per_task", 1),
             value.get("environment", "docker"),
             value.get("max_concurrent_rollouts"),
+            value.get("max_failed_fraction"),
         )
 
 
