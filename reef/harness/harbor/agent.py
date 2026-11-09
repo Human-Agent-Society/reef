@@ -59,6 +59,9 @@ CONTAINER_ROOT = "/reef-run"
 COMMAND_FILE = "command.json"
 #: The directory under the agent's log directory that receives the agent's session files.
 SESSIONS_DIR = "sessions"
+#: The ATIF document of the run under the agent's log directory, and the pattern of it and its continuations.
+TRAJECTORY_FILE = "trajectory.json"
+TRAJECTORY_FILES = "trajectory*.json"
 #: The install kinds an agent can have in a task's container.
 CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv"})
 #: Where Astral's installer puts uv in a task's container, under the agent user's own home.
@@ -116,6 +119,7 @@ class AdapterAgent(BaseInstalledAgent):
         env: Mapping[str, str],
         writable_paths: Sequence[str],
         sessions: str,
+        trajectory_format: str,
         files_dir: str,
         timeout_s: float,
         install_kind: str = "npm",
@@ -123,6 +127,7 @@ class AdapterAgent(BaseInstalledAgent):
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, version=version, **kwargs)
+        self.reader = reader_for(trajectory_format)
         if install_kind not in CONTAINER_INSTALL_KINDS:
             raise ValueError(f"install kind {install_kind!r} cannot install in a task's container")
         self.install_kind = install_kind
@@ -197,6 +202,9 @@ class AdapterAgent(BaseInstalledAgent):
         sessions = f"{CONTAINER_ROOT}/{self.sessions}"
         if await environment.is_dir(sessions):
             await environment.download_dir(sessions, self.logs_dir / SESSIONS_DIR)
+        # Only Reef writes the ATIF files that the verifier reads. Harbor's upload adds files but removes none.
+        planted = shlex.quote(str(self.environment_logs_dir)) + "/" + TRAJECTORY_FILES
+        await self.exec_as_root(environment, command=f"rm -f {planted}")
 
     @contextlib.asynccontextmanager
     async def bridged(self, environment: BaseEnvironment) -> AsyncIterator[None]:
@@ -305,7 +313,24 @@ class AdapterAgent(BaseInstalledAgent):
 
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
-        """Keep Harbor's context as it is: Reef reads the session files, not Harbor's token counts."""
+        """Write the run's ATIF documents beside the session files, for the task's verifier (RFC #1290).
+
+        Harbor uploads the log directory to the container before the verifier starts. Harbor's context stays as it
+        is: Reef reads the session files, not Harbor's token counts. A session that does not convert writes no ATIF,
+        and the run goes on.
+        """
+        for planted in self.logs_dir.glob(TRAJECTORY_FILES):
+            planted.unlink()
+        try:
+            documents = self.reader.to_atif(self.logs_dir / SESSIONS_DIR)
+        except Exception:
+            self.logger.warning("the agent's sessions do not convert to ATIF", exc_info=True)
+            return
+        names = [TRAJECTORY_FILE, *(f"trajectory.cont-{index}.json" for index in range(1, len(documents)))]
+        for index, document in enumerate(documents):
+            if index + 1 < len(names):
+                document = {**document, "continued_trajectory_ref": names[index + 1]}
+            (self.logs_dir / names[index]).write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
 
 def uv_install_command(version: str) -> str:
@@ -364,6 +389,7 @@ def adapter_agent_kwargs(
         "env": headless_env(descriptor, Path(CONTAINER_ROOT)),
         "writable_paths": list(descriptor.writable_paths),
         "sessions": descriptor.trajectory_path,
+        "trajectory_format": descriptor.trajectory_format,
         "files_dir": str(files_dir),
         "timeout_s": timeout,
     }
