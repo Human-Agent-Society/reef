@@ -377,7 +377,10 @@ campaign adds ``terminus`` (`its README
        call. It gets the instruction as its argument and reads the binding
        (``api``, ``base_url`` ending in ``/v1``, ``api_key``, ``model``) from
        ``program/model.json``. It declares its dependencies as inline script
-       metadata (PEP 723). Only the ``openai`` dialect.
+       metadata (PEP 723). Only the ``openai`` dialect. To give a task's
+       verifier the run as ATIF, the program writes one JSONL line for each
+       model call under ``REEF_PROGRAM_SESSION_DIR``: the request body, with
+       the response body as ``response``.
 
 The comments in each ``adapter.yaml`` explain its defaults and checks.
 
