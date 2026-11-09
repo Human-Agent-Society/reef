@@ -45,6 +45,7 @@ from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
+from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.artifact.snapshot_chain import ArtifactSnapshotChain
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
@@ -1196,6 +1197,90 @@ def test_the_samples_service_of_another_process_follows_the_commits_of_control(d
         assert ended == ["finished"], "a job's end is read once"
     finally:
         samples_process.close()
+
+
+def _split_dispatcher(dispatchers: _Dispatchers, service: str) -> Dispatcher:
+    """A dispatcher that runs only ``service``, over the artifact repository, the records and the coordination that
+    every dispatcher of the test shares. Its registry, scenarios and stages are its own, as in a process of a
+    deployment."""
+    factory = GitLFSRepositoryBackend.factory(
+        dispatchers.tmp_path / "artifacts.git",
+        work_dir=dispatchers.tmp_path / f"{len(dispatchers.opened)}-work",
+        cache_dir=dispatchers.tmp_path / f"{len(dispatchers.opened)}-cache",
+    )
+    dispatcher, _ = dispatchers.open(backend_factory=factory, hold_local_cycles=True, components=frozenset({service}))
+    return dispatcher
+
+
+def _commit_of_control(control: Scenario, dispatcher: Dispatcher) -> list[int]:
+    """Commit the next job of ``control``, which reads only the sample store, and return the steps of the commits that
+    ``GET /commits?record_id=r1`` lists, which name the record that the job consumed."""
+    result = control.next_commit(WEIGHTS)
+    assert result is not None
+    control.commit(result, component=WEIGHTS)
+    page = dispatcher.read_commits("agent", after_step=0, limit=50, record_ids=("r1",))
+    return [commit["step"] for commit in page["commits"]]
+
+
+@pytest.mark.integration
+def test_the_stage_of_a_separate_samples_service_follows_the_commits_of_control(
+    dispatchers: _Dispatchers, fake_git_lfs: None
+) -> None:
+    """Two dispatchers share only the stores of a deployment. Control commits from the sample store and lists the
+    commit under the record it consumed; the stage of the samples service reads no commit until its next step, which
+    releases the records."""
+    control_dispatcher = _split_dispatcher(dispatchers, "control")
+    samples_dispatcher = _split_dispatcher(dispatchers, "samples")
+    control = control_dispatcher.get_or_create_scenario("agent")
+    samples = samples_dispatcher.registry.get_or_create("agent", allow_implicit_creation=False)
+    assert control is not None and samples is not None and samples is not control
+    stage = samples.trainer_for(WEIGHTS).pipeline.record2sample
+    control_stage = control.trainer_for(WEIGHTS).pipeline.record2sample
+
+    _append_records(control, 1)
+    samples.produce_samples(WEIGHTS)
+    assert stage.releasable_record_ids() >= {"i1", "r1"}
+    assert control_stage.releasable_record_ids() == frozenset(), "control's stage reads no record"
+
+    assert _commit_of_control(control, control_dispatcher), "the commit names the record that it consumed"
+    assert control_stage.releasable_record_ids() == frozenset()
+
+    samples.produce_samples(WEIGHTS)
+    assert not {"i1", "r1"} & stage.releasable_record_ids(), "the stage follows the commit and releases them"
+
+
+@pytest.mark.integration
+def test_a_restarted_samples_service_does_not_hold_a_committed_record_again(
+    dispatchers: _Dispatchers, fake_git_lfs: None
+) -> None:
+    """After the samples service restarts, it holds no record that a commit consumed, control's commits stay as they
+    were, and it makes the samples of the records that arrive next. This holds because the sample store marks the
+    records of a committed job consumed; it does not depend on the stage reading the commit history."""
+    control_dispatcher = _split_dispatcher(dispatchers, "control")
+    first_dispatcher = _split_dispatcher(dispatchers, "samples")
+    control = control_dispatcher.get_or_create_scenario("agent")
+    first = first_dispatcher.registry.get_or_create("agent", allow_implicit_creation=False)
+    assert control is not None and first is not None
+
+    _append_records(control, 1)
+    first.produce_samples(WEIGHTS)
+    committed_steps = _commit_of_control(control, control_dispatcher)
+    assert committed_steps
+
+    first_dispatcher.close()
+    dispatchers.opened[:] = [opened for opened in dispatchers.opened if opened[0] is not first_dispatcher]
+    restarted_dispatcher = _split_dispatcher(dispatchers, "samples")
+    restarted = restarted_dispatcher.registry.get_or_create("agent", allow_implicit_creation=False)
+    assert restarted is not None
+    stage = restarted.trainer_for(WEIGHTS).pipeline.record2sample
+    restarted.produce_samples(WEIGHTS)
+    assert not {"i1", "r1"} & stage.releasable_record_ids(), "a committed record is not held again"
+    page = control_dispatcher.read_commits("agent", after_step=0, limit=50, record_ids=("r1",))
+    assert [commit["step"] for commit in page["commits"]] == committed_steps, "the restart commits nothing"
+
+    _append_records(control, 2)
+    restarted.produce_samples(WEIGHTS)
+    assert stage.releasable_record_ids() >= {"i2", "r2"}, "the restarted service makes the samples of new records"
 
 
 @pytest.mark.unit
