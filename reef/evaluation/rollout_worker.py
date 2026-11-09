@@ -649,9 +649,10 @@ class EvaluationRolloutWorker(QueueWorker):
             # The trial directory is under ``work``, so read the verifier's files before the block removes it.
             self.keep_verifier_output(rollout, attempt, trial_directory(result.trial_uri))
             if not result.turns:
-                # A verifier can write a reward with no call, so that reward says nothing of the candidate's model.
-                logger.warning("rollout %s reached no model: %s", rollout.item_id(), result.error)
-                return RolloutScore.failed()
+                # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
+                # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
+                # the rollout is retried as any other failed attempt.
+                raise ReefError(f"the rollout reached no model: {result.error or 'the agent made no model call'}")
             return runner.rollout_score(result)
 
     def keep_verifier_output(self, rollout: EvaluationRollout, attempt: int, trial: Path | None) -> None:

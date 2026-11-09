@@ -225,7 +225,7 @@ def evaluating_server(dispatcher: Dispatcher, lab: TaskLab, **options: Any) -> t
 
 
 async def finished(client: TestClient, evaluation_id: str) -> dict[str, Any]:
-    for _ in range(200):
+    for _ in range(600):
         answer = await (await client.get(f"/reef/scenarios/s/evaluations/{evaluation_id}", headers=AUTH)).json()
         if answer["state"] not in ("queued", "running"):
             return answer
@@ -283,9 +283,10 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             assert answer["mean_score"] == 0.5
             assert runtime.handler.releases == [artifact_id] * 4, "every call samples the evaluated release"
             assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
-            assert runtime.served == [artifact_id] * 6, "inference serves the candidate before each trial"
+            # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
+            assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
             assert (
-                runtime.serve_scenarios == ["s"] * 6 and runtime.applied.count("s") >= 6
+                runtime.serve_scenarios == ["s"] * 10 and runtime.applied.count("s") >= 10
             ), "inference serves the candidate with the scenario's serving config"
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
@@ -297,12 +298,15 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             assert [(rollout["task"], rollout["repeat"], rollout["score"]) for rollout in rollouts] == [
                 ("add", 0, 1.0),
                 ("add", 1, 1.0),
-                ("broken", 0, "failed"),
-                ("broken", 1, "failed"),
+                ("broken", 0, None),
+                ("broken", 1, None),
                 ("sort", 0, 0.0),
                 ("sort", 1, 0.0),
             ]
-            assert {rollout["state"] for rollout in rollouts} == {"finished"}
+            assert [rollout["state"] for rollout in rollouts] == ["finished"] * 2 + ["failed"] * 2 + ["finished"] * 2
+            assert [rollout["error"] for rollout in rollouts if rollout["task"] == "broken"] == [
+                "ReefError: the rollout reached no model: the sandbox did not start"
+            ] * 2
             assert all(rollout["started_at"] <= rollout["ended_at"] for rollout in rollouts)
             one_call = {"count": 1, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
             assert [rollout["calls"] for rollout in rollouts] == [one_call, one_call, None, None, one_call, one_call]
@@ -968,9 +972,15 @@ def test_a_rollout_that_reached_no_model_fails_though_its_verifier_wrote_a_rewar
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
             answer = await finished(client, (await response.json())["evaluation_id"])
+            rollouts = await (
+                await client.get(f"/reef/scenarios/s/evaluations/{answer['evaluation_id']}/rollouts", headers=AUTH)
+            ).json()
 
         assert answer["policy_evaluation"]["scores"] == [{"task": "add", "scores": ["failed"]}]
         assert answer["mean_score"] is None
+        [row] = rollouts["rollouts"]
+        assert row["attempt_count"] > 1, "a rollout that reached no model is retried"
+        assert row["error"] == "ReefError: the rollout reached no model: the agent made no model call"
 
     asyncio.run(run())
 
