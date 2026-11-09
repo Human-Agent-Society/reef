@@ -855,7 +855,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_settings(self, scenario: str) -> dict[str, Any]:
         """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
 
-        ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
+        ``training_mode`` is the stored mode, which control may have changed after this process loaded the
+        scenario, else the mode that the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
         scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
@@ -874,7 +875,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             job_parameters = current.stepping_trainers()[0].trainer.pipeline.sample2job.context.job_parameters
             return {
                 "scenario": scenario,
-                "training_mode": current.training_mode,
+                "training_mode": (
+                    settings.training_mode if settings.training_mode in ("auto", "manual") else current.training_mode
+                ),
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
                 "effective_activation": self.registry.effective_activation(settings),
