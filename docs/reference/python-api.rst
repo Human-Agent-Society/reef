@@ -134,7 +134,7 @@ artifact returns it as ``engine``. It must not start an engine. While an
 engine is ``"starting"``, ``engine_detail(served)`` can give one short line
 for a person, which the status returns as ``engine_detail``, and
 ``engine_steps(served)`` its ``start`` and ``load`` phases as
-``reef.inference.startup.StartupSteps`` (RFC #1283).
+``reef.inference.interfaces.StartupSteps`` (RFC #1283).
 
 While an ``InferenceRuntime`` serves an artifact, it can report the phase of
 its startup with ``reef.inference.startup.report_startup(phase, detail,

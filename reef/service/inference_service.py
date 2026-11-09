@@ -53,9 +53,9 @@ from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusErr
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
-from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler
+from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler, StartupSteps
 from reef.inference.provider_protocol import SSEFrameDecoder
-from reef.inference.startup import StartupSteps, reported_steps
+from reef.inference.startup import reported_steps
 from reef.service.streaming import (
     chat_completion_chunk_identity,
     frame_for_codex,

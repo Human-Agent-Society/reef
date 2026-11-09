@@ -1,6 +1,7 @@
 import pytest
 
-from reef.inference.startup import StartupStep, StartupSteps, report_startup, reported_steps
+from reef.inference.interfaces import StartupStep, StartupSteps
+from reef.inference.startup import report_startup, reported_steps
 
 
 def entry(artifact_id: str, phase: str, at: float, detail: str | None = None, estimate: float | None = None) -> dict:

@@ -30,7 +30,6 @@ from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import WeightFiles
-from reef.inference.startup import StartupSteps
 
 # -- Identities and errors ----------------------------------------------------
 
@@ -200,6 +199,70 @@ class InferenceArtifact:
 #: The state of the engine behind a route (RFC #1269): ``warm`` answers now, ``starting`` runs but does not answer
 #: yet, ``idle`` runs no engine, and a request starts one.
 EngineState = Literal["warm", "starting", "idle"]
+
+#: The phases of an artifact's startup, in their order (RFC #1283): ``prepare`` (the serving work waits, deploys the
+#: engine, and converts or quantizes the weights), ``start`` (a machine and the weights) and ``load`` (GPU memory,
+#: kernels, CUDA graphs and warm-up). ``reef.inference.startup`` reports them.
+StartupPhase = Literal["prepare", "start", "load"]
+#: The phases, in the order of a startup.
+PHASES: tuple[StartupPhase, ...] = ("prepare", "start", "load")
+
+
+@dataclass(frozen=True)
+class StartupStep:
+    """One phase of an artifact's startup.
+
+    Values: ``phase`` is one of ``PHASES``. ``started_at`` is when it began, and ``ended_at`` when it ended, in epoch
+    seconds, at least ``started_at``; None while it runs. ``detail`` is a short note of what it does, such as
+    "Quantizing to NVFP4", or None.
+
+    Purpose: ``reported_steps`` and ``InferenceHandler.engine_steps`` make it, and the startup status gives it as JSON.
+    """
+
+    phase: StartupPhase
+    started_at: float
+    ended_at: float | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.phase not in PHASES:
+            raise ValueError(f"a startup phase is one of {PHASES}, not {self.phase!r}")
+        if self.ended_at is not None and self.ended_at < self.started_at:
+            raise ValueError("a startup step ends at or after its start")
+        if self.detail is not None and not isinstance(self.detail, str):
+            raise ValueError("a startup step's detail is text or None")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"phase": self.phase, "started_at": self.started_at, "ended_at": self.ended_at, "detail": self.detail}
+
+
+@dataclass(frozen=True)
+class StartupSteps:
+    """The phases of an artifact's startup so far, and how long it may still take.
+
+    Values: ``steps`` have distinct phases in the order of ``PHASES``, and start in that order; every step but the
+    last has ``ended_at``. ``estimate_seconds`` is a guess of the seconds until the engine is warm, at least 0, or None.
+
+    Purpose: the startup status gives it as its ``startup`` field (``to_json``).
+    """
+
+    steps: tuple[StartupStep, ...]
+    estimate_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        order = [PHASES.index(step.phase) for step in self.steps]
+        if order != sorted(set(order)):
+            raise ValueError("startup steps have distinct phases, in the order of a startup")
+        starts = [step.started_at for step in self.steps]
+        if starts != sorted(starts):
+            raise ValueError("startup steps start in the order of their phases")
+        if any(step.ended_at is None for step in self.steps[:-1]):
+            raise ValueError("only the last startup step can run")
+        if self.estimate_seconds is not None and self.estimate_seconds < 0:
+            raise ValueError("a startup's estimate is at least 0 seconds")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"steps": [step.to_json() for step in self.steps], "estimate_seconds": self.estimate_seconds}
 
 
 class InferenceHandler(ABC):
