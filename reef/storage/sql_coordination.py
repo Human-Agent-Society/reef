@@ -64,11 +64,14 @@ from reef.storage.migrations import migrate_training_request_items, migrate_work
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
+    REDEPLOY,
     SERVING_KIND,
     SERVING_QUEUE,
     STOP_SERVING_KIND,
     ControlLeaseConflict,
     ServedModelsWriter,
+    serving_serial_key,
+    without_redeploy,
 )
 from reef.storage.sql_setup import enable_wal, postgres_url, validate_postgres_schema
 from reef.storage.work_queue import (
@@ -453,7 +456,11 @@ class SQLServedModels(ServedModelsWriter):
             current = self.request_in(connection, scenario)
             # Whether the new item retries the failed current item of the same payload.
             retried = False
-            if current is not None and canonical_json(dict(current.payload)) == canonical_json(dict(payload)):
+            if (
+                current is not None
+                and REDEPLOY not in payload
+                and canonical_json(without_redeploy(current.payload)) == canonical_json(dict(payload))
+            ):
                 if not (retry_failed and current.state == "failed"):
                     return current
                 retried = True
@@ -478,7 +485,14 @@ class SQLServedModels(ServedModelsWriter):
             sequence = counter.next()
             item = self.work.insert(
                 connection,
-                NewWork(SERVING_QUEUE, f"serve:{sequence}", scenario, SERVING_KIND, payload, serial_key=SERVING_QUEUE),
+                NewWork(
+                    SERVING_QUEUE,
+                    f"serve:{sequence}",
+                    scenario,
+                    SERVING_KIND,
+                    payload,
+                    serial_key=serving_serial_key(scenario),
+                ),
                 sequence,
                 moment,
             )
@@ -693,8 +707,8 @@ class SQLServedModels(ServedModelsWriter):
                         f"serve:{sequence}",
                         current.scenario,
                         SERVING_KIND,
-                        current.payload,
-                        serial_key=SERVING_QUEUE,
+                        without_redeploy(current.payload),
+                        serial_key=serving_serial_key(current.scenario),
                     ),
                     sequence,
                     moment,

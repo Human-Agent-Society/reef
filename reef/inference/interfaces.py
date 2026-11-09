@@ -405,6 +405,13 @@ class InferenceRuntime(ABC):
         return True
 
     @property
+    def serving_slots(self) -> int:
+        """How many serving works the serving worker runs at once (RFC #1299): a positive int, 1 by default. With
+        more than one, the runtime gets concurrent calls for different scenarios, and for the artifacts of one
+        scenario, so it must lock what they share, such as an engine that scenarios share."""
+        return 1
+
+    @property
     def base_url(self) -> str:
         return self._base_url
 
