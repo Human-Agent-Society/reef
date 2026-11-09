@@ -30,6 +30,7 @@ from reef.service.artifact_page import before_artifact_id, build_artifact_page, 
 from reef.service.lifecycle import PendingWrites
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.routed_inference import InferenceRetryPolicy, InferenceRetryTimeout, RoutedInference
+from reef.service.routed_shadow import ShadowLimits, ShadowTasks
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import RoutingPreviewClient
 from reef.service.wire import (
@@ -102,7 +103,8 @@ class RequestService:
 
     Values: ``inference_url`` is the address at which clients reach the inference service
     (``harness.inference_url``), or ``None``; a client's harness layer sends its model calls there, else to the
-    address that the client gave.
+    address that the client gave. ``shadows`` runs the shadow calls of routed requests; without it, the service
+    gets its own ``ShadowTasks`` with the default ``ShadowLimits``.
     """
 
     def __init__(
@@ -114,11 +116,18 @@ class RequestService:
         writes: PendingWrites | None = None,
         preview: RoutingPreviewClient | None = None,
         retry_policy: InferenceRetryPolicy | None = None,
+        shadows: ShadowTasks | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self.routing = routing
         self.preview = preview
-        self.routed = RoutedInference(dispatcher, preview, retry_policy or InferenceRetryPolicy(), writes)
+        self.routed = RoutedInference(
+            dispatcher,
+            preview,
+            retry_policy or InferenceRetryPolicy(),
+            writes,
+            ShadowTasks(ShadowLimits()) if shadows is None else shadows,
+        )
         self.inference_url = None if inference_url is None else inference_url.rstrip("/")
 
     @property

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 
 from aiohttp import web
 
@@ -104,20 +105,29 @@ def register_routed_chat(app: web.Application, *, request_service: RequestServic
             client_payload = await read_object(request, strict=True)
             decision = await request_service.routed.select_route(routing, scenario, client_payload)
             handler = routing.handler_for(decision)
+            # The shadow call, if any, binds to the same policy as the primary one, before the policy is released.
+            shadow = routing.shadow_decision(decision)
+            shadow_handler = None if shadow is None else routing.handler_for(shadow)
         finally:
             # The request has either failed or captured everything it needs from this routing policy.
             acceptance = request.app.get(REQUEST_ACCEPTANCE)
             task = asyncio.current_task()
             if acceptance is not None and task is not None:
                 acceptance.release_selection(task)
+        request_id = uuid.uuid4().hex
+        if shadow is not None and shadow_handler is not None:
+            # Started before the primary call, never awaited by it.
+            request_service.routed.start_shadow(
+                dict(request.headers), client_payload, request.path, shadow, shadow_handler, request_id
+            )
         payload = {**client_payload, "model": decision.target.provider_model}
         if payload.get("stream") is True:
             stream, pending = await request_service.routed.start_routed_stream(
-                request.headers, payload, request.path, handler, decision=decision
+                request.headers, payload, request.path, handler, decision=decision, request_id=request_id
             )
             return await relay_routed_stream(request, request_service, stream, pending)
         response, item = await request_service.routed.infer_routed(
-            request.headers, payload, request.path, decision, handler
+            request.headers, payload, request.path, decision, handler, request_id=request_id
         )
         return web.json_response(response, headers={RECORD_HEADER: item.agent_record_id})
 

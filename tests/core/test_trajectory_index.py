@@ -5,10 +5,17 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from tests.support.conversations import conversation, turn
+from tests.support.conversations import conversation, routed_call, turn
 
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.trajectory_index import CallKey, TrajectoryIndex, call_key, sha256_text, trajectory_calls
+from reef.core.trajectory_index import (
+    CallKey,
+    TrajectoryIndex,
+    call_key,
+    sha256_text,
+    shadow_request_id,
+    trajectory_calls,
+)
 from reef.storage.sqlite import SQLiteRecordStore
 
 SYSTEM = {"role": "system", "content": "be brief"}
@@ -93,6 +100,38 @@ def test_the_index_links_the_calls_as_the_record_store_does(tmp_path) -> None:
     assert index.trajectory("missing") == ()
     assert index.continued("call-2") and index.continued("retry")
     assert not index.continued("call-3") and not index.continued("first")
+
+
+@pytest.mark.parametrize("shadow_first", [False, True])
+def test_a_shadow_call_with_the_primarys_messages_has_a_trajectory_of_its_own(tmp_path, shadow_first: bool) -> None:
+    primary = routed_call(conversation("primary", 1), "serve", "primary-request")
+    shadow = routed_call(conversation("shadow", 1), "shadow", "shadow-request", reply=9)
+    following = routed_call(conversation("next", 3), "serve", "next-request")
+    primary_key, shadow_key = call_key(primary.payload), call_key(shadow.payload)
+    assert primary_key is not None and shadow_key is not None
+    # A primary call and any call without the shadow mark keep the key they always had.
+    assert primary_key == call_key(conversation("plain", 1).payload)
+    assert shadow_request_id(shadow.payload) == "shadow-request" and shadow_request_id(primary.payload) is None
+    assert set(shadow_key.prefix_sha256).isdisjoint(primary_key.prefix_sha256)
+    index = TrajectoryIndex()
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
+        for record in (shadow, primary) if shadow_first else (primary, shadow):
+            index.add(record)
+            records.append(record)
+        # Neither call retries the other, whichever finished first.
+        assert index.is_end("primary") and index.is_end("shadow")
+        index.add(following)
+        records.append(following)
+        for record_id, expected in (("primary", ("primary",)), ("shadow", ("shadow",)), ("next", ("primary", "next"))):
+            assert index.trajectory(record_id) == records.trajectory("math", record_id) == expected
+        assert index.is_end("shadow") and not index.is_end("primary")
+        # Stored payloads keep the routing metadata, so a rebuild from them links the calls the same way.
+        stored = list(records.replay("math"))
+    assert {record.agent_record_id: record.payload for record in stored}["shadow"] == shadow.payload
+    rebuilt = TrajectoryIndex()
+    for record in stored:
+        rebuilt.add(record)
+    assert rebuilt.trajectory("next") == ("primary", "next") and rebuilt.trajectory("shadow") == ("shadow",)
 
 
 def test_forgetting_a_call_keeps_it_while_a_later_call_links_to_it() -> None:

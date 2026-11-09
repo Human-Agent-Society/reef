@@ -248,12 +248,16 @@ class RoutingDeploymentController:
         """The longest one ``open`` of ``snapshot`` takes when every readiness check is healthy but slow.
 
         The child checks the providers one after another, then previews each Scenario. It checks each
-        distinct provider URL and credential once, so the enabled-target count bounds those checks
-        without resolving credentials here. Each check gets the child's own timeout.
+        distinct provider URL and credential once, and never a shadow-only target, so the count of the
+        other enabled targets bounds those checks without resolving credentials here. Each check gets the
+        child's own timeout.
         """
         provider_check_seconds = min(self.service_settings.inference_timeout_s, MAX_READINESS_TIMEOUT_SECONDS)
         preview_seconds = self.policy.selection_timeout_seconds + RESPONSE_WRITE_ALLOWANCE_SECONDS
-        enabled_targets = sum(target.enabled for target in snapshot.targets.values())
+        shadow_only = snapshot.shadow_only_targets
+        enabled_targets = sum(
+            target.enabled and target.target_id not in shadow_only for target in snapshot.targets.values()
+        )
         return (
             enabled_targets * (provider_check_seconds + AIOHTTP_DEADLINE_ROUNDING_SECONDS)
             + len(snapshot.scenarios) * (preview_seconds + AIOHTTP_DEADLINE_ROUNDING_SECONDS)

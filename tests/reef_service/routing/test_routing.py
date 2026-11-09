@@ -324,6 +324,11 @@ def test_handler_lookup_rejects_foreign_decision(adapter: RoutingAdapter) -> Non
         # Optional fields may be omitted, never given as null.
         (("targets", "code-teacher", "role"), None),
         (("targets", "code-teacher", "api_key_env"), None),
+        # A shadow target is one enabled catalog target, named once.
+        (("scenarios", "code-opd", "shadow_target"), None),
+        (("scenarios", "code-opd", "shadow_target"), "unknown-teacher"),
+        (("scenarios", "code-opd", "shadow_target"), "retired-teacher"),
+        (("scenarios", "code-opd", "shadow_target"), ["code-teacher"]),
     ],
 )
 def test_invalid_manifest_fields_fail_at_load(
@@ -416,6 +421,9 @@ def replaced_scenario(snapshot: RoutingSnapshot, scenario: RoutingScenario, vers
         lambda snapshot: automatic(snapshot, router_config_hash=None),
         lambda snapshot: automatic(snapshot, rule_name="teacher_requested"),
         lambda snapshot: automatic(snapshot, reason="rule"),
+        lambda snapshot: automatic(snapshot, reason="shadow_target"),
+        lambda snapshot: automatic(snapshot, reason="shadow_target", rule_name=None, router_config_hash="A" * 64),
+        lambda snapshot: RoutingScenario("code-opd", "code-student", ("code-student",), shadow_target=""),
         lambda snapshot: automatic(snapshot, target=snapshot.targets["retired-teacher"]),
         lambda snapshot: RoutingAdapter(snapshot, ROUTER_HASH, {"unknown": HttpInferenceHandler("http://x")}),
         lambda snapshot: RoutingAdapter(snapshot, ROUTER_HASH, {}, {"code-student": ""}),
@@ -480,6 +488,53 @@ def test_routing_values_keep_their_own_collections(manifest: dict[str, object]) 
     )
 
 
+def test_a_shadow_target_is_configured_per_scenario_and_never_selected(manifest: dict[str, object]) -> None:
+    plain = RoutingSnapshot.from_mapping(manifest)
+    assert plain.scenarios["code-opd"].shadow_target is None and plain.shadow_only_targets == frozenset()
+    targets, scenarios = manifest["targets"], manifest["scenarios"]
+    assert isinstance(targets, dict) and isinstance(scenarios, dict)
+    targets["observer"] = {"provider_model": "observer", "revision": "o1", "url": "http://localhost:8106"}
+    scenarios["code-opd"]["shadow_target"] = "code-student"
+    scenarios["math-opd"]["shadow_target"] = "observer"
+    snapshot = RoutingSnapshot.from_mapping(manifest)
+    assert snapshot.version != plain.version
+    # The observer serves no Scenario as its primary target; the code student does.
+    assert snapshot.shadow_only_targets == {"observer"}
+    adapter = RoutingAdapter.from_snapshot(
+        snapshot, router_config_hash=ROUTER_HASH, credential_environment={"STUDENT_TOKEN": "key"}, timeout_s=5
+    )
+    teacher = automatic_decision(adapter, "code-opd", "teacher_requested", "code-teacher")
+    shadow = adapter.shadow_decision(teacher)
+    assert shadow == RoutingDecision(
+        snapshot.targets["code-student"],
+        snapshot.version,
+        "code-opd",
+        "auto",
+        "shadow_target",
+        router_config_hash=ROUTER_HASH,
+    )
+    assert adapter.handler_for(shadow) is adapter.handlers["code-student"]
+    # The primary target is never called twice by one request.
+    assert adapter.shadow_decision(automatic_decision(adapter, "code-opd", "default", "code-student")) is None
+    pin = adapter.explicit_decision(snapshot.scenarios["math-opd"], {"model": "math-teacher"})
+    assert pin is not None
+    pinned = adapter.shadow_decision(pin)
+    assert pinned is not None
+    assert (pinned.target.target_id, pinned.original_selector, pinned.router_config_hash) == (
+        "observer",
+        "math-teacher",
+        None,
+    )
+    # A shadow target is not a primary target: a client cannot pin it.
+    with pytest.raises(RoutingRequestError, match="not available"):
+        adapter.explicit_decision(snapshot.scenarios["math-opd"], {"model": "observer"})
+    # A shadow makes no further shadow, and a decision of another snapshot binds nothing.
+    with pytest.raises(ValueError, match="no shadow of its own"):
+        adapter.shadow_decision(shadow)
+    with pytest.raises(RoutingRequestError, match="another snapshot"):
+        adapter.shadow_decision(replace(teacher, snapshot_version="sha256:" + "0" * 64))
+
+
 def test_every_routing_error_status_has_an_http_translation() -> None:
     # 413 needs its body limit, so the translation builds it separately.
     assert set(ROUTING_ERRORS) | {413} == ROUTING_ERROR_STATUSES
@@ -538,6 +593,50 @@ def test_readiness_checks_enabled_model_ids_and_reuses_endpoint_probe(
                     await adapter.check_ready()
                 assert captured.value.status == 503
             assert calls == ["Bearer readiness-secret"]
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
+def test_readiness_skips_only_targets_that_no_request_can_use_as_its_primary(
+    tmp_path: Path, manifest: dict[str, object]
+) -> None:
+    from aiohttp import web
+
+    async def run() -> None:
+        async def models(request: web.Request) -> web.Response:
+            listed = ("code-student", "code-teacher", "math-student", "math-teacher")
+            return web.json_response({"data": [{"id": name} for name in listed]})
+
+        app = web.Application()
+        app.router.add_get("/v1/models", models)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, "127.0.0.1", 0).start()
+            url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+            targets, scenarios = manifest["targets"], manifest["scenarios"]
+            assert isinstance(targets, dict) and isinstance(scenarios, dict)
+            for target in targets.values():
+                target["url"] = url
+                target.pop("api_key_env", None)
+            # An offline shadow-only target: the provider does not list its model.
+            targets["observer"] = {"provider_model": "observer-offline", "revision": "o1", "url": url}
+            scenarios["code-opd"]["shadow_target"] = "observer"
+
+            def adapter() -> RoutingAdapter:
+                snapshot = RoutingSnapshot.from_mapping(manifest)
+                return RoutingAdapter.from_snapshot(
+                    snapshot, router_config_hash=ROUTER_HASH, credential_environment={}, timeout_s=5
+                )
+
+            await adapter().check_ready()
+            # A shadow target that another Scenario serves as its primary keeps its check.
+            targets["math-teacher"]["provider_model"] = "math-teacher-offline"
+            scenarios["code-opd"]["shadow_target"] = "math-teacher"
+            with pytest.raises(RoutingRequestError, match="does not expose"):
+                await adapter().check_ready()
         finally:
             await runner.cleanup()
 

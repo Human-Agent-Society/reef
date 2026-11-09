@@ -394,7 +394,8 @@ class FakeControl(ReefLifecycleClient):
     one; an ``open`` raises a retryable 409 before any runtime is published, then ``open_error`` if set.
     A command that does not fail becomes ``control_revision``, and ``open``, ``close`` and ``stop`` set
     ``accepting`` as the child does. As in the child, ``stopping`` closes admission, a forced close counts the
-    requests it cancels in ``forced_requests``, and the drain counts every pending write. ``check_candidate``
+    requests it cancels in ``forced_requests`` and also cancels the running shadow calls (``pending_shadows``), a
+    policy close leaves both alone, and the drain counts every pending write. ``check_candidate``
     logs ``control:check`` and the candidate's snapshot in ``checked``, never changes ``revision``, and raises
     ``check_error`` if set.
     """
@@ -406,6 +407,7 @@ class FakeControl(ReefLifecycleClient):
         self.pending_selections = 0
         self.policy_close_revision: int | None = None
         self.pending_writes = 0
+        self.pending_shadows = 0
         self.failed_writes = 0
         self.forced_requests = 0
         self.snapshot_version = "snapshot-one"
@@ -472,6 +474,7 @@ class FakeControl(ReefLifecycleClient):
             self.forced_requests += self.active_requests
             self.active_requests = 0
             self.pending_selections = 0
+            self.pending_shadows = 0
         if action == "stop":
             self.stopping = True
         return self.status()
@@ -503,6 +506,7 @@ class FakeControl(ReefLifecycleClient):
             forced_requests=self.forced_requests,
             pending_selections=self.pending_selections,
             policy_closed=self.policy_close_revision is not None,
+            pending_shadows=self.pending_shadows,
         )
 
 

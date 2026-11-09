@@ -217,14 +217,16 @@ def test_pending_record_finalization_blocks_recovery(case: ControllerCase) -> No
     assert "control:open" not in case.actions
 
 
-def test_drain_waits_for_admitted_requests_then_forces_them(case: ControllerCase) -> None:
-    case.control.active_requests = 1
+@pytest.mark.parametrize("work", ["active_requests", "pending_shadows"])
+def test_drain_waits_for_admitted_requests_then_forces_them(case: ControllerCase, work: str) -> None:
+    setattr(case.control, work, 1)
     started = time.monotonic()
     case.controller.drain(recovery=False)
-    # The admitted request (an upload counts) outlasts the drain window, so a second close cancels it.
+    # The admitted request (an upload counts), or a running shadow call alone, outlasts the drain window, so a
+    # second close cancels it.
     assert case.actions.count("control:close") == 2
     assert case.controller.state == "finalizing"
-    assert case.control.active_requests == 0
+    assert getattr(case.control, work) == 0
     # The first close starts the drain phase, so it has no phase deadline. Each status read of the drain
     # shares the drain deadline; the forced close and the reads after it share the finalization deadline.
     phases = case.control.deadlines

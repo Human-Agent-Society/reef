@@ -292,7 +292,25 @@ caller-supplied routing metadata and contains ``target_id``, ``role``,
 ``explicit_pin``) and ``rule_name`` (``null`` for pins). ``request_id``,
 ``attempt_index`` and ``prior_attempt_ids`` link retries; the successful
 attempt's normal receipt remains the reference for Scenario-local REPORT
-feedback.
+feedback. These attempts have ``purpose: serve``.
+
+A Scenario's `shadow target <configuration.rst#shadow-targets>`__ adds one
+record for each shadow call whose provider call started and whose record the
+store accepted, with ``purpose: shadow``, reason ``shadow_target``,
+``rule_name: null``, ``client_visible: false`` and
+``delivery_outcome: not_started``. Its ``original_selector``, ``snapshot_version``
+and ``router_config_hash`` are those of the request's primary decision. It has a
+``request_id`` of its own and names the primary attempts' ``request_id`` in
+``primary_request_id``. The response never returns its ID, and Reef never
+adds training data to it. A shadow record's trajectory holds only that record,
+so the next turn of a conversation continues the primary call.
+
+On a routed request, Reef's own ``payload.metadata.routing`` replaces whatever
+the client sent there, so a client's shadow mark is dropped, not refused. Reef's
+native inference routes refuse a body whose ``metadata.routing`` has
+``purpose: shadow``, whatever its ``request_id``, or a ``primary_request_id``,
+with 400; other routing metadata there is recorded as sent. An imported record
+may keep these marks: an import is not proof that Reef made the call.
 
 ``model_revision`` is declared by the deployment manifest, with
 ``identity_source: deployment_manifest``. The external model serves the request.
@@ -329,7 +347,8 @@ this private interface.
 ``router_config_hash`` (empty until the owner publishes a verified runtime),
 ``control_revision``, ``accepting``, ``stopping``, ``active_requests`` and
 ``pending_writes``, plus ``drain_pending_writes``, ``policy_closed``,
-``pending_selections`` and diagnostic
+``pending_selections``, ``pending_shadows`` (shadow calls still running, which a
+full drain also waits for and a forced close cancels) and diagnostic
 ``forced_requests`` and ``failed_writes`` counts. An admitted request keeps the
 manifest and router runtime hash it captured at admission, including while the
 router previews it. ``GET /healthz`` remains a

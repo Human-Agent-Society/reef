@@ -260,7 +260,9 @@ class RoutingScenario:
     ``RoutingRule`` values with distinct names, and ``rule.target_id`` ∈ ``target_ids`` for each rule. No two
     domain labels of the Scenario's rules are equal ignoring case: the router keeps one rule per label, case
     folded. Earlier rules take priority, whatever their kind. The constructor stores a list of target IDs or
-    rules as a tuple.
+    rules as a tuple. ``shadow_target`` is None or a manifest string: the target that Reef also calls, as a
+    shadow, for each routed request of the Scenario whose primary target is another one. It need not be in
+    ``target_ids``; it becomes a primary target only if it is listed there.
     Which of these targets exist and are enabled is checked by the ``RoutingSnapshot`` that holds the
     Scenario.
     Purpose: ``parse_scenario`` makes it. ``target_for_rule`` maps the Semantic Router's decision name to a
@@ -271,6 +273,7 @@ class RoutingScenario:
     default_target: str
     target_ids: tuple[str, ...]
     rules: tuple[RoutingRule, ...] = ()
+    shadow_target: str | None = None
 
     def __post_init__(self) -> None:
         if manifest_string(self.name, "scenario name") in RESERVED_SCENARIOS:
@@ -297,6 +300,8 @@ class RoutingScenario:
                     )
                 labels[label.casefold()] = rule.name
         object.__setattr__(self, "rules", rules)
+        if self.shadow_target is not None:
+            manifest_string(self.shadow_target, f"{name}.shadow_target")
 
     def target_for_rule(self, rule_name: str) -> str | None:
         """Return the target an automatic selection rule chooses, if the rule exists."""
@@ -389,7 +394,7 @@ def parse_domain_classifier(value: object) -> DomainClassifier:
 
 def parse_scenario(name: str, value: object) -> RoutingScenario:
     """Read one Scenario entry and its rules; ``RoutingScenario`` and ``RoutingRule`` check their domains."""
-    scenario = manifest_mapping(value, f"scenarios.{name}", {"default_target", "targets", "rules"})
+    scenario = manifest_mapping(value, f"scenarios.{name}", {"default_target", "targets", "rules", "shadow_target"})
     raw_rules = scenario.get("rules", [])
     if not isinstance(raw_rules, list):
         raise ValueError(f"scenarios.{name}.rules must be a list")
@@ -430,6 +435,11 @@ def parse_scenario(name: str, value: object) -> RoutingScenario:
         manifest_string(scenario.get("default_target"), f"scenarios.{name}.default_target"),
         manifest_strings(scenario.get("targets"), f"scenarios.{name}.targets"),
         tuple(rules),
+        (
+            manifest_string(scenario["shadow_target"], f"scenarios.{name}.shadow_target")
+            if "shadow_target" in scenario
+            else None
+        ),
     )
 
 
@@ -441,7 +451,8 @@ class RoutingSnapshot:
     target ID. ``targets`` is a non-empty read-only mapping of ``RoutingTarget`` values in which each key
     equals its target's ``target_id``. ``scenarios`` is a non-empty read-only mapping of ``RoutingScenario``
     values in which each key equals its Scenario's ``name``. For each Scenario ``s``: ``target_ids(s) ⊆ keys(targets)``, and its default target and every
-    rule target are enabled. Targets may be shared between Scenarios. ``version`` is a ``sha256:<hex>``
+    rule target are enabled; its ``shadow_target``, if any, is an enabled target. Targets may be shared between
+    Scenarios. ``version`` is a ``sha256:<hex>``
     digest; the constructor checks only its form. ``domain_classifier`` is None or a ``DomainClassifier``, and
     it is not None when any rule of any Scenario names domains.
     Purpose: ``from_mapping`` makes it and sets ``version`` to the SHA-256 of the manifest's canonical JSON,
@@ -493,10 +504,23 @@ class RoutingSnapshot:
                         f"scenarios.{scenario_name}.rules.{rule.name} names domains, which need "
                         "deployment.domain_classifier"
                     )
+            shadow = scenario.shadow_target
+            if shadow is not None and (shadow not in targets or not targets[shadow].enabled):
+                raise ValueError(f"scenarios.{scenario_name}.shadow_target must identify an enabled target")
         if self.domain_classifier is not None and not isinstance(self.domain_classifier, DomainClassifier):
             raise ValueError("deployment.domain_classifier must be a domain classifier")
         if not isinstance(self.version, str) or not SHA256_DIGEST.fullmatch(self.version):
             raise ValueError("routing snapshot version must be a sha256 digest")
+
+    @property
+    def shadow_only_targets(self) -> frozenset[str]:
+        """The IDs of the targets that some Scenario names as its ``shadow_target`` and no Scenario lists in its
+        ``target_ids``: no request can use them as its primary target."""
+        primary = {target_id for scenario in self.scenarios.values() for target_id in scenario.target_ids}
+        shadows = {
+            target_id for scenario in self.scenarios.values() if (target_id := scenario.shadow_target) is not None
+        }
+        return frozenset(shadows - primary)
 
     @classmethod
     def load(cls, path: str | Path) -> RoutingSnapshot:
@@ -590,21 +614,25 @@ class RoutingDecision:
     - ``default``: the router chose the Scenario's default, so ``rule_name == DEFAULT_RULE``.
     - ``rule``: the router matched a keyword or domain rule, so ``rule_name`` matches ``RULE_NAME`` and is not
       ``DEFAULT_RULE``.
+    - ``shadow_target``: the target is the Scenario's ``shadow_target``, which the manifest configures and no
+      router selects. ``rule_name`` is None. ``original_selector`` and ``router_config_hash`` are those of the
+      request's primary decision, so ``router_config_hash`` is None or a router runtime hash.
 
     For ``default`` and ``rule``, ``router_config_hash`` is a router runtime hash: that of the router that
     selected.
-    Purpose: ``RoutingAdapter.explicit_decision`` makes pins and ``checked_selection`` makes the other two,
-    with the snapshot's automatic model as ``original_selector``. ``explicit_decision`` and
-    ``RoutingPreviewClient.select`` first check that the Scenario is the snapshot's own. Both makers then
-    check that the target belongs to that Scenario. A decision alone can check neither. The request keeps
-    one decision for its provider call and every retry; ``metadata`` is its stored record form.
+    Purpose: ``RoutingAdapter.explicit_decision`` makes pins, ``checked_selection`` makes ``default`` and
+    ``rule`` decisions, with the snapshot's automatic model as ``original_selector``, and
+    ``RoutingAdapter.shadow_decision`` makes shadow decisions from a primary one. ``explicit_decision`` and
+    ``RoutingPreviewClient.select`` first check that the Scenario is the snapshot's own. Each maker then
+    checks that the target belongs to that Scenario. A decision alone can check neither. The request keeps
+    one primary decision for its provider call and every retry; ``metadata`` is its stored record form.
     """
 
     target: RoutingTarget
     snapshot_version: str
     scenario: str
     original_selector: str
-    reason: Literal["default", "rule", "explicit_pin"]
+    reason: Literal["default", "rule", "explicit_pin", "shadow_target"]
     rule_name: str | None = None
     #: The Semantic Router runtime that selected an automatic request; None for an explicit pin.
     router_config_hash: str | None = None
@@ -624,6 +652,12 @@ class RoutingDecision:
             ):
                 raise ValueError("an explicit pin names its own target and has no rule or router runtime")
             return
+        if self.reason == "shadow_target":
+            if self.rule_name is not None or (
+                self.router_config_hash is not None and not is_router_config_hash(self.router_config_hash)
+            ):
+                raise ValueError("a shadow decision has no rule and at most its primary's router runtime")
+            return
         if self.reason == "default":
             selected_by_rule = self.rule_name == DEFAULT_RULE
         elif self.reason == "rule":
@@ -633,7 +667,7 @@ class RoutingDecision:
                 and self.rule_name != DEFAULT_RULE
             )
         else:
-            raise ValueError("a routing decision's reason must be default, rule or explicit_pin")
+            raise ValueError("a routing decision's reason must be default, rule, explicit_pin or shadow_target")
         if not selected_by_rule:
             raise ValueError(f"a {self.reason} decision has the wrong rule name")
         if not is_router_config_hash(self.router_config_hash):
@@ -674,8 +708,8 @@ class RoutingAdapter:
     makes the first adapter of a service from its startup environment. ``RoutingPublication`` makes every
     later one with ``from_snapshot`` and the current adapter's ``credential_environment`` and
     ``inference_timeout_s``, so a published policy gets new handlers for its own targets and endpoints.
-    A request captures one adapter when it is admitted and keeps it for selection, its provider call and
-    every retry. With ``router_config_hash`` None no automatic request can select: a managed child starts
+    A request captures one adapter when it is admitted and keeps it for selection, its provider call, every
+    retry and its shadow call. With ``router_config_hash`` None no automatic request can select: a managed child starts
     this way, closed. ``handler_for`` reports a target without a handler as unavailable (503).
     """
 
@@ -779,12 +813,17 @@ class RoutingAdapter:
         )
 
     async def check_ready(self) -> None:
-        """Check configured model availability; this does not verify model weights."""
+        """Check that each enabled target's provider lists its model; this does not verify model weights.
+
+        A shadow-only target (``RoutingSnapshot.shadow_only_targets``) is not checked: it serves no request, so
+        its outage fails only shadow calls. Every other enabled target is checked, also one no Scenario names.
+        """
         from aiohttp import ClientError, ClientSession, ClientTimeout
 
         probes: dict[tuple[str, str | None], set[str]] = {}
+        shadow_only = self.snapshot.shadow_only_targets
         for target in self.snapshot.targets.values():
-            if target.enabled:
+            if target.enabled and target.target_id not in shadow_only:
                 endpoint = (target.url.rstrip("/"), self.api_keys.get(target.target_id))
                 probes.setdefault(endpoint, set()).add(target.provider_model)
         async with ClientSession(timeout=ClientTimeout(total=self.readiness_timeout_s)) as session:
@@ -873,6 +912,39 @@ class RoutingAdapter:
         if not target.enabled:
             raise RoutingRequestError("routing target is disabled", code="target_unavailable", status=503)
         return RoutingDecision(target, self.snapshot.version, scenario.name, selector, "explicit_pin")
+
+    def shadow_decision(self, primary: RoutingDecision) -> RoutingDecision | None:
+        """The shadow decision of the request whose primary decision is ``primary``, or None.
+
+        It is None when the primary's Scenario names no ``shadow_target``, or names the primary's own target, so
+        a request calls each target at most once. Otherwise the shadow uses ``primary``'s snapshot, Scenario,
+        selector and router runtime hash, with reason ``shadow_target``.
+
+        Raises:
+            ValueError: ``primary`` is a shadow decision.
+            RoutingRequestError: ``primary`` belongs to another snapshot (409).
+        """
+        if primary.reason == "shadow_target":
+            raise ValueError("a shadow decision has no shadow of its own")
+        scenario = self.snapshot.scenarios.get(primary.scenario)
+        if (
+            primary.snapshot_version != self.snapshot.version
+            or scenario is None
+            or self.snapshot.targets.get(primary.target.target_id) != primary.target
+        ):
+            raise RoutingRequestError(
+                "routing decision belongs to another snapshot", code="snapshot_mismatch", status=409
+            )
+        if scenario.shadow_target is None or scenario.shadow_target == primary.target.target_id:
+            return None
+        return RoutingDecision(
+            self.snapshot.targets[scenario.shadow_target],
+            self.snapshot.version,
+            scenario.name,
+            primary.original_selector,
+            "shadow_target",
+            router_config_hash=primary.router_config_hash,
+        )
 
     def handler_for(self, decision: RoutingDecision) -> HttpInferenceHandler:
         """Return the handler captured for this snapshot, never rebinding a shared one."""

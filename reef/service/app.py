@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 import tempfile
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -33,6 +34,7 @@ from reef.service.lifecycle import (
     register_admission,
 )
 from reef.service.request_service import InferenceRetryPolicy, RequestService
+from reef.service.routed_shadow import ShadowLimits, ShadowTasks
 from reef.service.routes import register_data_service_routes, register_routes
 from reef.service.routes.harness import register_harness_routes
 from reef.service.routes.records import register_record_routes
@@ -238,6 +240,7 @@ def create_app(
     evaluations: ArtifactEvaluations | None = None,
     artifact_imports: ArtifactImports | None = None,
     harness_inference_url: str | None = None,
+    shadow_limits: ShadowLimits | None = None,
 ) -> web.Application:
     """Build the HTTP app around an existing dispatcher; close it only when requested.
 
@@ -261,6 +264,10 @@ def create_app(
     ``artifact_imports`` reads and holds artifact imports; None reads the
     built-in sources into the system's temporary directory.
     ``harness_inference_url`` is ``harness.inference_url``: where a client's harness layer sends its model calls.
+    ``shadow_limits`` bounds a routed app's shadow calls (default ``ShadowLimits()``). A routed app tracks every
+    record write it submits. When it shuts down, it cancels the shadow calls still running and waits, within one
+    finalization deadline (the managed child's, or its default when unmanaged), for the shadow tasks and then
+    for every tracked write; only cleanup, after that, may close the record store.
 
     Without routing, the app runs the inference routes in the same process (``reef.service.inference_service``): they read
     ``served_models`` and reach each row's engine through the runtime that inference serves it with, or through
@@ -285,7 +292,10 @@ def create_app(
         raise ValueError("managed lifecycle requires its exact routing snapshot and router runtime")
     if lifecycle is None and routing is not None and routing.router_config_hash is None:
         raise ValueError("an unmanaged routed app needs a verified router runtime hash")
-    writes = None if lifecycle is None else PendingWrites()
+    # A routed app tracks its record writes, so cancelling a request or a shadow call never orphans a write
+    # that storage cleanup could race. A managed child always routes.
+    writes = None if routing is None else PendingWrites()
+    shadows = ShadowTasks(ShadowLimits() if shadow_limits is None else shadow_limits)
     preview_client = None if preview is None else RoutingPreviewClient(preview)
     publisher = dispatcher.publisher
     if publisher is None:
@@ -297,30 +307,48 @@ def create_app(
         routing=routing,
         writes=writes,
         preview=preview_client,
+        shadows=shadows,
     )
     app = service_application(accepted_tokens, evaluation_tokens=evaluation_tokens)
     app[REQUEST_SERVICE_KEY] = request_service
     if routing is not None:
         app.middlewares.insert(1, routed_routes_only)
-    if lifecycle is not None and writes is not None:
-        managed = RequestAcceptance(lifecycle, writes, publisher=RoutingPublication(request_service))
-        # Inside authentication, outside error translation, so generated error
-        # responses for admitted requests also complete within their root lease.
-        app.middlewares.insert(len(app.middlewares) - 1, create_acceptance_middleware(managed))
-        register_admission(app, managed)
-        app[CONTROL_APPLICATION] = create_control_app(managed)
-        owner_fd = os.environ.get("REEF_ROUTING_OWNER_FD")
-        if owner_fd is not None:
-            configure_owner_watch(app, managed, int(owner_fd))
+    if writes is not None:
 
-        async def finalize_requests(app: web.Application) -> None:
-            managed.owner_lost()
-            if not await writes.wait(lifecycle.finalization_timeout_seconds):
-                logger.error(
-                    "managed request finalization deadline exceeded with %d pending writes", len(writes.tasks)
-                )
+        async def finalize_records(timeout_seconds: float) -> None:
+            # Cancelled shadow calls write their own records first; every write then shares one deadline,
+            # and the record store closes only in cleanup, after this returns.
+            deadline = time.monotonic() + timeout_seconds
+            if not await shadows.close(timeout_seconds):
+                logger.error("request finalization deadline exceeded with %d shadow calls", len(shadows.tasks))
+            if writes.tasks and not await writes.wait(max(0.0, deadline - time.monotonic())):
+                logger.error("request finalization deadline exceeded with %d pending writes", len(writes.tasks))
 
-        app.on_shutdown.append(finalize_requests)
+        if lifecycle is not None:
+            managed = RequestAcceptance(
+                lifecycle, writes, publisher=RoutingPublication(request_service), shadows=shadows
+            )
+            # Inside authentication, outside error translation, so generated error
+            # responses for admitted requests also complete within their root lease.
+            app.middlewares.insert(len(app.middlewares) - 1, create_acceptance_middleware(managed))
+            register_admission(app, managed)
+            app[CONTROL_APPLICATION] = create_control_app(managed)
+            owner_fd = os.environ.get("REEF_ROUTING_OWNER_FD")
+            if owner_fd is not None:
+                configure_owner_watch(app, managed, int(owner_fd))
+
+            async def finalize_requests(app: web.Application) -> None:
+                managed.owner_lost()
+                await finalize_records(lifecycle.finalization_timeout_seconds)
+
+            app.on_shutdown.append(finalize_requests)
+        else:
+
+            async def finalize_unmanaged(app: web.Application) -> None:
+                # An unmanaged routed app has no lifecycle deadline; it uses the managed child's default.
+                await finalize_records(LifecycleSettings.finalization_timeout_seconds)
+
+            app.on_shutdown.append(finalize_unmanaged)
     configure_browser_access(app, console_origins)
     artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations
     if routing is None:

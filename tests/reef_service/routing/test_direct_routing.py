@@ -15,6 +15,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import threading
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,14 +36,15 @@ from tests.reef_service.routing.routing_fakes import (
     running_router,
 )
 
-from reef.core.records_types import ROLLOUT_HEADER
+from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.service import routing_preview
-from reef.service.app import CONTROL_APPLICATION, create_app
+from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, create_app
 from reef.service.assembly import build_app
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.errors import translate_error
-from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
+from reef.service.lifecycle import INFERENCE_FINALIZATION, REQUEST_ACCEPTANCE, LifecycleSettings
+from reef.service.routed_shadow import ShadowLimits, ShadowTasks
 from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, PREVIEW_BODY_LIMIT_BYTES
 from reef.service.web import MAX_REQUEST_BYTES
@@ -60,15 +62,26 @@ def write_manifest(
     keyword: str = "reef_teacher_required",
     domain: bool = False,
     default: str = "student",
+    shadow: str | None = None,
+    target_urls: Mapping[str, str] | None = None,
 ) -> Path:
     """Two Scenarios sharing a teacher; the coding Scenario also lists a disabled target.
 
     With ``domain``, each Scenario also has a ``math_request`` domain rule for the teacher, after any keyword
-    rule. Its classifier names a directory that does not exist: serving requests never reads it.
+    rule. Its classifier names a directory that does not exist: serving requests never reads it. ``shadow``
+    names the coding Scenario's shadow target; ``target_urls`` gives some targets their own endpoint, and the
+    shadow-only target ``observer`` is in the catalog exactly when it names it.
     """
+    urls = dict(target_urls or {})
+    models = {**PROVIDER_MODELS, **({"observer": "observer-v1"} if "observer" in urls else {})}
     targets = {
-        target_id: {"provider_model": model, "revision": "r1", "url": provider_url, "enabled": target_id != "retired"}
-        for target_id, model in PROVIDER_MODELS.items()
+        target_id: {
+            "provider_model": model,
+            "revision": "r1",
+            "url": urls.get(target_id, provider_url),
+            "enabled": target_id != "retired",
+        }
+        for target_id, model in models.items()
     }
     domain_rules = [{"name": "math_request", "domains": ["math"], "target": "teacher"}] if domain else []
     deployment: dict[str, object] = {"semantic_router_image": "semantic-router@sha256:" + "a" * 64}
@@ -94,6 +107,7 @@ def write_manifest(
                 "default_target": default,
                 "targets": ["student", "teacher", "retired"],
                 "rules": [{"name": "teacher_requested", "keywords": [keyword], "target": "teacher"}, *domain_rules],
+                **({"shadow_target": shadow} if shadow is not None else {}),
             },
             "math": {"default_target": "math-student", "targets": ["math-student", "teacher"], "rules": domain_rules},
         },
@@ -185,8 +199,16 @@ async def routed_service(
     domain: bool = False,
     default: str = "student",
     provider_chat: web.Handler | None = None,
+    shadow: str | None = None,
+    target_urls: Mapping[str, str] | None = None,
+    shadow_limits: ShadowLimits | None = None,
+    close_dispatcher: bool = False,
 ) -> AsyncIterator[RoutedService]:
-    """Start a provider, a fake router and a routed Reef; ``managed`` adds the private lifecycle control."""
+    """Start a provider, a fake router and a routed Reef; ``managed`` adds the private lifecycle control.
+
+    ``shadow`` and ``target_urls`` go to ``write_manifest``; ``shadow_limits`` and ``close_dispatcher`` to
+    ``create_app``. The dispatcher is closed at the end either way; closing it again does nothing.
+    """
     provider = Provider()
     # Pinned requests may exceed the router's 10 MiB preview limit; the provider accepts them like Reef does.
     provider_app = web.Application(client_max_size=MAX_REQUEST_BYTES)
@@ -194,7 +216,15 @@ async def routed_service(
     provider_app.router.add_post("/v1/chat/completions", provider.chat if provider_chat is None else provider_chat)
     async with TestServer(provider_app) as provider_server:
         url = str(provider_server.make_url("")).rstrip("/")
-        path = write_manifest(tmp_path / "routing.json", url, keyword=keyword, domain=domain, default=default)
+        path = write_manifest(
+            tmp_path / "routing.json",
+            url,
+            keyword=keyword,
+            domain=domain,
+            default=default,
+            shadow=shadow,
+            target_urls=target_urls,
+        )
         adapter = RoutingAdapter.from_manifest(path, router_config_hash=ROUTER_HASH, environ={})
         dispatcher = routing_dispatcher(tmp_path)
         lifecycle = None
@@ -212,7 +242,13 @@ async def routed_service(
             async with running_router(adapter.snapshot, timeout_seconds=timeout_seconds) as router:
                 router.reply_changes = dict(reply_changes or {})
                 app = create_app(
-                    dispatcher, tokens=SERVICE_TOKEN, routing=adapter, preview=router.settings, lifecycle=lifecycle
+                    dispatcher,
+                    tokens=SERVICE_TOKEN,
+                    routing=adapter,
+                    preview=router.settings,
+                    lifecycle=lifecycle,
+                    shadow_limits=shadow_limits,
+                    close_dispatcher=close_dispatcher,
                 )
                 async with TestClient(TestServer(app)) as client, contextlib.AsyncExitStack() as stack:
                     control = None
@@ -1097,5 +1133,613 @@ def test_the_tutorial_fake_provider_serves_auto_pin_json_sse_and_feedback(tmp_pa
                     assert len(router.selections) == 3
             finally:
                 dispatcher.close()
+
+    asyncio.run(run())
+
+
+# -- Shadow targets ------------------------------------------------------------------------------------------------
+
+
+@dataclass
+class EchoProvider:
+    """A provider whose every answer names the model that answered it.
+
+    ``received`` lists each request body in arrival order. A call to a model in ``held`` is appended to
+    ``waiting`` and then waits until ``release`` is set. ``aborts`` gives, per model, how many of its calls
+    first answer with an engine abort. ``replies`` replaces the answer of a model with its handler.
+    """
+
+    received: list[dict[str, object]] = field(default_factory=list)
+    held: set[str] = field(default_factory=set)
+    waiting: list[str] = field(default_factory=list)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    aborts: dict[str, int] = field(default_factory=dict)
+    replies: dict[str, web.Handler] = field(default_factory=dict)
+
+    async def chat(self, request: web.Request) -> web.StreamResponse:
+        payload = await request.json()
+        self.received.append(payload)
+        model = str(payload["model"])
+        if model in self.held:
+            self.waiting.append(model)
+            await self.release.wait()
+        if model in self.replies:
+            return await self.replies[model](request)
+        if self.aborts.get(model, 0):
+            self.aborts[model] -= 1
+            return web.json_response({"choices": [{"finish_reason": "abort"}]})
+        text = f"{model} answered"
+        if payload.get("stream") is True:
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            chunk = {"id": "chat-1", "choices": [{"index": 0, "delta": {"content": text}}]}
+            await response.write(f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode())
+            return response
+        return web.json_response({"choices": [{"message": {"content": text}, "finish_reason": "stop"}]})
+
+    async def wait_for(self, count: int) -> None:
+        """Return once ``count`` held calls arrived."""
+        async with asyncio.timeout(5):
+            while len(self.waiting) < count:
+                await asyncio.sleep(0.01)
+
+
+def shadow_tasks(service: RoutedService) -> ShadowTasks:
+    return service.client.app[REQUEST_SERVICE_KEY].routed.shadows
+
+
+async def shadows_finished(service: RoutedService) -> ShadowTasks:
+    """Wait until every shadow task of ``service`` has ended and been released."""
+    shadows = shadow_tasks(service)
+    async with asyncio.timeout(5):
+        while shadows.tasks:
+            await asyncio.wait(set(shadows.tasks))
+            await asyncio.sleep(0)
+    return shadows
+
+
+def records_by_purpose(service: RoutedService) -> tuple[list[AgentRecord], list[AgentRecord]]:
+    """The coding Scenario's serve records and shadow records, each in arrival order."""
+    records = service.dispatcher.get_or_create_scenario("coding").records.replay("coding")
+    serve = [record for record in records if record.payload["metadata"]["routing"]["purpose"] == "serve"]
+    shadow = [record for record in records if record.payload["metadata"]["routing"]["purpose"] == "shadow"]
+    assert len(serve) + len(shadow) == len(records)
+    return serve, shadow
+
+
+def stream_receipt(text: str) -> str:
+    return next(
+        json.loads(line.removeprefix("data: "))["reef"]["agent_record_id"]
+        for line in text.splitlines()
+        if line.startswith("data: {") and '"reef"' in line
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("model", "primary", "shadowed"),
+    [("auto", "teacher", True), ("teacher", "teacher", True), ("student", "student", False)],
+)
+def test_a_shadow_target_also_answers_but_only_the_primary_reaches_the_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream: bool, model: str, primary: str, shadowed: bool
+) -> None:
+    async def run() -> None:
+        provider = EchoProvider()
+        async with routed_service(
+            tmp_path, default="teacher", shadow="student", provider_chat=provider.chat
+        ) as service:
+            accept_record = service.dispatcher.accept_record
+            # Each record's purpose and whether its write belongs to inference finalization (read in its thread).
+            finalizing: list[tuple[str, bool]] = []
+
+            def observed_write(item: AgentRecord) -> AgentRecord:
+                if item.request_type is RequestType.INFERENCE:
+                    finalizing.append((item.payload["metadata"]["routing"]["purpose"], INFERENCE_FINALIZATION.get()))
+                return accept_record(item)
+
+            monkeypatch.setattr(service.dispatcher, "accept_record", observed_write)
+            body: dict[str, object] = {
+                "model": model,
+                "messages": user_message("hello"),
+                "temperature": 0.25,
+                "metadata": {"caller": "kept"},
+            }
+            if stream:
+                body.update(stream=True, stream_options={"include_usage": True})
+            status, text, headers = await service.chat(body)
+            assert status == 200, text
+            await shadows_finished(service)
+            assert f"{PROVIDER_MODELS[primary]} answered" in text
+            if primary != "student":
+                assert "student-v1 answered" not in text
+            receipt = stream_receipt(text) if stream else headers["x-reef-agent-record-id"]
+            # The shadow target is the manifest's, never a selection: one preview for auto, none for a pin.
+            assert len(service.router.selections) == (1 if model == "auto" else 0)
+            [served], shadows = records_by_purpose(service)
+            assert served.agent_record_id == receipt
+            served_routing = served.payload["metadata"]["routing"]
+            assert (served_routing["target_id"], served_routing["client_visible"]) == (primary, True)
+            assert "primary_request_id" not in served_routing
+            primary_body = {**body, "model": PROVIDER_MODELS[primary]}
+            if not shadowed:
+                # A shadow target that is the request's primary target is called once.
+                assert provider.received == [primary_body] and shadows == []
+                return
+            shadow_body = {key: value for key, value in body.items() if key != "stream_options"}
+            shadow_body.update(model="student-v1", **({"stream": False} if stream else {}))
+            assert sorted(provider.received, key=lambda sent: str(sent["model"])) == [shadow_body, primary_body]
+            # This app is unmanaged, so its request has no finalization scope; the detached shadow sets its own.
+            assert sorted(finalizing) == [("serve", False), ("shadow", True)]
+            [shadow] = shadows
+            routing = shadow.payload["metadata"]["routing"]
+            assert routing["purpose"] == "shadow" and routing["client_visible"] is False
+            assert (routing["execution_outcome"], routing["delivery_outcome"]) == ("completed", "not_started")
+            assert (routing["target_id"], routing["provider_model"], routing["reason"]) == (
+                "student",
+                "student-v1",
+                "shadow_target",
+            )
+            assert (routing["original_selector"], routing["rule_name"]) == (model, None)
+            assert routing["router_config_hash"] == (ROUTER_HASH if model == "auto" else None)
+            assert (
+                routing["snapshot_version"] == served_routing["snapshot_version"] == service.adapter.snapshot.version
+            )
+            assert routing["primary_request_id"] == served_routing["request_id"] != routing["request_id"]
+            assert shadow.agent_record_id != served.agent_record_id
+            assert shadow.payload["model"] == "student-v1" and shadow.payload["metadata"]["caller"] == "kept"
+            assert "student-v1 answered" in json.dumps(shadow.payload["response"])
+            report = await service.client.post(
+                "/reef/report", headers=routing_headers(), json={"score": 1, "references": [receipt]}
+            )
+            assert report.status == 200, await report.text()
+
+    asyncio.run(run())
+
+
+def test_a_held_shadow_never_delays_its_primary_and_a_full_slot_skips_the_next_shadow(tmp_path: Path) -> None:
+    async def run() -> None:
+        provider = EchoProvider(held={"student-v1"}, aborts={"teacher-v2": 1})
+        async with routed_service(
+            tmp_path,
+            default="teacher",
+            shadow="student",
+            provider_chat=provider.chat,
+            shadow_limits=ShadowLimits(max_concurrency=1),
+        ) as service:
+            # The primary's abort retry stays inside its own request; the shadow starts once, outside it.
+            status, text, _ = await service.chat({"model": "auto", "messages": user_message("first")})
+            assert status == 200 and "teacher-v2 answered" in text
+            await provider.wait_for(1)
+            shadows = shadow_tasks(service)
+            assert len(shadows.tasks) == 1
+            assert [
+                record.payload["metadata"]["routing"]["execution_outcome"] for record in records_by_purpose(service)[0]
+            ] == ["aborted", "completed"]
+            # No queue: the only slot is busy, so the next request skips its shadow and is served at once.
+            status, text, _ = await service.chat({"model": "auto", "messages": user_message("second")})
+            assert status == 200 and "teacher-v2 answered" in text
+            assert shadows.skipped == {"saturated": 1, "closed": 0}
+            provider.release.set()
+            await shadows_finished(service)
+            served, [shadow] = records_by_purpose(service)
+            assert [sent["model"] for sent in provider.received].count("student-v1") == 1
+            assert [sent["model"] for sent in provider.received].count("teacher-v2") == 3
+            first_request = served[0].payload["metadata"]["routing"]["request_id"]
+            assert served[1].payload["metadata"]["routing"]["request_id"] == first_request
+            assert shadow.payload["metadata"]["routing"]["primary_request_id"] == first_request
+            assert shadow.payload["messages"] == user_message("first")
+
+    asyncio.run(run())
+
+
+async def oversized(request: web.Request) -> web.Response:
+    return web.json_response({"choices": [{"message": {"content": "x" * 4096}}]})
+
+
+async def oversized_stream(request: web.Request) -> web.StreamResponse:
+    # Chunked, with no Content-Length: the limit is found while reading.
+    response = web.StreamResponse(headers={"Content-Type": "application/json"})
+    await response.prepare(request)
+    for _ in range(8):
+        await response.write(b" " * 512)
+    return response
+
+
+async def oversized_error(request: web.Request) -> web.Response:
+    return web.Response(status=500, text="e" * 4096)
+
+
+async def provider_error(request: web.Request) -> web.Response:
+    return web.Response(status=500, text="shadow provider failed")
+
+
+@pytest.mark.parametrize(
+    ("case", "outcome", "error_type"),
+    [
+        ("error", "error", "UpstreamStatusError"),
+        ("oversized", "error", "ResponseTooLarge"),
+        ("oversized_stream", "error", "ResponseTooLarge"),
+        ("oversized_error", "error", "ResponseTooLarge"),
+        ("timeout", "timeout", "TimeoutError"),
+        ("refused", "error", "ClientConnectorError"),
+        ("write_failure", None, None),
+    ],
+)
+def test_a_failing_shadow_keeps_its_own_record_and_never_touches_the_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, outcome: str | None, error_type: str | None
+) -> None:
+    async def run() -> None:
+        handlers = {
+            "error": provider_error,
+            "oversized": oversized,
+            "oversized_stream": oversized_stream,
+            "oversized_error": oversized_error,
+        }
+        provider = EchoProvider(held={"student-v1"} if case == "timeout" else set())
+        if case in handlers:
+            provider.replies["student-v1"] = handlers[case]
+        # Port 9 (discard) refuses connections; the observer is shadow-only, so readiness never probes it.
+        shadow_target = "observer" if case == "refused" else "student"
+        async with routed_service(
+            tmp_path,
+            default="teacher",
+            shadow=shadow_target,
+            provider_chat=provider.chat,
+            target_urls={"observer": "http://127.0.0.1:9"} if case == "refused" else None,
+            shadow_limits=ShadowLimits(timeout_seconds=0.2, max_response_bytes=1024),
+        ) as service:
+            accept_record = service.dispatcher.accept_record
+
+            def failing_shadow_write(item: AgentRecord) -> AgentRecord:
+                if item.payload["metadata"]["routing"]["purpose"] == "shadow":
+                    raise OSError("record store refused the shadow record")
+                return accept_record(item)
+
+            if case == "write_failure":
+                monkeypatch.setattr(service.dispatcher, "accept_record", failing_shadow_write)
+            try:
+                status, text, headers = await service.chat({"model": "auto", "messages": user_message("hello")})
+                assert status == 200 and "teacher-v2 answered" in text
+                shadows = await shadows_finished(service)
+            finally:
+                provider.release.set()
+            [served], recorded = records_by_purpose(service)
+            assert served.agent_record_id == headers["x-reef-agent-record-id"]
+            assert served.payload["metadata"]["routing"]["execution_outcome"] == "completed"
+            if case == "write_failure":
+                assert recorded == [] and shadows.failed == 1
+                return
+            [shadow] = recorded
+            routing = shadow.payload["metadata"]["routing"]
+            assert (routing["execution_outcome"], shadow.payload["response"]) == (outcome, {"error_type": error_type})
+            assert routing["target_id"] == shadow_target and routing["client_visible"] is False
+            assert shadows.failed == 0 and shadows.cancelled == 0
+
+    asyncio.run(run())
+
+
+def test_an_accepted_shadow_outlives_its_failed_or_disconnected_primary(tmp_path: Path) -> None:
+    async def run() -> None:
+        provider = EchoProvider(held={"student-v1", "teacher-v2"})
+        provider.replies["teacher-v2"] = provider_error
+        async with routed_service(
+            tmp_path, default="teacher", shadow="student", provider_chat=provider.chat
+        ) as service:
+            # A primary that fails at its provider: its error reaches the client; the shadow still answers.
+            failed = asyncio.create_task(service.chat({"model": "auto", "messages": user_message("fails")}))
+            await provider.wait_for(2)
+            provider.release.set()
+            status, _, _ = await failed
+            assert status >= 500
+            await shadows_finished(service)
+            # A client that disconnects while both calls run: the primary is cancelled, the shadow is not.
+            del provider.replies["teacher-v2"]
+            provider.release.clear()
+            provider.waiting.clear()
+            disconnected = asyncio.create_task(service.chat({"model": "auto", "messages": user_message("gone")}))
+            await provider.wait_for(2)
+            disconnected.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await disconnected
+            assert len(shadow_tasks(service).tasks) == 1
+            provider.release.set()
+            await shadows_finished(service)
+            served, shadows = records_by_purpose(service)
+            assert [record.payload["metadata"]["routing"]["execution_outcome"] for record in shadows] == [
+                "completed",
+                "completed",
+            ]
+            assert served[0].payload["metadata"]["routing"]["execution_outcome"] == "error"
+            assert [record.payload["messages"] for record in shadows] == [user_message("fails"), user_message("gone")]
+
+    asyncio.run(run())
+
+
+def test_old_primary_and_shadow_outputs_keep_their_policy_while_a_shadow_only_update_serves_new_requests(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        old_finish = asyncio.Event()
+        first = b'data: {"choices":[{"index":0,"delta":{"content":"first"}}]}\n\n'
+
+        async def teacher_stream(request: web.Request) -> web.StreamResponse:
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(first)
+            await old_finish.wait()
+            await response.write(b'data: {"choices":[{"index":0,"delta":{"content":"last"}}]}\n\ndata: [DONE]\n\n')
+            return response
+
+        provider = EchoProvider(held={"student-v1"}, replies={"teacher-v2": teacher_stream})
+        # Endpoint B: where V2 moves the student and the math student. It serves every model.
+        moved = EchoProvider()
+        moved_app = web.Application()
+        moved_app.router.add_get("/v1/models", Provider().models)
+        moved_app.router.add_post("/v1/chat/completions", moved.chat)
+        async with (
+            TestServer(moved_app) as moved_server,
+            routed_service(
+                tmp_path, managed=True, default="teacher", shadow="student", provider_chat=provider.chat
+            ) as service,
+        ):
+            moved_url = str(moved_server.make_url("")).rstrip("/")
+            old = await service.client.post(
+                "/v1/chat/completions",
+                headers=routing_headers(),
+                json={"model": "auto", "stream": True, "messages": user_message("old")},
+            )
+            try:
+                assert old.status == 200 and await old.content.readuntil(b"\n\n") == first
+                await provider.wait_for(1)
+                closed = await service.lifecycle(command("close_policy", 1))
+                state = await closed.json()
+                # Both old calls are bound: the policy close waits for neither the stream nor the shadow.
+                assert (state["active_requests"], state["pending_selections"], state["pending_shadows"]) == (1, 0, 1)
+                # Only the shadow target and two endpoints change, so the Semantic Router document and runtime
+                # stay the same (test_routing_deployment checks the rendered document).
+                path = write_manifest(
+                    tmp_path / "shadow-only.json",
+                    service.provider_url,
+                    default="teacher",
+                    shadow="math-student",
+                    target_urls={"student": moved_url, "math-student": moved_url},
+                )
+                version = RoutingSnapshot.load(path).version
+                activation = {
+                    "manifest_path": str(path),
+                    "snapshot_version": version,
+                    "router_config_hash": ROUTER_HASH,
+                    "expected_snapshot_version": service.adapter.snapshot.version,
+                }
+                activated = await service.lifecycle(command("activate", 2, policy_close_revision=1, **activation))
+                assert activated.status == 200, await activated.text()
+                service.router.snapshot = RoutingSnapshot.load(path)
+                opened = await service.lifecycle(command("open", 3, policy_close_revision=1))
+                assert opened.status == 200, await opened.text()
+                provider.replies.pop("teacher-v2")
+                status, text, headers = await service.chat({"model": "auto", "messages": user_message("new")})
+                assert status == 200 and "teacher-v2 answered" in text
+                new_receipt = headers["x-reef-agent-record-id"]
+            finally:
+                old_finish.set()
+                provider.release.set()
+            rest = await old.read()
+            assert b"last" in rest and rest.endswith(b"data: [DONE]\n\n")
+            await shadows_finished(service)
+            served, shadows = records_by_purpose(service)
+            # Each old branch keeps the policy it bound; each new branch has the new one.
+            seen = set()
+            for record in [*served, *shadows]:
+                routing = record.payload["metadata"]["routing"]
+                sent = record.payload["messages"][-1]["content"]
+                seen.add((sent, routing["purpose"], routing["target_id"]))
+                expected = service.adapter.snapshot.version if sent == "old" else version
+                assert (routing["snapshot_version"], routing["router_config_hash"]) == (expected, ROUTER_HASH)
+            assert seen == {
+                ("old", "serve", "teacher"),
+                ("old", "shadow", "student"),
+                ("new", "serve", "teacher"),
+                ("new", "shadow", "math-student"),
+            }
+            new_served = next(record for record in served if record.agent_record_id == new_receipt)
+            new_shadow = next(record for record in shadows if record.payload["messages"] == user_message("new"))
+            assert new_shadow.payload["metadata"]["routing"]["primary_request_id"] == (
+                new_served.payload["metadata"]["routing"]["request_id"]
+            )
+            # Each call reached the endpoint of the policy it bound: the old student shadow stayed on endpoint A
+            # although V2 moved the student to B, and the new math-student shadow went to B.
+            calls = {
+                endpoint: sorted((str(sent["model"]), sent["messages"][-1]["content"]) for sent in bodies)
+                for endpoint, bodies in (("A", provider.received), ("B", moved.received))
+            }
+            assert calls == {
+                "A": [("student-v1", "old"), ("teacher-v2", "new"), ("teacher-v2", "old")],
+                "B": [("math-v1", "new")],
+            }
+
+    asyncio.run(run())
+
+
+def test_a_full_close_drains_shadows_a_forced_close_cancels_them_and_shutdown_records_them(tmp_path: Path) -> None:
+    async def run() -> None:
+        provider = EchoProvider(held={"student-v1"})
+        async with routed_service(
+            tmp_path, managed=True, default="teacher", shadow="student", provider_chat=provider.chat
+        ) as service:
+            status, _, _ = await service.chat({"model": "auto", "messages": user_message("first")})
+            assert status == 200
+            await provider.wait_for(1)
+            closed = await service.lifecycle(command("close", 1))
+            state = await closed.json()
+            assert (state["active_requests"], state["pending_shadows"]) == (0, 1)
+            activation = {
+                "manifest_path": str(tmp_path / "routing.json"),
+                "snapshot_version": service.adapter.snapshot.version,
+                "router_config_hash": ROUTER_HASH,
+                "expected_snapshot_version": service.adapter.snapshot.version,
+            }
+            # A full close drains shadow calls too: no publication while one runs.
+            refused = await service.lifecycle(command("activate", 2, **activation))
+            assert refused.status == 409 and "drained" in await refused.text()
+            forced = await service.lifecycle(command("close", 3, cancel_active=True))
+            assert forced.status == 200
+            await shadows_finished(service)
+            assert (await (await service.lifecycle(command("close", 3, cancel_active=True))).json())[
+                "pending_shadows"
+            ] == 0
+            _, [cancelled] = records_by_purpose(service)
+            assert cancelled.payload["metadata"]["routing"]["execution_outcome"] == "cancelled"
+            # Shutdown cancels a running shadow and stores its record before the record store closes.
+            reopened = await service.lifecycle(command("open", 4))
+            assert reopened.status == 200, await reopened.text()
+            status, _, _ = await service.chat({"model": "auto", "messages": user_message("second")})
+            assert status == 200
+            await provider.wait_for(2)
+            shadows = shadow_tasks(service)
+            assert len(shadows.tasks) == 1
+            await service.client.close()
+            assert shadows.closed and not shadows.tasks
+            _, recorded = records_by_purpose(service)
+            assert [record.payload["metadata"]["routing"]["execution_outcome"] for record in recorded] == [
+                "cancelled",
+                "cancelled",
+            ]
+            assert recorded[1].payload["messages"] == user_message("second")
+            provider.release.set()
+
+    asyncio.run(run())
+
+
+def blocked_shadow_writes(
+    service: RoutedService, monkeypatch: pytest.MonkeyPatch, events: list[str]
+) -> tuple[threading.Event, threading.Event]:
+    """Make the record store hold each shadow record until the returned ``release`` is set.
+
+    ``entered`` is set when a shadow record write starts; ``events`` gets ``shadow written`` after it is stored.
+    Other records are stored at once. The write waits at most five seconds for ``release``.
+    """
+    accept_record = service.dispatcher.accept_record
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked(item: AgentRecord) -> AgentRecord:
+        if (
+            item.request_type is not RequestType.INFERENCE
+            or item.payload["metadata"]["routing"]["purpose"] != "shadow"
+        ):
+            return accept_record(item)
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("the test never released the shadow record write")
+        stored = accept_record(item)
+        events.append("shadow written")
+        return stored
+
+    monkeypatch.setattr(service.dispatcher, "accept_record", blocked)
+    return entered, release
+
+
+def test_an_unmanaged_app_closes_its_store_only_after_a_cancelled_shadows_record_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        provider = EchoProvider()
+        async with routed_service(
+            tmp_path, default="teacher", shadow="student", provider_chat=provider.chat, close_dispatcher=True
+        ) as service:
+            events: list[str] = []
+            entered, release = blocked_shadow_writes(service, monkeypatch, events)
+            close = service.dispatcher.close
+
+            def closing_store() -> None:
+                events.append("store closed")
+                close()
+
+            monkeypatch.setattr(service.dispatcher, "close", closing_store)
+            status, _, _ = await service.chat({"model": "auto", "messages": user_message("hello")})
+            assert status == 200
+            # The shadow has its answer and is writing its record when the app shuts down.
+            assert await asyncio.to_thread(entered.wait, 5)
+            shutdown = asyncio.create_task(service.client.close())
+            try:
+                # Shutdown cancels the shadow task during that write; the write stays tracked, not orphaned.
+                shadows = shadow_tasks(service)
+                async with asyncio.timeout(5):
+                    while shadows.tasks:
+                        await asyncio.sleep(0.01)
+                done, _ = await asyncio.wait({shutdown}, timeout=0.2)
+                assert not done and events == []
+            finally:
+                release.set()
+            await shutdown
+            assert events[:2] == ["shadow written", "store closed"]
+
+    asyncio.run(run())
+
+
+def test_a_second_cancellation_never_interrupts_a_shadows_cancelled_record_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        provider = EchoProvider(held={"student-v1"})
+        async with routed_service(
+            tmp_path, managed=True, default="teacher", shadow="student", provider_chat=provider.chat
+        ) as service:
+            entered, release = blocked_shadow_writes(service, monkeypatch, [])
+            try:
+                status, _, _ = await service.chat({"model": "auto", "messages": user_message("hello")})
+                assert status == 200
+                await provider.wait_for(1)
+                # A forced drain cancels the shadow's provider call; the write of its cancelled record then holds.
+                forced = await service.lifecycle(command("close", 1, cancel_active=True))
+                assert forced.status == 200
+                assert await asyncio.to_thread(entered.wait, 5)
+                shadows = shadow_tasks(service)
+                [task] = shadows.tasks
+                # A later forced close, a direct cancel and the shutdown close each find it already cancelling.
+                again = await service.lifecycle(command("close", 2, cancel_active=True))
+                assert (await again.json())["pending_shadows"] == 1
+                shadows.cancel()
+                assert not await shadows.close(0.05)
+                assert not task.done() and shadows.tasks == {task}
+            finally:
+                release.set()
+            await shadows_finished(service)
+            _, [record] = records_by_purpose(service)
+            assert record.payload["metadata"]["routing"]["execution_outcome"] == "cancelled"
+            assert (shadows.cancelled, shadows.failed) == (1, 0)
+            provider.release.set()
+
+    asyncio.run(run())
+
+
+def test_an_offline_shadow_only_target_never_blocks_opening_or_serving(tmp_path: Path) -> None:
+    async def run() -> None:
+        provider = EchoProvider()
+        async with routed_service(
+            tmp_path,
+            managed=True,
+            default="teacher",
+            shadow="observer",
+            provider_chat=provider.chat,
+            target_urls={"observer": "http://127.0.0.1:9"},
+        ) as service:
+            # routed_service opened the child: readiness probed the primary targets, not the observer.
+            state = await (await service.lifecycle(command("open"))).json()
+            assert state["accepting"] is True
+            status, text, _ = await service.chat({"model": "auto", "messages": user_message("hello")})
+            assert status == 200 and "teacher-v2 answered" in text
+            await shadows_finished(service)
+            _, [shadow] = records_by_purpose(service)
+            assert shadow.payload["metadata"]["routing"]["execution_outcome"] == "error"
+        # A target that may serve as a primary keeps its check: an offline teacher fails startup.
+        (tmp_path / "primary").mkdir()
+        with pytest.raises(RoutingRequestError, match="readiness"):
+            async with routed_service(
+                tmp_path / "primary",
+                default="teacher",
+                shadow="student",
+                target_urls={"teacher": "http://127.0.0.1:9"},
+            ):
+                pass
 
     asyncio.run(run())

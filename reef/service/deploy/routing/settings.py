@@ -8,11 +8,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from reef.core.config import config_arguments, config_option, parse_config_values
+from reef.service.routed_shadow import ShadowLimits
 
 
 @dataclass(frozen=True)
 class RoutingDeploymentSettings:
-    """The owned router container: identity, resources, preview limits and recovery policy.
+    """The owned router container: identity, resources, preview limits and recovery policy, and the limits of
+    the REEF child's shadow calls.
 
     Values: ``deployment_id`` is None or 1 to 48 lowercase letters, digits or hyphens, starting with a letter
     or digit. ``restart_policy`` is ``fail_stop`` or ``bounded``; ``max_restarts`` is an int ≥ 0, and ≥ 1
@@ -20,11 +22,13 @@ class RoutingDeploymentSettings:
     repeats allowed. The ready, finalization and container stop timeouts and ``sr_cpus`` are finite and
     positive; ``drain_timeout_seconds`` is finite and ≥ 0. ``sr_management_port`` is an int from 1 to 65535,
     ``selection_timeout_seconds`` an int from 1 to 300, ``preview_max_concurrency`` an int from 1 to 4096,
-    and ``sr_memory_bytes`` a positive int.
+    and ``sr_memory_bytes`` a positive int. ``shadow_max_concurrency``, ``shadow_timeout_seconds`` and
+    ``shadow_max_response_bytes`` have the domains of ``ShadowLimits``.
     Purpose: ``routing_deployment_settings`` makes it from ``reef.routing_deployment``; the controller and
-    the renderer read it. Recovery attempt ``n`` (from 1) waits ``restart_backoff_seconds[min(n - 1,
-    len - 1)]``, so the last delay repeats. These settings apply only when ``reef.routing_manifest`` is set;
-    ``require_identity`` then returns ``deployment_id`` or refuses a deployment without one.
+    the renderer read it, and the REEF child reads its shadow limits (``shadow_limits``). Recovery attempt ``n``
+    (from 1) waits ``restart_backoff_seconds[min(n - 1, len - 1)]``, so the last delay repeats. These settings
+    apply only when ``reef.routing_manifest`` is set; ``require_identity`` then returns ``deployment_id`` or
+    refuses a deployment without one.
     """
 
     deployment_id: str | None = config_option(None, help="Stable local deployment identifier.")
@@ -46,6 +50,15 @@ class RoutingDeploymentSettings:
     )
     sr_cpus: float = config_option(4.0, help="Semantic Router container CPU limit.")
     sr_memory_bytes: int = config_option(4 * 1024**3, help="Semantic Router container memory limit in bytes.")
+    shadow_max_concurrency: int = config_option(
+        ShadowLimits.max_concurrency, help="Shadow calls run at once; a request finding none free skips its shadow."
+    )
+    shadow_timeout_seconds: float = config_option(
+        ShadowLimits.timeout_seconds, help="Seconds one shadow call waits for its provider's answer."
+    )
+    shadow_max_response_bytes: int = config_option(
+        ShadowLimits.max_response_bytes, help="Longest provider body, in bytes, that a shadow call reads."
+    )
 
     def __post_init__(self) -> None:
         if self.deployment_id is not None and (
@@ -89,6 +102,11 @@ class RoutingDeploymentSettings:
             raise ValueError("routing preview_max_concurrency must be an integer from 1 to 4096")
         if type(self.sr_memory_bytes) is not int or self.sr_memory_bytes <= 0:
             raise ValueError("routing sr_memory_bytes must be a positive integer")
+        self.shadow_limits()
+
+    def shadow_limits(self) -> ShadowLimits:
+        """The shadow limits these settings name; ``ShadowLimits`` refuses values outside their domains."""
+        return ShadowLimits(self.shadow_max_concurrency, self.shadow_timeout_seconds, self.shadow_max_response_bytes)
 
     def require_identity(self) -> str:
         """The deployment identifier, which an enabled routing deployment must name."""

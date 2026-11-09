@@ -103,6 +103,9 @@ The manifest (``schema_version: 2``) has three parts:
   predicts one of its labels; it needs ``deployment.domain_classifier``, and
   within one Scenario a label may appear in only one rule, ignoring case. If
   several rules match, the first one listed is used, whatever its kind.
+  Optional ``shadow_target`` names one enabled target that Reef also calls for
+  each of the Scenario's requests whose primary target is another one; see
+  `Shadow targets <#shadow-targets>`__.
 * ``deployment`` pins the Semantic Router image (``semantic_router_image``) by
   digest. Optional ``domain_classifier`` names a local pretrained domain
   classifier: ``model_directory`` (an absolute path without symlinks),
@@ -121,6 +124,48 @@ in any letter case: that prefix names the private router entrypoints.
 See `Routed external-model requests
 <http-api.rst#routed-external-model-requests>`__ for the request and record
 contract.
+
+Shadow targets
+^^^^^^^^^^^^^^
+
+A Scenario's ``shadow_target`` is fixed by the manifest. Semantic Router never
+selects it: its code, pinned version and preview selection are unchanged, and
+changing only a ``shadow_target`` does not change the SR configuration. Adding
+a catalog target for a shadow does change the configuration's model catalog,
+as any added target does. After a request's primary target is selected or
+pinned, Reef binds the shadow target from the same manifest and starts one
+shadow call. It does not wait for it: the client receives only the primary
+response and the primary receipt. A request whose primary target is the shadow
+target calls it once. The shadow target need not be one of the Scenario's
+``targets``. If it is in no Scenario's ``targets``, no request can use it as its
+primary target, and readiness checks skip it, so an offline shadow-only target
+never blocks opening or a policy update. Its credential variable is still
+required.
+
+The shadow call sends the client's body with the shadow target's provider
+model, without streaming (``stream: false``, no ``stream_options``). It is
+never retried. Its wait for the provider's answer ends after
+``shadow_timeout_seconds``; the record write that follows is not part of that
+limit. Reef collects at most ``shadow_max_response_bytes`` of a provider body,
+success or error, and fails the call without parsing a longer one; aiohttp's
+own read buffers come on top of that. At most ``shadow_max_concurrency`` shadow
+calls run at once, each until its record write has finished or failed. There is
+no queue: a request that finds no free slot skips its shadow call, which is
+counted and logged. A failed, timed out or skipped shadow call never changes the
+primary response. Shadow calls share the deployment's hardware, so they can
+still slow the primary call.
+
+A shadow call writes its own INFERENCE record once it has started its provider
+call, whatever the outcome; see `Routed external-model requests
+<http-api.rst#routed-external-model-requests>`__. It writes none if the record
+store refuses the write, or if it is cancelled before its provider call starts.
+A normal policy update does not wait for shadow calls: they finish under the
+policy they started with. Draining the deployment waits for them, and a forced
+drain cancels them. A cancelled call keeps its slot until its ``cancelled``
+record write ends; a later cancellation does not interrupt that write. When Reef
+stops, it cancels the running shadow calls and waits for their record writes and
+every other tracked write, within the finalization deadline, before the record
+store closes.
 
 Managed routing lifecycle
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -204,9 +249,22 @@ through ``--reef.routing-deployment``.
    * - sr_cpus / sr_memory_bytes
      - 4 / 4294967296
      - SR CPU and memory limits.
+   * - shadow_max_concurrency
+     - 4
+     - Shadow calls running at once, from 1 to 4096; a request finding none free skips its shadow call.
+   * - shadow_timeout_seconds
+     - 300
+     - Seconds one shadow call waits for its provider's answer; its record write is not included.
+   * - shadow_max_response_bytes
+     - 8388608
+     - Most provider body bytes, success or error, that a shadow call collects before it refuses the body.
 
-To change targets, rules, a Scenario's default target or its target membership
-without restarting Reef or SR, edit the configured ``reef.routing_manifest`` and
+The shadow defaults are conservative settings, not measured model or GPU
+capacities. Like the preview settings, the shadow settings are part of the
+frozen configuration: changing one needs a restart.
+
+To change targets, rules, a Scenario's default target, its target membership or
+its shadow target without restarting Reef or SR, edit the configured ``reef.routing_manifest`` and
 send ``SIGHUP`` to the ``reef serve`` process. A target can be added, removed,
 enabled or disabled, or given another provider model, revision or endpoint.
 A target that a default or rule still names cannot be removed or disabled in
