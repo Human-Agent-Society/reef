@@ -110,11 +110,11 @@ How Reef runs an agent
        session log, and removes the root.
      - ``dirs``, ``model``, ``run.task``, ``sessions``
    * - Harbor task
-     - Starts the task's container, installs the pinned agent with npm (or
-       uv), copies in the tree, runs ``run.task`` with the instruction, and
+     - Starts the task's container, installs the pinned agent with npm, uv,
+       or from its git checkout into a venv, copies in the tree, runs ``run.task`` with the instruction, and
        scores the tests' reward. The verifier can read the run as ATIF in
        ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
-     - an npm or uv ``install``
+     - an npm, uv or git ``install``
    * - A person's machine
      - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
