@@ -228,6 +228,11 @@ def register_scenario_writes(
         components = await asyncio.to_thread(request_service.dispatcher.restore, scenario, step)
         return web.json_response({"scenario": scenario, "components": dict(components)})
 
+    async def redeploy_scenario(request: web.Request) -> web.Response:
+        scenario = request.match_info["scenario"]
+        await asyncio.to_thread(request_service.dispatcher.redeploy, scenario)
+        return web.json_response({"scenario": scenario})
+
     async def stop_serving_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         artifact_id, component = await read_artifact_selection(request)
@@ -268,6 +273,7 @@ def register_scenario_writes(
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/redeploy", redeploy_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/jobs/{job_id}/cancel", cancel_job)
 
 

@@ -55,7 +55,7 @@ from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
 from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler, StartupSteps
 from reef.inference.provider_protocol import SSEFrameDecoder
-from reef.inference.startup import reported_steps
+from reef.inference.startup import STARTUP_FAILED_PREFIX, reported_steps
 from reef.service.streaming import (
     chat_completion_chunk_identity,
     frame_for_codex,
@@ -81,6 +81,14 @@ ARTIFACT_HEADER = "x-reef-artifact-id"
 # Kept for clients deployed before artifact identity became the public contract.
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
+
+
+def startup_error(error: str | None) -> str:
+    """What a failed startup status says: the message of a runtime's ``StartupFailed`` (RFC #1299), else a fixed text,
+    since other errors can hold paths or secrets."""
+    if error is not None and error.startswith(STARTUP_FAILED_PREFIX):
+        return error.removeprefix(STARTUP_FAILED_PREFIX)
+    return "The inference engine did not start. Check the service logs."
 
 
 class NotServed(ReefError):
@@ -469,7 +477,7 @@ class InferenceReplica:
         return {
             "artifact_id": artifact_id,
             "state": state,
-            "error": "The inference engine did not start. Check the service logs." if state == "failed" else None,
+            "error": startup_error(item.error) if state == "failed" else None,
             "engine": engine,
             "engine_detail": detail,
             "startup": None if steps is None else steps.to_json(),

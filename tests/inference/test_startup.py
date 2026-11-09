@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -13,14 +14,14 @@ from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingCompon
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.served_models import ScheduledStop
-from reef.dispatcher import Dispatcher
+from reef.dispatcher import Dispatcher, serving
 from reef.dispatcher.serving import ServingWorker
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.inference.null import NullInferenceRuntime
-from reef.inference.startup import report_startup
+from reef.inference.startup import StartupFailed, StartupStopped, redeploying, report_startup, stopping
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app
-from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
+from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import WorkLeaseLost
@@ -361,3 +362,137 @@ def test_the_worker_logs_its_ownership_its_opening_and_each_activation(startup, 
     assert any("kept 0 of 0 routes from before" in message for message in messages)
     assert any("scenario math: activated artifact" in message for message in messages)
     assert any("released runtime ownership" in message for message in messages)
+
+
+class StoppableRuntime(PausedRuntime):
+    """An engine whose start waits until the test releases it or the serving work must stop (RFC #1299)."""
+
+    def __init__(self, slots: int = 1) -> None:
+        super().__init__()
+        self.slots = slots
+        self.redeploys: list[bool] = []
+        self.running = 0
+        self.most_running = 0
+        self.lock = threading.Lock()
+
+    @property
+    def serving_slots(self) -> int:
+        return self.slots
+
+    @property
+    def shared_by_training_scenarios(self) -> bool:
+        return True
+
+    def activate_checkpoint(self, artifact, *, scenario=None):
+        self.redeploys.append(redeploying())
+        with self.lock:
+            self.running += 1
+            self.most_running = max(self.most_running, self.running)
+        self.entered.set()
+        try:
+            while not self.release.wait(0.02):
+                if stopping():
+                    raise StartupStopped
+        finally:
+            with self.lock:
+                self.running -= 1
+        if self.fail_start:
+            raise StartupFailed("--language-model-only does not support this model")
+        return StubInferenceRuntime.activate_checkpoint(self, artifact, scenario=scenario)
+
+
+@pytest.fixture
+def stoppable(tmp_path, monkeypatch, request):
+    monkeypatch.setattr(serving, "REPLACED_CHECK_SECONDS", 0.05)
+    runtime = StoppableRuntime(getattr(request, "param", 1))
+    training = StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=True)
+    recipe = TestPolicyRecipe(**runtime_bindings(training, runtime))
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    coordination = memory_coordination()
+    control = Dispatcher(
+        recipe,
+        backends,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=coordination,
+        components=frozenset({"control"}),
+        local_artifact_dir=tmp_path / "control",
+    )
+    worker = ServingWorker(
+        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+    )
+    try:
+        yield control, worker, runtime
+    finally:
+        runtime.release.set()
+        worker.stop()
+        control.close()
+
+
+@pytest.mark.unit
+def test_a_redeploy_stops_the_held_start_and_the_next_control_round_keeps_it(stoppable):
+    control, worker, runtime = stoppable
+    control.create_scenario("math")
+    routes = control.coordination.served_models
+    first = routes.current_request("math")
+    held = threading.Thread(target=worker.run_once)
+    held.start()
+    assert runtime.entered.wait(2)
+    control.redeploy("math")
+    redeploy = routes.current_request("math")
+    assert redeploy.id != first.id and REDEPLOY in redeploy.payload
+    # The held start stops within seconds, not when the engine would have started.
+    held.join(5)
+    assert not held.is_alive()
+    stopped = control.coordination.work_queue.get(SERVING_QUEUE, first.id)
+    assert (stopped.state, stopped.error) == ("failed", serving.REPLACED)
+    # A control round compares the payloads without the redeploy number, so it keeps the redeploy request.
+    control.publisher.run_once()
+    assert routes.current_request("math").id == redeploy.id
+    runtime.release.set()
+    assert worker.run_once()
+    assert runtime.redeploys == [False, True]
+    assert routes.current_request("math").state == "finished" and routes.read_scenario("math")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stoppable", [1, 2], indirect=True)
+def test_the_runtime_s_slots_start_that_many_scenarios_at_once(stoppable):
+    control, worker, runtime = stoppable
+    control.create_scenario("math")
+    control.create_scenario("code")
+    worker.start()
+    deadline = time.monotonic() + 5
+    while runtime.most_running < runtime.slots and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.2)
+    assert runtime.most_running == runtime.slots
+    runtime.release.set()
+    routes = control.coordination.served_models
+    while time.monotonic() < deadline and not all(routes.read_scenario(name) for name in ("math", "code")):
+        time.sleep(0.02)
+    assert all(routes.read_scenario(name) for name in ("math", "code"))
+
+
+@pytest.mark.unit
+def test_the_status_gives_the_message_of_a_startup_failure(stoppable, tmp_path):
+    control, worker, runtime = stoppable
+    runtime.fail_start = True
+    runtime.release.set()
+    control.create_scenario("math")
+    assert worker.run_once()
+    inference = build_inference_app(
+        control.coordination.served_models,
+        SQLiteScenarioStorage(tmp_path / "records"),
+        FixedEngineClients(Answer()),
+        tokens=None,
+    )
+
+    async def run() -> None:
+        async with TestClient(TestServer(inference)) as client:
+            status = await (await client.get(STATUS)).json()
+            assert (status["state"], status["error"]) == (
+                "failed",
+                "--language-model-only does not support this model",
+            )
+
+    asyncio.run(run())
