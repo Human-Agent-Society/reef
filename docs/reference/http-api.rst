@@ -1832,7 +1832,12 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null}
+   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
+    "startup": {"steps": [{"phase": "prepare", "started_at": 1794150000.1, "ended_at": 1794150480.6,
+                           "detail": "Quantizing to NVFP4"},
+                          {"phase": "start", "started_at": 1794150480.6, "ended_at": null,
+                           "detail": "Waiting for a GPU"}],
+                "estimate_seconds": null}}
 
 ``model`` defaults to ``active``. It can also name an active artifact alias
 or an artifact selected for serving beside the active one. An unknown name
@@ -1861,6 +1866,26 @@ returns 404.
 While ``engine`` is ``starting``, ``engine_detail`` can say what the engine
 does now, as one short line, such as ``Loading weights · 0:42``. It is null
 otherwise.
+
+``startup`` gives the artifact's startup in three fixed phases (RFC #1283), so
+that a client shows one step bar for every backend:
+
+* ``prepare``: the serving work waits, deploys the engine, and converts or
+  quantizes the weights.
+* ``start``: a machine or container is found, and the weights reach it.
+* ``load``: the weights go into GPU memory, and kernels, CUDA graphs and
+  warm-up run.
+
+It is ``{steps, estimate_seconds}``. Each step is ``{phase, started_at,
+ended_at, detail}``, in the order of the phases, with times in epoch seconds.
+Only the last step can have ``ended_at`` null: it runs now. ``detail`` is a
+short note of what it does, or null. ``estimate_seconds`` is a guess of the
+seconds until the engine is warm, or null. While the state is ``pending`` or
+``starting``, the steps are ``prepare`` from the startup request, then the
+phases that the runtime reported for this artifact. While a ready artifact's
+engine is ``starting``, they are the phases that the inference handler reports.
+``startup`` is null otherwise. A phase that the backend does not report has no
+step.
 Reading it starts no engine.
 
 The status describes the selected

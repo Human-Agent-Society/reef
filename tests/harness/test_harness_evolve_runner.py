@@ -127,6 +127,7 @@ class StubReefClient:
                 "error": STARTUP_FAILED if state == "failed" else None,
                 "engine": "warm" if state == "ready" else None,
                 "engine_detail": None,
+                "startup": None,
             }
         if path == "/reef/harness/artifacts":
             rows = self._step_rows()
