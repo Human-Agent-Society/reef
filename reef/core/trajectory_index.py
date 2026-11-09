@@ -285,6 +285,18 @@ class TrajectoryIndex:
                 self.by_list[self.calls.pop(record_id).list_sha256].remove(record_id)
 
 
+def conversations(records: Sequence[AgentRecord]) -> list[list[AgentRecord]]:
+    """The inference records of ``records`` linked into conversations by ``TrajectoryIndex``, in the order of their
+    first records. Each conversation holds its records oldest first, without the calls that a retry replaced."""
+    index = TrajectoryIndex()
+    for record in records:
+        index.add(record)
+    by_id = {record.agent_record_id: record for record in records}
+    order = {record_id: position for position, record_id in enumerate(by_id)}
+    ends = (index.trajectory(record_id) for record_id in by_id if index.is_end(record_id))
+    return [[by_id[record_id] for record_id in calls] for calls in sorted(ends, key=lambda calls: order[calls[0]])]
+
+
 __all__ = [
     "CallKey",
     "ParentCandidate",
@@ -292,6 +304,7 @@ __all__ = [
     "best_parent",
     "call_key",
     "comparable_message",
+    "conversations",
     "reply_sha256",
     "sha256_text",
     "trajectory_calls",
