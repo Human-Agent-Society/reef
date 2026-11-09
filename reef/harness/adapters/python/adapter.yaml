@@ -3,7 +3,8 @@
 # One run is one `uv run --script program/main.py <task>`. The program reads the model binding from
 # program/model.json, which Reef renders for each run: the served tree never holds it. The program declares
 # its own dependencies in its inline script metadata (PEP 723), and uv installs them and a Python for the run.
-# It may write its own session log as JSONL under REEF_PROGRAM_SESSION_DIR.
+# It may write its own session log as JSONL under REEF_PROGRAM_SESSION_DIR. A line with a `response` is one
+# model call: the request body, with the response body as `response`. Those lines become the run's ATIF.
 name: python
 binary: uv
 # uv from PyPI at the pinned version. A task's container gets the same version from Astral's installer.
