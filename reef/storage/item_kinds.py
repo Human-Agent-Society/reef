@@ -44,9 +44,19 @@ def json_digest(content: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def evaluation_call_id(evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int) -> str:
-    """The record ID of a call of an evaluation rollout: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``."""
-    return f"{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}"
+def evaluation_call_id(
+    evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int, caller: str = "agent"
+) -> str:
+    """The record ID of a call of an evaluation rollout: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``
+    for an agent call, and ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:<index>`` for a verifier call."""
+    rollout = f"{evaluation_id}:{task_index}:{repeat}:{attempt}"
+    return f"{rollout}:{index}" if caller == "agent" else f"{rollout}:{caller}:{index}"
+
+
+def evaluation_trajectory_id(evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int) -> str:
+    """The ID, after ``<scenario>/``, of a trajectory that the verifier of an evaluation rollout wrote:
+    ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:trajectory:<index>``."""
+    return f"{evaluation_id}:{task_index}:{repeat}:{attempt}:verifier:trajectory:{index}"
 
 
 def task_partition(owner: str) -> str:
@@ -202,13 +212,17 @@ class RecordRules(JsonItemRules):
         origin = metadata["origin"]["scenario"]
         record = copied_record(item_id, content, origin, origin)
         location = metadata["origin"].get("evaluation")
-        names = ("evaluation_id", "task_index", "repeat", "attempt", "index")
-        if (
-            location is not None
-            and record.agent_record_id != f"{origin}/{evaluation_call_id(*map(location.get, names))}"
+        if location is not None and record.agent_record_id != f"{origin}/" + evaluation_call_id(
+            location["evaluation_id"],
+            location["task_index"],
+            location["repeat"],
+            location["attempt"],
+            location["index"],
+            location.get("caller", "agent"),
         ):
             raise ValueError(
-                f"an evaluation call has the ID {origin}/<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>"
+                f"an evaluation call has the ID {origin}/<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>,"
+                " with verifier: before the index of a verifier call"
             )
 
 
@@ -268,6 +282,7 @@ __all__ = [
     "check_artifact_content",
     "copied_record",
     "evaluation_call_id",
+    "evaluation_trajectory_id",
     "json_digest",
     "task_partition",
 ]
