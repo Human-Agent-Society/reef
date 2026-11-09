@@ -430,7 +430,9 @@ class InferenceReplica:
         """Read the current serving work's artifact, state, and safe error without changing it, and for a ready
         artifact its engine's state (``engine_state``, RFC #1269).
 
-        The model is ``active``, an active artifact alias, or an artifact served beside it.
+        The model is ``active``, an active artifact alias, or an artifact served beside it. An artifact that a
+        published route of the model serves already is ``ready``, whatever the state of the work: one request serves
+        the active artifact and each beside one, and the start of one does not change the others.
         Unknown models answer 404; an unreadable or invalid work item answers 503.
         """
         try:
@@ -449,7 +451,13 @@ class InferenceReplica:
             if not isinstance(beside, dict) or model not in beside:
                 raise web.HTTPNotFound(text=f"scenario {scenario!r} serves no model {model!r}")
             artifact_id = model
-        if item.state == "finished":
+        try:
+            route = self.cache.read(scenario, model)
+        except (NotServed, StaleServedModels, LookupError):
+            route = None
+        if item.state == "finished" or (route is not None and route.artifact_id == artifact_id):
+            # A published route serves the artifact already: the request that starts another artifact beside it, or
+            # its failure, does not change this artifact's state.
             state = "ready"
         elif item.state == "failed":
             state = "failed"

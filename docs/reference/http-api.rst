@@ -1841,7 +1841,10 @@ route after startup succeeds. Read its state with:
 
 ``model`` defaults to ``active``. It can also name an active artifact alias
 or an artifact selected for serving beside the active one. An unknown name
-returns 404.
+returns 404. One request serves the active artifact and each artifact beside
+it. An artifact that a published route of ``model`` serves already is
+``ready``, whatever the state of the request: the start of another artifact,
+or its failure, does not change it.
 
 * ``pending``: no worker has taken the startup work.
 * ``starting``: inference has taken it. Downloads, conversion, loading, and
