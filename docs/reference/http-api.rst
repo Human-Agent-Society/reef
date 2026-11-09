@@ -1072,7 +1072,7 @@ The body takes these fields:
   ``rollout.agent`` takes it. ``{"item": "<item id>"}`` runs a harness tree: a
   published artifact item of the scenario's owner, also from another scenario.
   The item has the kind ``harness_plugin``, and ``adapter`` in its metadata. Its
-  adapter must install with npm or uv and call the runtime's API dialect. Each
+  adapter must install with npm, uv or git and call the runtime's API dialect. Each
   agent runs in the task's container. On ``docker``, the container reaches the
   model at ``evaluation.agent_host``. In a remote environment, such as
   ``modal``, the agent bridges the container's loopback to the model through

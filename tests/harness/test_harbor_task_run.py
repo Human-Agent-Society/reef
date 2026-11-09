@@ -101,17 +101,18 @@ def test_a_trial_that_never_ran_the_agent_is_a_failed_trial_with_its_error(tmp_p
     assert failed_trial_error(result.trajectory) == "the image did not build"
 
 
-def test_only_an_adapter_with_an_npm_or_uv_install_and_a_text_prompt_plays_a_task_in_a_container(
+def test_only_an_adapter_with_an_npm_uv_or_git_install_and_a_text_prompt_plays_a_task_in_a_container(
     tmp_path: Path,
 ) -> None:
     assert all(
-        can_run_in_task_container(get_adapter(name)) for name in ("claude", "pi", "opencode", "codex", "python")
+        can_run_in_task_container(get_adapter(name))
+        for name in ("claude", "pi", "opencode", "codex", "python", "hermes")
     )
-    # An adapter whose own command takes the task directory runs it itself; hermes installs from git.
+    # An adapter whose own command takes the task directory runs it itself; native declares no install.
     assert not can_run_in_task_container(replace(get_adapter("pi"), takes_task_directory=True))
-    assert not can_run_in_task_container(get_adapter("hermes"))
-    with pytest.raises(TaskRunError, match="'hermes' cannot play a Harbor task directory"):
-        run_harbor_task(get_adapter("hermes"), {}, str(harbor_task(tmp_path)))
+    assert not can_run_in_task_container(get_adapter("native"))
+    with pytest.raises(TaskRunError, match="'native' cannot play a Harbor task directory"):
+        run_harbor_task(get_adapter("native"), {}, str(harbor_task(tmp_path)))
     with pytest.raises(TaskRunError, match="is not a Harbor task directory"):
         run_harbor_task(get_adapter("pi"), {}, str(tmp_path / "missing"))
 
@@ -154,6 +155,23 @@ def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instructio
     assert 'agent="$HOME/.local/bin/uv"' in run
     assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
     assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
+
+
+def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(tmp_path: Path) -> None:
+    hermes = get_adapter("hermes")
+    (tmp_path / "logs").mkdir()
+    agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(hermes, hermes.install, tmp_path / "files", 60.0))
+    environment = RecordingEnvironment()
+    asyncio.run(agent.install(environment))
+    asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
+
+    tools, install, run = environment.commands[0], environment.commands[1], environment.commands[-2]
+    assert "apt-get install -y curl" in tools and "apt-get install -y git" in tools
+    clone = f"git clone --quiet --depth 1 --branch {hermes.install.ref} {hermes.install.repository}"
+    assert clone in install and 'rm -rf "$HOME/.reef-agent/src/.git"' in install
+    assert '"$HOME/.local/bin/uv" pip install --quiet --python "$HOME/.reef-agent/venv/bin/python" -e' in install
+    assert run.startswith('agent="$HOME/.reef-agent/venv/bin/hermes"')
+    assert agent.get_version_command() == '"$HOME/.reef-agent/venv/bin/hermes" --version'
 
 
 def test_the_agent_writes_the_atif_of_its_sessions_for_the_verifier_and_drops_a_planted_one(tmp_path: Path) -> None:
