@@ -5,9 +5,10 @@ run: a procedure, and a check that the agent runs before it trusts its result, w
 check fails. When the run's task is one of the step's evaluation tasks, the step runs the task with and without the
 candidate (``Services.evaluate``) and keeps the candidate only when it scores higher. A run whose task cannot be
 replayed adds its candidate unverified, and only from a success. When a failed run implicates a skill of the library,
-the step runs the task without that skill, and a skill that does better removed collects a loss; a skill whose losses
-pass its wins by ``max_losses`` leaves the library. The library is the method's state, ``state/skills.json``, and each
-skill is served as ``skills/sl-<slug>/SKILL.md``. The README describes the method and its sources.
+the step runs the task without that skill. A library that does better without it gives the skill a loss, one that does
+worse without it gives a win, and a tie gives neither. A skill whose losses pass its wins by ``max_losses`` leaves the
+library. The library is the method's state, ``state/skills.json``, and each skill is served as
+``skills/sl-<slug>/SKILL.md``. The README describes the method and its sources.
 """
 
 from __future__ import annotations
@@ -358,7 +359,7 @@ class LibraryStep:
             self.ablate_one(replay_task, blamed, event)
 
     def ablate_one(self, task: str, blamed: str, event: dict[str, Any]) -> None:
-        """Replay ``task`` without the skill ``blamed`` and count the replay as its loss or its win.
+        """Replay ``task`` without the skill ``blamed`` and count the replay as its loss, its win or neither.
 
         Nothing runs when the library has no skill ``blamed`` or the step has used its ablations.
         """
@@ -370,8 +371,12 @@ class LibraryStep:
         self.credit(blamed, outcome)
 
     def credit(self, blamed: str, outcome: ReplayOutcome) -> None:
-        """Count a decided ablation of ``blamed``: a loss when the library did better without it, else a win."""
-        if not outcome.decided:
+        """Count an ablation of ``blamed``: a loss when the library did better without it, a win when it did better
+        with it, each by more than the replay's margin. An undecided replay or a tie counts for neither."""
+        # A tie, most often a task that fails with and without the skill, shows nothing about the skill. Counted as a
+        # win, it hid later losses, so a skill that tied often could not leave after the policy it states changed.
+        helped = ReplayOutcome.of_means(outcome.reference, outcome.challenger, self.replay.margin).better
+        if not (outcome.better or helped):
             return
         self.library = [
             replay_counted(skill, lost=outcome.better) if skill.slug == blamed else skill for skill in self.library

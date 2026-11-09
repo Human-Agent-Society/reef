@@ -31,7 +31,9 @@ of the outcomes for and against it and leaves when the count turns against it, a
    wrong.
 3. **Count against implicated skills.** When a failed run implicates a skill and its task can be replayed, the step
    runs the task without the skill and with the full library. A library that scores higher without the skill gives
-   the skill a loss, and otherwise the skill gets a win. At most `max_ablations_per_step` such replays run per step.
+   the skill a loss, and a library that scores higher with it gives a win. A tie gives neither, because a task that
+   fails with and without the skill says nothing about it. At most `max_ablations_per_step` such replays run per
+   step.
 4. **Verify the candidate.** When the run failed and its task can be replayed, the step runs the task with the
    library plus the candidate and with the library alone. The candidate joins (or replaces its old text) only when its mean score is
    higher by more than `min_margin`, and it is marked verified with one more win.

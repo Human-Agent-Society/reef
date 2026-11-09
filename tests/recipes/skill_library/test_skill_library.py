@@ -478,6 +478,34 @@ def test_a_step_replays_at_most_max_ablations_and_a_skill_that_helps_collects_a_
     ]
 
 
+def test_an_ablation_that_ties_counts_for_neither_so_earlier_losses_can_retire_the_skill(tmp_path: Path) -> None:
+    # The task fails with and without Alpha: the tie leaves the counts as they were.
+    state = library_state({"wins": 0, "losses": 1})
+    tied, result, _ = run_step(
+        tmp_path,
+        QueueChat(proposed(None, implicated=["Alpha"])),
+        [scored_run("i1", TASK, 0.0)],
+        scores={},
+        state=state,
+    )
+    assert result.notes["events"][0]["ablations"] == [
+        {"skill": "alpha", "challenger": 0.0, "reference": 0.0, "better": False}
+    ]
+    assert [(row["wins"], row["losses"]) for row in library_of(tied)] == [(0, 1)]
+    # A second loss now retires it. Had the tie counted as a win, the skill would stay.
+    _, result, _ = run_step(
+        tmp_path,
+        QueueChat(proposed(None, implicated=["Alpha"])),
+        [scored_run("i2", TASK, 0.0)],
+        scores={"alpha": 0.0},
+        default=1.0,
+        number=2,
+        tree=tied.tree(),
+        state=tied.state_files(),
+    )
+    assert result.notes["retired"] == ["alpha"]
+
+
 def test_retirement_and_the_cap_rank_skills_by_wins_minus_losses(tmp_path: Path) -> None:
     state = library_state(
         {"verified": True, "wins": 2, "losses": 2}, {"slug": "beta", "verified": True, "wins": 1, "losses": 0}
