@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import io
 import json
+import math
 import tarfile
 import time
 import urllib.request
@@ -304,6 +305,9 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
                 ("sort", 1, 0.0),
             ]
             assert [rollout["state"] for rollout in rollouts] == ["finished"] * 2 + ["failed"] * 2 + ["finished"] * 2
+            assert [rollout["rewards"] for rollout in rollouts] == [{"reward": 1.0}] * 2 + [None] * 2 + [
+                {"reward": 0.0}
+            ] * 2
             assert [rollout["error"] for rollout in rollouts if rollout["task"] == "broken"] == [
                 "ReefError: the rollout reached no model: the sandbox did not start"
             ] * 2
@@ -413,7 +417,8 @@ class JudgingLab(ModelCallingLab):
         (judge / "calls.jsonl").write_text("\n".join([*map(json.dumps, lines), "not json"]) + "\n")
         document = {"schema_version": "ATIF-v1.4", "agent": {"name": "judge"}, "steps": [{"source": "user"}]}
         (judge / "trajectory.json").write_text(json.dumps(document))
-        return replace(row, trial_uri=(self.trials / key).as_uri())
+        rewards = {**row.rewards, "rule": 1.0, "judge": 0.5, "unbounded": math.inf}
+        return replace(row, rewards=rewards, trial_uri=(self.trials / key).as_uri())
 
 
 @pytest.mark.integration
@@ -431,6 +436,8 @@ def test_an_evaluation_keeps_the_calls_and_trajectories_that_its_verifier_wrote(
             rollouts_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/rollouts"
             [rollout] = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
             assert rollout["calls"]["count"] == 1, "the agent's totals leave out the verifier's calls"
+            assert rollout["score"] == 1.0, "the score is the primary reward"
+            assert rollout["rewards"] == {"reward": 1.0, "rule": 1.0, "judge": 0.5}, "only finite rewards stay"
             assert rollout["verifier_calls"] == {"count": 2, "failed": 1, "prompt_tokens": 0, "completion_tokens": 0}
             calls_route = f"{rollouts_route}/0/0/calls"
             agent_calls = (await (await client.get(calls_route, headers=AUTH)).json())["calls"]
