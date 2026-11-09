@@ -26,7 +26,7 @@ from typing import Any, Literal, Self, get_args
 
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
-from reef.core.evaluation import EvaluationCallSummary
+from reef.core.evaluation import EvaluationCallSummary, require_integer
 from reef.core.job_data import JobData
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
@@ -118,8 +118,9 @@ def check_record_origin(value: object) -> dict[str, Any]:
 
     The origin is ``{scenario, artifact_id}`` (``check_origin``), with an optional ``source`` from
     ``RECORD_SOURCES``. The origin of an evaluation call also has ``evaluation``: the non-empty ``evaluation_id``
-    and each field of the call's ``EvaluationCallSummary``, which its constructor checks. The summary is in the
-    metadata so that a reader of the calls of an evaluation needs no content.
+    and each field of the call's ``EvaluationCallSummary``, which its constructor checks. ``caller`` and ``label``
+    may be absent, as in a call kept before RFC #1293: the call is then an agent call without a label. The summary
+    is in the metadata so that a reader of the calls of an evaluation needs no content.
     """
     if not isinstance(value, Mapping):
         raise ValueError("metadata.origin must be {scenario, artifact_id}")
@@ -140,8 +141,10 @@ def check_record_origin(value: object) -> dict[str, Any]:
     if source == "evaluation":
         location = value["evaluation"]
         names = ("evaluation_id", *(entry.name for entry in fields(EvaluationCallSummary)))
-        if not isinstance(location, Mapping) or set(location) != set(names):
+        optional = {"caller", "label"}
+        if not isinstance(location, Mapping) or not set(names) - optional <= set(location) <= set(names):
             raise ValueError("metadata.origin.evaluation must be {" + ", ".join(names) + "}")
+        names = tuple(name for name in names if name in location)
         if not isinstance(location["evaluation_id"], str) or not location["evaluation_id"]:
             raise ValueError("metadata.origin.evaluation.evaluation_id must be a non-empty string")
         try:
@@ -160,16 +163,18 @@ def record_source(metadata: Mapping[str, Any]) -> str:
 def record_link_scope(metadata: Mapping[str, Any]) -> str:
     """The calls that a record item with ``metadata`` can link to (RFC #1054): those of the same scope.
 
-    The scope of a scenario's own call is its origin scenario. The scope of an evaluation call is its evaluation
-    attempt, ``<scenario>/<evaluation_id>:<task_index>:<repeat>:<attempt>``. A scenario name has no ``/``, so an
-    evaluation call never links to a scenario's own call, nor a scenario's own call to an evaluation call.
+    The scope of a scenario's own call is its origin scenario. The scope of an agent call of an evaluation is its
+    evaluation attempt, ``<scenario>/<evaluation_id>:<task_index>:<repeat>:<attempt>``, and the scope of a verifier
+    call that attempt with ``:verifier``. A scenario name has no ``/``, so an evaluation call never links to a
+    scenario's own call, nor a scenario's own call to an evaluation call.
     """
     origin = metadata["origin"]
     if record_source(metadata) != "evaluation":
         return origin["scenario"]
     location = origin["evaluation"]
     rollout = ":".join(str(location[name]) for name in ("evaluation_id", "task_index", "repeat", "attempt"))
-    return f"{origin['scenario']}/{rollout}"
+    caller = location.get("caller", "agent")
+    return f"{origin['scenario']}/{rollout}" + ("" if caller == "agent" else f":{caller}")
 
 
 def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -180,7 +185,9 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     whose origin source is ``evaluation``, has empty ``scenarios`` and the ``evaluation_id`` of its origin, and no
     other record item has ``evaluation_id``. An artifact may have an origin, with a non-null
     ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
-    when a trainer's stage made it (``check_stage_origin``). Other keys are kept as they are. Raise ``ValueError``
+    when a trainer's stage made it (``check_stage_origin``). A trajectory that an evaluation's verifier wrote has
+    empty ``scenarios``, an ``evaluation_id`` and ``evaluation`` (``check_evaluation_trajectory``), and no origin; no
+    other item but an evaluation call has ``evaluation_id``. Other keys are kept as they are. Raise ``ValueError``
     for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
@@ -207,7 +214,31 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
         created["origin"] = origin
     elif "origin" in metadata:
         created["origin"] = check_stage_origin(metadata["origin"])
+    if kind != "record" and ("evaluation_id" in metadata or "evaluation" in metadata):
+        if kind != "trajectory" or "origin" in metadata or created["scenarios"]:
+            raise ValueError(
+                "only an evaluation call or a trajectory of an evaluation's verifier has an evaluation_id; such a "
+                "trajectory has empty scenarios and no origin"
+            )
+        created["evaluation"] = check_evaluation_trajectory(metadata.get("evaluation"), metadata.get("evaluation_id"))
     return created
+
+
+def check_evaluation_trajectory(value: object, evaluation_id: object) -> dict[str, Any]:
+    """Return ``value`` as the ``evaluation`` of a trajectory that an evaluation's verifier wrote (RFC #1293), or
+    raise ``ValueError``: ``{evaluation_id, task_index, repeat, attempt, index, name}``, the fields of its
+    ``EvaluationTrajectory`` with the non-empty ``evaluation_id``, which is also the item's ``evaluation_id``."""
+    names = ("evaluation_id", "task_index", "repeat", "attempt", "index", "name")
+    if not isinstance(value, Mapping) or set(value) != set(names):
+        raise ValueError("metadata.evaluation must be {" + ", ".join(names) + "}")
+    if not isinstance(evaluation_id, str) or not evaluation_id or value["evaluation_id"] != evaluation_id:
+        raise ValueError("metadata.evaluation.evaluation_id is the item's non-empty evaluation_id")
+    for name in ("task_index", "repeat", "index"):
+        require_integer(value[name], f"metadata.evaluation.{name}")
+    require_integer(value["attempt"], "metadata.evaluation.attempt", minimum=1)
+    if not isinstance(value["name"], str) or not value["name"]:
+        raise ValueError("metadata.evaluation.name is a non-empty string")
+    return {name: value[name] for name in names}
 
 
 def check_stage_origin(value: object) -> dict[str, Any]:

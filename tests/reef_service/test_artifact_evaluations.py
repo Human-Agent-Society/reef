@@ -383,6 +383,94 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
     asyncio.run(run())
 
 
+class JudgingLab(ModelCallingLab):
+    """As ``ModelCallingLab``, and the verifier of each trial writes two judge calls, a bad line and a trajectory."""
+
+    def __init__(self, rewards: dict[str, float], trials: Path) -> None:
+        super().__init__(rewards)
+        self.trials = trials
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        row = await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        judge = self.trials / key / "verifier" / "judge"
+        judge.mkdir(parents=True)
+        asked = [{"role": "user", "content": "rate the answer"}]
+        lines = [
+            {
+                "request": {"model": "judge", "messages": asked},
+                "response": {"choices": [{"message": {"role": "assistant", "content": "4"}, "finish_reason": "stop"}]},
+                "started_at": 5.0,
+                "duration_s": 0.5,
+                "label": "judge:quality",
+            },
+            {"request": {"model": "judge", "messages": asked}, "response": {"error": "busy"}, "status": 429,
+             "started_at": 6.0, "duration_s": 0.1},
+        ]  # fmt: skip
+        (judge / "calls.jsonl").write_text("\n".join([*map(json.dumps, lines), "not json"]) + "\n")
+        document = {"schema_version": "ATIF-v1.4", "agent": {"name": "judge"}, "steps": [{"source": "user"}]}
+        (judge / "trajectory.json").write_text(json.dumps(document))
+        return replace(row, trial_uri=(self.trials / key).as_uri())
+
+
+@pytest.mark.integration
+def test_an_evaluation_keeps_the_calls_and_trajectories_that_its_verifier_wrote(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    lab = JudgingLab({"add": 1.0}, tmp_path / "trials")
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            assert (await finished(client, accepted["evaluation_id"]))["mean_score"] == 1.0
+            rollouts_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/rollouts"
+            [rollout] = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
+            assert rollout["calls"]["count"] == 1, "the agent's totals leave out the verifier's calls"
+            assert rollout["verifier_calls"] == {"count": 2, "failed": 1, "prompt_tokens": 0, "completion_tokens": 0}
+            calls_route = f"{rollouts_route}/0/0/calls"
+            agent_calls = (await (await client.get(calls_route, headers=AUTH)).json())["calls"]
+            assert [call["caller"] for call in agent_calls] == ["agent"]
+            listed = (await (await client.get(f"{calls_route}?caller=verifier", headers=AUTH)).json())["calls"]
+            assert [(call["index"], call["status"], call["label"], call["finish_reason"]) for call in listed] == [
+                (0, 200, "judge:quality", "stop"),
+                (1, 429, None, None),
+            ]
+            judged = await (await client.get(f"{calls_route}/1/0?caller=verifier", headers=AUTH)).json()
+            assert judged["caller"] == "verifier" and judged["response"]["choices"][0]["message"]["content"] == "4"
+            agent_call = await (await client.get(f"{calls_route}/1/0", headers=AUTH)).json()
+            assert agent_call["request"]["messages"] == [{"role": "user", "content": "solve add"}]
+            assert (await client.get(f"{calls_route}/1/2?caller=verifier", headers=AUTH)).status == 404
+            assert (await client.get(f"{calls_route}?caller=judge", headers=AUTH)).status == 400
+            trajectories_route = f"{rollouts_route}/0/0/trajectories"
+            [agent] = (await (await client.get(trajectories_route, headers=AUTH)).json())["trajectories"]
+            assert agent["extra"]["reef"]["reward"] == 1.0
+            written, stitched = (
+                await (await client.get(f"{trajectories_route}?caller=verifier", headers=AUTH)).json()
+            )["trajectories"]
+            assert written["agent"] == {"name": "judge"}
+            assert written["extra"]["reef"]["evaluation"] == {
+                "evaluation_id": accepted["evaluation_id"],
+                "task": "add",
+                "task_index": 0,
+                "repeat": 0,
+                "attempt": 1,
+                "caller": "verifier",
+                "file": "trajectory.json",
+                "scored": False,
+            }
+            assert stitched["extra"]["reef"]["reward"] is None
+            assert stitched["extra"]["reef"]["evaluation"]["caller"] == "verifier"
+            assert [record["agent_record_id"] for record in stitched["extra"]["reef"]["records"]] == [
+                f"{accepted['evaluation_id']}:0:0:1:verifier:0"
+            ]
+            export_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/trajectories"
+            exported = (await (await client.get(export_route, headers=AUTH)).text()).splitlines()
+            assert len(exported) == 1, "the export holds the agent's trajectories only"
+
+    asyncio.run(run())
+
+
 @pytest.mark.integration
 def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
@@ -531,6 +619,7 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
         "task_index": 2,
         "repeat": 0,
         "attempt": 3,
+        "caller": "agent",
         "conversation": 0,
         "scored": True,
     }
