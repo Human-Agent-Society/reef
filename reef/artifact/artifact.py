@@ -19,6 +19,7 @@ __all__ = [
     "ARTIFACT_ID_METADATA_KEY",
     "LOCAL_SNAPSHOT_PREFIX",
     "SNAPSHOT_METADATA_KEYS",
+    "TRAINING_STARTS_METADATA_KEY",
     "Artifact",
     "ArtifactConflict",
     "ArtifactError",
@@ -33,6 +34,8 @@ __all__ = [
     "content_metadata",
     "decode_snapshot_ref",
     "encode_snapshot_ref",
+    "training_starts_of",
+    "with_training_starts",
 ]
 
 #: Files a repository adds to a materialized snapshot; a snapshot with nothing else holds no weights.
@@ -41,6 +44,8 @@ REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 ARTIFACT_ID_METADATA_KEY = "artifact_id"
 #: Metadata keys that describe a snapshot, not the content of the artifact it holds.
 SNAPSHOT_METADATA_KEYS = frozenset({COMPONENTS_METADATA_KEY, "scenario_commit_record"})
+#: The key of an artifact's own metadata that names its training starts (RFC #1263).
+TRAINING_STARTS_METADATA_KEY = "training_starts"
 
 
 class ArtifactError(ReefError):
@@ -138,7 +143,8 @@ class Artifact:
         """The artifact that this value holds: the artifact of a component view, or the only component of a snapshot.
 
         New artifacts record an independent ID before publication. A component
-        view keeps that ID when another snapshot carries it.
+        view keeps that ID when another snapshot carries it, and a use through an artifact item keeps it in another
+        scenario (RFC #1218).
         A snapshot containing several components has no single artifact ID;
         callers must select a component.
         """
@@ -203,14 +209,16 @@ class Artifact:
         *,
         metadata: Mapping[str, object] | None = None,
         repository: ArtifactRepository | None = None,
+        artifact_id: str | None = None,
     ) -> Artifact:
-        """Create an unpublished artifact with a fresh ID that staging and publication preserve."""
+        """Create an unpublished artifact with the ID ``artifact_id``, or a fresh one, that staging and publication
+        preserve. ``artifact_id`` names an artifact that already exists elsewhere, with the same content."""
         token = uuid.uuid4().hex
         stored_metadata = dict(metadata or {})
         stored_metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
         manifest = snapshot_components(stored_metadata)
         if manifest is None:
-            stored_metadata[ARTIFACT_ID_METADATA_KEY] = f"artifact:{token}"
+            stored_metadata[ARTIFACT_ID_METADATA_KEY] = artifact_id or f"artifact:{token}"
         else:
             manifest = SnapshotComponents(
                 {
@@ -268,3 +276,28 @@ def content_metadata(snapshot: Artifact, component: str | None) -> dict[str, obj
     if component is None or manifest is None:
         return {key: value for key, value in snapshot.metadata.items() if key not in SNAPSHOT_METADATA_KEYS}
     return dict(manifest.entries[component].metadata)
+
+
+def training_starts_of(artifact: Artifact) -> tuple[str, ...]:
+    """The artifact IDs of the training starts of ``artifact`` (RFC #1263), nearest first: the training start of
+    the trainer that made it, then that start's own training starts. Empty for an artifact that no training made.
+
+    ``artifact`` is one artifact: a flat snapshot or a component view. Raise ``ValueError`` when its metadata holds
+    another value than a list of non-empty strings.
+    """
+    starts = artifact.metadata.get(TRAINING_STARTS_METADATA_KEY, [])
+    if not isinstance(starts, list) or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError(f"an artifact's training starts are a list of artifact IDs, not {starts!r}")
+    return tuple(starts)
+
+
+def with_training_starts(artifact: Artifact, starts: tuple[str, ...]) -> Artifact:
+    """``artifact``, unpublished, with ``starts`` as the training starts in its own metadata."""
+    if not starts or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError("training starts are a non-empty tuple of artifact IDs")
+    return Artifact(
+        artifact.ref,
+        artifact.repository,
+        local_path=artifact.local_path,
+        metadata={**artifact.storage_metadata, TRAINING_STARTS_METADATA_KEY: list(starts)},
+    )

@@ -15,7 +15,7 @@ from aiohttp import web
 from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, write_domain_classifier
 
 from reef.service import assembly
-from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
+from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate, render_external
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 from reef.service.lifecycle import LifecycleSettings
@@ -244,6 +244,45 @@ def test_a_shadow_target_never_reaches_the_router_configuration(deployment_manif
     assert (tmp_path / "shadowed" / "router.yaml").read_bytes() == (tmp_path / "base" / "router.yaml").read_bytes()
     assert shadowed.version != base.version
     assert shadowed.scenarios["code-opd"].shadow_target == "math-student"
+
+
+def test_external_router_keeps_shadow_settings_in_reef(deployment_manifest: Path, tmp_path: Path) -> None:
+    manifest = json.loads(deployment_manifest.read_text())
+    manifest["scenarios"]["code-opd"]["shadow_target"] = "math-student"
+    deployment_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    config = normalize_service_config(
+        {
+            "reef": {
+                "recipe": "recipe",
+                "routing_manifest": str(deployment_manifest),
+                "routing_deployment": {
+                    "lifecycle": "external",
+                    "sr-management-port": 50100,
+                    "shadow-max-concurrency": 2,
+                    "shadow-timeout-seconds": 30,
+                    "shadow-max-response-bytes": 4096,
+                },
+            }
+        }
+    )
+    settings = service_config_from_mapping(config).routing_deployment
+    assert settings.shadow_limits() == ShadowLimits(2, 30, 4096)
+    output = tmp_path / "external-router.yaml"
+    snapshot = render_external(deployment_manifest, output, settings)
+    assert snapshot.scenarios["code-opd"].shadow_target == "math-student"
+    router = yaml.safe_load(output.read_text())
+    management = router["global"]["services"]["management_api"]
+    assert (management["bind_address"], management["port"], management["remote_exposure"]) == (
+        "127.0.0.1",
+        50100,
+        False,
+    )
+    default_output = tmp_path / "external-default-limits.yaml"
+    render_external(
+        deployment_manifest, default_output, RoutingDeploymentSettings(lifecycle="external", sr_management_port=50100)
+    )
+    assert output.read_bytes() == default_output.read_bytes()
+    assert "shadow" not in output.read_text()
 
 
 def test_nondefault_shadow_limits_reach_the_routed_child_that_production_assembly_builds(

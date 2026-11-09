@@ -23,10 +23,10 @@ from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
-from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.segments import SegmentStore
+from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.tasks import TaskFileStore
 
 
@@ -41,7 +41,7 @@ class ServiceConfig:
 
     ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
     takes a blank value as not supplied, and nothing checks the file when the value is made.
-    ``routing_deployment`` holds the managed router's settings; loading a configuration parses and checks
+    ``routing_deployment`` holds the router's settings; loading a configuration parses and checks
     them even when routing is off, but only a routed deployment acts on them. Starting managed routing also
     needs a deployment ID, a record-only recipe and a loopback host; the controller and app assembly check
     those when they start, not here.
@@ -80,7 +80,7 @@ class ServiceConfig:
     routing_manifest: str | None = config_option(
         None,
         public_path=("reef", "routing_manifest"),
-        help="External-target routing manifest; reef serve manages Semantic Router for a record-only recipe.",
+        help="External-target routing manifest for a record-only recipe; see reef.routing_deployment.lifecycle.",
     )
     routing_deployment: RoutingDeploymentSettings = field(default_factory=RoutingDeploymentSettings)
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
@@ -252,6 +252,13 @@ class ServiceConfig:
         "host.docker.internal",
         public_path=("evaluation", "agent_host"),
         help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
+    )
+    #: The rollouts that one process of the evaluation service runs at once, across evaluations. Each one holds a
+    #: sandbox of its task.
+    evaluation_max_sandboxes: int = config_option(
+        4,
+        public_path=("evaluation", "max_sandboxes"),
+        help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
     )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
@@ -458,6 +465,9 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        sandboxes = self.evaluation_max_sandboxes
+        if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
+            raise ValueError("evaluation.max_sandboxes must be a positive integer")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:
@@ -550,7 +560,7 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
             "object",
             False,
             {},
-            "Local Semantic Router lifecycle settings; reef serve owns routing whenever routing_manifest is set.",
+            "Semantic Router settings; reef serve owns the router unless the lifecycle is external.",
             public_path=("reef", "routing_deployment"),
         ),
         ConfigArgument(

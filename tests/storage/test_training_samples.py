@@ -196,6 +196,15 @@ def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(scenario):
     assert (second.train_count(""), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
 
 
+def test_a_commit_counts_more_samples_than_one_statement_can_name(scenario):
+    # PostgreSQL takes at most 65535 parameters in one statement, and each count row has several.
+    sample_ids = [f"t{index}" for index in range(20_000)]
+    commit = training_commit(1, *(consumed_sample_id(sample_id) for sample_id in sample_ids))
+    scenario.session.commit_step(expected_step=0, commit=commit)
+    counts = scenario.session.training_state.train_counts(sample_ids)
+    assert len(counts) == len(sample_ids) and counts["t19999"] == {"": 1}
+
+
 def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2", math="train")])
     scenario.session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), component="a"))
@@ -293,14 +302,14 @@ def test_a_start_drops_the_sample_store_and_the_train_counts_of_its_stage_sample
         session.commit_step(expected_step=0, commit=training_commit(1, *consumed, component="a"))
         state = session.training_state
         schema = state.counts.table.schema
-        with state.records._transaction(write=True) as connection:
+        with state.database._transaction(write=True) as connection:
             storage_id = state.counts.scope.get("storage_id")
             legacy_sample_tables(connection, schema, storage_id)
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
         assert state.train_counts(["upload", "a:r1:0"]) == {"upload": {"a": 1}}
-        with state.records._transaction(write=False) as connection:
+        with state.database._transaction(write=False) as connection:
             assert not inspect(connection).has_table("training_sample", schema=schema)
             assert not inspect(connection).has_table("sample_record", schema=schema)
 
@@ -309,7 +318,7 @@ def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_stora
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
         schema = state.counts.table.schema
-        with state.records._transaction(write=True) as connection:
+        with state.database._transaction(write=True) as connection:
             legacy = Table(
                 "manual_buffer",
                 MetaData(schema=schema),
@@ -321,6 +330,6 @@ def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_stora
     with (
         closing(open_durable_storage()) as storage,
         closing(storage.open("math")) as session,
-        session.training_state.records._transaction(write=False) as connection,
+        session.training_state.database._transaction(write=False) as connection,
     ):
         assert not inspect(connection).has_table("manual_buffer", schema=schema)

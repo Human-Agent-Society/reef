@@ -13,7 +13,7 @@ from tests.support.serving import wait_for_serving
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import AgentRecord, RequestType
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import ItemIdentity, RootSource
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
@@ -583,7 +583,10 @@ def test_composite_item_roots_are_checked_before_registration(
     else:
         (directory / "rules.md").write_text("imported rules")
     item = ItemStart(
-        "upload-1", directory.as_uri(), DirectorySource(directory, source_version="v1", link=False), component
+        ItemIdentity("upload-1"),
+        directory.as_uri(),
+        DirectorySource(directory, source_version="v1", link=False),
+        component,
     )
     dispatcher = Dispatcher(
         recipe,
@@ -624,7 +627,9 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
     (notes / "notes.txt").write_text("no weights")
 
     def item(directory: Path) -> ItemStart:
-        return ItemStart("upload-1", directory.as_uri(), DirectorySource(directory, source_version="v1", link=False))
+        return ItemStart(
+            ItemIdentity("upload-1"), directory.as_uri(), DirectorySource(directory, source_version="v1", link=False)
+        )
 
     dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:

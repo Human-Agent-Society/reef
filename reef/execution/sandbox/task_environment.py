@@ -28,8 +28,8 @@ from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 #: Every Harbor task environment type Reef passes to Harbor: local Docker, and each cloud type in
 #: ``REMOTE_TASK_ENVIRONMENTS``.
 HARBOR_TASK_ENVIRONMENTS: tuple[str, ...] = ("docker", *REMOTE_TASK_ENVIRONMENTS)
-#: The top level names that Harbor's e2b environment imports from the e2b package (harbor 0.20.0,
-#: ``harbor/environments/e2b.py`` lines 30 to 60); without one of them Harbor marks the environment missing.
+#: The top level names that Harbor's e2b environment imports from the e2b package (harbor 0.25.0,
+#: ``harbor/environments/e2b.py`` lines 32 to 39); without one of them Harbor marks the environment missing.
 HARBOR_E2B_NAMES = ("ALL_TRAFFIC", "AsyncSandbox", "AsyncTemplate", "FileType", "SandboxNetworkOpts", "Template")
 DOCKER_PROBE_TIMEOUT_S = 5.0
 

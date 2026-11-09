@@ -26,6 +26,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 from aiohttp import web
@@ -50,7 +51,8 @@ from reef.service.assembly import (
 from reef.service.auth import evaluation_token_for
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.engine_clients import DeploymentEngineClients
-from reef.service.inference_service import build_inference_app
+from reef.service.inference_service import ServedModelsCache, build_inference_app
+from reef.service.routed_replica import ReplicaRecords, add_replica_routing
 from reef.service.web import service_application
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
@@ -86,8 +88,9 @@ class InferenceApp(ComponentApp):
         coordination = open_service_coordination(settings)
         try:
             backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
-            storage, _ = open_scenario_storage(settings)
-            # Records that this service appends are traced as the records that control appends are.
+            # Records that this service appends are record items (RFC #1219), traced as the records that control
+            # appends are.
+            storage, data_store = open_scenario_storage(settings)
             record_observer = build_record_observer(settings.tracing_config, environ=environ)
             if record_observer is not None:
                 storage = ObservedScenarioStorage(storage, record_observer)
@@ -107,6 +110,21 @@ class InferenceApp(ComponentApp):
             timeout_seconds=timeout_seconds,
             for_codex=recipe.harness_adapter == "codex",
         )
+        if settings.routing_manifest is not None:
+            try:
+                add_replica_routing(
+                    app,
+                    settings,
+                    recipe,
+                    ReplicaRecords(ServedModelsCache(coordination.served_models), storage),
+                    environ,
+                )
+            except BaseException:
+                data_store.close()
+                storage.close()
+                coordination.close()
+                close_runtimes(recipe.job_components(), runtime)
+                raise
 
         worker = None
         if backends is not None:
@@ -122,6 +140,8 @@ class InferenceApp(ComponentApp):
         async def close_inference(app: web.Application) -> None:
             if worker is not None:
                 await asyncio.to_thread(worker.stop)
+            # The data store shares the storage's task file store, so it closes first.
+            data_store.close()
             storage.close()
             coordination.close()
             close_runtimes(recipe.job_components(), runtime)
@@ -277,13 +297,18 @@ def build_component_app(
 ) -> web.Application:
     """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
 
+    Every service of a deployment reads the same settings. With ``external`` routing only ``inference`` routes; the
+    other services ignore the manifest.
+
     Raise ``ValueError`` for an unknown service or a managed routing manifest, which requires the orchestrator.
     """
     builder = COMPONENT_APPS.get(component)
     if builder is None:
         raise ValueError(f"unknown service {component!r}; the services are {SERVICE_COMPONENTS}")
-    if settings.routing_manifest is not None:
+    if settings.routing_manifest is not None and settings.routing_deployment.lifecycle == "managed":
         raise ValueError("managed routing requires reef serve without --component")
+    if component != "inference":
+        settings = replace(settings, routing_manifest=None)
     return builder.build(settings, os.environ if environ is None else environ)
 
 

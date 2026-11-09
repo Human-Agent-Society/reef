@@ -15,7 +15,9 @@ where they are. There are two kinds of artifact item of an owner ``o``.
   ``adapter`` in its metadata for a harness tree.
 
 ``scenarios`` is empty for every artifact item: a scenario uses one by importing its ``source_uri``
-(``ArtifactImports.import_item``), which makes a new artifact of that scenario. An evaluation of a model artifact
+(``ArtifactImports.import_item``). The artifact keeps its ID in that scenario, and it gets no second item, so the
+library holds it once (RFC #1218). An upload gets its ID, ``metadata.artifact_id``, at its first use. An evaluation
+of a model artifact
 can also read a harness tree from an item, and makes no artifact (``ArtifactEvaluations.tree_harness``).
 
 The data service makes the items of a scenario's artifacts when it takes an ``artifact_copy`` item from the ``data``
@@ -37,7 +39,11 @@ from reef.storage.work_queue import WorkItem, WorkQueue
 
 
 def artifact_item(
-    scenario: str, row: Mapping[str, Any], kind: str | None, source_uri: str | None, adapter: str | None = None
+    scenario: str,
+    row: Mapping[str, Any],
+    kind: str | None,
+    source_uri: str | None,
+    adapter: str | None = None,
 ) -> NewItem:
     """The artifact item of ``row``, one artifact that ``scenario`` lists, as the module docstring defines it.
 

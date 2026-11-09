@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
+from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import data_storage, made_task, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
@@ -36,9 +38,8 @@ from reef.record2sample import (
 )
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
-from reef.storage.data import NewItem
+from reef.storage.data import MAX_QUERY_LIMIT, NewItem
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
@@ -252,7 +253,7 @@ def test_the_pipeline_adds_its_stages_background_work_and_status_and_closes_them
 
 @pytest.mark.unit
 def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_released() -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("s")
     for record in (inference("i1"), inference("drop-1"), report("r1", "i1")):
         records.append(record)
     trainer = Trainer.build(
@@ -276,7 +277,7 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
 
 @pytest.mark.unit
 def test_the_trainer_reports_the_stages_background_work() -> None:
-    trainer = Trainer.build("s", SQLiteRecordStore(), pipeline_factory=RecordingPipeline)
+    trainer = Trainer.build("s", memory_records("s"), pipeline_factory=RecordingPipeline)
     processor = trainer.pipeline
     assert isinstance(processor, RecordingPipeline)
     assert not trainer.pipeline.background_jobs_running()
@@ -384,7 +385,7 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
 
 @pytest.mark.unit
 def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("s")
     records.append(inference("i1"))
     trainer = Trainer.build(
         "s",
@@ -503,12 +504,9 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
 
 
 @pytest.mark.unit
-def test_a_pipeline_refuses_a_trajectory_that_its_task_to_job_stage_does_not_accept() -> None:
+def test_a_pipeline_does_not_train_a_trajectory_that_its_task_to_job_stage_does_not_accept() -> None:
     context = PipelineContext("s")
     processor = TrainingPipeline(context, sample2job=PairJobData(context, None, None))
-    with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
-        processor.uploaded_sample(TRAJECTORY)
-    # A stored upload does not reach its job data either.
     upload(processor.store.store, "t1")
     assert not processor.ready(1)
     assert processor.status()["ready_samples"] == 0
@@ -564,6 +562,24 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     assert processor.status()["ready_samples"] == 0
     assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"
     assert not processor.ready(1)
+
+
+@pytest.mark.unit
+def test_the_records_of_an_artifact_served_beside_train_while_it_serves() -> None:
+    context = PipelineContext("s")
+    later_tasks = LaterSamples()
+    processor = TrainingPipeline(context, record2sample=later_tasks, sample2job=UploadJobData(context, 1, None))
+    processor.push(inference("i1"))
+    later_tasks.finish(
+        "i1", SampleResult.ready((policy_trajectory("i1", [1], [1], [0.0], 1.0, artifact_id="beside"),))
+    )
+    processor.produce()
+    processor.observe_serving_artifact_id("active")
+    assert auto_ids(processor) == (), "an artifact outside the served history is stale"
+    processor.served_artifacts.restore_beside(("beside",))
+    assert len(auto_ids(processor)) == 1
+    processor.served_artifacts.restore_beside(())
+    assert auto_ids(processor) == ()
 
 
 @pytest.mark.unit
@@ -727,7 +743,7 @@ def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train() -> 
 def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     replay_before_commit: bool, references: tuple[str, ...], legacy_stripped: bool
 ) -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("s")
     aborted = inference("aborted")
     aborted = replace(
         aborted,
@@ -757,7 +773,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
         root=STUB_ROOT,
     )
     if replay_before_commit:
-        trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
+        trainer.restore_consumed_records(frozenset())
     make_samples(trainer)
     result = trainer.advance_job()
     assert result is not None
@@ -784,7 +800,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
         job_loop=counting_jobs(),
         root=STUB_ROOT,
     )
-    restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
+    restored.restore_consumed_records(prepared.consumed_ids)
     records.append(report("later-report", "aborted"))
     make_samples(restored)
     assert restored.advance_job() is None
@@ -813,6 +829,30 @@ def test_a_request_names_stored_samples_of_one_kind_that_the_trainer_can_train()
     assert [stored.sample_id for stored, _ in processor.request_entries(training_request("upload", "gone"))] == [
         "upload"
     ]
+
+
+@pytest.mark.unit
+def test_a_request_reads_its_samples_in_batches_and_a_poll_does_not_read_them_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = PipelineContext("s", training_mode="manual")
+    processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
+    names = [f"upload-{index}" for index in range(MAX_QUERY_LIMIT + 1)]
+    upload(processor.store.store, *names)
+    data = processor.store.store.data
+    read_many, reads = data.read_many, []
+
+    def counted(owner: str, item_ids: Any, **options: Any) -> Any:
+        reads.append(len(item_ids))
+        return read_many(owner, item_ids, **options)
+
+    monkeypatch.setattr(data, "read_many", counted)
+    request = training_request(*names)
+    processor.check_request(request)
+    assert reads == [MAX_QUERY_LIMIT, 1]
+    processor.queue_requests([request])
+    assert processor.holds_job_data(None) and processor.holds_job_data(None)
+    assert reads == [MAX_QUERY_LIMIT, 1] * 2, "the pipeline decides once whether it takes a queued request"
 
 
 class TaskJobData(RecordingJobData):

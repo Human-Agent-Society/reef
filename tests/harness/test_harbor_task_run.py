@@ -2,17 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import shutil
+import socket
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
+from harbor.models.agent.context import AgentContext
 
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
 from reef.harness.adapters import get_adapter
-from reef.harness.harbor.agent import CONTAINER_ROOT, can_run_in_task_container, run_harbor_task, task_agent_tools
+from reef.harness.harbor.agent import (
+    CONTAINER_ROOT,
+    AdapterAgent,
+    TreeAgent,
+    adapter_agent_kwargs,
+    can_run_in_task_container,
+    run_harbor_task,
+    task_agent_tools,
+    tree_agent,
+)
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError
@@ -85,15 +101,172 @@ def test_a_trial_that_never_ran_the_agent_is_a_failed_trial_with_its_error(tmp_p
     assert failed_trial_error(result.trajectory) == "the image did not build"
 
 
-def test_only_an_adapter_with_an_npm_install_and_a_text_prompt_plays_a_task_in_a_container(tmp_path: Path) -> None:
-    assert all(can_run_in_task_container(get_adapter(name)) for name in ("claude", "pi", "opencode", "codex"))
-    # An adapter whose own command takes the task directory runs it itself; hermes installs from git.
+def test_only_an_adapter_with_an_npm_uv_or_git_install_and_a_text_prompt_plays_a_task_in_a_container(
+    tmp_path: Path,
+) -> None:
+    assert all(
+        can_run_in_task_container(get_adapter(name))
+        for name in ("claude", "pi", "opencode", "codex", "python", "hermes")
+    )
+    # An adapter whose own command takes the task directory runs it itself; native declares no install.
     assert not can_run_in_task_container(replace(get_adapter("pi"), takes_task_directory=True))
-    assert not can_run_in_task_container(get_adapter("hermes"))
-    with pytest.raises(TaskRunError, match="'hermes' cannot play a Harbor task directory"):
-        run_harbor_task(get_adapter("hermes"), {}, str(harbor_task(tmp_path)))
+    assert not can_run_in_task_container(get_adapter("native"))
+    with pytest.raises(TaskRunError, match="'native' cannot play a Harbor task directory"):
+        run_harbor_task(get_adapter("native"), {}, str(harbor_task(tmp_path)))
     with pytest.raises(TaskRunError, match="is not a Harbor task directory"):
         run_harbor_task(get_adapter("pi"), {}, str(tmp_path / "missing"))
+
+
+class RecordingEnvironment:
+    """A task container that keeps each command an agent runs in it and each file it uploads, and holds no session
+    directory. ``events`` is both, in order."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+        self.uploads: dict[str, str] = {}
+        self.events: list[str] = []
+        self.stream_handle = SimpleNamespace(provider="modal")
+
+    async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+        self.commands.append(command)
+        self.events.append(command)
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def upload_dir(self, source, target) -> None:
+        pass
+
+    async def upload_file(self, source, target) -> None:
+        self.uploads[target] = Path(source).read_text()
+
+    async def is_dir(self, path) -> bool:
+        return False
+
+
+def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instruction(tmp_path: Path) -> None:
+    python = get_adapter("python")
+    (tmp_path / "logs").mkdir()
+    agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0))
+    environment = RecordingEnvironment()
+    asyncio.run(agent.install(environment))
+    asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
+
+    install, run = environment.commands[1], environment.commands[-2]
+    assert f"curl -LsSf https://astral.sh/uv/{python.install.version}/install.sh" in install
+    assert 'agent="$HOME/.local/bin/uv"' in run
+    assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
+    assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
+
+
+def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(tmp_path: Path) -> None:
+    hermes = get_adapter("hermes")
+    (tmp_path / "logs").mkdir()
+    agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(hermes, hermes.install, tmp_path / "files", 60.0))
+    environment = RecordingEnvironment()
+    asyncio.run(agent.install(environment))
+    asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
+
+    tools, install, run = environment.commands[0], environment.commands[1], environment.commands[-2]
+    assert "apt-get install -y curl" in tools and "apt-get install -y git" in tools
+    clone = f"git clone --quiet --depth 1 --branch {hermes.install.ref} {hermes.install.repository}"
+    assert clone in install and 'rm -rf "$HOME/.reef-agent/src/.git"' in install
+    assert '"$HOME/.local/bin/uv" pip install --quiet --python "$HOME/.reef-agent/venv/bin/python" -e' in install
+    assert run.startswith('agent="$HOME/.reef-agent/venv/bin/hermes"')
+    assert agent.get_version_command() == '"$HOME/.reef-agent/venv/bin/hermes" --version'
+
+
+def test_the_agent_writes_the_atif_of_its_sessions_for_the_verifier_and_drops_a_planted_one(tmp_path: Path) -> None:
+    pi = get_adapter("pi")
+    logs = tmp_path / "logs"
+    shutil.copytree(Path(__file__).parent / "data" / "pi_session_real", logs / "sessions")
+    (logs / "trajectory.cont-3.json").write_text('{"steps": []}')
+    agent = AdapterAgent(logs, **adapter_agent_kwargs(pi, pi.install, tmp_path / "files", 60.0))
+    agent.populate_context_post_run(AgentContext())
+    assert sorted(path.name for path in logs.glob("trajectory*.json")) == ["trajectory.json"]
+    document = json.loads((logs / "trajectory.json").read_text())
+    assert document["steps"][-1]["message"] == "READY"
+    assert "continued_trajectory_ref" not in document
+
+
+def test_a_run_in_segments_writes_one_file_for_each_segment_with_its_continuation(tmp_path: Path) -> None:
+    pi = get_adapter("pi")
+    agent = AdapterAgent(tmp_path, **adapter_agent_kwargs(pi, pi.install, tmp_path / "files", 60.0))
+    agent.reader = SimpleNamespace(to_atif=lambda path: ({"steps": [1]}, {"steps": [2]}, {"steps": [3]}))
+    agent.populate_context_post_run(AgentContext())
+    first, second, third = (
+        json.loads((tmp_path / name).read_text())
+        for name in ["trajectory.json", "trajectory.cont-1.json", "trajectory.cont-2.json"]
+    )
+    assert first == {"steps": [1], "continued_trajectory_ref": "trajectory.cont-1.json"}
+    assert second == {"steps": [2], "continued_trajectory_ref": "trajectory.cont-2.json"}
+    assert third == {"steps": [3]}
+
+
+class BridgedContainer(RecordingEnvironment):
+    """A task container whose relay holds one model call: the bridge client's exchanges take it once, and the
+    container keeps each exchange's command and the answer that the next exchange gives back."""
+
+    def __init__(self, call: Mapping[str, object]) -> None:
+        super().__init__()
+        self.calls = [json.dumps(call)]
+        self.exchanges: list[str] = []
+        self.answered = asyncio.Event()
+
+    async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+        await super().exec(command, user=user, env=env, cwd=cwd, timeout_sec=timeout_sec)
+        if "client.py" not in command or command.endswith(" ready"):
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+        self.exchanges.append(command)
+        if command.endswith(".json"):
+            self.answered.set()
+        await asyncio.sleep(0.01)
+        return SimpleNamespace(return_code=0, stdout=self.calls.pop() if self.calls else "", stderr="")
+
+
+def test_a_bridged_agent_answers_the_relayed_calls_from_the_proxy_port_while_its_command_runs(tmp_path: Path) -> None:
+    async def model(request: web.Request) -> web.Response:
+        return web.json_response({"answer": (await request.json())["question"]}, headers={"X-Model": "m"})
+
+    async def run() -> BridgedContainer:
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", model)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        await web.SockSite(runner, listener).start()
+        body = base64.b64encode(json.dumps({"question": "42?"}).encode()).decode()
+        call = {"id": "c1", "method": "POST", "path": "/v1/chat/completions", "headers": {}, "body": body}
+        container = BridgedContainer(call)
+        python = get_adapter("python")
+        kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+        agent = AdapterAgent(tmp_path / "logs", bridge_port=port, **kwargs)
+        async with agent.bridged(container):
+            await asyncio.wait_for(container.answered.wait(), 10)
+        await runner.cleanup()
+        return container
+
+    (tmp_path / "logs").mkdir()
+    container = asyncio.run(run())
+    relay = next(command for command in container.commands if "relay.py" in command)
+    assert "--tunnel-port 47811 --tunnel-host 127.0.0.1" in relay
+    assert container.uploads["/tmp/reef-relay/relay.py"].startswith('"""The relay a remote sandbox')
+    piece = json.loads(container.uploads["/tmp/reef-relay/replies/c1.json"])
+    assert (piece["status"], piece["end"], piece["sequence"]) == (200, True, 0)
+    assert json.loads(base64.b64decode(piece["data"])) == {"answer": "42?"}
+    assert piece["headers"]["X-Model"] == "m"
+    assert any(command.endswith("c1 /tmp/reef-relay/replies/c1.json") for command in container.exchanges)
+
+
+def test_a_tree_agent_bridges_the_port_of_its_loopback_binding(tmp_path: Path) -> None:
+    python = get_adapter("python")
+    (tmp_path / "tree" / "program").mkdir(parents=True)
+    (tmp_path / "tree" / "program" / "main.py").write_text("print('hi')\n")
+    spec = tree_agent(
+        python, api="openai", tree_dir=tmp_path / "tree", files_dir=tmp_path / "files", timeout=60.0, bridge=True
+    )
+    kwargs = {**spec["kwargs"], "model": "m", "base_url": "http://127.0.0.1:8901", "api_key": "reef"}
+    assert TreeAgent(tmp_path / "logs", **kwargs).bridge_port == 8901
 
 
 def test_a_container_reaches_a_loopback_model_route_at_the_agent_host() -> None:

@@ -7,20 +7,29 @@ from dataclasses import replace
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.dispatcher import build_default_dispatcher
+from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention
 from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 
 
 def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path):
     async def run():
-        dispatcher = build_default_dispatcher(
-            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        # The records are record items of the data store, which retention prunes.
+        data = SQLiteDataStore(tmp_path / "data", LocalTaskFileStore(None))
+        dispatcher = Dispatcher(
+            Recipe(),
+            InMemoryRepositoryBackend.factory(),
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "records", data=data),
+            data_store=data,
             coordination=memory_coordination(),
         )
         scenario = dispatcher.get_or_create_scenario("one")

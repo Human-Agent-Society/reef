@@ -17,7 +17,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.core.serving_config import ServingConfig
 from reef.storage.commits import CommitRecord, CommitSnapshots
-from reef.storage.data import check_owner
+from reef.storage.data import DataStore, check_owner
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainingState
@@ -166,14 +166,18 @@ class ScenarioStorage(Plugin, ABC):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         """Build the storage a deployment names.
 
         ``config`` is the plugin's own configuration. ``directory`` is the
         deployment's ``storage.agent_record_dir``, which the storage may use
         for local files. ``task_files`` keeps the files of published tasks.
         The storage owns it: ``archive`` retires the files of a scenario, and
-        ``close`` closes it.
+        ``close`` closes it. ``data`` is the deployment's data store, which keeps
+        each scenario's records as record items (RFC #1219); the storage shares
+        it and does not close it.
         """
 
     @property
@@ -201,10 +205,6 @@ class ScenarioStorage(Plugin, ABC):
     @abstractmethod
     def archive(self, scenario: str) -> tuple[str, ...]:
         """Archive a closed scenario's records, commits, tasks and settings; return archive locations."""
-
-    @abstractmethod
-    def prune(self, *, max_bytes: int) -> int:
-        """Evict oldest bodies over max_bytes."""
 
     @abstractmethod
     def close(self) -> None:

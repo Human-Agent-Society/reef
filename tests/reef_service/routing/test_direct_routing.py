@@ -37,13 +37,15 @@ from tests.reef_service.routing.routing_fakes import (
 )
 
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
-from reef.dispatcher import Dispatcher
+from reef.dispatcher import Dispatcher, ingest
+from reef.scenario.scenario import Scenario
 from reef.service import routing_preview
 from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, create_app
 from reef.service.assembly import build_app
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.errors import translate_error
 from reef.service.lifecycle import INFERENCE_FINALIZATION, REQUEST_ACCEPTANCE, LifecycleSettings
+from reef.service.routed_inference import DispatcherShadowWriter
 from reef.service.routed_shadow import ShadowLimits, ShadowTasks
 from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, PREVIEW_BODY_LIMIT_BYTES
@@ -1228,16 +1230,16 @@ def test_a_shadow_target_also_answers_but_only_the_primary_reaches_the_client(
         async with routed_service(
             tmp_path, default="teacher", shadow="student", provider_chat=provider.chat
         ) as service:
-            accept_record = service.dispatcher.accept_record
+            append_record = ingest.append_record
             # Each record's purpose and whether its write belongs to inference finalization (read in its thread).
             finalizing: list[tuple[str, bool]] = []
 
-            def observed_write(item: AgentRecord) -> AgentRecord:
+            def observed_write(scenario: Scenario, item: AgentRecord) -> tuple[AgentRecord, bool]:
                 if item.request_type is RequestType.INFERENCE:
                     finalizing.append((item.payload["metadata"]["routing"]["purpose"], INFERENCE_FINALIZATION.get()))
-                return accept_record(item)
+                return append_record(scenario, item)
 
-            monkeypatch.setattr(service.dispatcher, "accept_record", observed_write)
+            monkeypatch.setattr(ingest, "append_record", observed_write)
             body: dict[str, object] = {
                 "model": model,
                 "messages": user_message("hello"),
@@ -1388,15 +1390,12 @@ def test_a_failing_shadow_keeps_its_own_record_and_never_touches_the_primary(
             target_urls={"observer": "http://127.0.0.1:9"} if case == "refused" else None,
             shadow_limits=ShadowLimits(timeout_seconds=0.2, max_response_bytes=1024),
         ) as service:
-            accept_record = service.dispatcher.accept_record
 
-            def failing_shadow_write(item: AgentRecord) -> AgentRecord:
-                if item.payload["metadata"]["routing"]["purpose"] == "shadow":
-                    raise OSError("record store refused the shadow record")
-                return accept_record(item)
+            def failing_shadow_write(writer: DispatcherShadowWriter, item: AgentRecord) -> AgentRecord:
+                raise OSError("record store refused the shadow record")
 
             if case == "write_failure":
-                monkeypatch.setattr(service.dispatcher, "accept_record", failing_shadow_write)
+                monkeypatch.setattr(DispatcherShadowWriter, "accept_record", failing_shadow_write)
             try:
                 status, text, headers = await service.chat({"model": "auto", "messages": user_message("hello")})
                 assert status == 200 and "teacher-v2 answered" in text
@@ -1618,23 +1617,18 @@ def blocked_shadow_writes(
     ``entered`` is set when a shadow record write starts; ``events`` gets ``shadow written`` after it is stored.
     Other records are stored at once. The write waits at most five seconds for ``release``.
     """
-    accept_record = service.dispatcher.accept_record
+    accept_record = DispatcherShadowWriter.accept_record
     entered, release = threading.Event(), threading.Event()
 
-    def blocked(item: AgentRecord) -> AgentRecord:
-        if (
-            item.request_type is not RequestType.INFERENCE
-            or item.payload["metadata"]["routing"]["purpose"] != "shadow"
-        ):
-            return accept_record(item)
+    def blocked(writer: DispatcherShadowWriter, item: AgentRecord) -> AgentRecord:
         entered.set()
         if not release.wait(5):
             raise TimeoutError("the test never released the shadow record write")
-        stored = accept_record(item)
+        stored = accept_record(writer, item)
         events.append("shadow written")
         return stored
 
-    monkeypatch.setattr(service.dispatcher, "accept_record", blocked)
+    monkeypatch.setattr(DispatcherShadowWriter, "accept_record", blocked)
     return entered, release
 
 
@@ -1741,5 +1735,34 @@ def test_an_offline_shadow_only_target_never_blocks_opening_or_serving(tmp_path:
                 target_urls={"teacher": "http://127.0.0.1:9"},
             ):
                 pass
+
+    asyncio.run(run())
+
+
+def test_a_late_shadow_never_enters_a_recreated_scenario(tmp_path: Path) -> None:
+    async def run() -> None:
+        provider = EchoProvider(held={"student-v1"})
+        async with routed_service(
+            tmp_path, default="teacher", shadow="student", provider_chat=provider.chat
+        ) as service:
+            try:
+                status, _, _ = await service.chat({"model": "auto", "messages": user_message("old")})
+                assert status == 200
+                await provider.wait_for(1)
+                old = service.dispatcher.registry.get_loaded("coding")
+                service.dispatcher.delete_scenario("coding")
+                replacement = service.dispatcher.get_or_create_scenario("coding")
+                assert replacement is not None and replacement is not old
+                provider.release.set()
+                shadows = await shadows_finished(service)
+                assert shadows.failed == 1
+                assert service.records() == []
+                # The replacement still serves new requests and receives only its own primary/shadow pair.
+                assert (await service.chat({"model": "auto", "messages": user_message("new")}))[0] == 200
+                await shadows_finished(service)
+                assert len(service.records()) == 2
+                assert all(record["messages"] == user_message("new") for record in service.records())
+            finally:
+                provider.release.set()
 
     asyncio.run(run())

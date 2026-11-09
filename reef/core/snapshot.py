@@ -133,9 +133,31 @@ class RootSource:
         raise ValueError(f"a root source is {{kind, inputs}} or {{kind, item, uri, version}}, not {value!r}")
 
 
+@dataclass(frozen=True)
+class ItemIdentity:
+    """What an artifact made from an artifact item takes from the item, besides its files.
+
+    Values: ``item_id`` is the item's non-empty ID. ``artifact_id`` is the item's artifact ID, which the new artifact
+    keeps (RFC #1218), or None for a new one. Construction checks these types.
+
+    Purpose: ``reef.service.artifact_imports`` makes it from a stored item; a scenario's root (``ItemStart``) and an
+    import (``ScenarioCommitter.import_artifact``) read it.
+    """
+
+    item_id: str
+    artifact_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id:
+            raise ValueError("an item identity names a non-empty item_id")
+        if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
+            raise ValueError("an item identity's artifact_id is a non-empty string or None")
+
+
 __all__ = [
     "LOCAL_SNAPSHOT_PREFIX",
     "SELECTION_VIEW_PREFIX",
+    "ItemIdentity",
     "RootSource",
     "SnapshotRef",
     "decode_snapshot_ref",

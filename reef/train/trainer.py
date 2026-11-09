@@ -20,7 +20,6 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import CommitPending, TrainingStartRefused
-from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -28,8 +27,9 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
-from reef.record2sample.service import ProducedSamples
+from reef.record2sample.service import ProducedSamples, Selection
 from reef.storage.commits import CommitRecord
+from reef.storage.record_items import used_record, used_records
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -247,6 +247,10 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
+        # The records of other scenarios that this one uses. Commits name the ones that trained, so a new process reads
+        # them from the start and ``push_retained`` skips those.
+        self._used_sequence = 0
+        self._used_read = 0
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         #: The record IDs that a commit of this trainer named; the next commit names the other consumed records.
@@ -324,10 +328,12 @@ class Trainer:
         with self._lock:
             self._pipeline.queue_requests(requests, failures)
 
-    def restore_served_artifacts(self, artifact_ids: Iterable[str]) -> None:
-        """Set the artifacts that the scenario served, oldest first, for the staleness check of the pipeline."""
+    def restore_served_artifacts(self, artifact_ids: Iterable[str], beside: Iterable[str] = ()) -> None:
+        """Set the artifacts that the scenario served, oldest first, and those that it serves ``beside`` its active
+        selection, for the staleness check of the pipeline."""
         with self._lock:
             self._pipeline.served_artifacts.restore(tuple(artifact_ids))
+            self._pipeline.served_artifacts.restore_beside(beside)
 
     def fail_pending_request(self, error: str) -> str | None:
         """Mark the reserved request as failed, so its next job data is a skip row; return its ID, or None when no
@@ -393,15 +399,6 @@ class Trainer:
                     return True
             return self._pipeline.background_jobs_running()
 
-    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
-        """The training sample of an uploaded trajectory (``TrainingPipeline.uploaded_sample``), under the lock.
-
-        Admission calls it from a request thread; the lock keeps the pipeline's stages, such as a tokenizer,
-        to one thread at a time.
-        """
-        with self._lock:
-            return self._pipeline.uploaded_sample(trajectory)
-
     @property
     def state(self) -> Mapping[str, Any]:
         return self._state
@@ -457,7 +454,13 @@ class Trainer:
                 return True
             if self._pipeline.has_unread_samples():
                 return True
-            return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
+            if self._records.count(self.scenario, after_sequence=self._data_sequence) > 0:
+                return True
+            samples = self._pipeline.store.store
+            used = used_records(
+                samples.data, samples.owner, self.scenario, after_sequence=self._used_sequence, limit=1
+            )
+            return bool(used[1])
 
     def next_job_listing(self) -> Mapping[str, Any]:
         """The trainer's training mode and the samples of its next automatic job (``TrainingPipeline.next_job_listing``)."""
@@ -501,7 +504,11 @@ class Trainer:
             if any(ref in self.consumed_record_ids for ref in item.references):
                 self.skipped_record_ids.add(item.agent_record_id)
                 return
-            missing = [ref for ref in item.references if self._records.get(self.scenario, ref) is None]
+            missing = [
+                ref
+                for ref in item.references
+                if self._records.get(self.scenario, ref) is None and self.used_record(ref) is None
+            ]
             if missing:
                 logger.warning(
                     "Skipping report %s in scenario %s: %d referenced records are no longer stored; "
@@ -515,11 +522,12 @@ class Trainer:
         if item.request_type in self.pipeline.required_request_types:
             self._pipeline.push(item)
 
-    def produce_samples(self) -> ProducedSamples:
+    def produce_samples(self, selection: Selection | None = None) -> ProducedSamples:
         """Read the job ends of this trainer's state, push every record that arrived since the last call into the
         pipeline and make samples of the formed record sets; return whether the trainer received new input (samples or
         requests), whether background work of the pipeline still runs, and when a set that waits for time alone is
-        due, so the samples service comes back."""
+        due, so the samples service comes back. ``selection`` gets the counts so far after each page of records and
+        after the stage runs, and names the task in the samples that the step stores."""
         with self._lock:
             if not self.trains:
                 return ProducedSamples(changed=False, background=False)
@@ -527,10 +535,23 @@ class Trainer:
             # Another samples process can have stored the samples of later records since this trainer loaded;
             # the records that stored samples consumed never form a record set again.
             self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
-            before_records = self._data_offset
+            before_records = self._data_offset + self._used_read
             before_samples = self._pipeline.stored_sample_count
-            self.read_records()
-            stored = self._pipeline.produce()
+
+            def report() -> None:
+                if selection is not None:
+                    selection.progress(
+                        self._data_offset + self._used_read - before_records,
+                        self._pipeline.stored_sample_count - before_samples,
+                    )
+
+            self._pipeline.selection_task = None if selection is None else selection.task_id
+            try:
+                first_sequence = self.read_records(report)
+                stored = self._pipeline.produce()
+            finally:
+                self._pipeline.selection_task = None
+            report()
             self._pipeline.settle_ended_records(self.committed_record_ids)
             self.skipped_record_ids -= self.committed_record_ids
             if self.skipped_record_ids:
@@ -539,9 +560,10 @@ class Trainer:
             return ProducedSamples(
                 changed=stored,
                 background=self._pipeline.background_jobs_running(),
-                records_read=self._data_offset - before_records,
+                records_read=self._data_offset + self._used_read - before_records,
                 samples_created=self._pipeline.stored_sample_count - before_samples,
                 due_in_seconds=None if due is None else max(0.0, due - time.monotonic()),
+                record_sequences=None if first_sequence is None else (first_sequence, self._data_sequence),
             )
 
     def read_commits(self, records: Iterable[CommitRecord]) -> None:
@@ -567,10 +589,13 @@ class Trainer:
         with self._lock:
             self.read_records()
 
-    def read_records(self) -> None:
-        """Push every record after the record cursor into the pipeline and move the cursor. The samples service
-        calls it for a trainer that trains (``produce_samples``); ``read_new_records`` calls it for one that trains
-        nothing. The caller holds the lock."""
+    def read_records(self, page_read: Callable[[], None] | None = None) -> int | None:
+        """Push every record after the record cursor into the pipeline and move the cursor; call ``page_read`` after
+        each page. Return the data sequence of the first record of this scenario that it read, or None. The samples
+        service calls it for a trainer that trains (``produce_samples``); ``read_new_records`` calls it for one that
+        trains nothing. The caller holds the lock."""
+        self.read_used_records()
+        first: int | None = None
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -578,11 +603,40 @@ class Trainer:
                 limit=self._DATA_READ_BATCH_SIZE,
             )
             if not items:
-                return
+                return first
             for sequence, item in items:
+                self._pipeline.note_read(item.agent_record_id)
                 self.push_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
+                first = sequence if first is None else first
+            if page_read is not None:
+                page_read()
+
+    def used_record(self, record_id: str) -> AgentRecord | None:
+        """The record item of another scenario that this scenario uses, read as its record, or None."""
+        samples = self._pipeline.store.store
+        return used_record(samples.data, samples.owner, self.scenario, record_id)
+
+    def read_used_records(self) -> None:
+        """Push the record items of other scenarios that this scenario uses and that this process has not read. The
+        caller holds the lock."""
+        samples = self._pipeline.store.store
+        while True:
+            cursor, records = used_records(
+                samples.data,
+                samples.owner,
+                self.scenario,
+                after_sequence=self._used_sequence,
+                limit=self._DATA_READ_BATCH_SIZE,
+            )
+            self._used_sequence = cursor
+            for item in records:
+                self._pipeline.note_read(item.agent_record_id)
+                self.push_retained(item)
+                self._used_read += 1
+            if not records:
+                return
 
     def advance_job(
         self, *, serving_artifact_id: str | None = None, train_from_artifact_id: str | None = None
@@ -798,58 +852,16 @@ class Trainer:
         with self._lock:
             self._pipeline.close()
 
-    def replay_retained(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
-        """Rebuild pipeline memory from retained rows at or below a watermark.
+    def restore_consumed_records(self, consumed_ids: frozenset[str]) -> None:
+        """Set the records that committed job data or stored samples consumed, which a recovered trainer skips.
 
-        The committed high-water mark is a consumption cursor, not a liveness
-        boundary: consumption stops the moment job data is ready, so the cursor
-        passes rows of the next, still-incomplete step, and retention keeps
-        them stored. Only pipeline memory knew about them, and a rebuilt
-        pipeline starts empty: without this replay, a report arriving after
-        recovery waits forever on a reference that can never be pushed
-        again. ``consumed_ids`` names the rows that committed job data consumed —
-        the commit history records them per step because retention may keep a
-        consumed row stored (audit-only retention is contract-legal), and a
-        row that committed job data consumed must never train twice. Skipping them
-        while replaying the retained prefix reconstructs the live state the
-        crash destroyed and nothing more; consumption accounting stays
-        untouched, since the recovered mark already covers every replayed row.
+        A recovered trainer reads every retained record again, so the records of a step that was not complete reach
+        its pipeline again. Retention can keep a consumed record stored, and a consumed record never trains twice.
         """
-        if up_to_sequence < 0:
-            raise ValueError("up_to_sequence must be non-negative")
         with self._lock:
             self.consumed_record_ids.update(consumed_ids)
-            sequence = 0
-            while True:
-                items = self._records.replay_page(
-                    self.scenario,
-                    after_sequence=sequence,
-                    limit=self._DATA_READ_BATCH_SIZE,
-                )
-                if not items:
-                    return
-                for sequence, item in items:
-                    if sequence > up_to_sequence:
-                        return
-                    if item.agent_record_id in consumed_ids:
-                        continue
-                    self.push_retained(item)
 
     def restore_committed_records(self, record_ids: frozenset[str]) -> None:
         """Set the record IDs that the commits of this trainer named, so that its next commit does not name them again."""
         with self._lock:
             self.committed_record_ids = set(record_ids)
-
-    def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
-        """Resume consumption from a recovered commit record's high-water mark.
-
-        Without this, a recovered trainer would page the record store from
-        sequence 0 and push again the consumed rows that the retention policy
-        protected from deletion — re-training them. Restoring the watermark makes
-        replay start exactly where the recovered step left off.
-        """
-        if after_sequence < 0 or offset < 0:
-            raise ValueError("record progress must be non-negative")
-        with self._lock:
-            self._data_sequence = after_sequence
-            self._data_offset = offset

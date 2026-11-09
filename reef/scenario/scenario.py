@@ -15,15 +15,16 @@ from reef.core.activation import ActivationRule
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
+from reef.core.records_types import AgentRecord
 from reef.core.reports import ReportBase
 from reef.core.served_models import ScenarioModel
 from reef.core.serving_config import ServingConfig
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import ItemIdentity, RootSource
 from reef.core.values import JsonValue
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.record2sample.service import ProducedSamples
+from reef.record2sample.service import ProducedSamples, Selection
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.scenario.snapshots import ServedBesideArtifact
@@ -260,7 +261,7 @@ class Scenario:
         for component_trainer in stepping:
             component_trainer.trainer.set_training_mode(training_mode)
 
-    def produce_samples(self, component: str | None = None) -> ProducedSamples:
+    def produce_samples(self, component: str | None = None, selection: Selection | None = None) -> ProducedSamples:
         """Do the samples service's step for ``component``'s trainer: read its newer commits, then make the samples of
         the new records (``Trainer.produce_samples``).
 
@@ -275,7 +276,7 @@ class Scenario:
         component_trainer.trainer.read_commits(new)
         if new:
             self.job_ends_read_step[component_trainer.component] = new[-1].step
-        return component_trainer.trainer.produce_samples()
+        return component_trainer.trainer.produce_samples(selection)
 
     def next_commit(self, component: str | None = None) -> TrainingCommit | None:
         """Prepare ``component``'s next commit: a job's submission, or a running job's checkpoint or end.
@@ -291,8 +292,12 @@ class Scenario:
         runtime = self.runtime
         weights_load = self._binding.components.loaded_component is not None and runtime is not None
         serving = self.served_artifact_id() if weights_load else None
+        # Automatic training waits until the selected artifact serves, so that it does not train the samples of the
+        # artifact before. A request names its samples (``TrainingPipeline.request_entries``), so manual training
+        # does not wait, also when the selected artifact does not start.
         if (
-            weights_load
+            trainer.pipeline.training_mode == "auto"
+            and weights_load
             and runtime is not None
             and runtime.serves_requests
             and self._binding.served_models is not None
@@ -318,7 +323,7 @@ class Scenario:
                 self._committer.step, served_component, self._committer.component_names()
             )
             if history:
-                trainer.restore_served_artifacts(history)
+                trainer.restore_served_artifacts(history, self.served_beside())
         # Only a job's submission needs the start, and it reads the commit history.
         train_from_artifact_id = (
             self.artifact_status()[component_trainer.component]["training_start"] if trainer.job_due() else None
@@ -381,18 +386,6 @@ class Scenario:
             return None
         served = routes.read(ScenarioModel(self.name))
         return None if served is None else served.artifact_id
-
-    def replay_retained(
-        self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
-    ) -> None:
-        """Rebuild processor memory from retained rows behind a recovered watermark."""
-        with self._committer.lock:
-            self.trainer_for(component).replay_retained(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
-
-    def restore_record_progress(self, *, after_sequence: int, offset: int, component: str | None = None) -> None:
-        """Resume record consumption at a recovered commit's high-water mark."""
-        with self._committer.lock:
-            self.trainer_for(component).restore_record_progress(after_sequence=after_sequence, offset=offset)
 
     @property
     def commit_status(self) -> Mapping[str, Any]:
@@ -524,10 +517,20 @@ class Scenario:
         return self._committer.import_target(component)[0]
 
     def import_artifact(
-        self, files: SourceFiles, component: str | None, *, source: Mapping[str, str], directory: Path
+        self,
+        files: SourceFiles,
+        component: str | None,
+        *,
+        source: Mapping[str, str],
+        directory: Path,
+        item: ItemIdentity | None = None,
     ) -> ComponentArtifact:
-        """Publish ``files`` as a new artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
-        return self._committer.import_artifact(files, component, source=source, directory=directory)
+        """Publish ``files`` as an artifact of ``component``; see :meth:`ScenarioCommitter.import_artifact`."""
+        return self._committer.import_artifact(files, component, source=source, directory=directory, item=item)
+
+    def used_record(self, record_id: str) -> AgentRecord | None:
+        """The record item of another scenario that this scenario uses, read as its record, or None."""
+        return self.stepping_trainers()[0].trainer.used_record(record_id)
 
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""

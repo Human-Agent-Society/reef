@@ -23,6 +23,7 @@ from typing import Any, Self
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, job_sized_stages
 from tests.support.samples_service import make_samples
 
@@ -50,8 +51,8 @@ from reef.record2sample.distill import DistillSamples
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
 from reef.sample2job.traces import TraceJobData
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineSpec
@@ -141,9 +142,8 @@ class StreamRun:
     training_mode: str = "auto"
     job_samples: int = 1
     serving_artifact_id: str | None = None
-    records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
+    records: ItemRecordStore = field(default_factory=lambda: memory_records("s"))
     consumed: set[str] = field(default_factory=set)
-    high_water: tuple[int, int] | None = None
     commits: list[dict[str, object]] = field(default_factory=list)
     training_requests: ScenarioTrainingRequests = field(
         default_factory=lambda: ScenarioTrainingRequests(memory_coordination().work_queue, "s")
@@ -164,12 +164,7 @@ class StreamRun:
         """Rebuild the trainer from durable state, in the order scenario recovery uses."""
         trainer.close()
         rebuilt = self.build()
-        if self.high_water is not None:
-            sequence, offset = self.high_water
-            rebuilt.replay_retained(up_to_sequence=sequence, consumed_ids=frozenset(self.consumed))
-            rebuilt.restore_record_progress(after_sequence=sequence, offset=offset)
-        elif self.consumed:
-            rebuilt.replay_retained(up_to_sequence=0, consumed_ids=frozenset(self.consumed))
+        rebuilt.restore_consumed_records(frozenset(self.consumed))
         return rebuilt
 
     def drain(self, trainer: Trainer) -> None:
@@ -185,7 +180,6 @@ class StreamRun:
             prepared = trainer.prepare_commit(result)
             trainer.settle_commit(prepared)
             self.consumed |= prepared.consumed_ids
-            self.high_water = (prepared.high_water_sequence, prepared.high_water_offset)
             if batch is None:
                 # The end of the batch's job: it consumes no batch, so the goldens list only the submissions.
                 continue

@@ -73,8 +73,9 @@ Recipe, without a training runtime or a specialized recipe. It records
 inference and feedback; it does not train the routed models.
 
 Start this deployment with ``reef serve``. Its controller starts the managed
-HTTP service and SR together; ``reef serve --component`` refuses a routing
-manifest. If a provider aborts a buffered request, Reef retries the same
+HTTP service and SR together; ``reef serve --component`` refuses a managed
+routing manifest. To run each service in its own process, see `External router
+lifecycle`_. If a provider aborts a buffered request, Reef retries the same
 selected target with the backoff set by ``inference.retry-initial-s`` and
 ``inference.retry-max-s``. ``inference.retry-timeout-s`` bounds these retries
 and defaults to ``inference.timeout-s``.
@@ -159,7 +160,10 @@ A shadow call writes its own INFERENCE record once it has started its provider
 call, whatever the outcome; see `Routed external-model requests
 <http-api.rst#routed-external-model-requests>`__. It writes none if the record
 store refuses the write, or if it is cancelled before its provider call starts.
-A normal policy update does not wait for shadow calls: they finish under the
+Deleting or archiving its Scenario invalidates that write binding. Managed
+routing also rejects writes after the Scenario is unloaded or replaced. Reef
+never redirects the late write into a replacement Scenario.
+A managed policy update does not wait for shadow calls: they finish under the
 policy they started with. Draining the deployment waits for them, and a forced
 drain cancels them. A cancelled call keeps its slot until its ``cancelled``
 record write ends; a later cancellation does not interrupt that write. When Reef
@@ -213,6 +217,9 @@ through ``--reef.routing-deployment``.
    * - Setting
      - Default
      - Meaning
+   * - lifecycle
+     - managed
+     - ``managed``: this section. ``external``: see `External router lifecycle`_.
    * - deployment_id
      - required with routing_manifest
      - 1-48 lowercase letters, digits or hyphens; must start with a letter or digit.
@@ -260,8 +267,9 @@ through ``--reef.routing-deployment``.
      - Most provider body bytes, success or error, that a shadow call collects before it refuses the body.
 
 The shadow defaults are conservative settings, not measured model or GPU
-capacities. Like the preview settings, the shadow settings are part of the
-frozen configuration: changing one needs a restart.
+capacities. They apply separately to each routed service, including each
+external inference replica. Like the preview settings, changing a shadow
+setting requires restarting that service.
 
 To change targets, rules, a Scenario's default target, its target membership or
 its shadow target without restarting Reef or SR, edit the configured ``reef.routing_manifest`` and
@@ -345,6 +353,82 @@ was interrupted, its outstanding operation ID blocks the next start. Cleanup
 preserves this marker until the operator establishes that the daemon operation
 has finished and explicitly acknowledges it. See the tutorial for status,
 cleanup and configuration replacement commands.
+
+External router lifecycle
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use ``reef.routing_deployment.lifecycle: external`` when each Reef service runs
+in its own process and another system runs SR, for example Kubernetes. Reef then
+needs no Docker, and each replica of the ``inference`` service uses one SR on its
+own loopback. Every service can read the same configuration, because the other
+services ignore the manifest. ``reef serve`` without ``--component`` refuses this
+lifecycle.
+
+.. code-block:: yaml
+
+   reef:
+     routing_manifest: /etc/reef/manifest.yaml
+     routing_deployment:
+       lifecycle: external
+       sr_management_port: 50053
+   recipe:
+     implementation: recipe
+   inference:
+     # The launcher needs a reachable default; routed requests use the manifest's targets.
+     upstream_url: http://127.0.0.1:8101
+     upstream_model: code-student
+
+To start a replica:
+
+1. Set ``REEF_SR_MANAGEMENT_TOKEN`` and ``REEF_SR_SELECTION_TOKEN`` to two
+   different secrets, for both SR and the replica.
+2. Write SR's configuration, before SR starts:
+
+   .. code-block:: bash
+
+      python -m reef.service.deploy.routing.cli render \
+        --config /etc/reef/reef.yaml --output /app/config/config.yaml
+
+3. Run SR with ``/app/config/config.yaml`` as its argument, in the replica's
+   network namespace. SR listens on ``127.0.0.1:<sr_management_port>``. The render
+   step writes the file with mode 0600, so run SR as the user that wrote it.
+4. Run ``reef serve --component inference``. Clients reach it on ``reef.host``.
+
+Use ``GET /readyz`` as the replica's readiness check. It needs no token. It
+answers 200 after SR reports its generated runtime as active and ready, every
+enabled target except those used only as shadows lists its model, and one
+preview per Scenario passes. It answers 503 otherwise, including for requests
+of Scenarios outside the manifest. The
+replica reads SR every five seconds and checks a new runtime hash in the same way
+before requests use it.
+
+This lifecycle differs from ``managed``:
+
+* **Policy updates.** The replica reads the manifest once and has no ``SIGHUP``
+  update. To change the policy, including ``shadow_target``, replace the replicas.
+  During a rollout, two policies can serve at the same time. Each record's
+  ``snapshot_version`` shows which one served it.
+* **Scope.** A manifest Scenario's ``POST /v1/chat/completions`` follows the
+  routing rules. Every other Scenario and route keeps the ordinary ``inference``
+  behavior. Clients must call the ``inference`` service, because the other
+  services do not route.
+* **Stopping.** On SIGTERM the replica stops accepting connections and waits up to
+  60 seconds for primary requests. It then cancels remaining primary and shadow
+  calls, and waits ``finalization_timeout_seconds`` for their records. Give the
+  process more time than this before it is killed.
+* **Scenario deletion.** Stop all inference replicas before deleting
+  or archiving a Scenario through control. Wait for their calls and record writes
+  to finish and their storage sessions to close. The generation check prevents
+  late shadow records entering a replacement Scenario; it does not coordinate
+  storage archival across processes. In particular, never archive live SQLite
+  database files.
+* **Your responsibilities.** Reef does not start, restart or stop SR, and it does
+  not check the image's revision label. Pin an image built from the commit in
+  ``third_party/semantic-router``.
+
+Only ``sr_management_port``, ``selection_timeout_seconds``,
+``preview_max_concurrency``, ``finalization_timeout_seconds`` and the three
+``shadow_*`` limits apply. Set SR's CPU and memory limits where you run it.
 
 Configuration file layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1191,7 +1275,7 @@ persistent.
        seconds that the data store keeps a job data directory that no training job used; a job of the same samples uses the directory again (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__)
 
    ``storage.agent-record-retention-max-bytes`` : 21474836480
-       20 GiB shared across all record bodies, including unconsumed records
+       20 GiB shared across all record items of the data store, including unconsumed records
 
 .. warning::
 
@@ -1207,7 +1291,8 @@ by append sequence. Both consumed and unconsumed data are eligible, with one
 exception: storage keeps the model calls that a stored training sample holds. A
 sample that a recipe made from model calls stores their IDs and its own fields,
 such as its reward and training tokens, and renders the calls when it is read.
-Records do not expire by age.
+Records do not expire by age. The model calls of evaluation rollouts are not in
+the budget, and storage does not evict them.
 
 The budget measures the stored UTF-8 JSON of payloads, references and artifact
 references across active and archived scenarios. A scenario's store keeps
@@ -1248,8 +1333,12 @@ downgrade without restoring a compatible backup.
 .. container:: config
 
    ``evaluation.agent_host`` : host.docker.internal
-       the address at which a task's container reaches this host, for an evaluation whose harness is an artifact
-       item. See `HTTP API <http-api.rst>`__.
+       the address at which a task's container reaches this host, for an evaluation on ``docker`` whose harness is an
+       artifact item. In a remote environment, the agent bridges the container to this host through Harbor's exec
+       and needs no address. See `HTTP API <http-api.rst>`__.
+   ``evaluation.max_sandboxes`` : 4
+       the task sandboxes that one process of the evaluation service holds at once, across all evaluations. Each
+       running rollout holds one. Set it to the quota of the sandbox provider, divided by the evaluation processes.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
@@ -1557,7 +1646,7 @@ that plays task directories (an npm ``install``) and
        required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``step(context)`` makes each step's candidate
 
    ``evolution.adapter`` : pi
-       ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), or an entry-point adapter, such as ``terminus`` from the Meta-Harness Terminal-Bench campaign
+       ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), ``python`` (a Python program that uv runs, whose modules are tree files of the ``program`` part), or an entry-point adapter, such as ``terminus`` from the Meta-Harness Terminal-Bench campaign
 
    ``evolution.seed``
        the directory of the first tree: every regular file under it, at its relative path as its tree path; a new scenario's root snapshot holds it, and an existing scenario keeps its own root and head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the empty tree, unless a recipe subclass sets its own (for example Reefine's starter skill)

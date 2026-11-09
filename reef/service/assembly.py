@@ -90,8 +90,6 @@ def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
     return {key: value for key, value in settings.recipe_settings.items() if key not in service_owned}
 
 
-#: The evaluation rollout workers of a process that runs the evaluation service.
-ROLLOUT_WORKERS = 4
 #: The factory that ``storage.artifact_backend: git_lfs`` selects, over ``storage.artifact_repository``.
 GIT_LFS_ARTIFACT_BACKEND = "reef.artifact.git_lfs:GitLFSRepositoryBackendFactory"
 
@@ -383,29 +381,38 @@ def build_task_files(settings: ServiceConfig) -> TaskFileStore:
     return TaskFileStore.referenced_class(reference).from_config(reference.config, directory=task_file_directory)
 
 
-def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, TaskFileStore]:
-    """The deployment's scenario storage (``storage.record_backend``) and its task file store, which it owns."""
+def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, DataStore]:
+    """The deployment's scenario storage (``storage.record_backend``), which owns the task file store, and the data
+    store (``build_data_store``), which keeps the scenarios' records. The caller closes the data store before the
+    storage, because the data store shares the task file store."""
     record_directory = Path(settings.agent_record_dir)
     task_files = build_task_files(settings)
+    data: DataStore | None = None
     try:
+        data = build_data_store(settings, task_files)
         if settings.record_backend == "postgres":
             storage: ScenarioStorage = PostgresScenarioStorage(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 record_directory,
                 schema=settings.record_database_schema,
                 task_files=task_files,
+                data=data,
             )
         elif settings.record_backend == "sqlite":
-            storage = SQLiteScenarioStorage(record_directory, task_files=task_files)
+            storage = SQLiteScenarioStorage(record_directory, task_files=task_files, data=data)
         else:
             reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
             storage_class = ScenarioStorage.referenced_class(reference)
-            storage = storage_class.from_config(reference.config, directory=record_directory, task_files=task_files)
+            storage = storage_class.from_config(
+                reference.config, directory=record_directory, task_files=task_files, data=data
+            )
     except BaseException:
         # The storage owns the task file store after it exists. Until then, this code closes it.
+        if data is not None:
+            data.close()
         task_files.close()
         raise
-    return storage, task_files
+    return storage, data
 
 
 def build_artifact_backend(settings: ServiceConfig) -> ConfigurableRepositoryBackendFactory:
@@ -471,8 +478,7 @@ def build_dispatcher(
     data_store: DataStore | None = None
     dispatcher: Dispatcher | None = None
     try:
-        scenario_storage, task_files = open_scenario_storage(settings)
-        data_store = build_data_store(settings, task_files)
+        scenario_storage, data_store = open_scenario_storage(settings)
         task_import = (
             TaskImport(Path(settings.task_import_manifest), Path(settings.task_import_tasks_root))
             if settings.task_import_manifest is not None and settings.task_import_tasks_root is not None
@@ -525,16 +531,16 @@ def build_dispatcher(
             work_retention_seconds=settings.work_retention_s,
         )
         if dispatcher.services.runs_evaluation:
-            # Each worker serves its rollout's candidate itself, from the scenario's repository.
-            for _ in range(ROLLOUT_WORKERS):
-                dispatcher.workers.add(
-                    EvaluationRolloutWorker(
-                        dispatcher.queue,
-                        LocalCandidateEndpoints(dispatcher),
-                        worker_id=instance_id("evaluation"),
-                        agent_host=settings.evaluation_agent_host,
-                    )
+            # The worker serves each rollout's candidate itself, from the scenario's repository.
+            dispatcher.workers.add(
+                EvaluationRolloutWorker(
+                    dispatcher.queue,
+                    LocalCandidateEndpoints(dispatcher),
+                    worker_id=instance_id("evaluation"),
+                    agent_host=settings.evaluation_agent_host,
+                    slots=settings.evaluation_max_sandboxes,
                 )
+            )
         if dispatcher.services.runs_control and not dispatcher.services.runs_harness and recipe.harness_adapter:
             # The harness service runs in another process: it sends each import here to commit.
             dispatcher.workers.add(
@@ -590,7 +596,7 @@ def build_app(
     closed child of a managed routing deployment and hands it the router's selection credential.
 
     ``components`` names the services that this process runs besides ``control``. With ``evaluation``, this
-    process's evaluation workers serve each candidate themselves; without it, the evaluation service runs in another
+    process's evaluation worker serves each candidate itself; without it, the evaluation service runs in another
     process.
     """
     routing = None

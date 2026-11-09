@@ -44,6 +44,21 @@ def json_digest(content: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def evaluation_call_id(
+    evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int, caller: str = "agent"
+) -> str:
+    """The record ID of a call of an evaluation rollout: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``
+    for an agent call, and ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:<index>`` for a verifier call."""
+    rollout = f"{evaluation_id}:{task_index}:{repeat}:{attempt}"
+    return f"{rollout}:{index}" if caller == "agent" else f"{rollout}:{caller}:{index}"
+
+
+def evaluation_trajectory_id(evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int) -> str:
+    """The ID, after ``<scenario>/``, of a trajectory that the verifier of an evaluation rollout wrote:
+    ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:trajectory:<index>``."""
+    return f"{evaluation_id}:{task_index}:{repeat}:{attempt}:verifier:trajectory:{index}"
+
+
 def task_partition(owner: str) -> str:
     """The task file store partition that keeps the task directories of ``owner``."""
     return TASK_PARTITION_PREFIX + owner
@@ -172,13 +187,48 @@ class TrajectoryRules(JsonItemRules):
 
 
 class RecordRules(JsonItemRules):
-    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``."""
+    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``. The record ID of
+    an evaluation call is the ``evaluation_call_id`` of its ``origin.evaluation``.
+
+    Its digest is ``json_digest`` of the content without ``created_at``, as the record store's retry fingerprint,
+    so a client's retry with a new time matches. An item stored before had ``created_at`` in its digest, and it
+    matches the same content too.
+    """
 
     kind = "record"
 
+    def stored_digest(
+        self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
+    ) -> str:
+        if not isinstance(content, Mapping):
+            raise ValueError(f"record item {item_id!r} needs a JSON object as its content")
+        self.check_json(item_id, content, metadata)
+        return record_digest(content)
+
+    def matches_stored(self, content: object, digest: str) -> bool:
+        return isinstance(content, Mapping) and record_digest(content) == digest
+
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         origin = metadata["origin"]["scenario"]
-        copied_record(item_id, content, origin, origin)
+        record = copied_record(item_id, content, origin, origin)
+        location = metadata["origin"].get("evaluation")
+        if location is not None and record.agent_record_id != f"{origin}/" + evaluation_call_id(
+            location["evaluation_id"],
+            location["task_index"],
+            location["repeat"],
+            location["attempt"],
+            location["index"],
+            location.get("caller", "agent"),
+        ):
+            raise ValueError(
+                f"an evaluation call has the ID {origin}/<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>,"
+                " with verifier: before the index of a verifier call"
+            )
+
+
+def record_digest(content: Mapping[str, Any]) -> str:
+    """The digest of a record item's ``content``: ``json_digest`` without ``created_at``."""
+    return json_digest({key: value for key, value in content.items() if key != "created_at"})
 
 
 class ArtifactRules(JsonItemRules):
@@ -231,6 +281,8 @@ __all__ = [
     "TrajectoryRules",
     "check_artifact_content",
     "copied_record",
+    "evaluation_call_id",
+    "evaluation_trajectory_id",
     "json_digest",
     "task_partition",
 ]

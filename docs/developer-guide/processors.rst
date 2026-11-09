@@ -137,6 +137,14 @@ set ``s`` is the item ``<scenario>.<trainer>:<s>:<i>``, or
 and the sample's records. The samples of a unit with more than one sample share
 the item metadata ``group``, so they train in the same job.
 
+A sample that a sample processing task stores also has the metadata
+``stored_by_task``, the ID of that task, and ``read_by_task``, the ID of the
+task that read the last of its records (RFC #1267). The two differ when
+background work, such as a judgment, ends in a later task. A key is left out
+when the task is unknown, as for records read before a restart. A data query
+with ``group_key=stored_by_task`` or ``group_key=read_by_task`` finds the
+samples of one task.
+
 A restart never makes saved samples again: recovery skips the records that the
 trainer's stages consumed. Thus a nondeterministic stage, such as a judge, does
 not run a second time on the same records. A process that stops between the two
@@ -371,12 +379,11 @@ The record-to-sample stage turns each upload into its training sample with
 ``Record2Sample.uploaded_sample(trajectory)``. The default returns the trajectory
 as uploaded. A stage can override it to check the structure or add
 metadata: ``SFTSamples`` refuses a trajectory with no agent turn to train and
-adds its ``max_tokens``. The method must be pure. Admission calls it from the request
-thread for each trajectory and each trainer that accepts uploads; a
-``ValueError`` refuses the whole upload with 400, and the message names the
-trajectory. The pipeline calls it again when it reads the upload. A
-trajectory that ``uploaded_sample`` refuses when the pipeline reads it is
-skipped with a warning and stays unconsumed. The training component renders
+adds its ``max_tokens``. The method must be pure. The pipeline calls it when it
+reads the upload. A trajectory that it refuses with ``ValueError`` is skipped
+with a warning and stays unconsumed. A data write does not call it: to add
+items to a scenario, Reef checks only that a trainer accepts uploads, and it
+does not read the trajectories. The training component renders
 the trajectory when a job trains it; a trajectory that cannot render, or that
 is longer than its ``max_tokens``, is left out of the job.
 

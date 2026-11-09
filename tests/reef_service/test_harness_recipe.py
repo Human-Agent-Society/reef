@@ -48,6 +48,7 @@ from tests.support.harness_steps import (
     runtime,
     traced,
 )
+from tests.support.records import memory_records
 from tests.support.samples import data_storage, sample_store
 
 from reef.artifact import Artifact
@@ -86,7 +87,7 @@ from reef.service.app import create_app
 from reef.storage.data import NewItem
 from reef.storage.samples import StoredSample
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
@@ -275,7 +276,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
         evaluation=evaluation, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
     )
     built = from_config(settings, runtime=runtime())
-    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
+    trainer = built.build("demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built))
     try:
         backend = job_backend(trainer)
         selection = built.build_policy(backend)
@@ -298,7 +299,7 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
 
 def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committed_releases(tmp_path: Path) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
-    trainer = built.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
+    trainer = built.build("demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built))
     # The trainer submits each step as a job of the recipe's harness component.
     assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is built.harness_component
     assert isinstance(built.harness_component, HarnessTrainingComponent)
@@ -306,7 +307,7 @@ def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committe
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
     trainer.close()
     with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed snapshots"):
-        built.build("demo", SQLiteRecordStore(), root=seed_root(built))
+        built.build("demo", memory_records("demo"), root=seed_root(built))
 
 
 def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
@@ -322,7 +323,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     )
     state = tmp_path.resolve() / "state"
     assert built.scenario_state_dirs("demo") == (state / "demo",)
-    records = SQLiteRecordStore()
+    records = memory_records("demo")
     for scenario in ("demo", "other"):
         trainer = built.build(scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
         backend = job_backend(trainer)
@@ -387,8 +388,8 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
 
     assert boot().configured_tasks() == (str(root / "held-1"), str(root / "held-2"))
     assert boot().task_directories(get_adapter("pi"))
-    with pytest.raises(RecipeConfigError, match="'hermes' cannot play Harbor task directories"):
-        boot(adapter="hermes")
+    with pytest.raises(RecipeConfigError, match="'native' cannot play Harbor task directories"):
+        boot(adapter="native")
     with pytest.raises(RecipeConfigError, match="collect_failures adds prompts"):
         boot(collect_failures=True)
     with pytest.raises(RecipeConfigError, match="one task source, not tasks and task_manifest"):
@@ -455,7 +456,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         second = import_task("held-2", "eval")
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
         with pytest.raises(RecipeConfigError, match="needs the samples of a scenario session"):
-            built.build("s", SQLiteRecordStore(), artifacts=artifacts_for(built), root=seed_root(built))
+            built.build("s", memory_records("s"), artifacts=artifacts_for(built), root=seed_root(built))
     retired = {"tasks": [], "task_store": "imported-tasks"}
     with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
         from_config(evolution_config(evaluation=retired), runtime=runtime())
@@ -493,7 +494,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         return built
 
     def trainer_of(recipe: HarnessEvolutionRecipe) -> Trainer:
-        return recipe.build("demo", SQLiteRecordStore(), artifacts=artifacts_for(recipe), root=seed_root(recipe))
+        return recipe.build("demo", memory_records("demo"), artifacts=artifacts_for(recipe), root=seed_root(recipe))
 
     records = trainer_of(
         from_config(

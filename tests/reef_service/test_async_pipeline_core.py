@@ -451,10 +451,10 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     samples_release = Event()
     produce_samples = Trainer.produce_samples
 
-    def held_samples(self: Trainer) -> bool:
+    def held_samples(self: Trainer, progress=None) -> bool:
         if not samples_release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release the held samples service")
-        return produce_samples(self)
+        return produce_samples(self, progress)
 
     monkeypatch.setattr(Trainer, "produce_samples", held_samples)
     _submit_pair(dispatcher, "2")

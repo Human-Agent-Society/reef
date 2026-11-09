@@ -141,6 +141,7 @@ def router_configuration(snapshot: RoutingSnapshot, settings: RoutingDeploymentS
     CPU from ``DOMAIN_CLASSIFIER_DIRECTORY`` with the snapshot's threshold. Below that threshold, preview
     matches no domain rule; other matching rules or the Scenario default can still select a target.
     """
+    external = settings.lifecycle == "external"
     enabled = {name: target for name, target in snapshot.targets.items() if target.enabled}
     domain_module: dict[str, object] = {"model_ref": "", "model_id": "", "category_mapping_path": ""}
     model_catalog: dict[str, object] = {}
@@ -204,12 +205,13 @@ def router_configuration(snapshot: RoutingSnapshot, settings: RoutingDeploymentS
                         "max_concurrency": settings.preview_max_concurrency,
                     }
                 },
-                # A container-wide bind is published only on host loopback; the router refuses it unless
-                # bearer authentication names its tokens by variable.
+                # A managed router binds container-wide and is published only on host loopback; the router refuses
+                # that bind unless bearer authentication names its tokens by variable. An external router shares its
+                # replica's network namespace, so it binds loopback at the port that the replica calls.
                 "management_api": {
-                    "bind_address": "0.0.0.0",
-                    "port": ROUTER_HTTP_PORT,
-                    "remote_exposure": True,
+                    "bind_address": "127.0.0.1" if external else "0.0.0.0",
+                    "port": settings.sr_management_port if external else ROUTER_HTTP_PORT,
+                    "remote_exposure": not external,
                     "auth": {
                         "mode": "bearer",
                         "tokens": [
@@ -342,6 +344,20 @@ def check_domain_classifier(snapshot: RoutingSnapshot) -> None:
                 raise ValueError(f"{name}.domains names labels the classifier does not have: {unknown}")
             if rule.domains and rule.name.casefold() in folded:
                 raise ValueError(f"{name} is named like a classifier label; give the domain rule another name")
+
+
+def render_external(manifest_path: Path, output_file: Path, settings: RoutingDeploymentSettings) -> RoutingSnapshot:
+    """Write the configuration of an external router to ``output_file``, and check a domain classifier's files.
+
+    The caller runs the router with this file, and checks that its image has the pinned revision. Raise ``ValueError``
+    for an invalid manifest, or for settings of another lifecycle.
+    """
+    if settings.lifecycle != "external":
+        raise ValueError("render needs reef.routing_deployment.lifecycle: external")
+    snapshot = RoutingSnapshot.load(manifest_path)
+    check_domain_classifier(snapshot)
+    write_private_document(output_file, router_configuration(snapshot, settings))
+    return snapshot
 
 
 def generate(manifest_path: Path, output: Path, managed: ManagedRoutingRender) -> RoutingSnapshot:

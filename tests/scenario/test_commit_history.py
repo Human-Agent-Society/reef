@@ -37,7 +37,7 @@ from reef.storage.commits import CommitRecord, active_snapshot
 from reef.storage.job_data import read_job_data
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.train import Trainer
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
@@ -70,10 +70,10 @@ def sample_record(
 @pytest.fixture
 def open_history(tmp_path):
     """Open commit histories over one SQLite database file; the fixture closes them."""
-    stores: list[SQLiteRecordStore] = []
+    stores: list[SQLiteScenarioDatabase] = []
 
     def open_one():
-        stores.append(SQLiteRecordStore(tmp_path / "records.sqlite3"))
+        stores.append(SQLiteScenarioDatabase(tmp_path / "records.sqlite3"))
         return stores[-1].commit_history()
 
     yield open_one
@@ -388,7 +388,7 @@ def scenario_database(agent_record_dir, scenario: str = "math"):
 
 
 def committed_records(agent_record_dir, scenario: str = "math") -> tuple[CommitRecord, ...]:
-    with SQLiteRecordStore(scenario_database(agent_record_dir, scenario)) as records:
+    with SQLiteScenarioDatabase(scenario_database(agent_record_dir, scenario)) as records:
         return records.commit_history().records()
 
 
@@ -597,9 +597,9 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
 def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     """Consumed rows must never be trained twice, even when they survive compaction.
 
-    The protect-all pipeline keeps every row physically present, so recovery
-    without the history's high-water mark would page from sequence 0, push again
-    the consumed pair, and train it again.
+    The protect-all pipeline keeps every row physically present, and recovery
+    reads from sequence 0, so it must skip the consumed pair that the history
+    names, or the pair would train again.
     """
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
@@ -624,7 +624,6 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     second_component = RecordingComponent(tmp_path / "second")
     second = build(second_component)
     recovered = second.get_or_create_scenario("math")
-    assert recovered.trainer.data_offset == 2  # resumed at the committed watermark
 
     train_pair(second, 2)
     # The only newly trained batch is the genuinely new pair; i1 never retrains.
@@ -664,8 +663,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
 
     second_component = RecordingComponent()
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    recovered = second.get_or_create_scenario("math")
-    assert recovered.trainer.data_offset == 3  # resumed at the committed watermark
+    second.get_or_create_scenario("math")
     assert served_artifact_id(second) == base_artifact_id
 
     second.accept_record(sft_report("r2", "i2"))
@@ -1278,7 +1276,5 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     assert recovered.scenario_step == 2
     assert recovered.trainer.state == ended.algorithm_state
     assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
-    # Record progress resumes at the committed watermark, not sequence 0.
-    assert recovered.trainer.data_offset == 2
     first.close()
     second.close()

@@ -1,11 +1,10 @@
 """The data of each scenario when it opens: its owner, its record items and the deployment's task import
 (RFC #1028, RFC #1140).
 
-:class:`DataScenarioStorage` opens each scenario's session in three steps. A scenario without an owner gets the
+:class:`DataScenarioStorage` opens each scenario's session in two steps. A scenario without an owner gets the
 owner with its name. Then the deployment's ``task-import`` section, when it is set, adds each task of its split
-manifest as an item of the owner that the scenario uses in the manifest's split. Last, the record items of another
-scenario that it uses are appended to its record store (``sync_scenario_records``). The scenario trains on the items
-of the owner that it uses (``SampleStore``).
+manifest as an item of the owner that the scenario uses in the manifest's split. The scenario trains on the items
+of the owner that it uses (``SampleStore``), also on the record items of another scenario.
 
 An identical import changes nothing, so the import runs again at each open and picks up the tasks that the operator
 added to the manifest. A task that conflicts with a stored item stops the open.
@@ -24,8 +23,6 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks.split import read_split_manifest
 from reef.storage.data import DataStore, NewItem
-from reef.storage.data_sync import release_items
-from reef.storage.record_items import sync_scenario_records
 from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import SplitName, TaskFileStore
@@ -85,15 +82,14 @@ class DataScenarioStorage(ScenarioStorage):
 
     1. sets the owner of a scenario that has none to the scenario's name;
     2. runs ``task_import`` for the owner, when it is set;
-    3. appends to its record store the copy of each record item of the owner
-       that it uses and that another scenario made (``sync_scenario_records``);
-    4. returns the session.
+    3. returns the session.
 
     ``sample_store`` gives the items of the owner that the scenario uses.
 
-    If a step raises, ``open`` closes the session and raises. ``archive`` also
-    removes the scenario from the ``scenarios`` of its owner's items, except
-    the record items that it made, before the archive of ``inner``.
+    If a step raises, ``open`` closes the session and raises. ``archive`` is
+    ``inner``'s, which removes the scenario from the ``scenarios`` of its
+    owner's items, also of the record items that it made
+    (``DataStore.remove_scenario``).
 
     Purpose: deployment assembly wraps the scenario storage in it. The
     scenario factory opens each scenario's session through it.
@@ -105,7 +101,9 @@ class DataScenarioStorage(ScenarioStorage):
         self.task_import = task_import
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         raise PluginConfigError(f"{cls.__name__} wraps another storage; deployment assembly applies it")
 
     @property
@@ -128,7 +126,6 @@ class DataScenarioStorage(ScenarioStorage):
                 self.inner.write_settings(scenario, replace(settings, owner=owner))
             if self.task_import is not None:
                 self.task_import.run(self.data, owner, scenario)
-            sync_scenario_records(session.records, self.data, owner, scenario)
         except BaseException:
             session.close()
             raise
@@ -139,13 +136,7 @@ class DataScenarioStorage(ScenarioStorage):
         return None if owner is None else SampleStore(self.data, owner, scenario, session.training_state)
 
     def archive(self, scenario: str) -> tuple[str, ...]:
-        owner = self.inner.read_settings(scenario).owner
-        if owner is not None:
-            release_items(self.data, owner, scenario)
         return self.inner.archive(scenario)
-
-    def prune(self, *, max_bytes: int) -> int:
-        return self.inner.prune(max_bytes=max_bytes)
 
     def close(self) -> None:
         self.inner.close()

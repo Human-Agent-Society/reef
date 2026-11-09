@@ -10,7 +10,6 @@ from typing import Any
 
 from aiohttp import ClientResponse
 from aiohttp.test_utils import TestClient
-
 from tests.support.runtime_stubs import RecordingComponent
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend
@@ -144,16 +143,17 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     initial.mkdir(parents=True, exist_ok=True)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
-    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files)
+    coordination = memory_coordination()
+    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
         recipe,
         factory or InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
         data_store=data,
-        coordination=memory_coordination(),
+        coordination=coordination,
     )
-    # The data service copies the records to record items, as assembly runs it.
+    # The data service runs the data jobs, as assembly runs it.
     dispatcher.workers.add(
         DataWorker(
             dispatcher.queue,

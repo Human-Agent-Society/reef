@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import threshold_pipeline
 from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
 from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeArtifacts, changed_rules, harness_recipe
+from tests.support.records import item_records, memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples as produce_samples
 from tests.support.serving import wait_for_serving
@@ -38,7 +39,9 @@ from reef.storage.job_data import read_job_data
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sql_data import SQLiteDataStore
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop
@@ -129,7 +132,7 @@ def stored_samples_of(dispatcher, *receipts):
 
 @pytest.fixture
 def records():
-    store = SQLiteRecordStore()
+    store = memory_records("s")
     yield store
     store.close()
 
@@ -275,8 +278,8 @@ def test_auto_keeps_recipe_batching(records, build):
 
 
 def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_path, build, training_requests):
-    path = tmp_path / "records.sqlite"
-    records, backend = SQLiteRecordStore(path), RecordingComponent()
+    data, backend = SQLiteDataStore(tmp_path / "data", LocalTaskFileStore(None)), RecordingComponent()
+    records = item_records(data, "s")
     first = build(backend, store=records)
     records.append(inference("a"))
     file(training_requests, "committed")
@@ -287,16 +290,16 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     # Simulate a crash after the commit history landed but before compaction.
     file(training_requests, "pending")
     first.close()
-    records.close()
-    records = SQLiteRecordStore(path)
+    data.close()
+    data = SQLiteDataStore(tmp_path / "data", LocalTaskFileStore(None))
+    records = item_records(data, "s")
     recovered = build(backend, store=records)
-    recovered.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
-    recovered.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+    recovered.restore_consumed_records(prepared.consumed_ids)
     make_samples(recovered)
     assert recovered.advance_job() is not None
     assert [batch.request_id for batch in backend.batches] == ["committed", "pending"]
     recovered.close()
-    records.close()
+    data.close()
 
 
 def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path, open_dispatcher):

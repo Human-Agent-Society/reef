@@ -29,8 +29,14 @@ from reef.scenario.snapshot_files import component_files
 from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
 from reef.service.lifecycle import PendingWrites
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.routed_inference import InferenceRetryPolicy, InferenceRetryTimeout, RoutedInference
+from reef.service.routed_inference import (
+    DispatcherRecords,
+    InferenceRetryPolicy,
+    InferenceRetryTimeout,
+    RoutedInference,
+)
 from reef.service.routed_shadow import ShadowLimits, ShadowTasks
+
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import RoutingPreviewClient
 from reef.service.wire import (
@@ -122,7 +128,7 @@ class RequestService:
         self.routing = routing
         self.preview = preview
         self.routed = RoutedInference(
-            dispatcher,
+            DispatcherRecords(dispatcher),
             preview,
             retry_policy or InferenceRetryPolicy(),
             writes,

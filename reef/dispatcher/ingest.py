@@ -10,7 +10,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
@@ -103,7 +102,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
                 source = preceding.get(reference)
                 if source is None:
                     stored_reference = current.records.get_for_audit(item.scenario, reference)
-                    source = stored_reference.item if stored_reference is not None else None
+                    source = stored_reference.item if stored_reference is not None else current.used_record(reference)
                 if source is None or source.request_type is not RequestType.INFERENCE:
                     raise ReportValidationError(
                         f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
@@ -172,30 +171,20 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
 
 
-def check_use(current: Scenario, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool) -> None:
+def check_use(current: Scenario, trajectories: bool, train_tasks: bool) -> None:
     """Raise ``ValueError`` unless ``current`` can train on the data items that it is to use.
 
-    ``trajectories`` are the ``(item_id, trajectory)`` pairs of the trajectory items, and ``train_tasks`` says
-    whether one or more task item is to be in the ``train`` split. A trajectory needs a trainer that accepts
-    uploaded trajectories (``TrainingPipeline.accepts_trajectories``), and each such trainer must render it;
-    otherwise every trainer would skip it. A train task needs a trainer that reads imported tasks
-    (``Trainer.accepts_imported_tasks``). The ``eval`` split is always open: an artifact evaluation
-    runs its tasks.
+    ``trajectories`` says whether one or more trajectory item is new to it, and ``train_tasks`` whether one or more
+    task item is to be in the ``train`` split. A trajectory needs a trainer that accepts uploaded trajectories
+    (``TrainingPipeline.accepts_trajectories``). The check does not read the trajectories: the pipeline renders each
+    one when it reads it, and skips one that cannot train (``TrainingPipeline.trainable``). A train task needs a
+    trainer that reads imported tasks (``Trainer.accepts_imported_tasks``). The ``eval`` split is always open: an
+    artifact evaluation runs its tasks.
     """
-    if trajectories:
-        trainers = [
-            component_trainer.trainer
-            for component_trainer in current.trainers
-            if component_trainer.trainer.pipeline.accepts_trajectories
-        ]
-        if not trainers:
-            raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
-        for item_id, trajectory in trajectories:
-            for trainer in trainers:
-                try:
-                    trainer.uploaded_sample(trajectory)
-                except ValueError as exc:
-                    raise ValueError(f"trajectory {item_id!r} cannot train: {exc}") from exc
+    if trajectories and not any(
+        component_trainer.trainer.pipeline.accepts_trajectories for component_trainer in current.trainers
+    ):
+        raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
     if train_tasks and not any(
         component_trainer.trainer.accepts_imported_tasks for component_trainer in current.trainers
     ):

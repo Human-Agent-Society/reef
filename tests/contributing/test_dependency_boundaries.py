@@ -155,15 +155,10 @@ def test_importing_record_contracts_does_not_load_database_adapters() -> None:
         "assert not [name for name in sys.modules if name.startswith("
         "('sqlalchemy', 'psycopg', 'sqlite3', 'reef.storage.sqlite', "
         "'reef.storage.postgres', 'reef.storage.sql_records'))]; "
-        "from reef import SQLiteRecordStore, PostgresRecordStore; "
-        "from reef.storage.sqlite import SQLiteRecordStore as SQLiteImplementation; "
-        "from reef.storage.postgres import PostgresRecordStore as PostgresImplementation; "
         "from reef.storage.sqlite import SQLiteScenarioStorage; "
         "from reef.storage.postgres import PostgresScenarioStorage; "
         "assert issubclass(SQLiteScenarioStorage, ScenarioStorage); "
-        "assert issubclass(PostgresScenarioStorage, ScenarioStorage); "
-        "assert SQLiteRecordStore is SQLiteImplementation; "
-        "assert PostgresRecordStore is PostgresImplementation"
+        "assert issubclass(PostgresScenarioStorage, ScenarioStorage)"
     )
 
 

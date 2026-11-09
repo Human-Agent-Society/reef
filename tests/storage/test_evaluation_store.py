@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
 
@@ -99,8 +100,19 @@ def test_a_request_configures_exactly_one_side_of_the_policy():
         ({"model": "served", "task_names": ("add", "add")}, "distinct"),
         ({"model": "served", "rollouts_per_task": 0}, "positive integer"),
         ({"model": "served", "environment": ""}, "environment"),
+        ({"model": "served", "max_concurrent_rollouts": 0}, "max_concurrent_rollouts"),
+        ({"model": "served", "max_failed_fraction": 1}, "max_failed_fraction"),
+        ({"model": "served", "max_failed_fraction": True}, "max_failed_fraction"),
     ):
         with pytest.raises(ValueError, match=message):
             ArtifactEvaluationRequest("r1", "weights", **fields)
     with pytest.raises(ValueError, match="request is an object"):
         ArtifactEvaluationRequest.from_json({"artifact_id": "r1"})
+    limited = replace(REQUEST, max_concurrent_rollouts=4, max_failed_fraction=0.5)
+    assert ArtifactEvaluationRequest.from_json(limited.to_json()) == limited
+    stored_earlier = {
+        key: value
+        for key, value in REQUEST.to_json().items()
+        if key not in ("max_concurrent_rollouts", "max_failed_fraction")
+    }
+    assert ArtifactEvaluationRequest.from_json(stored_earlier) == REQUEST

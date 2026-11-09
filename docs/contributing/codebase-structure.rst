@@ -289,8 +289,8 @@ The extension points those packages expose are in `Python API
   writes each scenario's settings (such as the training mode and the
   activation rule) through the injected ``ScenarioStorage``, like records and
   commits; it imports no storage implementation.
-  ``Dispatcher`` calls the storage service directly for retention and closes
-  it after closing the loaded scenarios. It never imports or chooses a
+  ``Dispatcher`` prunes its data store for retention and closes the storage
+  service after closing the loaded scenarios. It never imports or chooses a
   concrete record backend.
 - Does it define shared record operations or retention limits? Put the contract
   or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
@@ -299,7 +299,8 @@ The extension points those packages expose are in `Python API
   and opens the scenario's task stores (``reef/storage/tasks.py``) and its
   training state; its training samples are data items
   (``reef/storage/samples.py``);
-  ``ScenarioStorage`` owns scenario settings, archival, and retention.
+  ``ScenarioStorage`` owns scenario settings and archival; a scenario's records
+  are record items in the data store (``ItemRecordStore``).
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or run them with an agent? Put it in ``reef/record2sample/generator/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
@@ -313,15 +314,17 @@ The extension points those packages expose are in `Python API
   split manifests. What a method asks the designer for, and what it does
   with the results, stays in the method's task generator under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
-  shares SQL record and retention operations, and ``ScopedTable``, one table
-  with the namespace of one store. ``sql_tasks.py``,
+  shares the trajectory nodes of record items, ``SQLScenarioDatabase``, the
+  database of one scenario's state, and ``ScopedTable``, one table with the
+  namespace of one store. ``sql_setup.py`` holds the connection setup that the
+  SQL stores share. ``sql_tasks.py``,
   ``sql_samples.py``, ``sql_evaluations.py`` and ``sql_commits.py``
   share the task, training sample, artifact evaluation and commit tables and
   their operations in the same database.
   ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts.
   ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
-  maintenance. ``postgres.py`` supplies PostgreSQL tables, pooled transactions,
-  and retention. ``commit_history.py`` owns the ``CommitHistory`` base and
+  maintenance. ``postgres.py`` supplies PostgreSQL tables and pooled
+  transactions. ``commit_history.py`` owns the ``CommitHistory`` base and
   ``CommitHistoryScenarioStore``, which accepts any ``RecordStore``,
   ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time
   upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
@@ -387,8 +390,7 @@ The extension points those packages expose are in `Python API
   ``reef/storage/served_models.py`` the ``served_models`` table, which control
   writes and the inference service reads;
   ``reef/storage/control_lease.py`` the lease that makes one control instance
-  active; and ``reef/storage/marks.py`` the named positions that a service
-  keeps, such as how far the data service copied each scenario's records.
+  active.
   ``reef/storage/sql_coordination.py`` keeps these tables in SQLite or
   PostgreSQL. ``reef/execution/workers.py`` holds ``QueueWorker``, the loop
   that takes, leases and finishes queue items. The workers that take queue

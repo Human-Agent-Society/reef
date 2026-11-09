@@ -14,6 +14,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
+from reef.core.job_data import TrajectorySample
+from reef.core.values import JsonValue, require_text
+
 #: The JSON value of a failed rollout's score (``RolloutScore.to_json``).
 FAILED = "failed"
 
@@ -306,6 +309,9 @@ class ArtifactEvaluationRequest:
     with a non-empty ``item`` and no other key); or ``model``, the non-empty name of the deployment's model binding that a
     harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
     ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
+    ``max_concurrent_rollouts`` is the most rollouts of the evaluation that run at once, a positive int, or None for
+    no limit. ``max_failed_fraction`` is the largest fraction of failed rollouts, a number greater than 0 and less
+    than 1, above which Reef stops the evaluation; None for no limit.
     Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
     """
 
@@ -316,6 +322,8 @@ class ArtifactEvaluationRequest:
     task_names: tuple[str, ...] = ()
     rollouts_per_task: int = 1
     environment: str = "docker"
+    max_concurrent_rollouts: int | None = None
+    max_failed_fraction: float | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -353,6 +361,14 @@ class ArtifactEvaluationRequest:
         count = self.rollouts_per_task
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("an artifact evaluation's rollouts_per_task is a positive integer")
+        limit = self.max_concurrent_rollouts
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValueError("an artifact evaluation's max_concurrent_rollouts is a positive integer or null")
+        fraction = self.max_failed_fraction
+        if fraction is not None and (
+            isinstance(fraction, bool) or not isinstance(fraction, int | float) or not 0 < fraction < 1
+        ):
+            raise ValueError("an artifact evaluation's max_failed_fraction is a number between 0 and 1, or null")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -363,13 +379,20 @@ class ArtifactEvaluationRequest:
             "task_names": list(self.task_names),
             "rollouts_per_task": self.rollouts_per_task,
             "environment": self.environment,
+            "max_concurrent_rollouts": self.max_concurrent_rollouts,
+            "max_failed_fraction": self.max_failed_fraction,
         }
 
     @classmethod
     def from_json(cls, value: object) -> ArtifactEvaluationRequest:
-        """The request that ``to_json`` gave; raise ``ValueError`` for any other value."""
+        """The request that ``to_json`` gave; raise ``ValueError`` for any other value. A request stored before
+        ``max_concurrent_rollouts`` or ``max_failed_fraction`` existed has no such limit."""
         keys = {"artifact_id", "component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
-        if not isinstance(value, Mapping) or set(value) != keys or not isinstance(value["task_names"], list):
+        if (
+            not isinstance(value, Mapping)
+            or set(value) - {"max_concurrent_rollouts", "max_failed_fraction"} != keys
+            or not isinstance(value["task_names"], list)
+        ):
             raise ValueError(f"an artifact evaluation request is an object of {sorted(keys)}")
         return cls(
             value["artifact_id"],
@@ -379,6 +402,8 @@ class ArtifactEvaluationRequest:
             tuple(value["task_names"]),
             value["rollouts_per_task"],
             value["environment"],
+            value.get("max_concurrent_rollouts"),
+            value.get("max_failed_fraction"),
         )
 
 
@@ -388,10 +413,10 @@ class ArtifactEvaluationSettings:
     ``artifact_id``.
 
     Values: ``component`` is None, for the one component of the snapshots that has a kind, or a non-empty
-    component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task`` and ``environment`` meet the
-    conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation request is these settings and an
-    artifact ID, and a scenario keeps settings to evaluate each new artifact with; ``request`` makes the request
-    of one artifact.
+    component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task``, ``environment``,
+    ``max_concurrent_rollouts`` and ``max_failed_fraction`` meet the conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation
+    request is these settings and an artifact ID, and a scenario keeps settings to evaluate each new artifact with;
+    ``request`` makes the request of one artifact.
     """
 
     component: str | None = None
@@ -400,6 +425,8 @@ class ArtifactEvaluationSettings:
     task_names: tuple[str, ...] = ()
     rollouts_per_task: int = 1
     environment: str = "docker"
+    max_concurrent_rollouts: int | None = None
+    max_failed_fraction: float | None = None
 
     def __post_init__(self) -> None:
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -418,6 +445,8 @@ class ArtifactEvaluationSettings:
             self.task_names,
             self.rollouts_per_task,
             self.environment,
+            self.max_concurrent_rollouts,
+            self.max_failed_fraction,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -428,6 +457,8 @@ class ArtifactEvaluationSettings:
             "task_names": list(self.task_names),
             "rollouts_per_task": self.rollouts_per_task,
             "environment": self.environment,
+            "max_concurrent_rollouts": self.max_concurrent_rollouts,
+            "max_failed_fraction": self.max_failed_fraction,
         }
 
     @classmethod
@@ -439,7 +470,16 @@ class ArtifactEvaluationSettings:
         """
         if not isinstance(value, Mapping):
             raise ValueError("artifact evaluation settings are a JSON object")
-        known = {"component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
+        known = {
+            "component",
+            "harness",
+            "model",
+            "task_names",
+            "rollouts_per_task",
+            "environment",
+            "max_concurrent_rollouts",
+            "max_failed_fraction",
+        }
         unknown = sorted(set(value) - known)
         if unknown:
             raise ValueError(f"artifact evaluation settings take no {unknown}; they take {sorted(known)}")
@@ -453,6 +493,8 @@ class ArtifactEvaluationSettings:
             tuple(task_names),
             value.get("rollouts_per_task", 1),
             value.get("environment", "docker"),
+            value.get("max_concurrent_rollouts"),
+            value.get("max_failed_fraction"),
         )
 
 
@@ -580,16 +622,215 @@ class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
         return decision
 
 
+#: What made an evaluation call: the agent, which calls the candidate, or the task's verifier, which writes its calls
+#: to ``/logs/verifier/judge/calls.jsonl`` (RFC #1293).
+Caller = Literal["agent", "verifier"]
+CALLERS: tuple[Caller, ...] = ("agent", "verifier")
+#: The longest ``label`` of a call.
+MAX_CALL_LABEL_CHARACTERS = 200
+
+
+def require_integer(value: object, name: str, *, minimum: int = 0) -> None:
+    """Raise ``ValueError`` naming ``name`` unless ``value`` is an integer from ``minimum``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} is an integer from {minimum}")
+
+
+@dataclass(frozen=True)
+class EvaluationCallSummary:
+    """One model call of an evaluation rollout, without its bodies.
+
+    Values: ``task_index`` and ``repeat`` name the rollout in its evaluation, as ``EvaluationRollout`` does.
+    ``attempt`` is the 1-based attempt of the rollout's work item that made the call. ``index`` is the 0-based
+    position of the call in that attempt, in the order in which the calls ended. ``path`` is the non-empty path that
+    the agent called, and ``status`` the HTTP status that it got, an integer from 100. ``started_at`` is a finite time in seconds, and
+    ``duration_s`` a finite number of seconds from 0. ``prompt_tokens`` and ``completion_tokens`` are integers from 0,
+    or None when the reply does not tell them. ``finish_reason`` is the non-empty reason that the reply gives, or
+    None. ``tool_calls`` is the number of tool calls in the reply, an integer from 0. A call whose ``status`` is not
+    200 has no ``finish_reason`` and no tool call. ``caller`` is the ``Caller`` that made the call; ``index`` counts
+    the calls of each caller of the attempt apart. ``label`` is a non-empty string of at most
+    ``MAX_CALL_LABEL_CHARACTERS`` characters that the verifier gave the call, or None; an agent call has none.
+    ``(task_index, repeat, attempt, caller, index)`` is the key of the call in its evaluation.
+
+    Purpose: the evaluation worker makes it for each call that a rollout's capture proxy captures, and for each call
+    that the rollout's verifier wrote; the evaluation routes answer it with ``to_json``.
+    """
+
+    task_index: int
+    repeat: int
+    attempt: int
+    index: int
+    path: str
+    status: int
+    started_at: float
+    duration_s: float
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    finish_reason: str | None
+    tool_calls: int
+    caller: Caller = "agent"
+    label: str | None = None
+
+    def __post_init__(self) -> None:
+        for count, name in (
+            (self.task_index, "task_index"),
+            (self.repeat, "repeat"),
+            (self.index, "index"),
+            (self.tool_calls, "tool_calls"),
+        ):
+            require_integer(count, name)
+        require_integer(self.attempt, "attempt", minimum=1)
+        require_integer(self.status, "status", minimum=100)
+        for tokens, name in ((self.prompt_tokens, "prompt_tokens"), (self.completion_tokens, "completion_tokens")):
+            if tokens is not None:
+                require_integer(tokens, name)
+        require_text(self.path, "path")
+        if not math.isfinite(self.started_at):
+            raise ValueError("a call's started_at is a finite time")
+        if not math.isfinite(self.duration_s) or self.duration_s < 0:
+            raise ValueError("a call's duration_s is a finite number of seconds from 0")
+        if self.finish_reason is not None and (not isinstance(self.finish_reason, str) or not self.finish_reason):
+            raise ValueError("a call's finish_reason is a non-empty string or None")
+        if self.status != 200 and (self.finish_reason is not None or self.tool_calls):
+            raise ValueError("a failed call has no finish_reason and no tool call")
+        if self.caller not in CALLERS:
+            raise ValueError(f"a call's caller is one of {', '.join(CALLERS)}")
+        if self.label is not None and (
+            not isinstance(self.label, str) or not 1 <= len(self.label) <= MAX_CALL_LABEL_CHARACTERS
+        ):
+            raise ValueError(f"a call's label is a string of 1 to {MAX_CALL_LABEL_CHARACTERS} characters or None")
+        if self.caller == "agent" and self.label is not None:
+            raise ValueError("an agent call has no label")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        """The call as the call routes answer it in its rollout: every field but ``task_index`` and ``repeat``."""
+        return {
+            "caller": self.caller,
+            "label": self.label,
+            "attempt": self.attempt,
+            "index": self.index,
+            "path": self.path,
+            "status": self.status,
+            "started_at": self.started_at,
+            "duration_s": self.duration_s,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "finish_reason": self.finish_reason,
+            "tool_calls": self.tool_calls,
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationCall:
+    """One model call of an evaluation rollout, with its bodies.
+
+    Values: ``summary`` is the call's ``EvaluationCallSummary``. ``request`` is the JSON object that the agent sent,
+    and ``response`` the JSON object that it got: the reply, or the error body of a failed call. Each is None when the
+    capture proxy kept no JSON object.
+
+    Purpose: the evaluation worker makes it for each captured call, and the data store keeps it as a record item
+    (``reef.storage.record_items.evaluation_call_item``). The call route answers it with ``to_json``.
+    """
+
+    summary: EvaluationCallSummary
+    request: Mapping[str, JsonValue] | None
+    response: Mapping[str, JsonValue] | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.summary, EvaluationCallSummary):
+            raise TypeError("a call's summary is an EvaluationCallSummary")
+        for body, name in ((self.request, "request"), (self.response, "response")):
+            if body is not None and not isinstance(body, Mapping):
+                raise TypeError(f"a call's {name} is a JSON object or None")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        """The summary's ``to_json`` with ``request`` and ``response``."""
+        return {
+            **self.summary.to_json(),
+            "request": None if self.request is None else dict(self.request),
+            "response": None if self.response is None else dict(self.response),
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationTrajectory:
+    """An ATIF trajectory that the verifier of one attempt of an evaluation rollout wrote (RFC #1293).
+
+    Values: ``task_index`` and ``repeat`` name the rollout, as ``EvaluationCallSummary`` does, and ``attempt`` is the
+    1-based attempt. ``index`` is the 0-based position of the trajectory's file among the attempt's trajectory files,
+    in name order, and ``name`` is the non-empty name of that file. ``document`` is the ATIF document
+    (``TrajectorySample`` checks it). ``(task_index, repeat, attempt, index)`` is its key in its evaluation.
+
+    Purpose: the evaluation worker reads it from the trial; the data store keeps it as a trajectory item
+    (``reef.storage.record_items.evaluation_trajectory_item``), and the trajectories route answers it.
+    """
+
+    task_index: int
+    repeat: int
+    attempt: int
+    index: int
+    name: str
+    document: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        for count, name in ((self.task_index, "task_index"), (self.repeat, "repeat"), (self.index, "index")):
+            require_integer(count, name)
+        require_integer(self.attempt, "attempt", minimum=1)
+        require_text(self.name, "name")
+        TrajectorySample(self.document)
+
+
+@dataclass(frozen=True)
+class EvaluationCallTotals:
+    """The totals of the kept calls of one evaluation rollout, over all its attempts.
+
+    Values: ``count`` is the number of calls, an integer from 1. ``failed`` is the number of calls whose status is
+    not 200, from 0 to ``count``. ``prompt_tokens`` and ``completion_tokens`` are the sums of the known token counts
+    of the calls, integers from 0; a call whose count is None adds nothing.
+
+    Purpose: ``ArtifactEvaluations.rollouts_json`` adds up the calls of each rollout into one; the rollouts route
+    answers it with ``to_json``.
+    """
+
+    count: int
+    failed: int
+    prompt_tokens: int
+    completion_tokens: int
+
+    def __post_init__(self) -> None:
+        require_integer(self.count, "count", minimum=1)
+        require_integer(self.failed, "failed")
+        require_integer(self.prompt_tokens, "prompt_tokens")
+        require_integer(self.completion_tokens, "completion_tokens")
+        if self.failed > self.count:
+            raise ValueError("a rollout has no more failed calls than calls")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "count": self.count,
+            "failed": self.failed,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
+
+
 __all__ = [
     "ARTIFACT_KINDS",
+    "CALLERS",
     "FAILED",
+    "MAX_CALL_LABEL_CHARACTERS",
     "ArtifactEvaluationRequest",
     "ArtifactEvaluationSettings",
     "ArtifactKind",
+    "Caller",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
+    "EvaluationCall",
+    "EvaluationCallSummary",
+    "EvaluationCallTotals",
     "EvaluationResult",
+    "EvaluationTrajectory",
     "PolicyEvaluation",
     "PolicyHarness",
     "PolicyModel",

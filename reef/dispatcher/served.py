@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import cast
 
 from reef.core.errors import ReefError
@@ -15,7 +16,7 @@ from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination
-from reef.storage.served_models import AUTOMATIC_RETRIES
+from reef.storage.served_models import AUTOMATIC_RETRIES, REDEPLOY
 from reef.storage.work_queue import JsonValue, WorkItem, clock
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,15 @@ class ServedModelsPublisher(ServiceWorker):
             "serving_config": current.served_serving_config(),
         }
 
-    def publish(self, current: Scenario, *, now: float | None = None, retry_failed: bool = False) -> None:
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int]) -> None:
+        """Make ``weights`` the traffic split of ``scenario`` (``ServedModelsWriter.write_traffic_weights``)."""
+        self.coordination.served_models.write_traffic_weights(
+            scenario, weights, control_lease_number=self.lease_number
+        )
+
+    def publish(
+        self, current: Scenario, *, now: float | None = None, retry_failed: bool = False, redeploy: bool = False
+    ) -> None:
         """Queue the desired payload of ``current`` at ``now`` while this instance holds the lease.
 
         Let ``failed`` be the scenario's current request when it failed with the desired payload, ``n`` its
@@ -190,13 +199,17 @@ class ServedModelsPublisher(ServiceWorker):
         - otherwise ``failed`` stays the current request.
 
         Without ``failed``, a desired payload that equals the current request's changes nothing, and another
-        payload replaces it with a new request.
+        payload replaces it with a new request. With ``redeploy`` (a person asks to deploy again, RFC #1299), a new
+        request with the desired payload and a new ``REDEPLOY`` number replaces the current one in any state. A
+        scenario that serves nothing queues no request.
         """
         moment = clock(now)
         with self.lock:
             if not self.held:
                 return
             desired = self.desired(current.name)
+            if redeploy and desired:
+                desired[REDEPLOY] = time.time_ns()
             retries = 0
             if not retry_failed:
                 failed = self.coordination.served_models.current_request(current.name)

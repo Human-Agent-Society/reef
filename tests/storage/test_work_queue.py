@@ -1,6 +1,7 @@
 import logging
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
@@ -10,7 +11,6 @@ import pytest
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.storage.control_lease import ControlLease
-from reef.storage.marks import Marks
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
@@ -24,7 +24,6 @@ from reef.storage.sql_coordination import (
     PostgresCoordinationDatabase,
     SQLControlLease,
     SQLiteCoordinationDatabase,
-    SQLMarks,
     SQLServedModels,
     SQLWorkQueue,
 )
@@ -36,7 +35,6 @@ class Coordination:
     queue: WorkQueue
     served: ServedModelsWriter
     lease: ControlLease
-    marks: Marks
 
 
 @pytest.fixture(params=["sqlite-memory", "sqlite", "postgres"])
@@ -56,7 +54,6 @@ def open_coordination(request, tmp_path):
             SQLWorkQueue(database, lease_seconds=lease_seconds, max_attempts=max_attempts),
             SQLServedModels(database, lease),
             lease,
-            SQLMarks(database),
         )
 
     yield opened
@@ -216,6 +213,27 @@ def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, err
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error", "stored"),
+    [
+        (
+            RuntimeError("modal run failed:\n  the export failed\n"),
+            "RuntimeError: modal run failed:\n  the export failed",
+        ),
+        (RuntimeError(), "RuntimeError:"),
+        (ItemFailed(" "), "the work item failed"),
+    ],
+)
+def test_a_worker_stores_an_error_message_with_surrounding_spaces(error, stored):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.add(job("a"))
+        assert FailingWorker(queue, error).run_once()
+        item = queue.get("jobs", "a")
+        assert (item.state, item.error) == ("failed", stored)
+
+
+@pytest.mark.unit
 def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
     with closing(SQLiteCoordinationDatabase(None)) as database:
         queue = SQLWorkQueue(database, lease_seconds=10, max_attempts={"jobs": 1})
@@ -225,6 +243,77 @@ def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
             assert not FailingWorker(queue, ItemFailed("unused")).run_once()
         assert queue.get("jobs", "a").state == "failed"
         assert warnings_of(caplog) == ["work item jobs/a of scenario s failed: the worker's lease expired"]
+
+
+class WaitingWorker(QueueWorker):
+    """A worker whose items run until ``release`` is set, or until the worker stops."""
+
+    def __init__(self, queue: WorkQueue, slots: int) -> None:
+        super().__init__(queue, "jobs", ["training_job:tinker"], worker_id="w", poll_seconds=0.01, slots=slots)
+        self.release = threading.Event()
+        self.lock = threading.Lock()
+        self.running: set[str] = set()
+        self.most_running = 0
+
+    def run_item(self, item, lease_lost):
+        with self.lock:
+            self.running.add(item.id)
+            self.most_running = max(self.most_running, len(self.running))
+        try:
+            while not self.release.wait(0.01):
+                if self.stopped.is_set():
+                    raise WorkerStopped
+            return {}
+        finally:
+            with self.lock:
+                self.running.discard(item.id)
+
+
+def wait_until(condition) -> None:
+    deadline = time.monotonic() + 5
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("the condition did not become true in 5 s")
+        time.sleep(0.01)
+
+
+@pytest.mark.unit
+def test_a_worker_runs_at_most_its_slots_of_items_at_once(tmp_path):
+    with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        for item_id in "abcde":
+            queue.add(job(item_id, serial_key=None))
+        worker = WaitingWorker(queue, slots=3)
+        worker.start()
+        try:
+            wait_until(lambda: len(worker.running) == 3)
+            assert [queue.get("jobs", item_id).state for item_id in "de"] == ["queued", "queued"]
+            worker.release.set()
+            wait_until(lambda: all(queue.get("jobs", item_id).state == "finished" for item_id in "abcde"))
+        finally:
+            worker.stop()
+        assert worker.most_running == 3
+
+
+@pytest.mark.unit
+def test_a_stopped_worker_returns_every_item_in_progress_to_the_queue(tmp_path):
+    with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        for item_id in "ab":
+            queue.add(job(item_id, serial_key=None))
+        worker = WaitingWorker(queue, slots=2)
+        worker.start()
+        wait_until(lambda: len(worker.running) == 2)
+        worker.stop()
+        assert worker.item_threads == []
+        assert [queue.get("jobs", item_id).state for item_id in "ab"] == ["queued", "queued"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("slots", [0, True, 1.5])
+def test_a_worker_needs_a_positive_integer_of_slots(slots):
+    with closing(SQLiteCoordinationDatabase(None)) as database, pytest.raises(ValueError, match="slots"):
+        WaitingWorker(SQLWorkQueue(database, lease_seconds=10), slots=slots)
 
 
 @pytest.mark.unit
@@ -435,17 +524,17 @@ def test_a_served_artifact_is_reachable_and_names_one_model():
 
 
 @pytest.mark.unit
-def test_a_mark_reads_zero_until_it_advances_and_never_moves_back(open_coordination):
-    marks = open_coordination().marks
-    assert marks.read("record_copy:s") == 0
-    marks.advance("record_copy:s", 5)
-    marks.advance("record_copy:s", 3)
-    marks.advance("record_copy:t", 1)
-    assert (marks.read("record_copy:s"), marks.read("record_copy:t")) == (5, 1)
-    with pytest.raises(ValueError, match="non-negative"):
-        marks.advance("record_copy:s", -1)
-    with pytest.raises(ValueError, match="non-empty"):
-        marks.read("")
+def test_an_upgrade_deletes_the_record_copies_of_an_older_version(tmp_path):
+    database = SQLiteCoordinationDatabase(tmp_path / "c")
+    queue = SQLWorkQueue(database)
+    queue.request("data", "s", "record_copy", "record_copy:s", {})
+    kept = queue.request("data", "s", "artifact_copy", "artifact_copy:s", {})
+    database.close()
+    reopened = SQLiteCoordinationDatabase(tmp_path / "c")
+    try:
+        assert [item.id for item in SQLWorkQueue(reopened).items("data")] == [kept.id]
+    finally:
+        reopened.close()
 
 
 @pytest.mark.unit
@@ -514,11 +603,19 @@ def test_withdrawal_removes_routes_and_cannot_be_undone_by_a_running_start(open_
     )
     assert table.read_serving_config("s") == {"temperature": 0.3}
     assert table.changed_sequence() > before
+    with pytest.raises(ValueError, match="b, c"):
+        table.write_traffic_weights("s", {"a": 50, "b": 25, "c": 25}, control_lease_number=lease.number)
+    assert table.read_traffic_weights("s") == {}
+    before_weights = table.changed_sequence()
+    table.write_traffic_weights("s", {"active": 100, "absent": 0}, control_lease_number=lease.number)
+    assert table.read_traffic_weights("s") == {"active": 100, "absent": 0}
+    assert table.changed_sequence() > before_weights
     table.request("s", {"artifact_id": "b"}, control_lease_number=lease.number, now=3)
     running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=4)
     withdrawn = table.request("s", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=5)
     assert withdrawn.state == "finished" and withdrawn.payload == {}
     assert table.read_scenario("s") == {} and table.read_serving_config("s") == {}
+    assert table.read_traffic_weights("s") == {}
     assert table.due_stops(14) == ()
     assert table.due_stops(15) == (ScheduledStop(served, 15),)
     table.complete_request(
@@ -726,3 +823,25 @@ def test_queue_pages_and_counts_are_scoped_and_newest_first(open_coordination):
     for kwargs in ({"state": "missing"}, {"limit": 0}, {"before_sequence": 0}):
         with pytest.raises(ValueError):
             queue.page("jobs", scenario="s", **kwargs)
+
+
+@pytest.mark.unit
+def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coordination):
+    from reef.storage.work_queue import WorkLogLine
+
+    queue = open_coordination().queue
+    queue.add(job("a"), now=0)
+    queue.take("jobs", "w", ["training_job:tinker"], now=1)
+    queue.append_log("jobs", "a", 1, [WorkLogLine(n, 1.0 + n, "INFO", "reef.test", f"line {n}") for n in range(3)])
+    queue.append_log("jobs", "a", 2, [WorkLogLine(0, 9.0, "ERROR", "reef.test", "second attempt")])
+
+    first = queue.read_log("jobs", "a", 1, limit=2)
+    assert [line.message for line in first] == ["line 0", "line 1"]
+    assert [line.number for line in queue.read_log("jobs", "a", 1, after=first[-1].number)] == [2]
+    assert [line.level for line in queue.read_log("jobs", "a", 2)] == ["ERROR"]
+    with pytest.raises(ValueError):
+        queue.read_log("jobs", "a", 1, limit=0)
+
+    queue.finish("jobs", "a", "w", {}, now=2)
+    assert queue.delete_final(finished_before=3) == 1
+    assert queue.read_log("jobs", "a", 1) == ()

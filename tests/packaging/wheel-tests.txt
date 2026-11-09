@@ -105,6 +105,7 @@ tests/reef_service/routing/test_lifecycle_orchestration.py
 tests/reef_service/routing/test_lifecycle_transport_boundaries.py
 tests/reef_service/routing/test_policy.py
 tests/reef_service/routing/test_reef_lifecycle_client.py
+tests/reef_service/routing/test_replica_routing.py
 tests/reef_service/routing/test_routing.py
 tests/reef_service/routing/test_routing_deployment.py
 tests/reef_service/routing/test_routing_preview.py
@@ -161,6 +162,7 @@ tests/reef_service/test_sse_streams.py
 tests/reef_service/test_startup_diagnostics.py
 tests/reef_service/test_step_record_history.py
 tests/reef_service/test_train_admission.py
+tests/reef_service/test_traffic_weights.py
 tests/reef_service/test_training_backends.py
 tests/reef_service/test_training_server.py
 tests/reef_service/test_training_startup.py
@@ -188,8 +190,7 @@ tests/slime_backend/test_slime_component.py
 tests/slime_backend/test_slime_job_preparation.py
 tests/slime_backend/test_teacher_engine.py
 tests/storage/test_postgres_records.py
-tests/storage/test_record_store_contract.py
-tests/storage/test_records.py
+tests/storage/test_sqlite_database.py
 tests/storage/test_scenario_store.py
 tests/tinker_backend/test_tinker_backend.py
 tests/tinker_backend/test_tinker_client.py

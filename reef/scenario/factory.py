@@ -35,7 +35,7 @@ from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
-from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
+from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
@@ -150,22 +150,24 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
 class ItemStart:
     """The artifact item that a new scenario's root snapshot holds.
 
-    Values: ``item_id`` is the item's non-empty ID, and ``uri`` its non-empty ``source_uri``. ``files`` is the
+    Values: ``item`` is the item's ``ItemIdentity``, and ``uri`` its non-empty ``source_uri``. ``files`` is the
     ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
-    ``None`` for the scenario's one component.
+    ``None`` for the scenario's one component. The root's artifact of ``component`` keeps the item's artifact ID.
 
     Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
     ``ScenarioFactory.register`` checks it and writes it as the root snapshot.
     """
 
-    item_id: str
+    item: ItemIdentity
     uri: str
     files: SourceFiles
     component: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.item_id, str) or not self.item_id or not isinstance(self.uri, str) or not self.uri:
-            raise ValueError("an item start names a non-empty item_id and uri")
+        if not isinstance(self.item, ItemIdentity):
+            raise TypeError("an item start's item is an ItemIdentity")
+        if not isinstance(self.uri, str) or not self.uri:
+            raise ValueError("an item start names a non-empty uri")
         if not isinstance(self.files, SourceFiles):
             raise TypeError("an item start's files are SourceFiles")
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -174,14 +176,13 @@ class ItemStart:
 
 @dataclass(frozen=True)
 class RecoveredTrainerState:
-    """What one component's trainer recovers from its own commits: state, cursor, and consumed rows.
+    """What one component's trainer recovers from its own commits: state and consumed rows.
 
     ``committed_ids`` holds the IDs that its commits named. ``consumed_ids`` holds those and the records that
     its stored samples consumed.
     """
 
     algorithm_state: Mapping[str, Any] | None
-    high_water: tuple[int, int] | None
     consumed_ids: frozenset[str]
     committed_ids: frozenset[str]
 
@@ -228,7 +229,6 @@ def recovered_trainer_states(
         )
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
-            high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
             consumed_ids=stored | committed,
             committed_ids=committed,
         )
@@ -344,8 +344,8 @@ class ScenarioFactory:
             component, layout = components.import_target(start.component)
             directory = work / "item"
             directory.mkdir()
-            stored = layout.stored(start.files, directory)
-            source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
+            stored = layout.stored(start.files, directory, artifact_id=start.item.artifact_id)
+            source = RootSource("item", item=start.item.item_id, uri=start.uri, version=start.files.version)
             # The admission checks of an import: the snapshot's own with one component, else the component's here and
             # the snapshot's on the composed root.
             if components.single:
@@ -537,28 +537,14 @@ class ScenarioFactory:
                 experiment_observer=experiment_observer,
                 training_requests=None if self._training_requests is None else self._training_requests.of(name),
             )
-            # Replay retained, unconsumed rows behind each trainer's watermark
-            # before resuming its cursor. Retention may keep already-consumed
-            # rows for audit.
+            # Each trainer reads its records from the start again and skips the consumed ones. A commit's record
+            # progress is not a cursor here: it can name a sequence of a record store that came before the record
+            # items (RFC #1219).
             for component_trainer in trainers:
                 # Scenario() checked that every trainer names a component the scenario serves: each has a state.
                 recovered = recovered_states[component_trainer.component]
                 component_trainer.trainer.restore_committed_records(recovered.committed_ids)
-                if recovered.high_water is not None:
-                    scenario.replay_retained(
-                        up_to_sequence=recovered.high_water[0],
-                        consumed_ids=recovered.consumed_ids,
-                        component=component_trainer.component,
-                    )
-                    scenario.restore_record_progress(
-                        after_sequence=recovered.high_water[0],
-                        offset=recovered.high_water[1],
-                        component=component_trainer.component,
-                    )
-                elif recovered.consumed_ids:
-                    scenario.replay_retained(
-                        up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
-                    )
+                component_trainer.trainer.restore_consumed_records(recovered.consumed_ids)
             scenario.resume_training_starts()
             return scenario
         except BaseException:

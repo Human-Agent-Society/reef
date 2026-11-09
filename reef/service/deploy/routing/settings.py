@@ -1,4 +1,4 @@
-"""Validated settings for the Semantic Router container that ``reef serve`` owns when routing is enabled."""
+"""Validated settings of the Semantic Router of a routed deployment."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from reef.service.routed_shadow import ShadowLimits
 
 @dataclass(frozen=True)
 class RoutingDeploymentSettings:
-    """The owned router container: identity, resources, preview limits and recovery policy, and the limits of
-    the REEF child's shadow calls.
+    """The router's lifecycle, identity, resources, preview and recovery settings, and Reef's shadow limits.
 
-    Values: ``deployment_id`` is None or 1 to 48 lowercase letters, digits or hyphens, starting with a letter
-    or digit. ``restart_policy`` is ``fail_stop`` or ``bounded``; ``max_restarts`` is an int ≥ 0, and ≥ 1
+    Values: ``lifecycle`` is ``managed`` or ``external``. ``deployment_id`` is None or 1 to 48 lowercase letters,
+    digits or hyphens, starting with a letter or digit. ``restart_policy`` is ``fail_stop`` or ``bounded``;
+    ``max_restarts`` is an int ≥ 0, and ≥ 1
     when bounded. ``restart_backoff_seconds`` is a non-empty tuple of finite numbers ≥ 0, in order, with
     repeats allowed. The ready, finalization and container stop timeouts and ``sr_cpus`` are finite and
     positive; ``drain_timeout_seconds`` is finite and ≥ 0. ``sr_management_port`` is an int from 1 to 65535,
@@ -25,12 +25,17 @@ class RoutingDeploymentSettings:
     and ``sr_memory_bytes`` a positive int. ``shadow_max_concurrency``, ``shadow_timeout_seconds`` and
     ``shadow_max_response_bytes`` have the domains of ``ShadowLimits``.
     Purpose: ``routing_deployment_settings`` makes it from ``reef.routing_deployment``; the controller and
-    the renderer read it, and the REEF child reads its shadow limits (``shadow_limits``). Recovery attempt ``n``
-    (from 1) waits ``restart_backoff_seconds[min(n - 1, len - 1)]``, so the last delay repeats. These settings
-    apply only when ``reef.routing_manifest`` is set; ``require_identity`` then returns ``deployment_id`` or
-    refuses a deployment without one.
+    the renderer read it, and each routed service reads its shadow limits (``shadow_limits``). Recovery attempt
+    ``n`` (from 1) waits ``restart_backoff_seconds[min(n - 1, len - 1)]``, so the last delay repeats. These settings
+    apply only when ``reef.routing_manifest`` is set; ``require_identity`` returns ``deployment_id`` or refuses
+    a managed deployment without one. With ``managed``, ``reef serve`` runs the container and reads every
+    setting. With ``external``, another system runs the router beside ``reef serve --component inference``;
+    only the port, preview, finalization and per-replica shadow settings apply.
     """
 
+    lifecycle: str = config_option(
+        "managed", help="Who runs the router: managed (reef serve) or external (beside --component inference)."
+    )
     deployment_id: str | None = config_option(None, help="Stable local deployment identifier.")
     restart_policy: str = config_option("fail_stop", help="Failure policy: fail_stop or bounded.")
     max_restarts: int = config_option(2, help="Recovery attempts allowed during this explicit deployment.")
@@ -61,6 +66,8 @@ class RoutingDeploymentSettings:
     )
 
     def __post_init__(self) -> None:
+        if self.lifecycle not in {"managed", "external"}:
+            raise ValueError("routing lifecycle must be managed or external")
         if self.deployment_id is not None and (
             not isinstance(self.deployment_id, str)
             or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", self.deployment_id) is None

@@ -17,16 +17,19 @@ import json
 import re
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
+from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
+from reef.core.evaluation import EvaluationCallSummary, require_integer
 from reef.core.job_data import JobData
 from reef.core.plugins import Plugin, PluginConfigError
-from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
+from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
@@ -35,8 +38,12 @@ from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
-#: The metadata keys that Reef reads. ``kind``, ``owner`` and ``origin`` are set at creation and never change.
-FIXED_KEYS = ("kind", "owner", "origin")
+#: The metadata keys that Reef reads. ``kind``, ``owner``, ``origin`` and an evaluation call's ``evaluation_id`` are set
+#: at creation and never change.
+FIXED_KEYS = ("kind", "owner", "origin", "evaluation_id")
+#: What made a record item, its ``origin.source``: a scenario's own traffic, or a call of an evaluation rollout. A record
+#: item without ``source`` is ``inference``.
+RECORD_SOURCES = ("inference", "evaluation")
 #: The most items that one query returns.
 MAX_QUERY_LIMIT = 1000
 
@@ -47,6 +54,10 @@ class ItemConflict(ReefError):
 
 class ItemNotFound(ReefError):
     """An item ID that the owner does not store."""
+
+
+class ScenarioArchived(ReefError):
+    """A write of record items for a generation of their scenario that is no longer current."""
 
 
 def check_owner(owner: object) -> str:
@@ -102,13 +113,82 @@ def check_origin(value: object) -> dict[str, str | None]:
     return {key: value[key] for key in ("scenario", "artifact_id")}
 
 
+def check_record_origin(value: object) -> dict[str, Any]:
+    """Return ``value`` as the ``origin`` of a record item, or raise ``ValueError``.
+
+    The origin is ``{scenario, artifact_id}`` (``check_origin``), with an optional ``source`` from
+    ``RECORD_SOURCES``. The origin of an evaluation call also has ``evaluation``: the non-empty ``evaluation_id``
+    and each field of the call's ``EvaluationCallSummary``, which its constructor checks. ``caller`` and ``label``
+    may be absent, as in a call kept before RFC #1293: the call is then an agent call without a label. The summary
+    is in the metadata so that a reader of the calls of an evaluation needs no content.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError("metadata.origin must be {scenario, artifact_id}")
+    source = value.get("source", "inference")
+    if source not in RECORD_SOURCES:
+        raise ValueError(f"metadata.origin.source must be one of {', '.join(RECORD_SOURCES)}, got {source!r}")
+    keys = {"scenario", "artifact_id"} | ({"source"} if "source" in value else set())
+    if source == "evaluation":
+        keys.add("evaluation")
+    if set(value) != keys:
+        raise ValueError(
+            "metadata.origin of a record is {scenario, artifact_id}, with an optional source, and evaluation exactly "
+            "when the source is evaluation"
+        )
+    origin: dict[str, Any] = check_origin({key: value[key] for key in ("scenario", "artifact_id")})
+    if "source" in value:
+        origin["source"] = source
+    if source == "evaluation":
+        location = value["evaluation"]
+        names = ("evaluation_id", *(entry.name for entry in fields(EvaluationCallSummary)))
+        optional = {"caller", "label"}
+        if not isinstance(location, Mapping) or not set(names) - optional <= set(location) <= set(names):
+            raise ValueError("metadata.origin.evaluation must be {" + ", ".join(names) + "}")
+        names = tuple(name for name in names if name in location)
+        if not isinstance(location["evaluation_id"], str) or not location["evaluation_id"]:
+            raise ValueError("metadata.origin.evaluation.evaluation_id must be a non-empty string")
+        try:
+            EvaluationCallSummary(**{name: location[name] for name in names[1:]})
+        except TypeError as exc:
+            raise ValueError(f"metadata.origin.evaluation is no call summary: {exc}") from exc
+        origin["evaluation"] = {name: location[name] for name in names}
+    return origin
+
+
+def record_source(metadata: Mapping[str, Any]) -> str:
+    """The source of the record item with ``metadata`` (``RECORD_SOURCES``): ``inference`` when its origin has none."""
+    return metadata["origin"].get("source", "inference")
+
+
+def record_link_scope(metadata: Mapping[str, Any]) -> str:
+    """The calls that a record item with ``metadata`` can link to (RFC #1054): those of the same scope.
+
+    The scope of a scenario's own call is its origin scenario. The scope of an agent call of an evaluation is its
+    evaluation attempt, ``<scenario>/<evaluation_id>:<task_index>:<repeat>:<attempt>``, and the scope of a verifier
+    call that attempt with ``:verifier``. A scenario name has no ``/``, so an evaluation call never links to a
+    scenario's own call, nor a scenario's own call to an evaluation call.
+    """
+    origin = metadata["origin"]
+    if record_source(metadata) != "evaluation":
+        return origin["scenario"]
+    location = origin["evaluation"]
+    rollout = ":".join(str(location[name]) for name in ("evaluation_id", "task_index", "repeat", "attempt"))
+    caller = location.get("caller", "agent")
+    return f"{origin['scenario']}/{rollout}" + ("" if caller == "agent" else f":{caller}")
+
+
 def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     """The metadata that an item of ``owner`` is created with, from the client's ``metadata``.
 
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
-    defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
+    defaults to ``{}``. ``origin`` is required for a record (``check_record_origin``). An evaluation call, a record
+    whose origin source is ``evaluation``, has empty ``scenarios`` and the ``evaluation_id`` of its origin, and no
+    other record item has ``evaluation_id``. An artifact may have an origin, with a non-null
     ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
-    when a trainer's stage made it (``check_stage_origin``). Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
+    when a trainer's stage made it (``check_stage_origin``). A trajectory that an evaluation's verifier wrote has
+    empty ``scenarios``, an ``evaluation_id`` and ``evaluation`` (``check_evaluation_trajectory``), and no origin; no
+    other item but an evaluation call has ``evaluation_id``. Other keys are kept as they are. Raise ``ValueError``
+    for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
@@ -121,7 +201,12 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     created["owner"] = owner
     created["scenarios"] = check_scenarios(metadata.get("scenarios", {}), kind)
     if kind == "record":
-        created["origin"] = check_origin(metadata.get("origin"))
+        created["origin"] = check_record_origin(metadata.get("origin"))
+        evaluation = created["origin"].get("evaluation")
+        if evaluation is not None and created["scenarios"]:
+            raise ValueError("an evaluation call is the data of no scenario, so metadata.scenarios is empty")
+        if created.get("evaluation_id") != (None if evaluation is None else evaluation["evaluation_id"]):
+            raise ValueError("metadata.evaluation_id is the evaluation of an evaluation call, and only of one")
     elif kind == "artifact" and "origin" in metadata:
         origin = check_origin(metadata["origin"])
         if origin["artifact_id"] is None:
@@ -129,7 +214,31 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
         created["origin"] = origin
     elif "origin" in metadata:
         created["origin"] = check_stage_origin(metadata["origin"])
+    if kind != "record" and ("evaluation_id" in metadata or "evaluation" in metadata):
+        if kind != "trajectory" or "origin" in metadata or created["scenarios"]:
+            raise ValueError(
+                "only an evaluation call or a trajectory of an evaluation's verifier has an evaluation_id; such a "
+                "trajectory has empty scenarios and no origin"
+            )
+        created["evaluation"] = check_evaluation_trajectory(metadata.get("evaluation"), metadata.get("evaluation_id"))
     return created
+
+
+def check_evaluation_trajectory(value: object, evaluation_id: object) -> dict[str, Any]:
+    """Return ``value`` as the ``evaluation`` of a trajectory that an evaluation's verifier wrote (RFC #1293), or
+    raise ``ValueError``: ``{evaluation_id, task_index, repeat, attempt, index, name}``, the fields of its
+    ``EvaluationTrajectory`` with the non-empty ``evaluation_id``, which is also the item's ``evaluation_id``."""
+    names = ("evaluation_id", "task_index", "repeat", "attempt", "index", "name")
+    if not isinstance(value, Mapping) or set(value) != set(names):
+        raise ValueError("metadata.evaluation must be {" + ", ".join(names) + "}")
+    if not isinstance(evaluation_id, str) or not evaluation_id or value["evaluation_id"] != evaluation_id:
+        raise ValueError("metadata.evaluation.evaluation_id is the item's non-empty evaluation_id")
+    for name in ("task_index", "repeat", "index"):
+        require_integer(value[name], f"metadata.evaluation.{name}")
+    require_integer(value["attempt"], "metadata.evaluation.attempt", minimum=1)
+    if not isinstance(value["name"], str) or not value["name"]:
+        raise ValueError("metadata.evaluation.name is a non-empty string")
+    return {name: value[name] for name in names}
 
 
 def check_stage_origin(value: object) -> dict[str, Any]:
@@ -165,9 +274,9 @@ def merge_patch(target: Any, patch: Any) -> Any:
 def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     """``metadata`` with the JSON merge patch ``patch`` applied, or ``ValueError``.
 
-    The patch may not change ``kind``, ``owner`` or ``origin``. The patched ``scenarios`` must be valid for the
+    The patch may not change a key of ``FIXED_KEYS``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
-    that scenario's record store keeps the record.
+    that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.remove_scenario`` removes that use.
     """
     if not isinstance(patch, Mapping):
         raise ValueError("a metadata patch must be an object")
@@ -175,11 +284,15 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
     for key in FIXED_KEYS:
         if patched.get(key) != metadata.get(key):
             raise ValueError(f"metadata.{key} is set at creation and never changes")
+    if metadata.get("artifact_id") not in (None, patched.get("artifact_id")):
+        raise ValueError("metadata.artifact_id is set once and never changes")
     patched["scenarios"] = check_scenarios(patched.get("scenarios", {}), metadata["kind"])
     if metadata["kind"] == "record":
         origin = metadata["origin"]["scenario"]
         if origin in metadata["scenarios"] and origin not in patched["scenarios"]:
             raise ValueError(f"a record item stays in {origin!r}, the scenario that made it")
+        if record_source(metadata) == "evaluation" and patched["scenarios"]:
+            raise ValueError("an evaluation call is the data of no scenario, so metadata.scenarios stays empty")
     return patched
 
 
@@ -206,10 +319,11 @@ class StoredItem:
     Values: ``sequence`` is a positive int, the position of the item in the order the store received its items.
     ``owner`` and ``item_id`` identify the item; no two items of one owner have the same ``item_id``.
     ``metadata`` passes ``created_metadata`` for ``owner``, and its ``kind`` is the item's kind. ``digest`` is the
-    SHA-256 of the content: ``json_digest`` of the JSON content, or the task file store's digest of a task
-    directory. A trajectory, a record or an artifact has its JSON ``content``, except in the result of a ``query``
+    SHA-256 of the content: ``json_digest`` of the JSON content, without ``created_at`` for a record
+    (``record_digest``), or the task file store's digest of a task directory. A trajectory, a record or an artifact has its JSON ``content``, except in the result of a ``query``
     without content. A task has no ``content``: the task file store
-    keeps its directory under ``digest``, in the owner's partition (``task_partition``).
+    keeps its directory under ``digest``, in the owner's partition (``task_partition``). ``inserted`` is True only
+    in the result of the ``create`` that stored the item.
 
     Purpose: what ``DataStore`` returns. Training reads a scenario's items, and clients read and query them.
     """
@@ -220,6 +334,7 @@ class StoredItem:
     metadata: Mapping[str, Any]
     digest: str
     content: Mapping[str, Any] | None = field(default=None, compare=False)
+    inserted: bool = field(default=False, compare=False)
 
     @property
     def kind(self) -> ItemKind:
@@ -306,26 +421,51 @@ class DataStore(Plugin, ABC):
       digest is unchanged; with another digest it is an ``ItemConflict``, and nothing is stored. Bad metadata or
       content is a ``ValueError``, and nothing is stored. New artifact items omit the obsolete ``content_id``.
       A retry of an older artifact compares all other content fields and preserves the stored content and digest.
-      It returns the stored items in the order given.
+      It returns the stored items in the order given, without their content; ``inserted`` marks those that this
+      call stored.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
-      ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
-      are given. Without ``content``, each item's ``content`` is None, and the store does not read it.
+    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group)`` returns the items of
+      ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
+      when those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
+      of ``request_type``; they need ``kind="record"``. ``group``, a pair ``(key, value)``, keeps only the items of
+      that group of ``groups``: the items with the string ``value`` under ``key`` in their metadata, or with no
+      string there when ``value`` is None. Without ``content``, each item's ``content`` is None, and the store does
+      not read it.
+    * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
+      with these filters and no limit gives.
+    * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,
+      or 0 when there is none.
     * ``scenario_items(owner, scenario, kinds, after, limit)`` returns the items of ``kinds`` of ``owner`` that
       ``scenario`` uses, with content, each with the sequence of its use, in the order of those sequences: the uses
       after ``after``, at most ``limit``. The store reads no item of another kind; without ``content``, each item's
       ``content`` is None, and the store does not read it. Each use of an item by a scenario
       has its own sequence, which increases across the store: a new use, also of an older item, and a use whose
       split changes get a new one. A trainer reads its scenario's items with
-      it.
+      it. With ``excluding_origin``, the record items that this scenario made are left out.
+    * ``last_use_sequence(owner, scenario)`` returns the sequence of the newest use by ``scenario``, or 0.
+    * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``. A durable reader of record items keeps one cursor for each: a
+      ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
-      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
+      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items, without content.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
+    * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
+      the record items that it made, and returns their number. It also ends the scenario's generation. The archive
+      of a scenario calls it, so that a new scenario with that name uses nothing. The items stay.
+    * ``scenario_generation(owner, scenario)`` returns the current generation of ``scenario``: an opaque string,
+      new when the scenario has none. A writer of the scenario's records reads it when it opens the scenario, and
+      gives it to ``create``. ``create(owner, items, generation=...)`` stores record items of one origin scenario
+      only while that generation is current; else it raises ``ScenarioArchived`` and stores nothing.
+    * ``prune_records(max_bytes)`` deletes the oldest record items of the source ``inference``, across owners, until
+      those items hold at most ``max_bytes``, and returns their number. Each deleted item adds to the ``RecordLoss``
+      of its origin scenario. It deletes no evaluation call and does not count its bytes. A store counts the bytes that it keeps for a record item: its row and the trajectory nodes that
+      only it needs. A retry of a deleted record stores it again.
+    * ``record_loss(owner, scenario)`` returns the ``RecordLoss`` of the record items of ``owner`` that
+      ``scenario`` made.
     * ``task_path(item)`` returns a local directory with the files of a task item.
     * ``record_links(owner, item_ids)`` maps each ID of ``item_ids`` that names a stored record item of ``owner``
       with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
-      it, by the rule of ``reef.core.trajectory_index`` among the earlier record items of the same origin scenario,
-      and the link never changes; a deleted ancestor is skipped. Other IDs are left out.
+      it, by the rule of ``reef.core.trajectory_index`` among the earlier record items of the same link scope
+      (``record_link_scope``), and the link never changes; a deleted ancestor is skipped. Other IDs are left out.
     * ``groups(owner, kind, key, before, limit)`` groups the items of ``owner`` and ``kind`` by the string under
       ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
       when given, newest first, at most ``limit``.
@@ -377,10 +517,28 @@ class DataStore(Plugin, ABC):
         """
 
     @abstractmethod
-    def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]: ...
+    def create(
+        self, owner: str, items: Sequence[NewItem], *, generation: str | None = None
+    ) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def scenario_generation(self, owner: str, scenario: str) -> str: ...
+
+    @abstractmethod
+    def prune_records(self, max_bytes: int) -> int: ...
+
+    @abstractmethod
+    def record_loss(self, owner: str, scenario: str) -> RecordLoss: ...
 
     @abstractmethod
     def read(self, owner: str, item_id: str) -> StoredItem | None: ...
+
+    @abstractmethod
+    def read_many(self, owner: str, item_ids: Sequence[str], *, content: bool = True) -> tuple[StoredItem, ...]:
+        """The items of ``owner`` that ``item_ids`` name, each once, in the order of their first ID in ``item_ids``.
+        An ID that names no item gives none. A store reads them together, so that a write that names many items does
+        not read each one alone. Without ``content``, each item's ``content`` is None, and the store does not read
+        it."""
 
     @abstractmethod
     def query(
@@ -389,10 +547,36 @@ class DataStore(Plugin, ABC):
         *,
         kind: ItemKind | None = None,
         scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        group: tuple[str, str | None] | None = None,
     ) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def count(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+        after: int = 0,
+    ) -> int: ...
+
+    @abstractmethod
+    def last_sequence(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+    ) -> int: ...
 
     @abstractmethod
     def scenario_items(
@@ -404,7 +588,14 @@ class DataStore(Plugin, ABC):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        excluding_origin: str | None = None,
     ) -> tuple[tuple[int, StoredItem], ...]: ...
+
+    @abstractmethod
+    def last_use_sequence(self, owner: str, scenario: str) -> int: ...
+
+    @abstractmethod
+    def scenarios_with_records(self, owner: str) -> tuple[str, ...]: ...
 
     @abstractmethod
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]: ...
@@ -413,23 +604,32 @@ class DataStore(Plugin, ABC):
     def delete(self, owner: str, item_id: str) -> bool: ...
 
     @abstractmethod
+    def remove_scenario(self, owner: str, scenario: str) -> int: ...
+
+    @abstractmethod
     def task_path(self, item: StoredItem) -> Path: ...
 
     @abstractmethod
     def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]: ...
 
     def groups(
-        self, owner: str, *, kind: ItemKind, key: str, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        *,
+        kind: ItemKind,
+        key: str,
+        scenario: str | None = None,
+        before: int | None = None,
+        limit: int = MAX_QUERY_LIMIT,
     ) -> tuple[ItemGroup, ...]:
-        """The groups of the items of ``owner`` and ``kind`` by ``key``. The default reads every page of ``query``
-        without content; a store can read the groups at once."""
-        check_groups(owner, kind, key, before, limit)
+        """The groups of the items of ``owner`` and ``kind`` by ``key``, only of the items that ``scenario`` uses if it
+        is given. The default reads every page of ``query`` without content; a store can read the groups at once."""
+        check_groups(owner, kind, key, scenario, before, limit)
         found: dict[str | None, ItemGroup] = {}
         after = 0
-        while page := self.query(owner, kind=kind, after=after, content=False):
+        while page := self.query(owner, kind=kind, scenario=scenario, after=after, content=False):
             for item in page:
-                value = item.metadata.get(key)
-                value = value if isinstance(value, str) else None
+                value = group_value(item.metadata, key)
                 group = found.get(value)
                 found[value] = (
                     ItemGroup(value, 1, item.sequence, item.sequence, item.metadata)
@@ -493,28 +693,82 @@ class DataStore(Plugin, ABC):
         """Release the store's resources. A second call does nothing."""
 
 
-def check_groups(owner: str, kind: object, key: object, before: object, limit: object) -> None:
+def check_groups(owner: str, kind: object, key: object, scenario: object, before: object, limit: object) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.groups`` are valid."""
-    check_query(owner, kind, None, 0, limit)
+    check_query(owner, kind, scenario, 0, limit)
     if kind is None:
         raise ValueError("groups need a kind")
-    if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
-        raise ValueError("key must be 1 to 64 letters, digits and underscores")
+    check_group_key(key)
     if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 1):
         raise ValueError("before must be a positive int")
 
 
-def check_query(owner: str, kind: object, scenario: object, after: object, limit: object) -> None:
+def check_group_key(key: object) -> None:
+    """Raise ``ValueError`` unless ``key`` is a metadata key that groups items (``GROUP_KEY``)."""
+    if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
+        raise ValueError("key must be 1 to 64 letters, digits and underscores")
+
+
+def group_value(metadata: Mapping[str, Any], key: str) -> str | None:
+    """The value of the group of ``key`` that an item with ``metadata`` is in: its string under ``key``, else None."""
+    value = metadata.get(key)
+    return value if isinstance(value, str) else None
+
+
+def check_query(
+    owner: str,
+    kind: object,
+    scenario: object,
+    after: object,
+    limit: object,
+    *,
+    origin: object = None,
+    request_type: object = None,
+    group: object = None,
+) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
+    check_filters(owner, kind, scenario, origin, request_type, after)
+    if group is not None:
+        if not isinstance(group, tuple) or len(group) != 2:
+            raise ValueError("group must be a pair (key, value)")
+        check_group_key(group[0])
+        if group[1] is not None and not isinstance(group[1], str):
+            raise ValueError("a group value is a string or None")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
+        raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
+
+
+def check_filters(
+    owner: str, kind: object, scenario: object, origin: object, request_type: object, after: object
+) -> None:
+    """Raise ``ValueError`` unless the filters of ``DataStore.query`` and ``DataStore.count`` are valid."""
     check_owner(owner)
     if kind is not None and kind not in ITEM_KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
-    if scenario is not None:
-        check_owner(scenario)
+    for name in (scenario, origin):
+        if name is not None:
+            check_owner(name)
+    if (origin is not None or request_type is not None) and kind != "record":
+        raise ValueError("origin and request_type filter record items: give kind='record'")
+    if request_type is not None and request_type not in tuple(RequestType):
+        raise ValueError(f"request_type must be one of {', '.join(RequestType)}, got {request_type!r}")
     if isinstance(after, bool) or not isinstance(after, int) or after < 0:
         raise ValueError("after must be a non-negative int")
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
-        raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
+
+
+def generation_origin(
+    prepared: Sequence[tuple[NewItem, Mapping[str, Any], str]], generation: str | None
+) -> str | None:
+    """The origin scenario whose ``generation`` a ``create`` of ``prepared`` checks, or None without a generation.
+
+    Raise ``ValueError`` unless every item is a record item of one origin scenario.
+    """
+    if generation is None:
+        return None
+    origins = {metadata["origin"]["scenario"] for _, metadata, _ in prepared if metadata["kind"] == "record"}
+    if len(origins) != 1 or any(metadata["kind"] != "record" for _, metadata, _ in prepared):
+        raise ValueError("a create with a generation writes record items of one origin scenario")
+    return origins.pop()
 
 
 def item_digest_matches(item: StoredItem, digest: str) -> bool:
@@ -557,7 +811,7 @@ class MemoryDataStore(DataStore):
 
     It keeps the items of each owner in a dict from ID to item, the use sequence of each item, scenario and split
     (``uses``), and the next sequence, which items and uses share. Task directories go to the task file store that it
-    is given. ``trajectories`` links the record items of each owner and origin scenario as
+    is given. ``trajectories`` links the record items of each owner and link scope (``record_link_scope``) as
     they are created; a deleted item stays there as a link of later calls.
     """
 
@@ -571,6 +825,8 @@ class MemoryDataStore(DataStore):
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
         self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
+        self.generations: dict[tuple[str, str], str] = {}
+        self.losses: dict[tuple[str, str], RecordLoss] = {}
         self.next_sequence = 1
 
     def take_sequence(self) -> int:
@@ -610,8 +866,11 @@ class MemoryDataStore(DataStore):
     def delete_job_directory_record(self, key: str) -> None:
         self.job_directory_uses.pop(key, None)
 
-    def create(self, owner: str, items: Sequence[NewItem]) -> tuple[StoredItem, ...]:
+    def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
+        origin = generation_origin(prepared, generation)
+        if origin is not None and self.generations.get((owner, origin)) != generation:
+            raise ScenarioArchived(f"generation {generation!r} of {origin!r} is no longer current")
         stored = self.items.setdefault(owner, {})
         for entry in prepared:
             existing = stored.get(entry[0].item_id)
@@ -629,7 +888,7 @@ class MemoryDataStore(DataStore):
             self.write_uses(owner, item.item_id, metadata["scenarios"])
             if content is not None and metadata["kind"] == "record" and content["request_type"] == "inference":
                 scenario = metadata["origin"]["scenario"]
-                self.trajectories.setdefault((owner, scenario), TrajectoryIndex()).add(
+                self.trajectories.setdefault((owner, record_link_scope(metadata)), TrajectoryIndex()).add(
                     AgentRecord.create(
                         scenario=scenario,
                         request_type=RequestType.INFERENCE,
@@ -638,12 +897,18 @@ class MemoryDataStore(DataStore):
                         artifact_id=stored_record_artifact_id(content, content["payload"]),
                     )
                 )
-            result.append(created)
-        return tuple(result)
+            result.append(replace(created, inserted=True))
+        return tuple(replace(item, content=None) for item in result)
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
         return self.items.get(owner, {}).get(item_id)
+
+    def read_many(self, owner: str, item_ids: Sequence[str], *, content: bool = True) -> tuple[StoredItem, ...]:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        found = (stored[item_id] for item_id in dict.fromkeys(item_ids) if item_id in stored)
+        return tuple(item if content else replace(item, content=None) for item in found)
 
     def query(
         self,
@@ -651,22 +916,70 @@ class MemoryDataStore(DataStore):
         *,
         kind: ItemKind | None = None,
         scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        group: tuple[str, str | None] | None = None,
     ) -> tuple[StoredItem, ...]:
-        check_query(owner, kind, scenario, after, limit)
+        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type, group=group)
         matched = sorted(
             (
                 item
-                for item in self.items.get(owner, {}).values()
-                if item.sequence > after
-                and (kind is None or item.kind == kind)
-                and (scenario is None or scenario in item.scenarios)
+                for item in self.matching(owner, kind, scenario, origin, request_type, after)
+                if group is None or group_value(item.metadata, group[0]) == group[1]
             ),
             key=lambda item: item.sequence,
         )
         return tuple(item if content else replace(item, content=None) for item in matched[:limit])
+
+    def count(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+        after: int = 0,
+    ) -> int:
+        check_filters(owner, kind, scenario, origin, request_type, after)
+        return sum(1 for _ in self.matching(owner, kind, scenario, origin, request_type, after))
+
+    def last_sequence(
+        self,
+        owner: str,
+        *,
+        kind: ItemKind | None = None,
+        scenario: str | None = None,
+        origin: str | None = None,
+        request_type: str | None = None,
+    ) -> int:
+        check_filters(owner, kind, scenario, origin, request_type, 0)
+        return max(
+            (item.sequence for item in self.matching(owner, kind, scenario, origin, request_type, 0)), default=0
+        )
+
+    def matching(
+        self,
+        owner: str,
+        kind: ItemKind | None,
+        scenario: str | None,
+        origin: str | None,
+        request_type: str | None,
+        after: int,
+    ) -> Iterator[StoredItem]:
+        """The items of ``owner`` that the filters of ``query`` keep, in no order."""
+        for item in self.items.get(owner, {}).values():
+            if (
+                item.sequence > after
+                and (kind is None or item.kind == kind)
+                and (scenario is None or scenario in item.scenarios)
+                and (origin is None or item.metadata["origin"]["scenario"] == origin)
+                and (request_type is None or (item.content or {}).get("request_type") == request_type)
+            ):
+                yield item
 
     def scenario_items(
         self,
@@ -677,17 +990,45 @@ class MemoryDataStore(DataStore):
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
+        excluding_origin: str | None = None,
     ) -> tuple[tuple[int, StoredItem], ...]:
         check_query(owner, None, scenario, after, limit)
         stored = self.items.get(owner, {})
         used = sorted(
             (sequence, item_id)
             for (use_owner, item_id, use_scenario), (_, sequence) in self.uses.items()
-            if use_owner == owner and use_scenario == scenario and sequence > after and stored[item_id].kind in kinds
+            if use_owner == owner
+            and use_scenario == scenario
+            and sequence > after
+            and stored[item_id].kind in kinds
+            and (excluding_origin is None or not item_id.startswith(f"{excluding_origin}/"))
         )
         return tuple(
             (sequence, stored[item_id] if content else replace(stored[item_id], content=None))
             for sequence, item_id in used[:limit]
+        )
+
+    def scenarios_with_records(self, owner: str) -> tuple[str, ...]:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        return tuple(
+            sorted(
+                {
+                    use_scenario
+                    for (use_owner, item_id, use_scenario) in self.uses
+                    if use_owner == owner and stored[item_id].kind == "record"
+                }
+            )
+        )
+
+    def last_use_sequence(self, owner: str, scenario: str) -> int:
+        return max(
+            (
+                sequence
+                for (use_owner, _, use_scenario), (_, sequence) in self.uses.items()
+                if use_owner == owner and use_scenario == scenario
+            ),
+            default=0,
         )
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
@@ -710,12 +1051,61 @@ class MemoryDataStore(DataStore):
         for item in updated:
             stored[item.item_id] = item
             self.write_uses(owner, item.item_id, item.scenarios)
-        return tuple(updated)
+        return tuple(replace(item, content=None) for item in updated)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
         self.write_uses(owner, item_id, {})
         return self.items.get(owner, {}).pop(item_id, None) is not None
+
+    def remove_scenario(self, owner: str, scenario: str) -> int:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        used = [item for item in stored.values() if scenario in item.scenarios]
+        for item in used:
+            scenarios = {name: split for name, split in item.scenarios.items() if name != scenario}
+            stored[item.item_id] = replace(item, metadata={**item.metadata, "scenarios": scenarios})
+            self.write_uses(owner, item.item_id, scenarios)
+        self.generations.pop((owner, scenario), None)
+        return len(used)
+
+    def scenario_generation(self, owner: str, scenario: str) -> str:
+        check_owner(owner)
+        check_owner(scenario)
+        return self.generations.setdefault((owner, scenario), uuid.uuid4().hex)
+
+    def prune_records(self, max_bytes: int) -> int:
+        records = sorted(
+            (
+                item
+                for stored in self.items.values()
+                for item in stored.values()
+                if item.kind == "record" and record_source(item.metadata) == "inference"
+            ),
+            key=lambda item: item.sequence,
+        )
+        sizes = {item.sequence: len(canonical_json(item.content or {}).encode("utf-8")) for item in records}
+        excess = sum(sizes.values()) - max_bytes
+        evicted = 0
+        for item in records:
+            if excess <= 0:
+                break
+            excess -= sizes[item.sequence]
+            self.delete(item.owner, item.item_id)
+            key = (item.owner, item.metadata["origin"]["scenario"])
+            loss = self.losses.get(key, RecordLoss())
+            self.losses[key] = RecordLoss(
+                loss.record_count + 1,
+                loss.body_bytes + sizes[item.sequence],
+                loss.first_sequence or item.sequence,
+                item.sequence,
+            )
+            evicted += 1
+        return evicted
+
+    def record_loss(self, owner: str, scenario: str) -> RecordLoss:
+        check_owner(owner)
+        return self.losses.get((owner, scenario), RecordLoss())
 
     def task_path(self, item: StoredItem) -> Path:
         if item.kind != "task":
@@ -730,7 +1120,7 @@ class MemoryDataStore(DataStore):
             item = stored.get(item_id)
             if item is None or item.kind != "record":
                 continue
-            index = self.trajectories.get((owner, item.metadata["origin"]["scenario"]))
+            index = self.trajectories.get((owner, record_link_scope(item.metadata)))
             call = None if index is None else index.calls.get(item_id)
             if index is None or call is None:
                 continue
