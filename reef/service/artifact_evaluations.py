@@ -794,13 +794,14 @@ class ArtifactEvaluations:
 
     def rollouts_json(self, scenario: str, evaluation_id: str) -> list[dict[str, Any]] | None:
         """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
-        attempt_count, started_at, ended_at, score, error, calls, verifier_calls}``; None when ``scenario`` has no
+        attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``; None when ``scenario`` has no
         evaluation ``evaluation_id``.
 
         ``state`` is the rollout's queue state, or ``waiting`` for a rollout that ``max_concurrent_rollouts`` keeps
         out of the queue yet. ``started_at`` and ``ended_at`` are its work item's times.
-        ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``error`` is the reason of a
-        failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept agent calls as JSON,
+        ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``rewards`` is every reward
+        of its verifier (``verifier_rewards``, RFC #1297), and null when it has none, as for a rollout that finished
+        before Reef kept them; ``error`` is the reason of a failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept agent calls as JSON,
         or null when the data store keeps no agent call of it; ``verifier_calls`` is the same for its verifier calls.
         It reads the metadata of the evaluation's calls, not their content.
         """
@@ -837,6 +838,7 @@ class ArtifactEvaluations:
                     "started_at": item.started_at,
                     "ended_at": item.ended_at,
                     "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
+                    "rewards": cast(Mapping[str, object], item.result).get("rewards") if finished else None,
                     "error": item.error,
                     "calls": None if calls is None else calls.to_json(),
                     "verifier_calls": None if verifier_calls is None else verifier_calls.to_json(),
@@ -855,6 +857,7 @@ class ArtifactEvaluations:
                     "started_at": None,
                     "ended_at": None,
                     "score": None,
+                    "rewards": None,
                     "error": None,
                     "calls": None,
                     "verifier_calls": None,
