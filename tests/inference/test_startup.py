@@ -17,6 +17,7 @@ from reef.dispatcher import Dispatcher
 from reef.dispatcher.serving import ServingWorker
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.inference.null import NullInferenceRuntime
+from reef.inference.startup import report_startup
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
@@ -51,6 +52,8 @@ class PausedRuntime(StubInferenceRuntime):
         self.stops.append(served)
 
     def activate_checkpoint(self, artifact, *, scenario=None):
+        report_startup("prepare", "Deploying the engine")
+        report_startup("start", "Waiting for a GPU", estimate_seconds=300.0)
         self.entered.set()
         if not self.release.wait(10):
             raise TimeoutError("the test did not release startup")
@@ -116,7 +119,21 @@ def test_slow_start_reports_its_result_without_blocking_control(startup, fails, 
             try:
                 assert await asyncio.to_thread(runtime.entered.wait, 2)
                 status = await (await inference_client.get(STATUS)).json()
-                assert status == {**pending, "state": "starting"}
+                startup = status.pop("startup")
+                assert status == {
+                    **{key: value for key, value in pending.items() if key != "startup"},
+                    "state": "starting",
+                }
+                # RFC #1283: the runtime's reports are the phases of this artifact's startup.
+                prepare, start = startup["steps"]
+                assert (prepare["phase"], prepare["detail"], start["phase"], start["detail"]) == (
+                    "prepare",
+                    "Deploying the engine",
+                    "start",
+                    "Waiting for a GPU",
+                )
+                assert prepare["ended_at"] == start["started_at"] and start["ended_at"] is None
+                assert startup["estimate_seconds"] == 300.0
                 settings = await asyncio.wait_for(control_client.get("/reef/scenarios/math/settings"), 2)
                 assert settings.status == 200
                 waiting = await inference_client.post(
