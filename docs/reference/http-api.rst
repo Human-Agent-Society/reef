@@ -152,6 +152,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations``                                                                       | evaluate one artifact of a snapshot               |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``                                                | cancel one evaluation                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations``                                                                        | artifact evaluations, newest first                |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``                                                        | one evaluation: its state and result              |
@@ -1132,6 +1134,20 @@ Reef sets no limit on the evaluations that run at once: the evaluations queue
 holds the rollouts that wait. An evaluation process runs at most
 ``evaluation.max_sandboxes`` rollouts at once, across all evaluations (see
 `Configuration <configuration.rst>`__).
+
+``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``
+cancels one evaluation. It answers the evaluation after the cancel, as ``GET
+/reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it:
+
+- A queued or running evaluation fails with the error ``cancelled by
+  request``. Each of its rollouts that did not end fails with the same error.
+- A worker that runs one of these rollouts stops its trial and the trial's
+  sandbox within seconds.
+- The rollouts that wait for ``max_concurrent_rollouts`` never start. They
+  stay ``waiting`` in the rollouts list.
+- An evaluation that ended stays as it is, so a second cancel changes nothing.
+
+An unknown scenario or evaluation returns 404. Control answers this route.
 
 Model calls of a rollout
 ~~~~~~~~~~~~~~~~~~~~~~~~

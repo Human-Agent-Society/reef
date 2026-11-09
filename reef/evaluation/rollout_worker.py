@@ -15,6 +15,8 @@ of a rollout while it runs.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import tempfile
 import threading
@@ -46,7 +48,7 @@ from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import tree_agent
-from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
+from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
@@ -63,6 +65,8 @@ DEFAULT_AGENT_HOST = "host.docker.internal"
 SERVE_WAIT_S = 12 * 3600.0
 #: The wait between two reads of a serve item, in seconds.
 SERVE_POLL_S = 1.0
+#: The seconds between two checks of a running trial's lease.
+LEASE_CHECK_S = 1.0
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
 
@@ -411,6 +415,24 @@ class RolloutCalls(CaptureObserver):
         self.writer.shutdown(wait=True)
 
 
+async def run_while_held(
+    runner: TaskRolloutRunner, request: RolloutRequest, lease_lost: threading.Event
+) -> TaskRollout:
+    """Run the rollout of ``request`` with ``runner`` and return it. When ``lease_lost`` is set first, cancel the run,
+    so that Harbor stops the trial and its sandbox, and raise ``WorkLeaseLost``: a client cancelled the rollout, or
+    another worker took it."""
+    run = asyncio.ensure_future(runner.run_rollouts_async([request], asyncio.Semaphore(1)))
+    while not lease_lost.is_set():
+        done, _ = await asyncio.wait({run}, timeout=LEASE_CHECK_S)
+        if done:
+            [result] = run.result()
+            return result
+    run.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run
+    raise WorkLeaseLost("the evaluation worker lost its lease")
+
+
 class EvaluationRolloutWorker(QueueWorker):
     """The worker of the evaluation service.
 
@@ -501,10 +523,9 @@ class EvaluationRolloutWorker(QueueWorker):
                 lab=self.lab,
                 capture_observer=calls,
             )
+            request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
-                [result] = runner.run_rollouts(
-                    [RolloutRequest(runner.harness, runner.policy_model, str(task_directory))]
-                )
+                result = asyncio.run(run_while_held(runner, request, lease_lost))
             finally:
                 calls.close()
             if not result.turns:
