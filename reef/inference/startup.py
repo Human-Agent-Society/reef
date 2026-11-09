@@ -151,7 +151,8 @@ def reported_steps(
         phase, at = entry.get("phase"), entry.get("at")
         if phase not in PHASES or not isinstance(at, (int, float)):
             continue
-        detail = entry.get("detail") if isinstance(entry.get("detail"), str) else None
+        written = entry.get("detail")
+        detail = written if isinstance(written, str) else None
         value = entry.get("estimate_seconds")
         estimate = float(value) if isinstance(value, (int, float)) and value >= 0 else None
         last = steps[-1]

@@ -424,7 +424,7 @@ class InferenceReplica:
             store.close()
         return item.agent_record_id
 
-    def startup_status(self, scenario: str, model: str = ACTIVE) -> dict[str, str | None]:
+    def startup_status(self, scenario: str, model: str = ACTIVE) -> dict[str, JsonValue]:
         """Read the current serving work's artifact, state, and safe error without changing it, and for a ready
         artifact its engine's state (``engine_state``, RFC #1269).
 
