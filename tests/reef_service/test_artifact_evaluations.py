@@ -814,7 +814,7 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
         ({"uri": None}, "only a published artifact"),
         ({"adapter": None}, "names no adapter"),
         ({"adapter": "missing"}, "unknown harness adapter"),
-        ({"adapter": "hermes"}, "cannot run in a task's container"),
+        ({"adapter": "native"}, "cannot run in a task's container"),
         ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
     ],
 )
