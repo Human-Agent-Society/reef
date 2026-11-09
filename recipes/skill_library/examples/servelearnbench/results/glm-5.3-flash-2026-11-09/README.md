@@ -3,7 +3,7 @@
 The recipe under `recipes/skill_library/` on two ServeLearnBench scenarios, `banking_l1` (336 serving tasks in 4
 windows, 178 test tasks) and `retail_l1` (720 serving tasks in 6 windows, 384 test tasks), against the benchmark's
 Blind, Oracle and RAG arms and against `recipes/reasoning_bank`. Three repeats per arm. This folder keeps the scores
-of every run and the final skill library of every skill_library run. The full episode logs (about 400 MB) are kept
+of every run. The final skill library of every skill_library run and the full episode logs (about 400 MB) are kept
 offline and are available on request.
 
 ## Setup
@@ -45,14 +45,15 @@ The PR description discusses these numbers. The replays are extra graded episode
   the learning arms the steps, the skills or memory items at the end, the replay episodes, and the extractor calls and
   tokens. For the skill_library arms it also has the verified skills at the end, the retired skills and the ablation
   outcomes (a loss when the library did better without the skill, a win when it did worse, otherwise a tie).
-- `libraries/<scenario>-<arm>-rep<k>.json`: the final `state/skills.json` of each skill_library run. Each skill has its
-  slug, name, description, procedure, check and known bad result, whether a replay verified it, its wins and losses,
-  and the step that wrote its current text. The recipe serves each one as `skills/sl-<slug>/SKILL.md`.
+
+The final skill libraries are not in the repository. They are the model's own text, and that text uses words that the
+documentation checks reject. For each skill_library run, the offline copy keeps the final `state/skills.json`. It
+also keeps each step's tree, notes and replay rows.
 
 ## Rerunning
 
 Serve the model with vLLM as above, then run each arm through ServeLearnBench's `Runner` with block size 12. For a
 Reef arm, a small `Method` adapter builds a `Workspace` per block from the block's episodes (instruction as the user
 message, the episode record and its score line as the response), runs the recipe's `step`, and serves the new tree's
-`skills/*/SKILL.md` in the agent's context for the next block. That adapter and the episode logs are not in the
-repository. I can share both.
+`skills/*/SKILL.md` in the agent's context for the next block. That adapter, the skill libraries and the episode logs
+are not in the repository. I can share them.
