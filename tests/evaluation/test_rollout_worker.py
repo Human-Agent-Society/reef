@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -23,9 +24,10 @@ from reef.evaluation.rollout_worker import (
     evaluation_call,
     reply_summary,
     rollout_item_id,
+    run_while_held,
 )
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork
+from reef.storage.work_queue import NewWork, WorkLeaseLost
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -183,3 +185,23 @@ def test_rollout_calls_number_the_calls_in_order_and_a_refused_call_does_not_sto
         (3, 2, 200),
     ]
     assert "could not keep call 1 of rollout evaluation_rollout:e1:00002:00000" in caplog.text
+
+
+@pytest.mark.unit
+def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout(monkeypatch):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    cancelled = threading.Event()
+
+    class EndlessRunner:
+        async def run_rollouts_async(self, requests, slots):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    lease_lost = threading.Event()
+    threading.Timer(0.1, lease_lost.set).start()
+    with pytest.raises(WorkLeaseLost):
+        asyncio.run(run_while_held(EndlessRunner(), "request", lease_lost))
+    assert cancelled.is_set()

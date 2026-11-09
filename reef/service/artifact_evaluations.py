@@ -75,6 +75,8 @@ logger = logging.getLogger(__name__)
 
 #: The error of an evaluation whose rollouts are no longer in the queue, so they never end.
 STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
+#: The error of an evaluation that a client cancelled.
+CANCELLED_ERROR = "cancelled by request"
 #: The owner that every evaluation of the work queue stores: any service instance reads its rollouts.
 QUEUE_OWNER = "evaluations-queue"
 #: How many of a scenario's newest evaluations ``fail_stopped`` reads.
@@ -390,10 +392,10 @@ class ArtifactEvaluations:
     scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
     end.
 
-    Purpose: the evaluation routes call ``start``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
+    Purpose: the evaluation routes call ``start``, ``cancel``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
     ``call_json``, ``trajectories_json``, ``exported_rollouts`` and ``rollout_trajectories``, and the scenario update
     route calls ``configure``. ``open`` starts ``results`` and the reader of ``new_artifacts``; ``close`` stops them.
-    Every method but ``start``, ``configure``, ``open`` and ``close`` only reads.
+    Every method but ``start``, ``cancel``, ``configure``, ``open`` and ``close`` only reads.
     """
 
     def __init__(
@@ -467,6 +469,25 @@ class ArtifactEvaluations:
         """
         artifact_id, settings = request_settings(body)
         return self.accept(scenario, artifact_id, settings, state="running")
+
+    def cancel(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
+        """Cancel the evaluation ``evaluation_id`` of ``scenario`` and return it after the cancel; None when the
+        scenario has no such evaluation.
+
+        A queued or running evaluation fails with ``CANCELLED_ERROR``, and each of its rollouts that is not final
+        fails with the same error. A worker that runs one of them stops its trial at its next lease extension. No
+        rollout that waits for ``max_concurrent_rollouts`` starts. An evaluation that ended stays as it is.
+        """
+        with self.dispatcher.locked_scenario(scenario) as current:
+            stored = current.store.evaluations.get(evaluation_id)
+            if stored is None or stored.state in ("finished", "failed"):
+                return stored
+            # ``settle`` adds rollouts under this lock and adds none to a failed evaluation, so the listed rollouts
+            # are all that it will ever have.
+            cancelled = current.store.evaluations.fail(evaluation_id, error=CANCELLED_ERROR, finished_at=time.time())
+            for item in self.results.rollouts(evaluation_id, scenario):
+                self.queue.cancel(EVALUATIONS_QUEUE, item.id, CANCELLED_ERROR)
+        return cancelled
 
     def configure(self, scenario: str, changes: Mapping[str, object]) -> dict[str, object]:
         """Store how Reef evaluates and activates each new artifact of ``scenario``, and return each changed
@@ -833,6 +854,7 @@ class ArtifactEvaluations:
 
 
 __all__ = [
+    "CANCELLED_ERROR",
     "QUEUE_OWNER",
     "STOPPED_ERROR",
     "ArtifactEvaluations",
