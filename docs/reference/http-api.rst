@@ -164,7 +164,7 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls/{attempt}/{index}`` | one model call of a rollout, with its bodies      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``            | the ATIF trajectory of each attempt of a rollout  |
+| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``            | the ATIF trajectories of each attempt of a rollout|
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``                                           | the trajectories of an evaluation, as NDJSON      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -1224,24 +1224,31 @@ keep returns 404.
 Trajectories of an evaluation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Reef makes one ATIF trajectory from the kept calls of each attempt of a
-rollout. It joins the calls with status 200 in index order, as it joins the
-records of a training sample. An attempt without a 200 call has no
-trajectory.
+Reef makes ATIF trajectories from the kept calls of each attempt of a
+rollout. It links the calls with status 200 into conversations, as it links
+the records of training samples: a call continues the earlier call whose
+messages its own messages start with. An agent that plays several roles, each
+with its own messages, has one conversation for each role. Reef joins the
+calls of each conversation in index order, without the calls that a retry
+replaced, and orders the conversations by their first calls. An attempt
+without a 200 call has no trajectory.
 
 - Each call is one entry of ``extra.reef.records``. Its ``agent_record_id`` is
   ``{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}``, and its
   ``created_at`` is the call's ``started_at``. Its ``payload`` is the request
   body plus ``response``, the response body.
-- ``extra.reef.reward`` is the rollout's score for the attempt that was scored:
-  the last attempt of a finished rollout. It is null for every other attempt,
-  and for a failed score.
+- ``extra.reef.reward`` is the rollout's score for each trajectory of the
+  attempt that was scored: the last attempt of a finished rollout. It is null
+  for every other attempt, and for a failed score.
 - ``extra.reef.evaluation`` is ``{evaluation_id, task, task_index, repeat,
-  attempt, scored}``. ``scored`` is true only for the attempt that was scored.
+  attempt, conversation, scored}``. ``conversation`` counts the conversations
+  of the attempt from 0. ``scored`` is true only for the attempt that was
+  scored.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``
 answers ``{scenario, evaluation_id, task_index, repeat, trajectories}``: the
-trajectory of each attempt of one rollout, in attempt order.
+trajectories of each attempt of one rollout, in attempt and then conversation
+order.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``
 streams the trajectories of the whole evaluation as ``application/x-ndjson``:
