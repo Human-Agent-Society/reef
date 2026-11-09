@@ -119,14 +119,22 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
 
 def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
-    """The start of an evaluation, which control accepts."""
+    """The start and the cancel of an evaluation, which control accepts."""
 
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)
         stored = await asyncio.to_thread(evaluations.start, request.match_info["scenario"], body)
         return web.json_response(stored.to_json(), status=202)
 
+    async def cancel(request: web.Request) -> web.Response:
+        evaluation_id = request.match_info["evaluation_id"]
+        stored = await asyncio.to_thread(evaluations.cancel, request.match_info["scenario"], evaluation_id)
+        if stored is None:
+            raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
+        return web.json_response(stored.to_json())
+
     app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
+    app.router.add_post("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel", cancel)
 
 
 __all__ = ["register_evaluation_reads", "register_evaluation_writes"]
