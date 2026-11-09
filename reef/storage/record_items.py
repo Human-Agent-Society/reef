@@ -20,7 +20,9 @@ giving it (RFC #1219).
 An evaluation of ``s`` keeps each model call of its rollouts as an evaluation call: a record item of ``o`` whose
 origin source is ``evaluation`` (``evaluation_call_item``). It is the data of no scenario, so its ``scenarios`` stays
 empty, and no record store, trainer or record route of ``s`` reads it. It links only to the calls of the same
-evaluation attempt (``reef.storage.data.record_link_scope``), and ``prune_records`` keeps it.
+evaluation attempt and caller (``reef.storage.data.record_link_scope``), and ``prune_records`` keeps it. A trajectory
+that the verifier of a rollout wrote is a trajectory item of ``o`` with empty ``scenarios``
+(``evaluation_trajectory_item``, RFC #1293).
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import asdict, replace
 from typing import Any, cast
 
-from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
+from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
 from reef.core.values import JsonValue
@@ -42,7 +44,7 @@ from reef.storage.data import (
     item_digest_matches,
     record_source,
 )
-from reef.storage.item_kinds import copied_record, evaluation_call_id, record_digest
+from reef.storage.item_kinds import copied_record, evaluation_call_id, evaluation_trajectory_id, record_digest
 from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
 
 #: The most record items that one ``used_records`` call reads.
@@ -82,13 +84,16 @@ def evaluation_call_item(scenario: str, artifact_id: str, evaluation_id: str, ca
     """The record item of ``call``, a call of evaluation ``evaluation_id`` of ``scenario`` to the candidate
     ``artifact_id``.
 
-    Its ID is ``<scenario>/<evaluation_call_id>``. Its content is the record of an inference: the payload is the
-    request body with ``response``, the response body or null, and ``created_at`` is the call's start. Its metadata
-    is ``kind: record``, empty ``scenarios``, the ``evaluation_id``, and the origin ``{scenario, artifact_id, source:
-    evaluation, evaluation}``, where ``evaluation`` holds the ``evaluation_id`` and every field of the call's summary.
+    Its ID is ``<scenario>/<evaluation_call_id>``, with the call's caller. Its content is the record of an inference:
+    the payload is the request body with ``response``, the response body or null, and ``created_at`` is the call's
+    start. Its metadata is ``kind: record``, empty ``scenarios``, the ``evaluation_id``, and the origin ``{scenario,
+    artifact_id, source: evaluation, evaluation}``, where ``evaluation`` holds the ``evaluation_id`` and every field
+    of the call's summary.
     """
     summary = call.summary
-    record_id = evaluation_call_id(evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index)
+    record_id = evaluation_call_id(
+        evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index, summary.caller
+    )
     payload = {**(call.request or {}), "response": None if call.response is None else dict(call.response)}
     record = AgentRecord(
         record_id, scenario, RequestType.INFERENCE, payload, summary.started_at, artifact_id=artifact_id
@@ -128,6 +133,40 @@ def stored_evaluation_call(item: StoredItem) -> EvaluationCall:
     response = payload.pop("response")
     # The item keeps an absent request as an empty payload, so an empty request reads as None too.
     return EvaluationCall(evaluation_call_summary(item), cast(dict[str, JsonValue], payload) or None, response)
+
+
+def evaluation_trajectory_item(scenario: str, evaluation_id: str, trajectory: EvaluationTrajectory) -> NewItem:
+    """The trajectory item of ``trajectory``, which the verifier of a rollout of evaluation ``evaluation_id`` of
+    ``scenario`` wrote. Its ID is ``<scenario>/<evaluation_trajectory_id>``, and its content the ATIF document. Its
+    metadata is ``kind: trajectory``, empty ``scenarios``, the ``evaluation_id``, and ``evaluation``: the
+    ``evaluation_id`` and every field of ``trajectory`` but ``document``."""
+    location = {name: value for name, value in asdict(trajectory).items() if name != "document"}
+    item_id = evaluation_trajectory_id(
+        evaluation_id, trajectory.task_index, trajectory.repeat, trajectory.attempt, trajectory.index
+    )
+    return NewItem(
+        f"{scenario}/{item_id}",
+        dict(trajectory.document),
+        {
+            "kind": "trajectory",
+            "scenarios": {},
+            "evaluation_id": evaluation_id,
+            "evaluation": {"evaluation_id": evaluation_id, **location},
+        },
+    )
+
+
+def evaluation_trajectory_items(
+    data: DataStore, owner: str, scenario: str, evaluation_id: str, *, content: bool
+) -> Iterator[StoredItem]:
+    """The trajectory items that the verifiers of evaluation ``evaluation_id`` of ``scenario`` wrote, in sequence
+    order, a page at a time (``evaluation_trajectory_item``)."""
+    after = 0
+    while page := data.query(
+        owner, kind="trajectory", group=("evaluation_id", evaluation_id), after=after, content=content
+    ):
+        yield from (item for item in page if item.item_id.startswith(f"{scenario}/") and "evaluation" in item.metadata)
+        after = page[-1].sequence
 
 
 def evaluation_call_items(
@@ -381,6 +420,8 @@ __all__ = [
     "evaluation_call_item",
     "evaluation_call_items",
     "evaluation_call_summary",
+    "evaluation_trajectory_item",
+    "evaluation_trajectory_items",
     "old_record_copied",
     "record_content",
     "record_item",

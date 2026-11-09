@@ -725,7 +725,9 @@ the scenario's owner (`Model calls of a rollout`_). Such an item differs from
 a scenario's own record item:
 
 - Its ID is ``<scenario>/<agent_record_id>``, with the record ID
-  ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``.
+  ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>`` for a call of
+  the agent, and ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:<index>``
+  for a call that the verifier wrote (`Calls that a verifier writes`_).
 - Its content is a record of an inference. The payload is the request body,
   plus ``response``, the response body or null. ``created_at`` is the start
   of the call.
@@ -735,8 +737,10 @@ a scenario's own record item:
   ``evaluation_id`` and the call's summary: ``task_index``, ``repeat``,
   ``attempt``, ``index``, ``path``, ``status``, ``started_at``,
   ``duration_s``, ``prompt_tokens``, ``completion_tokens``,
-  ``finish_reason`` and ``tool_calls``, as `Model calls of a rollout`_
-  describes them. So a list of the calls reads no content.
+  ``finish_reason``, ``tool_calls``, ``caller`` and ``label``, as `Model
+  calls of a rollout`_ describes them. So a list of the calls reads no
+  content. A call kept before ``caller`` existed has no ``caller`` and no
+  ``label``, and it is a call of the agent.
 
 An evaluation call is the data of no scenario: a patch that adds a scenario to
 its ``scenarios`` returns 400, so no scenario trains on it. The scenario's
@@ -745,8 +749,19 @@ the data with ``kind=record``, ``group_key=evaluation_id`` and the
 evaluation's ID as ``group_value``. An index on the owner and
 ``evaluation_id`` finds them. An evaluation call links only to the
 earlier calls of the same attempt, so its trajectory node keeps only
-the messages after its parent's. A scenario's own call never links to an
+the messages after its parent's. A verifier call links only to the earlier
+verifier calls of the same attempt. A scenario's own call never links to an
 evaluation call.
+
+A trajectory that a verifier wrote is a trajectory item of the scenario's
+owner. Its ID is
+``<scenario>/<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:trajectory:<index>``,
+and its content is the ATIF document. Its metadata is ``{"kind":
+"trajectory", "scenarios": {}, "evaluation_id", "evaluation":
+{"evaluation_id", "task_index", "repeat", "attempt", "index", "name"}}``,
+where ``index`` counts the trajectory files of the attempt in name order and
+``name`` is the file's name. It has no ``origin``, and a patch that adds a
+scenario to it returns 400, so no scenario trains on it.
 
 Artifact items
 ~~~~~~~~~~~~~~
@@ -1133,7 +1148,7 @@ null when the evaluations queue no longer holds them:
 shows the progress of an evaluation while it runs. It answers ``{scenario,
 evaluation_id, rollouts}``: each rollout in task and repeat order, as
 ``{task, task_index, repeat, state, attempt_count, started_at, ended_at,
-score, error, calls}``.
+score, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
   ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
@@ -1147,6 +1162,9 @@ score, error, calls}``.
   attempts: ``{count, failed, prompt_tokens, completion_tokens}``. ``failed``
   counts the calls whose status is not 200. The token totals add the known
   counts only. ``calls`` is null when Reef kept no call of the rollout.
+  ``calls`` counts the agent's calls only.
+- ``verifier_calls`` holds the same totals of the calls that the rollout's
+  verifier wrote (`Calls that a verifier writes`_), or null.
 
 An unknown evaluation returns 404.
 
@@ -1180,10 +1198,11 @@ An unknown scenario or evaluation returns 404. Control answers this route.
 Model calls of a rollout
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Reef keeps each model call that a rollout makes to the candidate, failed
-calls too. It keeps a call when the call ends, so a client that polls sees
-the calls of a running rollout. Reef keeps only the calls that reach the
-candidate, not the calls of a verifier's judge, for example.
+Reef keeps each model call that a rollout's agent makes to the candidate,
+failed calls too. It keeps a call when the call ends, so a client that polls
+sees the calls of a running rollout. After each attempt, Reef also keeps the
+calls that the task's verifier wrote, for example the calls of a judge
+(`Calls that a verifier writes`_).
 
 Each call is a record item of the scenario's owner (`Evaluation calls`_). No
 scenario trains on it, and record retention does not delete it. After an
@@ -1196,13 +1215,20 @@ answers the calls of one rollout, without their bodies:
 .. code:: json
 
    {"scenario": "my-agent", "evaluation_id": "1d0e...", "task_index": 3, "repeat": 1,
-    "calls": [{"attempt": 1, "index": 0, "path": "/v1/chat/completions", "status": 200,
-               "started_at": 1762590001.2, "duration_s": 1.84, "prompt_tokens": 2100,
-               "completion_tokens": 340, "finish_reason": "tool_calls", "tool_calls": 1}]}
+    "calls": [{"caller": "agent", "label": null, "attempt": 1, "index": 0,
+               "path": "/v1/chat/completions", "status": 200, "started_at": 1762590001.2,
+               "duration_s": 1.84, "prompt_tokens": 2100, "completion_tokens": 340,
+               "finish_reason": "tool_calls", "tool_calls": 1}]}
+
+- ``caller`` is ``agent`` for a call of the agent, and ``verifier`` for a
+  call that the verifier wrote. By default the route answers the agent's
+  calls. Add ``?caller=verifier`` for the verifier's calls. Another value
+  returns 400.
+- ``label`` is the label that the verifier gave the call, else null.
 
 - ``attempt`` is the 1-based attempt of the rollout that made the call, and
-  ``index`` the 0-based order in which the calls of that attempt ended. The
-  list is in attempt and then index order.
+  ``index`` the 0-based order in which the calls of that caller and attempt
+  ended. The list is in attempt and then index order.
 - ``status`` is the HTTP status that the agent got. ``started_at`` is in
   epoch seconds, and ``duration_s`` in seconds.
 - ``prompt_tokens``, ``completion_tokens`` and ``finish_reason`` come from the
@@ -1218,8 +1244,35 @@ returns 404.
 ``GET .../rollouts/{task_index}/{repeat}/calls/{attempt}/{index}`` answers one
 call: the fields above, plus ``request``, the JSON body that the agent sent,
 and ``response``, the JSON body that it got or the error body of a failed
-call. Each is null when the call had no JSON body. A call that Reef did not
-keep returns 404.
+call. Each is null when the call had no JSON body. Add ``?caller=verifier``
+for a call that the verifier wrote. A call that Reef did not keep returns
+404.
+
+Calls that a verifier writes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A judge calls its own model, so its calls do not reach the candidate's
+endpoint. A task's verifier can write these calls, and the trajectories of an
+agent judge, to ``/logs/verifier/judge/``. Harbor downloads the verifier
+directory after the verifier runs, and Reef keeps the files with the attempt.
+Both files are optional:
+
+- ``calls.jsonl``: one JSON object for each call, in call order:
+  ``{"request", "response", "status", "started_at", "duration_s", "path",
+  "label"}``. ``request`` is the JSON body that the judge sent, and
+  ``response`` the JSON body that it got, or null. ``status`` is the HTTP
+  status (default 200). ``started_at`` is in epoch seconds, and
+  ``duration_s`` in seconds. ``path`` defaults to ``/v1/chat/completions``.
+  ``label`` is an optional string of 1 to 200 characters, for example
+  ``judge:character_fidelity``. Reef ignores other keys.
+- ``trajectory*.json``: ATIF documents, one in each file.
+
+Reef reads at most 32 MiB of these files and keeps at most 2000 calls for
+each attempt. It skips a line that is no such call, a call over the limit, a
+file that is no ATIF document, a file over the limit and a symbolic link, and
+it logs how many it skipped. It reads the files for a failed verifier too.
+The files never change the score. A task that sets the verifier's
+``include_logs`` or ``exclude_logs`` must keep ``judge/``.
 
 Trajectories of an evaluation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1234,26 +1287,32 @@ replaced, and orders the conversations by their first calls. An attempt
 without a 200 call has no trajectory.
 
 - Each call is one entry of ``extra.reef.records``. Its ``agent_record_id`` is
-  ``{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}``, and its
+  the call's record ID (`Evaluation calls`_), and its
   ``created_at`` is the call's ``started_at``. Its ``payload`` is the request
   body plus ``response``, the response body.
 - ``extra.reef.reward`` is the rollout's score for each trajectory of the
   attempt that was scored: the last attempt of a finished rollout. It is null
   for every other attempt, and for a failed score.
 - ``extra.reef.evaluation`` is ``{evaluation_id, task, task_index, repeat,
-  attempt, conversation, scored}``. ``conversation`` counts the conversations
-  of the attempt from 0. ``scored`` is true only for the attempt that was
-  scored.
+  attempt, caller, conversation, scored}``. ``conversation`` counts the
+  conversations of the attempt from 0. ``scored`` is true only for the
+  attempt that was scored.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``
 answers ``{scenario, evaluation_id, task_index, repeat, trajectories}``: the
 trajectories of each attempt of one rollout, in attempt and then conversation
-order.
+order. Add ``?caller=verifier`` for the verifier's trajectories. In each
+attempt, these are the trajectory files that the verifier wrote, in name
+order, and then the trajectories that Reef stitches from the verifier's
+calls. A verifier trajectory has no reward. Each verifier file has
+``extra.reef.evaluation`` as ``{evaluation_id, task, task_index, repeat,
+attempt, caller, file, scored}``, where ``file`` is the name of its file and
+``scored`` is false. Another ``caller`` value returns 400.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``
 streams the trajectories of the whole evaluation as ``application/x-ndjson``:
-one trajectory on each line, in task and repeat order. By default it sends the
-last attempt of each rollout. Add ``?attempts=all`` to send every attempt.
+one trajectory on each line, in task and repeat order. It sends the agent's
+trajectories only. By default it sends the last attempt of each rollout. Add ``?attempts=all`` to send every attempt.
 Reef reads the calls of one rollout at a time, so the memory of an export does
 not grow with the evaluation. A file within the upload limits uploads as it
 is as trajectory items (`Create trajectory items <#create-trajectory-items>`__).

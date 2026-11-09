@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
+from reef.core.job_data import TrajectorySample
 from reef.core.values import JsonValue, require_text
 
 #: The JSON value of a failed rollout's score (``RolloutScore.to_json``).
@@ -621,6 +622,14 @@ class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
         return decision
 
 
+#: What made an evaluation call: the agent, which calls the candidate, or the task's verifier, which writes its calls
+#: to ``/logs/verifier/judge/calls.jsonl`` (RFC #1293).
+Caller = Literal["agent", "verifier"]
+CALLERS: tuple[Caller, ...] = ("agent", "verifier")
+#: The longest ``label`` of a call.
+MAX_CALL_LABEL_CHARACTERS = 200
+
+
 def require_integer(value: object, name: str, *, minimum: int = 0) -> None:
     """Raise ``ValueError`` naming ``name`` unless ``value`` is an integer from ``minimum``."""
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -638,11 +647,13 @@ class EvaluationCallSummary:
     ``duration_s`` a finite number of seconds from 0. ``prompt_tokens`` and ``completion_tokens`` are integers from 0,
     or None when the reply does not tell them. ``finish_reason`` is the non-empty reason that the reply gives, or
     None. ``tool_calls`` is the number of tool calls in the reply, an integer from 0. A call whose ``status`` is not
-    200 has no ``finish_reason`` and no tool call. ``(task_index, repeat, attempt, index)`` is the key of the call in
-    its evaluation.
+    200 has no ``finish_reason`` and no tool call. ``caller`` is the ``Caller`` that made the call; ``index`` counts
+    the calls of each caller of the attempt apart. ``label`` is a non-empty string of at most
+    ``MAX_CALL_LABEL_CHARACTERS`` characters that the verifier gave the call, or None; an agent call has none.
+    ``(task_index, repeat, attempt, caller, index)`` is the key of the call in its evaluation.
 
-    Purpose: the evaluation worker makes it for each call that a rollout's capture proxy captures; the evaluation
-    routes answer it with ``to_json``.
+    Purpose: the evaluation worker makes it for each call that a rollout's capture proxy captures, and for each call
+    that the rollout's verifier wrote; the evaluation routes answer it with ``to_json``.
     """
 
     task_index: int
@@ -657,6 +668,8 @@ class EvaluationCallSummary:
     completion_tokens: int | None
     finish_reason: str | None
     tool_calls: int
+    caller: Caller = "agent"
+    label: str | None = None
 
     def __post_init__(self) -> None:
         for count, name in (
@@ -680,10 +693,20 @@ class EvaluationCallSummary:
             raise ValueError("a call's finish_reason is a non-empty string or None")
         if self.status != 200 and (self.finish_reason is not None or self.tool_calls):
             raise ValueError("a failed call has no finish_reason and no tool call")
+        if self.caller not in CALLERS:
+            raise ValueError(f"a call's caller is one of {', '.join(CALLERS)}")
+        if self.label is not None and (
+            not isinstance(self.label, str) or not 1 <= len(self.label) <= MAX_CALL_LABEL_CHARACTERS
+        ):
+            raise ValueError(f"a call's label is a string of 1 to {MAX_CALL_LABEL_CHARACTERS} characters or None")
+        if self.caller == "agent" and self.label is not None:
+            raise ValueError("an agent call has no label")
 
     def to_json(self) -> dict[str, JsonValue]:
         """The call as the call routes answer it in its rollout: every field but ``task_index`` and ``repeat``."""
         return {
+            "caller": self.caller,
+            "label": self.label,
             "attempt": self.attempt,
             "index": self.index,
             "path": self.path,
@@ -730,6 +753,34 @@ class EvaluationCall:
 
 
 @dataclass(frozen=True)
+class EvaluationTrajectory:
+    """An ATIF trajectory that the verifier of one attempt of an evaluation rollout wrote (RFC #1293).
+
+    Values: ``task_index`` and ``repeat`` name the rollout, as ``EvaluationCallSummary`` does, and ``attempt`` is the
+    1-based attempt. ``index`` is the 0-based position of the trajectory's file among the attempt's trajectory files,
+    in name order, and ``name`` is the non-empty name of that file. ``document`` is the ATIF document
+    (``TrajectorySample`` checks it). ``(task_index, repeat, attempt, index)`` is its key in its evaluation.
+
+    Purpose: the evaluation worker reads it from the trial; the data store keeps it as a trajectory item
+    (``reef.storage.record_items.evaluation_trajectory_item``), and the trajectories route answers it.
+    """
+
+    task_index: int
+    repeat: int
+    attempt: int
+    index: int
+    name: str
+    document: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        for count, name in ((self.task_index, "task_index"), (self.repeat, "repeat"), (self.index, "index")):
+            require_integer(count, name)
+        require_integer(self.attempt, "attempt", minimum=1)
+        require_text(self.name, "name")
+        TrajectorySample(self.document)
+
+
+@dataclass(frozen=True)
 class EvaluationCallTotals:
     """The totals of the kept calls of one evaluation rollout, over all its attempts.
 
@@ -765,10 +816,13 @@ class EvaluationCallTotals:
 
 __all__ = [
     "ARTIFACT_KINDS",
+    "CALLERS",
     "FAILED",
+    "MAX_CALL_LABEL_CHARACTERS",
     "ArtifactEvaluationRequest",
     "ArtifactEvaluationSettings",
     "ArtifactKind",
+    "Caller",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
@@ -776,6 +830,7 @@ __all__ = [
     "EvaluationCallSummary",
     "EvaluationCallTotals",
     "EvaluationResult",
+    "EvaluationTrajectory",
     "PolicyEvaluation",
     "PolicyHarness",
     "PolicyModel",

@@ -18,7 +18,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
 
 from reef.core.atif_payloads import canonical_json
-from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
+from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
@@ -27,7 +27,13 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
-from reef.storage.record_items import evaluation_call_item, record_item, stored_evaluation_call
+from reef.storage.record_items import (
+    evaluation_call_item,
+    evaluation_trajectory_item,
+    evaluation_trajectory_items,
+    record_item,
+    stored_evaluation_call,
+)
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.tasks import LocalTaskFileStore, files_digest
@@ -937,6 +943,49 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
     assert [item.item_id for item in store.query("acme", kind="record")] == ids
 
 
+def test_a_verifier_call_links_apart_from_the_agent_calls_and_a_call_kept_before_reads_as_an_agent_call(store):
+    agent, _ = evaluation_call(1, 1, 0)
+    summary = replace(agent.summary, caller="verifier", label="judge:quality")
+    verifier = EvaluationCall(summary, agent.request, agent.response)
+    verifier_item = evaluation_call_item("coding", "a1", "e1", verifier)
+    assert verifier_item.item_id == "coding/e1:0:0:1:verifier:0"
+    # A call kept before RFC #1293 has no caller and no label in its metadata.
+    old = evaluation_call_item("coding", "a1", "e1", agent)
+    location = {
+        key: value for key, value in old.metadata["origin"]["evaluation"].items() if key not in ("caller", "label")
+    }
+    old = NewItem(
+        old.item_id, old.content, {**old.metadata, "origin": {**old.metadata["origin"], "evaluation": location}}
+    )
+    store.create("acme", [old, verifier_item])
+    # The same messages in the same attempt, but a verifier call never links to an agent call.
+    assert store.record_links("acme", [verifier_item.item_id])[verifier_item.item_id].parent is None
+    assert stored_evaluation_call(store.read("acme", old.item_id)) == agent
+    assert stored_evaluation_call(store.read("acme", verifier_item.item_id)) == verifier
+    with pytest.raises(ValueError, match="evaluation call has the ID"):
+        content = {**verifier_item.content, "agent_record_id": "e1:0:0:1:0"}
+        store.create("acme", [NewItem("coding/e1:0:0:1:0", content, verifier_item.metadata)])
+
+
+def test_a_trajectory_that_a_verifier_wrote_is_no_scenarios_data(store):
+    trajectory = EvaluationTrajectory(0, 0, 1, 0, "trajectory.json", ATIF)
+    item = evaluation_trajectory_item("coding", "e1", trajectory)
+    assert item.item_id == "coding/e1:0:0:1:verifier:trajectory:0"
+    store.create("acme", [item])
+    [found] = evaluation_trajectory_items(store, "acme", "coding", "e1", content=True)
+    assert (found.content, found.scenarios, found.metadata["evaluation"]["name"]) == (ATIF, {}, "trajectory.json")
+    assert list(evaluation_trajectory_items(store, "acme", "other", "e1", content=False)) == []
+    for metadata, message in (
+        ({**item.metadata, "scenarios": {"coding": "train"}}, "empty scenarios"),
+        ({**item.metadata, "origin": {"scenario": "coding", "component": "", "records": []}}, "no origin"),
+        ({**item.metadata, "evaluation_id": "e2"}, "evaluation_id"),
+        ({**item.metadata, "evaluation": {**item.metadata["evaluation"], "attempt": 0}}, "attempt"),
+        ({"kind": "task", "evaluation_id": "e1"}, "only an evaluation call"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            store.create("acme", [NewItem("coding/other", ATIF, metadata)])
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
@@ -957,6 +1006,23 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
                 "origin": {**metadata["origin"], "evaluation": {**metadata["origin"]["evaluation"], "index": 7}},
             },
             "evaluation call has the ID",
+        ),
+        (
+            lambda metadata: {
+                **metadata,
+                "origin": {
+                    **metadata["origin"],
+                    "evaluation": {**metadata["origin"]["evaluation"], "caller": "judge"},
+                },
+            },
+            "caller",
+        ),
+        (
+            lambda metadata: {
+                **metadata,
+                "origin": {**metadata["origin"], "evaluation": {**metadata["origin"]["evaluation"], "label": "x"}},
+            },
+            "an agent call has no label",
         ),
     ],
 )
