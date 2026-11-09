@@ -19,7 +19,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, UpstreamStatusError
-from reef.core.evaluation import EvaluationCall
+from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
 
@@ -125,6 +125,8 @@ class CandidateArtifacts(ABC):
     ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
     ``add_evaluation_call(scenario, evaluation_id, artifact_id, call)`` keeps one call of a rollout to the candidate
     ``artifact_id`` as a record item of the scenario's owner (``reef.storage.record_items.evaluation_call_item``).
+    ``add_evaluation_trajectory(scenario, evaluation_id, trajectory)`` keeps one trajectory that a rollout's verifier
+    wrote as a trajectory item of that owner (``reef.storage.record_items.evaluation_trajectory_item``).
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """
@@ -142,6 +144,11 @@ class CandidateArtifacts(ABC):
     @abstractmethod
     def add_evaluation_call(
         self, scenario: str, evaluation_id: str, artifact_id: str, call: EvaluationCall
+    ) -> None: ...
+
+    @abstractmethod
+    def add_evaluation_trajectory(
+        self, scenario: str, evaluation_id: str, trajectory: EvaluationTrajectory
     ) -> None: ...
 
 

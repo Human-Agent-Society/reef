@@ -38,6 +38,7 @@ from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
+    Caller,
     EvaluationCall,
     EvaluationCallTotals,
     PolicyEvaluation,
@@ -71,7 +72,12 @@ from reef.storage.data import DataStore, StoredItem, record_source
 from reef.storage.evaluations import StoredEvaluation
 from reef.storage.item_kinds import evaluation_call_id
 from reef.storage.observer import RecordObserver
-from reef.storage.record_items import evaluation_call_items, evaluation_call_summary, stored_evaluation_call
+from reef.storage.record_items import (
+    evaluation_call_items,
+    evaluation_call_summary,
+    evaluation_trajectory_items,
+    stored_evaluation_call,
+)
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
@@ -213,20 +219,20 @@ def rollout_work(rollout: EvaluationRollout) -> NewWork:
 
 
 def attempt_trajectories(
-    scenario: str, evaluation_id: str, item: WorkItem, calls: Sequence[EvaluationCall]
+    scenario: str, evaluation_id: str, item: WorkItem, calls: Sequence[EvaluationCall], caller: Caller = "agent"
 ) -> list[dict[str, Any]]:
     """The ATIF trajectories of each attempt of the rollout of ``item`` that has a 200 call among ``calls``, in
-    attempt order. ``calls`` are kept calls of that rollout, in attempt and then index order.
+    attempt order. ``calls`` are kept calls of ``caller`` of that rollout, in attempt and then index order.
 
-    Each 200 call of an attempt is one ``AgentRecord``: its ID is ``{evaluation_id}:{task_index}:{repeat}:{attempt}:
-    {index}``, its payload the request body plus ``response``, the response body, and its time the call's
-    ``started_at``. ``TrajectoryIndex`` links the calls of one attempt into conversations, as it links the records of
-    training samples: an agent that plays several roles, each with its own messages, has one conversation for each.
+    Each 200 call of an attempt is one ``AgentRecord``: its ID is the call's ``evaluation_call_id``, its payload the
+    request body plus ``response``, the response body, and its time the call's ``started_at``. ``TrajectoryIndex``
+    links the calls of one attempt into conversations, as it links the records of training samples: an agent that
+    plays several roles, each with its own messages, has one conversation for each.
     ``make_trajectory`` stitches each conversation, without the calls that a retry replaced; the conversations are in
     the order of their first calls. The attempt that the rollout's score came from is the last attempt of a finished
-    rollout: each of its trajectories has the score's value as its reward, null for a failed score, and every other
-    trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``: ``{evaluation_id, task, task_index,
-    repeat, attempt, conversation, scored}``, where ``conversation`` counts from 0 in its attempt.
+    rollout: each of its agent trajectories has the score's value as its reward, null for a failed score, and every
+    other trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``: ``{evaluation_id, task,
+    task_index, repeat, attempt, caller, conversation, scored}``, where ``conversation`` counts from 0 in its attempt.
     """
     rollout = EvaluationRollout.from_item(item)
     finished = item.state == "finished" and item.result is not None
@@ -237,7 +243,7 @@ def attempt_trajectories(
         if summary.status != 200:
             continue
         record_id = evaluation_call_id(
-            evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index
+            evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index, summary.caller
         )
         payload = {**(call.request or {}), "response": dict(call.response or {})}
         attempts.setdefault(summary.attempt, []).append(
@@ -245,7 +251,7 @@ def attempt_trajectories(
         )
     trajectories = []
     for attempt, records in sorted(attempts.items()):
-        scored = finished and attempt == item.attempt_count
+        scored = caller == "agent" and finished and attempt == item.attempt_count
         for conversation, stitched in enumerate(conversations(records)):
             trajectory = make_trajectory(stitched, reward=score if scored else None).trajectory
             evaluation = {
@@ -254,6 +260,7 @@ def attempt_trajectories(
                 "task_index": rollout.task_index,
                 "repeat": rollout.repeat,
                 "attempt": attempt,
+                "caller": caller,
                 "conversation": conversation,
                 "scored": scored,
             }
@@ -262,6 +269,30 @@ def attempt_trajectories(
                 {**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}}
             )
     return trajectories
+
+
+def verifier_trajectory(item: StoredItem, rollout: EvaluationRollout) -> dict[str, Any]:
+    """The ATIF document of the trajectory item ``item``, which the verifier of ``rollout`` wrote
+    (``evaluation_trajectory_item``), with ``extra.reef.evaluation``: ``{evaluation_id, task, task_index, repeat,
+    attempt, caller, file, scored}``, where ``caller`` is ``verifier``, ``file`` the name of its file and ``scored``
+    false. It adds an ``extra`` or ``extra.reef`` object that the document has not."""
+    location = item.metadata["evaluation"]
+    document = dict(cast(Mapping[str, Any], item.content))
+    extra = document.get("extra")
+    extra = extra if isinstance(extra, Mapping) else {}
+    reef = extra.get("reef")
+    reef = reef if isinstance(reef, Mapping) else {}
+    evaluation = {
+        "evaluation_id": location["evaluation_id"],
+        "task": rollout.task_name,
+        "task_index": rollout.task_index,
+        "repeat": rollout.repeat,
+        "attempt": location["attempt"],
+        "caller": "verifier",
+        "file": location["name"],
+        "scored": False,
+    }
+    return {**document, "extra": {**extra, "reef": {**reef, "evaluation": evaluation}}}
 
 
 class EvaluationResults:
@@ -763,25 +794,25 @@ class ArtifactEvaluations:
 
     def rollouts_json(self, scenario: str, evaluation_id: str) -> list[dict[str, Any]] | None:
         """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
-        attempt_count, started_at, ended_at, score, error, calls}``; None when ``scenario`` has no evaluation
-        ``evaluation_id``.
+        attempt_count, started_at, ended_at, score, error, calls, verifier_calls}``; None when ``scenario`` has no
+        evaluation ``evaluation_id``.
 
         ``state`` is the rollout's queue state, or ``waiting`` for a rollout that ``max_concurrent_rollouts`` keeps
         out of the queue yet. ``started_at`` and ``ended_at`` are its work item's times.
         ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``error`` is the reason of a
-        failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept calls as JSON, or
-        null when the data store keeps no call of it. It reads the metadata of the evaluation's calls, not their
-        content.
+        failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept agent calls as JSON,
+        or null when the data store keeps no agent call of it; ``verifier_calls`` is the same for its verifier calls.
+        It reads the metadata of the evaluation's calls, not their content.
         """
         stored = self.get(scenario, evaluation_id)
         if stored is None:
             return None
-        totals: dict[tuple[int, int], EvaluationCallTotals] = {}
+        totals: dict[tuple[int, int, Caller], EvaluationCallTotals] = {}
         place = self.call_store(scenario)
         kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
         for call_item in kept:
             summary = evaluation_call_summary(call_item)
-            key = (summary.task_index, summary.repeat)
+            key = (summary.task_index, summary.repeat, summary.caller)
             found = totals.get(key)
             totals[key] = EvaluationCallTotals(
                 (0 if found is None else found.count) + 1,
@@ -794,7 +825,8 @@ class ArtifactEvaluations:
         for item in items:
             rollout = EvaluationRollout.from_item(item)
             finished = item.state == "finished" and item.result is not None
-            calls = totals.get((rollout.task_index, rollout.repeat))
+            calls = totals.get((rollout.task_index, rollout.repeat, "agent"))
+            verifier_calls = totals.get((rollout.task_index, rollout.repeat, "verifier"))
             views.append(
                 {
                     "task": rollout.task_name,
@@ -807,6 +839,7 @@ class ArtifactEvaluations:
                     "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
                     "error": item.error,
                     "calls": None if calls is None else calls.to_json(),
+                    "verifier_calls": None if verifier_calls is None else verifier_calls.to_json(),
                 }
             )
         request = stored.request
@@ -824,6 +857,7 @@ class ArtifactEvaluations:
                     "score": None,
                     "error": None,
                     "calls": None,
+                    "verifier_calls": None,
                 }
             )
         return views
@@ -835,17 +869,20 @@ class ArtifactEvaluations:
         data = self.dispatcher.data_store
         return None if data is None or owner is None else (data, owner)
 
-    def rollout_items(self, scenario: str, evaluation_id: str, task_index: int, repeat: int) -> list[StoredItem]:
-        """The items of the kept calls of rollout ``(task_index, repeat)`` of one evaluation, without their content, in
-        attempt and then index order."""
+    def rollout_items(
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller
+    ) -> list[StoredItem]:
+        """The items of the kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation, without
+        their content, in attempt and then index order."""
         place = self.call_store(scenario)
         found = [
             item
             for item in (
                 () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
             )
-            if (item.metadata["origin"]["evaluation"]["task_index"], item.metadata["origin"]["evaluation"]["repeat"])
-            == (task_index, repeat)
+            if (summary := evaluation_call_summary(item)).task_index == task_index
+            and summary.repeat == repeat
+            and summary.caller == caller
         ]
         return sorted(
             found,
@@ -856,12 +893,12 @@ class ArtifactEvaluations:
         )
 
     def rollout_calls(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller = "agent"
     ) -> tuple[EvaluationCall, ...]:
-        """The kept calls of rollout ``(task_index, repeat)`` of one evaluation, with their bodies, in attempt and
-        then index order. It reads the content of this rollout's calls only."""
+        """The kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation, with their bodies, in
+        attempt and then index order. It reads the content of these calls only."""
         place = self.call_store(scenario)
-        items = self.rollout_items(scenario, evaluation_id, task_index, repeat)
+        items = self.rollout_items(scenario, evaluation_id, task_index, repeat, caller)
         if place is None or not items:
             return ()
         data, owner = place
@@ -869,39 +906,71 @@ class ArtifactEvaluations:
         return tuple(stored_evaluation_call(read[item.item_id]) for item in items if item.item_id in read)
 
     def calls_json(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller = "agent"
     ) -> list[dict[str, JsonValue]] | None:
-        """The summaries of the kept calls of rollout ``(task_index, repeat)`` of one evaluation as JSON, in attempt
-        and then index order; None when ``scenario`` has no evaluation ``evaluation_id``. It reads no content."""
+        """The summaries of the kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation as JSON,
+        in attempt and then index order; None when ``scenario`` has no evaluation ``evaluation_id``. It reads no
+        content."""
         if self.get(scenario, evaluation_id) is None:
             return None
-        items = self.rollout_items(scenario, evaluation_id, task_index, repeat)
+        items = self.rollout_items(scenario, evaluation_id, task_index, repeat, caller)
         return [evaluation_call_summary(item).to_json() for item in items]
 
     def call_json(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int
+        self,
+        scenario: str,
+        evaluation_id: str,
+        task_index: int,
+        repeat: int,
+        attempt: int,
+        index: int,
+        caller: Caller = "agent",
     ) -> dict[str, JsonValue] | None:
-        """The kept call with the key ``(task_index, repeat, attempt, index)`` of one evaluation as JSON, with its
-        bodies; None when ``scenario`` has no such evaluation or call. It reads the call's item by its ID."""
+        """The kept call with the key ``(task_index, repeat, attempt, caller, index)`` of one evaluation as JSON, with
+        its bodies; None when ``scenario`` has no such evaluation or call. It reads the call's item by its ID."""
         place = self.call_store(scenario)
         if place is None or self.get(scenario, evaluation_id) is None:
             return None
         data, owner = place
-        item = data.read(owner, f"{scenario}/{evaluation_call_id(evaluation_id, task_index, repeat, attempt, index)}")
+        record_id = evaluation_call_id(evaluation_id, task_index, repeat, attempt, index, caller)
+        item = data.read(owner, f"{scenario}/{record_id}")
         if item is None or item.kind != "record" or record_source(item.metadata) != "evaluation":
             return None
         return stored_evaluation_call(item).to_json()
 
     def trajectories_json(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller = "agent"
     ) -> list[dict[str, Any]] | None:
-        """The trajectories of each attempt of rollout ``(task_index, repeat)`` of one evaluation
-        (``attempt_trajectories``), in attempt order; None when ``scenario`` has no evaluation ``evaluation_id``. A
-        rollout that the queue does not hold has none."""
+        """The trajectories of ``caller`` of each attempt of rollout ``(task_index, repeat)`` of one evaluation, in
+        attempt order; None when ``scenario`` has no evaluation ``evaluation_id``. A rollout that the queue does not
+        hold has none. The agent's trajectories are stitched from its calls (``attempt_trajectories``). In each
+        attempt, the verifier's trajectories are the files that it wrote (``verifier_trajectory``), in name order, and
+        then the trajectories stitched from its calls."""
         if self.get(scenario, evaluation_id) is None:
             return None
         item = self.queue.get(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, task_index, repeat))
-        return [] if item is None else self.rollout_trajectories(scenario, evaluation_id, item, every_attempt=True)
+        if item is None:
+            return []
+        if caller == "agent":
+            return self.rollout_trajectories(scenario, evaluation_id, item, every_attempt=True)
+        rollout = EvaluationRollout.from_item(item)
+        place = self.call_store(scenario)
+        written = sorted(
+            (
+                found
+                for found in (
+                    () if place is None else evaluation_trajectory_items(*place, scenario, evaluation_id, content=True)
+                )
+                if (found.metadata["evaluation"]["task_index"], found.metadata["evaluation"]["repeat"])
+                == (task_index, repeat)
+            ),
+            key=lambda found: (found.metadata["evaluation"]["attempt"], found.metadata["evaluation"]["index"]),
+        )
+        calls = self.rollout_calls(scenario, evaluation_id, task_index, repeat, "verifier")
+        stitched = attempt_trajectories(scenario, evaluation_id, item, calls, "verifier")
+        views = [verifier_trajectory(found, rollout) for found in written] + stitched
+        # A stable sort keeps the files of an attempt before its stitched trajectories.
+        return sorted(views, key=lambda view: view["extra"]["reef"]["evaluation"]["attempt"])
 
     def exported_rollouts(self, scenario: str, evaluation_id: str) -> tuple[WorkItem, ...] | None:
         """The rollout items of one evaluation, in task and repeat order, for an export of its trajectories; None when
