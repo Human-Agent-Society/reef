@@ -545,7 +545,7 @@ class PythonSessionReader(TrajectoryReader):
             AgentRecord(f"python-call-{index}", "python", RequestType.INFERENCE, event, float(index))
             for index, event in enumerate(event for event in self(path) if isinstance(event.get("response"), dict))
         ]
-        return tuple(make_trajectory(conversation).trajectory for conversation in conversations(calls))
+        return tuple(dict(make_trajectory(conversation).trajectory) for conversation in conversations(calls))
 
 
 # The readers reef.harness exports as functions.
