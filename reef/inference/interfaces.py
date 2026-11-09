@@ -30,6 +30,7 @@ from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import WeightFiles
+from reef.inference.startup import StartupSteps
 
 # -- Identities and errors ----------------------------------------------------
 
@@ -262,6 +263,12 @@ class InferenceHandler(ABC):
         """What the starting engine at ``served`` does now, as one short line for a person, such as "Loading weights
         · 0:42"; None when the handler cannot tell, the default. Reef asks it only while ``engine_state`` is
         ``starting``, under the same rules."""
+        return None
+
+    def engine_steps(self, served: ServedArtifact) -> StartupSteps | None:
+        """The ``start`` and ``load`` phases of the starting engine at ``served`` (RFC #1283), when a ready artifact's
+        engine starts again from zero; None when the handler cannot tell, the default. Reef asks it only while
+        ``engine_state`` is ``starting``, under the same rules."""
         return None
 
     async def inference_stream(

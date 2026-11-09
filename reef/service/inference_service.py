@@ -55,6 +55,7 @@ from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
 from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler
 from reef.inference.provider_protocol import SSEFrameDecoder
+from reef.inference.startup import StartupSteps, reported_steps
 from reef.service.streaming import (
     chat_completion_chunk_identity,
     frame_for_codex,
@@ -454,25 +455,30 @@ class InferenceReplica:
             state = "pending"
         else:
             state = "starting"
-        engine, detail = self.engine_state(scenario, model) if state == "ready" else (None, None)
+        engine, detail, steps = self.engine_state(scenario, model) if state == "ready" else (None, None, None)
+        if state in ("pending", "starting"):
+            steps = reported_steps(item.progress, artifact_id, item.created_at, None)
         return {
             "artifact_id": artifact_id,
             "state": state,
             "error": "The inference engine did not start. Check the service logs." if state == "failed" else None,
             "engine": engine,
             "engine_detail": detail,
+            "startup": None if steps is None else steps.to_json(),
         }
 
-    def engine_state(self, scenario: str, model: str) -> tuple[EngineState | None, str | None]:
+    def engine_state(self, scenario: str, model: str) -> tuple[EngineState | None, str | None, StartupSteps | None]:
         """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), and for a starting engine
-        what it does now (``InferenceHandler.engine_detail``); None without a route or a handler for it."""
+        what it does now (``engine_detail``) and its phases (``engine_steps``); None without a route or a handler."""
         try:
             served = self.cache.read(scenario, model)
             handler = self.engines.handler(served)
         except (NotServed, StaleServedModels, LookupError):
-            return None, None
+            return None, None, None
         engine = handler.engine_state(served)
-        return engine, handler.engine_detail(served) if engine == "starting" else None
+        if engine != "starting":
+            return engine, None, None
+        return engine, handler.engine_detail(served), handler.engine_steps(served)
 
     async def resolve(
         self,

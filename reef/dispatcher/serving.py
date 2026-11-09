@@ -18,6 +18,7 @@ from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScheduledStop, Served
 from reef.core.values import require_text
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.inference.interfaces import InferenceRuntime
+from reef.inference.startup import PROGRESS_KEY, StartupReporter, reporting_startup
 from reef.recipe.base import Recipe
 from reef.scenario.binding import activate_snapshot
 from reef.storage.coordination import Coordination
@@ -64,6 +65,31 @@ def serving_config_of(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     if not isinstance(value, dict):
         raise ValueError("a serving request's serving_config must be a JSON object")
     return dict(value)
+
+
+class QueueStartupReporter(StartupReporter):
+    """Adds the startup reports of a serving work item to its progress, one progress entry each (RFC #1283).
+
+    Values: ``queue`` holds ``item``, which ``worker_id`` holds; ``number`` is the next progress number. A failed write
+    is logged and lost.
+
+    Purpose: ``ServingWorker.run_item`` makes one for each serving request, and binds the runtime's reports to it.
+    """
+
+    def __init__(self, queue: WorkQueue, item: WorkItem, worker_id: str) -> None:
+        self.queue, self.item, self.worker_id = queue, item, worker_id
+        self.number = len(item.progress)
+        self.lock = threading.Lock()
+
+    def add(self, entry: Mapping[str, JsonValue]) -> None:
+        with self.lock:
+            try:
+                self.queue.add_progress(
+                    self.item.queue, self.item.id, self.worker_id, {PROGRESS_KEY: dict(entry)}, number=self.number
+                )
+                self.number += 1
+            except Exception:
+                logger.warning("could not report the startup of %s", self.item.id, exc_info=True)
 
 
 class ServingWorker(QueueWorker):
@@ -221,13 +247,16 @@ class ServingWorker(QueueWorker):
 
         artifact = selected_artifact(item.payload)
         components = self.recipe.scenario_components(item.scenario)
+        # The runtime reports each artifact's startup phases to the item's progress (RFC #1283).
+        reporter = QueueStartupReporter(self.queue, item, self.worker_id)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
         runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
         if self.activated.get(item.scenario) == artifact_id:
             logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
         else:
             started = time.monotonic()
-            activate_snapshot(components, artifact, runtime, item.scenario)
+            with reporting_startup(reporter, artifact_id):
+                activate_snapshot(components, artifact, runtime, item.scenario)
             self.activated[item.scenario] = artifact_id
             logger.info(
                 "scenario %s: activated artifact %s in %.1f s", item.scenario, artifact_id, time.monotonic() - started
@@ -249,9 +278,10 @@ class ServingWorker(QueueWorker):
                 raise ValueError("a beside artifact needs its snapshot and component")
             component = require_text(value.get("component"), "component")
             if component == components.loaded_component:
-                beside_model = runtime.serve_artifact(
-                    components.component_artifact(selected_artifact(value), component), scenario=item.scenario
-                )
+                with reporting_startup(reporter, name):
+                    beside_model = runtime.serve_artifact(
+                        components.component_artifact(selected_artifact(value), component), scenario=item.scenario
+                    )
                 if beside_model is None:
                     raise ValueError("the inference runtime provides no route for a beside artifact")
                 models[name] = beside_model

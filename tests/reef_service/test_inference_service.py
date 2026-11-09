@@ -15,6 +15,7 @@ from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import EngineClients, InferenceHandler
+from reef.inference.startup import StartupStep, StartupSteps
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
@@ -171,6 +172,13 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "error": None,
                     "engine": None,
                     "engine_detail": None,
+                    # RFC #1283: a startup that waits is in its prepare phase from the request.
+                    "startup": {
+                        "steps": [
+                            {"phase": "prepare", "started_at": before.created_at, "ended_at": None, "detail": None}
+                        ],
+                        "estimate_seconds": None,
+                    },
                 }
                 assert response.headers["Cache-Control"] == "no-store"
                 assert table.current_request("math") == before
@@ -210,6 +218,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "error": None,
                     "engine": None,
                     "engine_detail": None,
+                    "startup": None,
                 }
         finally:
             storage.close()
@@ -239,6 +248,7 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
                     "error": "The inference engine did not start. Check the service logs.",
                     "engine": None,
                     "engine_detail": None,
+                    "startup": None,
                 }
                 response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                 assert response.status == 503
@@ -297,12 +307,15 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
                 app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
                 async with TestClient(TestServer(app)) as client:
                     response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
+                    created_at = table.current_request("math").created_at
+                    prepare = {"phase": "prepare", "started_at": created_at, "ended_at": None, "detail": None}
                     assert await response.json() == {
                         "artifact_id": "release-2",
                         "state": "pending",
                         "error": None,
                         "engine": None,
                         "engine_detail": None,
+                        "startup": {"steps": [prepare], "estimate_seconds": None},
                     }
                     response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                     assert response.status == 200
@@ -352,6 +365,9 @@ class ColdHandler(HttpInferenceHandler):
     def engine_detail(self, served: ServedArtifact) -> str:
         return "Loading weights · 0:42"
 
+    def engine_steps(self, served: ServedArtifact) -> StartupSteps:
+        return StartupSteps((StartupStep("start", 100.0, 108.0), StartupStep("load", 108.0, detail="5 of 6")), 60.0)
+
 
 @pytest.mark.unit
 def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path: Path) -> None:
@@ -381,6 +397,11 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
                     assert status["engine"] == state
                     # Only a starting engine says what it does now.
                     assert status["engine_detail"] == ("Loading weights · 0:42" if state == "starting" else None)
+                    # RFC #1283: and its phases, with their times.
+                    load = {"phase": "load", "started_at": 108.0, "ended_at": None, "detail": "5 of 6"}
+                    start = {"phase": "start", "started_at": 100.0, "ended_at": 108.0, "detail": None}
+                    expected = {"steps": [start, load], "estimate_seconds": 60.0}
+                    assert status["startup"] == (expected if state == "starting" else None)
         finally:
             ColdHandler.state = "idle"
             storage.close()
