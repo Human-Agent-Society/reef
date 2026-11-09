@@ -531,6 +531,7 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
         "task_index": 2,
         "repeat": 0,
         "attempt": 3,
+        "conversation": 0,
         "scored": True,
     }
     # Attempt 2 has no 200 call, so it has no trajectory.
@@ -550,6 +551,47 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
         None,
         None,
     ]
+
+
+@pytest.mark.unit
+def test_an_attempt_that_plays_two_roles_gives_one_trajectory_for_each_role_without_replaced_calls() -> None:
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 0.5},
+    )
+    ann = [{"role": "system", "content": "You are Ann."}, {"role": "user", "content": "Start."}]
+    ben = [{"role": "system", "content": "You are Ben."}, {"role": "user", "content": "Ann: Hello."}]
+    ann_again = [*ann, {"role": "assistant", "content": "Hello."}, {"role": "user", "content": "Ben: Hi."}]
+    # The roles take turns. Ann's second call has an empty answer, and the agent asks again with the same messages.
+    calls = [
+        chat_call(1, 0, ann, "Hello."),
+        chat_call(1, 1, ben, "Hi."),
+        chat_call(1, 2, ann_again, ""),
+        chat_call(1, 3, ann_again, "How are you?"),
+    ]
+    first, second = attempt_trajectories("s", "e1", item, calls)
+    assert [step["message"] for step in first["steps"]] == [
+        "You are Ann.",
+        "Start.",
+        "Hello.",
+        "Ben: Hi.",
+        "How are you?",
+    ]
+    assert [step["message"] for step in second["steps"]] == ["You are Ben.", "Ann: Hello.", "Hi."]
+    assert [record["agent_record_id"] for record in first["extra"]["reef"]["records"]] == ["e1:2:0:1:0", "e1:2:0:1:3"]
+    assert [trajectory["extra"]["reef"]["evaluation"]["conversation"] for trajectory in (first, second)] == [0, 1]
+    assert first["extra"]["reef"]["reward"] == second["extra"]["reef"]["reward"] == 0.5
 
 
 class TreeCallingLab(TaskLab):
