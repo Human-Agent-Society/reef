@@ -57,6 +57,7 @@ from reef.recipe import Recipe
 from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import (
+    CANCELLED_ERROR,
     STOPPED_ERROR,
     ArtifactEvaluations,
     NewArtifact,
@@ -441,6 +442,42 @@ def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tm
                 {"task": "add", "scores": [1.0, 0.0]},
                 {"task": "sort", "scores": [0.0, 1.0]},
             ]
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_evaluation_fails_with_its_rollouts_and_starts_no_waiting_rollout(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        # No worker runs: the test takes the one rollout in the queue, and three rollouts wait.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 2,
+                "max_concurrent_rollouts": 1,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            taken = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.start(EVALUATIONS_QUEUE, taken.id, "w")
+
+            answer = await (await client.post(f"{route}/cancel", headers=AUTH)).json()
+            assert (answer["state"], answer["error"]) == ("failed", CANCELLED_ERROR)
+            assert [(item.state, item.error) for item in queue.items(EVALUATIONS_QUEUE, scenario="s")] == [
+                ("failed", CANCELLED_ERROR)
+            ]
+            listed = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+            assert [row["state"] for row in listed] == ["failed", "waiting", "waiting", "waiting"]
+            # A second cancel changes nothing; an unknown evaluation is 404.
+            again = await (await client.post(f"{route}/cancel", headers=AUTH)).json()
+            assert again == answer
+            unknown = await client.post("/reef/scenarios/s/evaluations/unknown/cancel", headers=AUTH)
+            assert unknown.status == 404
 
     asyncio.run(run())
 
