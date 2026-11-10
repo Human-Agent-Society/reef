@@ -49,7 +49,6 @@ from reef.core.evaluation import (
     harness_item,
     mean_score,
 )
-from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 from reef.core.trajectory_index import conversations
@@ -783,14 +782,11 @@ class ArtifactEvaluations:
         if item is None:
             tree = None
         else:
-            # Only a harness tree is checked against the task files, and only against the tasks that it runs.
+            # Only a harness tree is checked against the task files, and only against the tasks that it runs. A
+            # remote task file store downloads them, so the read does not hold the scenario's lock.
             with self.dispatcher.locked_scenario(scenario) as current:
                 samples = self.dispatcher.storage.sample_store(scenario, current.store)
-                directories = [
-                    str(stored.sample.task_path)
-                    for stored in (() if samples is None else samples.get(names))
-                    if isinstance(stored.sample, TaskSample)
-                ]
+            directories = [str(path) for path in (() if samples is None else samples.task_paths(names))]
             tree = self.tree_harness(scenario, item, api, directories)
         agent = None if tree is not None else harbor_agent(request.harness)
         # The stored request names its tasks, so that the rollouts that wait can be added later.
