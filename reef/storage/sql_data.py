@@ -8,9 +8,9 @@ its parent's, and the item's content keeps an empty payload. The tables are writ
 in the task file store, in each owner's partition.
 
 With a segment store, the content of a trajectory item, and the content of a trajectory node, can live in a segment
-line instead (``reef.storage.segments``). ``create`` writes the content of new trajectory items as one segment.
-``maintain`` moves the rest into segments once an owner has ``PACK_BYTES`` of it, and deletes the segments that no
-row uses. ``data_segment`` lists each segment that the store wrote, so that ``maintain`` finds the unused ones.
+line instead (``reef.storage.segments``). ``create`` writes the content of new trajectory items as one segment
+when it is at least ``CREATE_SEGMENT_BYTES``. ``maintain`` moves the rest into segments once an owner has
+``PACK_BYTES`` of it, and deletes the segments that no row uses. ``data_segment`` lists each segment that the store wrote, so that ``maintain`` finds the unused ones.
 """
 
 from __future__ import annotations
@@ -118,6 +118,8 @@ from reef.storage.tasks import TaskFileStore
 
 #: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.
 PACK_BYTES = 64 * 2**20
+#: The content bytes of the new trajectory items of one ``create`` call from which the call writes them as a segment.
+CREATE_SEGMENT_BYTES = 2**20
 #: The age in seconds after which ``maintain`` deletes a segment that no row uses. A new segment has no rows
 #: until the transaction that writes them commits.
 UNUSED_SEGMENT_SECONDS = 24 * 3600
@@ -563,7 +565,9 @@ class SQLDataStore(DataStore):
                 and isinstance(item.content, Mapping)
                 and item.item_id not in existing
             ]
-            if new:
+            # Less content waits in the rows for ``maintain``: a segment for each small write, such as one sample that
+            # a stage made, costs a reader one request for each item.
+            if new and sum(len(text.encode("utf-8")) for _, text in new) >= CREATE_SEGMENT_BYTES:
                 lines = self.write_segment(partition, [text for _, text in new])
                 places = {item_id: line for (item_id, _), line in zip(new, lines, strict=True)}
         # The rows and the nodes, but for their sequences, need no lock: they depend on the items alone.
