@@ -272,6 +272,26 @@ def test_imported_tasks_are_the_tasks_that_no_stage_made(scenario):
     assert scenario.ids(kind="task") == ["task-a", "held", "math.generated-tasks.g"]
 
 
+def test_the_listing_of_the_imported_tasks_reads_no_task_files(scenario, monkeypatch):
+    samples = scenario.samples
+    scenario.task("task-a", "train")
+    scenario.task("held", "eval", 9001)
+    samples.for_trainer("").add_record_samples(
+        None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),)
+    )
+    imported = samples.imported_tasks()
+
+    def refuse(item):
+        raise AssertionError(f"the listing read the files of {item.item_id}")
+
+    monkeypatch.setattr(scenario.data, "task_path", refuse)
+    listed = samples.listed_imported_tasks()
+    assert [(task.sample_id, task.split, task.digest, task.train_counts) for task in listed] == [
+        (task.sample_id, task.split, task.sample.metadata["task"]["files_digest"], task.train_counts)
+        for task in imported
+    ]
+
+
 def legacy_sample_tables(connection, schema: str | None, storage_id: str | None) -> None:
     """Make the ``training_sample`` and ``sample_record`` tables of the sample store before RFC #1140, with an upload
     and a sample that the trainer ``a`` made."""
