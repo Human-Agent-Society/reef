@@ -487,17 +487,17 @@ the deployment's top-level ``activation`` section (`Configuration
 
 An inactive artifact sits in ``GET /reef/harness/artifacts`` with ``active:
 false`` and ``activated: false``, and Reef serves it to no client. The next
-steps train from it in the meantime. To serve it, send the row's
-``artifact_id`` to the activate route. The same route serves an earlier
+steps train from it in the meantime. To serve it, set ``served`` to the row's
+``artifact_id`` with weight 100. The same request serves an earlier
 snapshot again. Clients install the active selection at their next sync:
 
 .. code:: bash
 
-   curl -sS -X POST -H "Content-Type: application/json" -d '{"artifact_id": "<artifact_id>"}' \
-     http://127.0.0.1:8901/reef/scenarios/<scenario>/activate
+   curl -sS -X POST -H "Content-Type: application/json" -d '{"served": {"<artifact_id>": 100}}' \
+     http://127.0.0.1:8901/reef/scenarios/<scenario>/update
 
-`Activate an artifact <operate.rst#activate-an-artifact>`__ describes
-activation, and `Train from an artifact
+`Set what a scenario serves <operate.rst#set-what-a-scenario-serves>`__ describes
+the request, and `Train from an artifact
 <operate.rst#train-from-an-artifact>`__ describes how to make the steps train
 from another snapshot.
 

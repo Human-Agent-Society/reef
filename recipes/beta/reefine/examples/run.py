@@ -342,22 +342,22 @@ def wait_for_step(client, text, before, deadline):
 
 
 def activate(client, rows, row, run_dir):
-    """Save the inactive step's page beside the run, print its URL, activate the row's artifact; the id of the
-    active selection that the activation names."""
+    """Save the inactive step's page beside the run, print its URL, and make the row's artifact the one that the
+    scenario serves; the ID of that artifact."""
     step = rows.index(row)
     page = f"/reef/harness/artifacts/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(fetch_text(page), encoding="utf-8")
     say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
     say("activate: the demo is scripted; a person reads the page first")
-    body = {"artifact_id": row["artifact_id"]}
+    body = {"served": {row["artifact_id"]: 100}}
     if row.get("component"):
         body["component"] = row["component"]
-    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/activate", SCENARIO, body)
-    if answer.get("artifact_id") != row["artifact_id"]:
-        raise SystemExit(f"reef answered the activation without artifact {row['artifact_id']}: {answer}")
-    say(f"activated: artifact {answer['artifact_id']} is active")
-    return answer["artifact_id"]
+    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/update", SCENARIO, body)
+    if answer.get("served") != body["served"]:
+        raise SystemExit(f"reef answered the update without artifact {row['artifact_id']}: {answer}")
+    say(f"activated: artifact {row['artifact_id']} is active")
+    return row["artifact_id"]
 
 
 # -- the show session -----------------------------------------------------------------------------------------

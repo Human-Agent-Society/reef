@@ -77,8 +77,7 @@ pi's ``adapter.yaml``, shortened:
    * - ``run.task``
      - the headless command (``{task}``, ``{root}``) and its variables;
        optionally ``skills``, the directory under the root where the agent
-       reads the skills of a Harbor task, and ``mcp``, how the agent reads
-       the MCP servers of a Harbor task (`Task MCP servers`_)
+       reads the skills of a Harbor task
    * - ``run.layer``
      - a person's machine: the agent's own commands that install the plugin
        and remove it (``register``, ``unregister``), and the ``args`` and
@@ -117,55 +116,16 @@ How Reef runs an agent
        or from its git checkout into a venv, copies in the tree, runs ``run.task`` with the instruction, and
        scores the tests' reward. A task that sets ``environment.skills_dir``
        needs an adapter with ``run.task.skills``: Reef copies the task's
-       skills there before the tree, so the tree's file wins on one path. A
-       task that sets ``environment.mcp_servers`` needs an adapter with
-       ``run.task.mcp`` (`Task MCP servers`_). An evaluation refuses a task
-       that needs what the adapter does not give its agent. The verifier can read the run as ATIF in
+       skills there before the tree, so the tree's file wins on one path. No
+       adapter's agent gets a task's ``mcp_servers``, and an evaluation
+       refuses such a task. The verifier can read the run as ATIF in
        ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
-     - an npm, uv or git ``install``, ``run.task.skills``,
-       ``run.task.mcp``
+     - an npm, uv or git ``install``, ``run.task.skills``
    * - A person's machine
      - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
        Reef.
      - ``run.layer``
-
-Task MCP servers
-~~~~~~~~~~~~~~~~
-
-A Harbor task can name MCP servers for its agent
-(``environment.mcp_servers``). ``run.task.mcp`` says how the adapter's agent
-reads them. Reef writes the servers of the task into the agent's config when
-it renders the tree for that task.
-
-.. code-block:: yaml
-
-   run:
-     task:
-       mcp:
-         target: agent
-         key: mcp
-         stdio: {type: local, command: "{argv}"}
-         sse: {type: remote, url: "{url}", oauth: false}
-         streamable-http: {type: remote, url: "{url}", oauth: false}
-
-- ``target`` names a config target, and ``key`` is the key of that file that
-  maps each server's name to its entry.
-- ``stdio``, ``sse`` and ``streamable-http`` give the entry of a server of
-  that transport. Name only the transports that the agent can use.
-- A value that is exactly ``{command}``, ``{args}``, ``{argv}`` or ``{url}``
-  stands for the server's command, its argument list, its command with its
-  arguments as one list, or its URL. Every other value is literal.
-
-The servers merge into the config file after the target's checks
-(`Config checks`_). A check can thus refuse the key from a tree, and Reef
-still writes it for a task.
-
-An evaluation refuses a task before any rollout when the adapter has no
-``run.task.mcp``, when it names no entry for the transport of one of the
-task's servers, or when a server has HTTP headers. Of the bundled adapters,
-``claude``, ``codex``, ``hermes`` and ``opencode`` declare ``run.task.mcp``;
-``codex`` reads no ``sse`` server.
 
 Tree parts
 ----------
@@ -562,7 +522,7 @@ that Reef starts also sends its model calls to Reef.
 ``reef-client harness`` asks ``GET /reef/harness?form=client&root=<install>``
 and installs the files under ``<install>``. It runs ``register`` once per
 installed artifact, and ``unregister`` on ``disconnect``. A snapshot that a
-person activates (``POST /reef/scenarios/<scenario>/activate``) installs at
+person activates (``served`` of ``POST /reef/scenarios/<scenario>/update``) installs at
 the client's next sync. The layer's render starts each config target from
 nothing and skips the checks; ``layer_files`` adds what ``register`` names
 and the tree lacks, such as a marketplace, and drops files the install keeps
