@@ -22,6 +22,7 @@ import math
 import os
 import re
 import sys
+import tomllib
 import urllib.parse
 import urllib.request
 import uuid
@@ -193,6 +194,22 @@ def task_identity(task_path: Path) -> dict[str, str]:
     with contextlib.suppress(HarborTaskError):
         identity["digest"] = read_harbor_task(task_path).digest
     return identity
+
+
+def environment_config(environment: str, task_path: Path) -> dict[str, object]:
+    """The Harbor environment config of a rollout of ``task_path`` in the Harbor environment type ``environment``.
+
+    It is ``{"type": environment}``. It also sets Harbor's ``modal_vm_runtime`` kwarg when ``environment`` is
+    ``modal``, the task has ``environment/docker-compose.yaml``, and its ``task.toml`` asks for no GPU. Modal's default
+    runtime puts each Compose service on the host network, and Compose refuses that for a service that names its
+    networks. The VM runtime keeps the task's networks and their DNS aliases, but it has no GPUs.
+    """
+    vm_runtime = (
+        environment == "modal"
+        and (task_path / "environment" / "docker-compose.yaml").is_file()
+        and tomllib.loads((task_path / "task.toml").read_text()).get("environment", {}).get("gpus", 0) == 0
+    )
+    return {"type": environment, "kwargs": {"modal_vm_runtime": True}} if vm_runtime else {"type": environment}
 
 
 def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
@@ -441,7 +458,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         for _ in range(2):
             async with slots:
                 error = await self.lab.build_environment(
-                    task_path, overrides={"environment": {"type": self.environment}}
+                    task_path, overrides={"environment": environment_config(self.environment, task_path)}
                 )
             if not error:
                 break
@@ -473,7 +490,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         try:
             base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
-            overrides: dict[str, object] = {"environment": {"type": self.environment}}
+            overrides: dict[str, object] = {"environment": environment_config(self.environment, task_path)}
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)
