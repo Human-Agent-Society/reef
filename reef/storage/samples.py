@@ -110,9 +110,9 @@ class TrainingState(ABC):
     """The training state of one scenario: what its trainers trained and consumed.
 
     Values: the train count of each sample ID and trainer, a positive int, and the IDs of the records that each
-    trainer's stages consumed. Only a commit changes a train count: the commit history adds one, for the commit's
-    trainer, for each sample that the commit lists (``consumed_sample_id``), in the commit's transaction. A train
-    count stays when its item leaves the scenario, so an item that comes back keeps it.
+    trainer's stages consumed. The train count of a sample and a trainer is the number of that trainer's commits that
+    list the sample (``consumed_sample_id``), so only a commit changes it. A train count stays when its item leaves
+    the scenario, so an item that comes back keeps it.
 
     Purpose: the scenario storage keeps it with the scenario's commits. ``SampleStore`` reads it.
     """
