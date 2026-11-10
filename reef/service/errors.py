@@ -29,6 +29,7 @@ from reef.service.routing import RoutingRequestError
 from reef.service.routing_preview import PREVIEW_BODY_LIMIT_BYTES
 from reef.storage.data import ItemConflict, ItemNotFound
 from reef.storage.records import RecordConflict
+from reef.storage.task_collections import CollectionNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactNotFound, web.HTTPNotFound),
     (UnknownScenario, web.HTTPNotFound),
     (ItemNotFound, web.HTTPNotFound),
+    (CollectionNotFound, web.HTTPNotFound),
     (ItemConflict, web.HTTPConflict),
     (NoDataStore, web.HTTPServiceUnavailable),
     (ScenarioLimitReached, web.HTTPConflict),

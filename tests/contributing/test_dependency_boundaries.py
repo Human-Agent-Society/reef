@@ -241,8 +241,10 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
             "reef.storage.item_kinds",
             "reef.storage.job_data",
             "reef.storage.segments",
+            "reef.storage.task_collections",
             "reef.storage.tasks",
         ),
+        "reef.storage.task_collections": ("reef.core",),
         "reef.storage.evaluations": ("reef.core",),
         "reef.storage.scenario": (
             "reef.core",

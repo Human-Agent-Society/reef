@@ -1,6 +1,7 @@
-"""HTTP routes of a data owner's items (RFC #1028), under ``/reef/namespaces/{owner}/data``.
+"""HTTP routes of a data owner's items (RFC #1028), under ``/reef/namespaces/{owner}/data``, and of its
+collections (RFC #1312), under ``/reef/namespaces/{owner}/collections``.
 
-``reef.service.data`` handles each route; this module reads the request and writes the response.
+``reef.service.data`` and ``reef.service.collections`` handle each route; this module reads the request and writes the response.
 """
 
 from __future__ import annotations
@@ -13,6 +14,13 @@ from typing import Any
 from aiohttp import web
 
 from reef.service.auth import add_signed_download, signed_download_url
+from reef.service.collections import (
+    add_to_scenario,
+    delete_collection,
+    list_collections,
+    read_collection,
+    save_collection,
+)
 from reef.service.data import (
     DataAccess,
     create_items,
@@ -153,6 +161,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             limit=query_int(request, "limit", MAX_QUERY_LIMIT),
             content=content == 1,
             group=None if group_key is None else (group_key, request.query.get("group_value")),
+            benchmark=request.query.get("benchmark") or None,
         )
         return web.json_response(listing)
 
@@ -185,6 +194,25 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         )
         return web.json_response(receipt)
 
+    async def collections(request: web.Request) -> web.Response:
+        return web.json_response(await asyncio.to_thread(list_collections, data, request.match_info["owner"]))
+
+    async def collection(request: web.Request) -> web.Response:
+        """Store, read or delete one collection, by the method."""
+        owner, name = request.match_info["owner"], request.match_info["name"]
+        if request.method == "PUT":
+            body = await read_object(request)
+            return web.json_response(await asyncio.to_thread(save_collection, data, owner, name, body))
+        handler = read_collection if request.method == "GET" else delete_collection
+        return web.json_response(await asyncio.to_thread(handler, data, owner, name))
+
+    async def collection_scenarios(request: web.Request) -> web.Response:
+        body = await read_object(request)
+        receipt = await asyncio.to_thread(
+            add_to_scenario, data, request.match_info["owner"], request.match_info["name"], body
+        )
+        return web.json_response(receipt)
+
     base = "/reef/namespaces/{owner}/data"
     transfers = "{transfer:" + "|".join(TRANSFER_KINDS) + "}"
     app.router.add_post(base, create)
@@ -200,6 +228,11 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     # An item ID can hold '/', so the route takes the rest of the path.
     app.router.add_get(base + "/{item_id:.+}", read)
     app.router.add_delete(base + "/{item_id:.+}", delete)
+    stored = "/reef/namespaces/{owner}/collections"
+    app.router.add_get(stored, collections)
+    for method in ("PUT", "GET", "DELETE"):
+        app.router.add_route(method, stored + "/{name}", collection)
+    app.router.add_post(stored + "/{name}/scenarios", collection_scenarios)
 
 
 __all__ = ["download_seconds", "register_data_routes"]

@@ -113,6 +113,7 @@ from reef.storage.sql_records import (
     trajectory_node_table,
 )
 from reef.storage.sql_setup import enable_wal, postgres_url, validate_postgres_schema
+from reef.storage.task_collections import TaskCollection
 from reef.storage.tasks import TaskFileStore
 
 #: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.
@@ -136,9 +137,10 @@ def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
     return cast(items.c.metadata_json, JSONB).op("->>")(literal_column("'evaluation_id'"))
 
 
-def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table, Table, Table]:
+def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table]:
     """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment``, ``data_job_directory``,
-    ``data_scenario`` and ``data_record_loss`` in ``metadata``. ``data_scenario`` has the current generation of each
+    ``data_scenario``, ``data_record_loss`` and ``data_collection`` in ``metadata``. ``data_collection`` has one row
+    per ``TaskCollection`` of an owner, with its JSON. ``data_scenario`` has the current generation of each
     scenario of an owner (``DataStore.scenario_generation``). ``data_record_loss`` has the ``RecordLoss`` of each
     origin scenario of an owner whose record items ``prune_records`` deleted. ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
 
@@ -237,7 +239,15 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
     # The calls of one evaluation are read by their evaluation_id (``SQLDataStore.query``), so a read does not scan
     # all the record items of an owner. ``migrate_data_indexes`` adds the index to an older table.
     Index("data_item_by_evaluation", items.c.owner, item_evaluation_id(items, sqlite=sqlite))
-    return items, scenarios, nodes, segments, job_directories, generations, losses
+    collections = Table(
+        "data_collection",
+        metadata,
+        Column("owner", Text, nullable=False),
+        Column("name", Text, nullable=False),
+        Column("collection_json", Text, nullable=False),
+        PrimaryKeyConstraint("owner", "name"),
+    )
+    return items, scenarios, nodes, segments, job_directories, generations, losses, collections
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -287,7 +297,7 @@ class SQLDataStore(DataStore):
 
     def __init__(
         self,
-        tables: tuple[Table, Table, Table, Table, Table, Table, Table],
+        tables: tuple[Table, Table, Table, Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
         job_directories: SegmentStore | None = None,
@@ -301,6 +311,7 @@ class SQLDataStore(DataStore):
             self.job_directory_table,
             self.generations_table,
             self.losses_table,
+            self.collections_table,
         ) = tables
         self.task_files = task_files
         self.segments = segments
@@ -355,6 +366,11 @@ class SQLDataStore(DataStore):
     def metadata_string(self, key: str) -> ColumnElement[str]:
         """The string under ``key`` in the ``metadata_json`` of an item row, or NULL when the value there is not a
         string. ``key`` passes ``GROUP_KEY``."""
+
+    @abstractmethod
+    def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
+        """The condition that the list under ``benchmarks`` in the ``metadata_json`` of an item row has the string
+        ``benchmark``."""
 
     @abstractmethod
     def record_source(self) -> ColumnElement[str]:
@@ -743,8 +759,19 @@ class SQLDataStore(DataStore):
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
         group: tuple[str, str | None] | None = None,
+        benchmark: str | None = None,
     ) -> tuple[StoredItem, ...]:
-        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type, group=group)
+        check_query(
+            owner,
+            kind,
+            scenario,
+            after,
+            limit,
+            origin=origin,
+            request_type=request_type,
+            group=group,
+            benchmark=benchmark,
+        )
         items = self.items_table
         # Without content, read only the columns of the metadata: content_json can be large.
         columns = (
@@ -759,6 +786,8 @@ class SQLDataStore(DataStore):
             if group[0] == "evaluation_id" and group[1] is not None:
                 # The same condition in the form of the index data_item_by_evaluation, which finds the rows.
                 statement = statement.where(self.evaluation_id() == group[1])
+        if benchmark is not None:
+            statement = statement.where(items.c.kind == "task", self.in_benchmark(benchmark))
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
@@ -792,6 +821,33 @@ class SQLDataStore(DataStore):
         statement = select(newest).where(*self.filters(owner, kind, scenario, origin, request_type, 0))
         with self.transaction(read_only=True) as connection:
             return int(connection.execute(statement).scalar_one())
+
+    def collections(self, owner: str) -> tuple[TaskCollection, ...]:
+        check_owner(owner)
+        table = self.collections_table
+        statement = select(table.c.collection_json).where(table.c.owner == owner).order_by(table.c.name)
+        with self.transaction(read_only=True) as connection:
+            return tuple(
+                TaskCollection.from_json(json.loads(value)) for value in connection.execute(statement).scalars()
+            )
+
+    def put_collection(self, owner: str, collection: TaskCollection) -> None:
+        check_owner(owner)
+        table = self.collections_table
+        with self.transaction() as connection:
+            connection.execute(delete(table).where(table.c.owner == owner, table.c.name == collection.name))
+            connection.execute(
+                insert(table).values(
+                    owner=owner, name=collection.name, collection_json=canonical_json(collection.to_json())
+                )
+            )
+
+    def remove_collection(self, owner: str, name: str) -> bool:
+        check_owner(owner)
+        table = self.collections_table
+        with self.transaction() as connection:
+            removed = connection.execute(delete(table).where(table.c.owner == owner, table.c.name == name))
+            return removed.rowcount > 0
 
     def filters(
         self,
@@ -1354,6 +1410,10 @@ class SQLiteDataStore(SQLDataStore):
         metadata = self.items_table.c.metadata_json
         return case((func.json_type(metadata, path) == "text", func.json_extract(metadata, path)))
 
+    def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
+        names = func.json_each(self.items_table.c.metadata_json, "$.benchmarks").table_valued("value")
+        return exists().where(names.c.value == benchmark)
+
     def record_source(self) -> ColumnElement[str]:
         return func.coalesce(func.json_extract(self.items_table.c.metadata_json, "$.origin.source"), "inference")
 
@@ -1453,6 +1513,9 @@ class PostgresDataStore(SQLDataStore):
     def metadata_string(self, key: str) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
         return case((func.jsonb_typeof(metadata[key]) == "string", metadata[key].astext))
+
+    def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
+        return cast(self.items_table.c.metadata_json, JSONB).contains({"benchmarks": [benchmark]})
 
     def record_source(self) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
