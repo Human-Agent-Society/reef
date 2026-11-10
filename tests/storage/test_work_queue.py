@@ -69,6 +69,25 @@ def job(
 
 
 @pytest.mark.unit
+def test_an_attempt_that_its_worker_gave_back_does_not_count(open_coordination):
+    queue = open_coordination(max_attempts={"jobs": 2}).queue
+    queue.add(job("a"), now=0)
+    # A service that restarts three times gives the item back three times.
+    for restart in range(3):
+        queue.take("jobs", f"w{restart}", ["training_job:tinker"], now=restart)
+        given_back = queue.give_back("jobs", "a", f"w{restart}", now=restart)
+        assert (given_back.state, given_back.error, given_back.ended_at) == ("queued", "the worker stopped", None)
+        assert (given_back.attempt_count, given_back.stopped_attempt_count) == (restart + 1, restart + 1)
+    with pytest.raises(WorkLeaseLost):
+        queue.give_back("jobs", "a", "w2", now=3)
+    # The item still has its two attempts.
+    queue.take("jobs", "w", ["training_job:tinker"], now=4)
+    assert queue.fail("jobs", "a", "w", "transient", retryable=True, now=5).state == "queued"
+    queue.take("jobs", "w", ["training_job:tinker"], now=6)
+    assert [item.state for item in queue.requeue_expired(now=100)] == ["failed"]
+
+
+@pytest.mark.unit
 def test_a_worker_takes_the_oldest_item_it_accepts_and_finishes_it_under_its_lease(open_coordination):
     queue = open_coordination().queue
     queue.add(job("a"), now=0)
@@ -196,7 +215,7 @@ def warnings_of(caplog) -> list[str]:
         (ValueError("bad input"), 2, "failed"),
         (RuntimeError("engine down"), 2, "queued"),
         (RuntimeError("engine down"), 1, "failed"),
-        (WorkerStopped(), 1, "failed"),
+        (WorkerStopped(), 1, "queued"),
     ],
 )
 def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, error, attempts, state):
@@ -380,7 +399,7 @@ def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path
         queue.take("jobs", "w", ["training_job:tinker"], now=1)
         queue.finish("jobs", "ended", "w", {}, now=2)
     with closing(sqlite3.connect(directory / "coordination.sqlite3")) as connection:
-        for column in ("started_at", "ended_at", "metadata_json"):
+        for column in ("started_at", "ended_at", "metadata_json", "stopped_attempt_count"):
             connection.execute(f"ALTER TABLE work_item DROP COLUMN {column}")
         connection.commit()
 
@@ -390,6 +409,8 @@ def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path
         # An ended item ended at its last change; the start of an earlier item is not known.
         assert (ended.started_at, ended.ended_at, ended.metadata) == (None, 2, {})
         assert (waiting.started_at, waiting.ended_at, waiting.metadata) == (None, None, {})
+        # Every attempt of an earlier item counts.
+        assert (ended.attempt_count, ended.stopped_attempt_count) == (1, 0)
 
 
 def test_the_queued_training_requests_of_an_older_version_move_to_their_new_queue_and_kind(tmp_path):
