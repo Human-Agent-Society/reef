@@ -54,8 +54,9 @@ from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.training_capture import DISTRIBUTION_KEYS
 from reef.core.values import JsonValue
-from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler
+from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler, StartupSteps
 from reef.inference.provider_protocol import SSEFrameDecoder
+from reef.inference.startup import STARTUP_FAILED_PREFIX, reported_steps
 from reef.service.streaming import (
     chat_completion_chunk_identity,
     frame_for_codex,
@@ -87,6 +88,14 @@ ARTIFACT_HEADER = "x-reef-artifact-id"
 # Kept for clients deployed before artifact identity became the public contract.
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
+
+
+def startup_error(error: str | None) -> str:
+    """What a failed startup status says: the message of a runtime's ``StartupFailed`` (RFC #1299), else a fixed text,
+    since other errors can hold paths or secrets."""
+    if error is not None and error.startswith(STARTUP_FAILED_PREFIX):
+        return error.removeprefix(STARTUP_FAILED_PREFIX)
+    return "The inference engine did not start. Check the service logs."
 
 
 class NotServed(ReefError):
@@ -432,11 +441,13 @@ class InferenceReplica:
             store.close()
         return item.agent_record_id
 
-    def startup_status(self, scenario: str, model: str = ACTIVE) -> dict[str, str | None]:
+    def startup_status(self, scenario: str, model: str = ACTIVE) -> dict[str, JsonValue]:
         """Read the current serving work's artifact, state, and safe error without changing it, and for a ready
         artifact its engine's state (``engine_state``, RFC #1269).
 
-        The model is ``active``, an active artifact alias, or an artifact served beside it.
+        The model is ``active``, an active artifact alias, or an artifact served beside it. An artifact that a
+        published route of the model serves already is ``ready``, whatever the state of the work: one request serves
+        the active artifact and each beside one, and the start of one does not change the others.
         Unknown models answer 404; an unreadable or invalid work item answers 503.
         """
         try:
@@ -455,7 +466,13 @@ class InferenceReplica:
             if not isinstance(beside, dict) or model not in beside:
                 raise web.HTTPNotFound(text=f"scenario {scenario!r} serves no model {model!r}")
             artifact_id = model
-        if item.state == "finished":
+        try:
+            route = self.cache.read(scenario, model)
+        except (NotServed, StaleServedModels, LookupError):
+            route = None
+        if item.state == "finished" or (route is not None and route.artifact_id == artifact_id):
+            # A published route serves the artifact already: the request that starts another artifact beside it, or
+            # its failure, does not change this artifact's state.
             state = "ready"
         elif item.state == "failed":
             state = "failed"
@@ -463,25 +480,30 @@ class InferenceReplica:
             state = "pending"
         else:
             state = "starting"
-        engine, detail = self.engine_state(scenario, model) if state == "ready" else (None, None)
+        engine, detail, steps = self.engine_state(scenario, model) if state == "ready" else (None, None, None)
+        if state in ("pending", "starting"):
+            steps = reported_steps(item.progress, artifact_id, item.created_at, None)
         return {
             "artifact_id": artifact_id,
             "state": state,
-            "error": "The inference engine did not start. Check the service logs." if state == "failed" else None,
+            "error": startup_error(item.error) if state == "failed" else None,
             "engine": engine,
             "engine_detail": detail,
+            "startup": None if steps is None else steps.to_json(),
         }
 
-    def engine_state(self, scenario: str, model: str) -> tuple[EngineState | None, str | None]:
+    def engine_state(self, scenario: str, model: str) -> tuple[EngineState | None, str | None, StartupSteps | None]:
         """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), and for a starting engine
-        what it does now (``InferenceHandler.engine_detail``); None without a route or a handler for it."""
+        what it does now (``engine_detail``) and its phases (``engine_steps``); None without a route or a handler."""
         try:
             served = self.cache.read(scenario, model)
             handler = self.engines.handler(served)
         except (NotServed, StaleServedModels, LookupError):
-            return None, None
+            return None, None, None
         engine = handler.engine_state(served)
-        return engine, handler.engine_detail(served) if engine == "starting" else None
+        if engine != "starting":
+            return engine, None, None
+        return engine, handler.engine_detail(served), handler.engine_steps(served)
 
     async def resolve(
         self,

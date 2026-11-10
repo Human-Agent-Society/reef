@@ -45,6 +45,12 @@ def open_store(request, tmp_path):
     task_files.close()
 
 
+@pytest.fixture(autouse=True)
+def create_segments(monkeypatch):
+    """Each ``create`` call of these tests writes its trajectory items as a segment, whatever their size."""
+    monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", 0)
+
+
 def waiting_rows(store) -> tuple[int, int]:
     """The trajectory items and the record nodes whose content the database of ``store`` still holds."""
     items, nodes = store.items_table, store.nodes_table
@@ -93,6 +99,27 @@ def test_new_trajectory_items_go_to_one_segment_and_read_back(open_store, tmp_pa
         assert len(segment_files(tmp_path)) == 1
 
 
+def test_small_new_trajectory_items_wait_in_the_database_for_one_segment(open_store, monkeypatch, tmp_path):
+    created = [trajectory(f"t{number}", str(number)) for number in range(3)]
+    size = len(json.dumps(created[0].content, separators=(",", ":")))
+    monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", 2 * size)
+    monkeypatch.setattr(sql_data, "PACK_BYTES", 3 * size)
+    with closing(open_store()) as store:
+        # One item for each call, as a stage stores its samples.
+        for item in created[:2]:
+            store.create("acme", [item])
+        store.maintain()
+        assert waiting_rows(store) == (2, 0) and segment_files(tmp_path) == []
+        store.create("acme", [created[2]])
+        store.maintain()
+        assert waiting_rows(store) == (0, 0)
+        assert [len(path.read_text().splitlines()) for path in segment_files(tmp_path)] == [3]
+        assert [item.content for item in store.query("acme")] == [item.content for item in created]
+        # A call with enough content writes its own segment.
+        store.create("acme", [trajectory("t3", "3"), trajectory("t4", "4")])
+        assert waiting_rows(store) == (0, 0) and len(segment_files(tmp_path)) == 2
+
+
 def test_a_read_of_many_items_reads_their_segment_lines_together(open_store, monkeypatch):
     with closing(open_store()) as store:
         created = [trajectory(f"t{number}", str(number)) for number in range(5)]
@@ -131,6 +158,29 @@ def test_maintain_moves_waiting_content_into_segments_and_reads_stay_exact(open_
         monkeypatch.setattr(SegmentPartition, "read_text", read_text)
         assert store.read("acme", "coding/call-4").content == later[0].content
         assert store.record_links("acme", ["coding/call-4"])["coding/call-4"].parent == "coding/call-3"
+
+
+def test_maintain_merges_the_segments_of_small_writes_and_reads_stay_exact(open_store, monkeypatch, tmp_path):
+    created = [trajectory(f"t{number}", str(number)) for number in range(3)]
+    size = len(json.dumps(created[0].content, separators=(",", ":")))
+    with closing(open_store()) as store:
+        # One segment for each item, as a store of an earlier version wrote them.
+        for item in created:
+            store.create("acme", [item])
+        assert [len(path.read_text().splitlines()) for path in segment_files(tmp_path)] == [1, 1, 1]
+        monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", 2**20)
+        monkeypatch.setattr(sql_data, "PACK_BYTES", 2 * size)
+        store.maintain()
+        # The two oldest fill one segment; the third waits for more. The old segments stay for a reader.
+        assert sorted(len(path.read_text().splitlines()) for path in segment_files(tmp_path)) == [1, 1, 1, 2]
+        assert [item.content for item in store.query("acme")] == [item.content for item in created]
+        monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+        store.maintain()
+        assert sorted(len(path.read_text().splitlines()) for path in segment_files(tmp_path)) == [1, 2]
+        assert [item.content for item in store.read_many("acme", ["t2", "t0"])] == [
+            created[2].content,
+            created[0].content,
+        ]
 
 
 def test_maintain_deletes_only_segments_that_no_row_uses(open_store, monkeypatch, tmp_path):

@@ -89,6 +89,16 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/exports/{id}``                                                                    | the status of one export                          |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/collections``                                                                          | the owner's collections of benchmarks             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/collections/{name}``                                                                   | create or replace one collection                  |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/collections/{name}``                                                                   | one collection, with its task counts              |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/collections/{name}``                                                                | delete one collection                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/collections/{name}/scenarios``                                                        | add a collection's tasks to a scenario split      |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                                                                 | submit feedback about one or more trajectories    |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                                                                  | enqueue one training request                      |
@@ -134,6 +144,8 @@ Routes
 | ``POST /reef/scenarios/{scenario}/stop-serving``                                                                      | stop serving an artifact beside the active        |
 |                                                                                                                       | release                                           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/redeploy``                                                                          | deploy the served engines again (RFC #1299)       |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/tasks``                                                                              | the tasks the scenario uses, which trained        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/jobs``                                                                               | the scenario's training jobs in the jobs queue    |
@@ -152,6 +164,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations``                                                                       | evaluate one artifact of a snapshot               |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``                                                | cancel one evaluation                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations``                                                                        | artifact evaluations, newest first                |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``                                                        | one evaluation: its state and result              |
@@ -162,7 +176,7 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls/{attempt}/{index}`` | one model call of a rollout, with its bodies      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``            | the ATIF trajectory of each attempt of a rollout  |
+| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``            | the ATIF trajectories of each attempt of a rollout|
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``                                           | the trajectories of an evaluation, as NDJSON      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -569,7 +583,8 @@ for the deployment (RFC #1028). An item is content and metadata:
   ``origin``: the scenario that made a record or an artifact. A record's
   ``origin.source`` is ``inference`` or ``evaluation``; a record without it is
   ``inference``. ``kind``, ``owner``, ``origin`` and ``evaluation_id`` never
-  change. You can add other keys.
+  change. A task can have ``benchmarks``: the names of the benchmarks that
+  it is in (`Benchmarks and collections`_). You can add other keys.
 
 Each item belongs to one owner. The routes have the owner in the path:
 ``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
@@ -739,7 +754,9 @@ the scenario's owner (`Model calls of a rollout`_). Such an item differs from
 a scenario's own record item:
 
 - Its ID is ``<scenario>/<agent_record_id>``, with the record ID
-  ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``.
+  ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>`` for a call of
+  the agent, and ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:<index>``
+  for a call that the verifier wrote (`Calls that a verifier writes`_).
 - Its content is a record of an inference. The payload is the request body,
   plus ``response``, the response body or null. ``created_at`` is the start
   of the call.
@@ -749,8 +766,10 @@ a scenario's own record item:
   ``evaluation_id`` and the call's summary: ``task_index``, ``repeat``,
   ``attempt``, ``index``, ``path``, ``status``, ``started_at``,
   ``duration_s``, ``prompt_tokens``, ``completion_tokens``,
-  ``finish_reason`` and ``tool_calls``, as `Model calls of a rollout`_
-  describes them. So a list of the calls reads no content.
+  ``finish_reason``, ``tool_calls``, ``caller`` and ``label``, as `Model
+  calls of a rollout`_ describes them. So a list of the calls reads no
+  content. A call kept before ``caller`` existed has no ``caller`` and no
+  ``label``, and it is a call of the agent.
 
 An evaluation call is the data of no scenario: a patch that adds a scenario to
 its ``scenarios`` returns 400, so no scenario trains on it. The scenario's
@@ -759,8 +778,19 @@ the data with ``kind=record``, ``group_key=evaluation_id`` and the
 evaluation's ID as ``group_value``. An index on the owner and
 ``evaluation_id`` finds them. An evaluation call links only to the
 earlier calls of the same attempt, so its trajectory node keeps only
-the messages after its parent's. A scenario's own call never links to an
+the messages after its parent's. A verifier call links only to the earlier
+verifier calls of the same attempt. A scenario's own call never links to an
 evaluation call.
+
+A trajectory that a verifier wrote is a trajectory item of the scenario's
+owner. Its ID is
+``<scenario>/<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:trajectory:<index>``,
+and its content is the ATIF document. Its metadata is ``{"kind":
+"trajectory", "scenarios": {}, "evaluation_id", "evaluation":
+{"evaluation_id", "task_index", "repeat", "attempt", "index", "name"}}``,
+where ``index`` counts the trajectory files of the attempt in name order and
+``name`` is the file's name. It has no ``origin``, and a patch that adds a
+scenario to it returns 400, so no scenario trains on it.
 
 Artifact items
 ~~~~~~~~~~~~~~
@@ -810,9 +840,10 @@ an artifact item: see `Create a scenario`_.
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&group_key=&group_value=&after=&limit=&content=``
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&benchmark=&group_key=&group_value=&after=&limit=&content=``
   lists the owner's items in the order they arrived: ``{"owner", "items",
-  "next"}``. ``kind`` and ``scenario`` filter the items. ``group_key`` keeps
+  "next"}``. ``kind`` and ``scenario`` filter the items. ``benchmark`` keeps
+  only the tasks of one benchmark. ``group_key`` keeps
   only the items of one group of the groups route below: those with the
   string ``group_value`` under ``group_key`` in their metadata, or with no
   string there when ``group_value`` is not given. ``group_value`` without
@@ -871,6 +902,54 @@ GET of ``.../data/imports/<x>`` or ``.../data/exports/<x>`` reads a transfer.
 So GET cannot read an item whose ID ends in ``/archive``, or whose ID is
 ``imports/<x>`` or ``exports/<x>`` with ``<x>`` one path segment. Give such
 items other IDs.
+
+Benchmarks and collections
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A benchmark is a name for a set of the owner's tasks. Reef does not store it:
+a task is in a benchmark when the list ``benchmarks`` of its metadata has the
+name. Set the list when you create the tasks, or with a metadata patch:
+``metadata={"benchmarks": ["terminal-bench"]}``. It holds distinct non-empty
+strings, so a task can be in several benchmarks. Only a task has it.
+
+A collection is a stored list of benchmarks under one name. Use it to add
+several benchmarks to a scenario in one call, and to evaluate an artifact on
+them (`Evaluate an artifact`_).
+
+.. code:: bash
+
+   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/collections/coding \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"benchmarks": ["terminal-bench", "swe-bench-lite"]}'
+
+- ``PUT /reef/namespaces/{owner}/collections/{name}`` creates the collection,
+  or replaces the one with the name. The body takes ``benchmarks``,
+  ``collections`` and ``average``. ``collections`` names other collections of
+  the owner: the collection also has their benchmarks. One of the two lists
+  or both are non-empty. ``average`` is ``task`` (the default) or
+  ``benchmark``: how an evaluation on the collection computes its
+  ``mean_score``. The response is ``{"owner", "name", "benchmarks",
+  "collections", "average"}``. Reef returns 400 for a name in ``collections``
+  that the owner does not store, and for collections that name each other in
+  a cycle.
+- ``GET /reef/namespaces/{owner}/collections`` lists the owner's collections
+  by name: ``{"owner", "collections"}``.
+- ``GET /reef/namespaces/{owner}/collections/{name}`` returns one collection
+  with ``benchmark_task_counts``, a list of ``{"benchmark", "task_count"}``
+  for each of its benchmarks, and ``task_count``. ``task_count`` counts a task
+  that is in two benchmarks once.
+- ``DELETE /reef/namespaces/{owner}/collections/{name}`` deletes the
+  collection and returns ``{"owner", "name", "deleted": true}``. No task
+  changes. Reef returns 400 while another collection names it.
+- ``POST /reef/namespaces/{owner}/collections/{name}/scenarios`` takes
+  ``{"scenario", "split"}``. Reef adds each task that the collection has now
+  to that split of the scenario, with the checks of a metadata patch. A task
+  that joins a benchmark later does not join the scenario. The response is
+  ``{"owner", "name", "scenario", "split", "task_count", "synced"}``. A
+  collection without tasks returns 400.
+
+An unknown collection returns 404.
 
 Download an item
 ~~~~~~~~~~~~~~~~
@@ -1071,7 +1150,7 @@ The body takes these fields:
   ``rollout.agent`` takes it. ``{"item": "<item id>"}`` runs a harness tree: a
   published artifact item of the scenario's owner, also from another scenario.
   The item has the kind ``harness_plugin``, and ``adapter`` in its metadata. Its
-  adapter must install with npm or uv and call the runtime's API dialect. Each
+  adapter must install with npm, uv or git and call the runtime's API dialect. Each
   agent runs in the task's container. On ``docker``, the container reaches the
   model at ``evaluation.agent_host``. In a remote environment, such as
   ``modal``, the agent bridges the container's loopback to the model through
@@ -1082,8 +1161,27 @@ The body takes these fields:
 - ``model``: the model binding that a harness artifact runs on. A request
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.
+  The stored request names the tasks that the evaluation runs.
+- ``collection``: a collection of the scenario's owner (`Benchmarks and
+  collections`_). Reef runs the eval tasks that are in the collection, each
+  one once. A request sets ``collection`` or ``task_names``, not both. Reef
+  returns 400 for an unknown collection, and for one with no eval task.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.
+- ``max_concurrent_rollouts``: the most rollouts of this evaluation that run
+  at once, or null (the default) for no limit. Each rollout holds a task
+  sandbox and sends model calls to the candidate, so set it to what the
+  sandbox provider and the candidate's serving can take. Reef adds the next
+  rollouts to the queue as earlier ones end.
+- ``max_failed_fraction``: the largest fraction of failed rollouts, a number
+  greater than 0 and less than 1, or null (the default) for no limit. A
+  rollout fails when its work fails or when it ends with no score. After at
+  least 10 rollouts end (or all of them, for a smaller evaluation), Reef stops
+  the evaluation when more than this fraction of the ended rollouts failed. It
+  fails with an error such as ``too many rollouts failed: 37 of 45 ended
+  (82%), over the limit of 50%``. Each rollout that did not end fails with
+  ``stopped: too many rollouts failed``, and the rollouts that wait never
+  start (RFC #1287).
 
 The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
@@ -1093,38 +1191,78 @@ it runs and after it ends:
 
    {"evaluation_id": "1d0e...", "state": "finished",
     "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
-                "model": null, "task_names": [], "rollouts_per_task": 2, "environment": "docker"},
+                "model": null, "task_names": ["sum-391"], "collection": null, "rollouts_per_task": 2,
+                "environment": "docker",
+                "max_concurrent_rollouts": null, "max_failed_fraction": 0.5},
     "created_at": 1793169552.2, "finished_at": 1793169840.7,
     "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
                           "model": {"name": "Qwen/Qwen3-8B", "adapter": "tinker://.../sampler"},
                           "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
-    "mean_score": 0.5, "error": null}
+    "mean_score": 0.5, "benchmark_scores": [], "error": null,
+    "progress": {"total": 2, "ended": 2, "scored": 2, "failed": 0, "cancelled": 0, "running": 0,
+                 "mean_score": 0.5, "eta_seconds": null}}
 
 ``state`` is ``queued``, ``running``, ``finished`` or ``failed``. A finished
 evaluation holds its ``policy_evaluation``: the harness and the model that its
 rollouts ran, and each rollout's score by task (see `Rollout
 <glossary.rst#rollout>`__). A failed one holds its ``error``. An evaluation
 that was queued or running when the service stopped reads as ``failed``; Reef
-does not resume it. ``GET /reef/scenarios/{scenario}/evaluations`` lists the
-evaluations, newest first, at most ``limit`` (50 by default).
+does not resume it. ``mean_score`` is the mean of the rollouts that have a
+score: a failed rollout does not count as 0. ``GET
+/reef/scenarios/{scenario}/evaluations`` lists the evaluations, newest first,
+at most ``limit`` (50 by default).
+
+For an evaluation on a collection, the stored ``collection`` is ``{"name",
+"average", "benchmarks"}``. ``benchmarks`` gives ``{"benchmark",
+"task_names"}`` for each benchmark that has a task in the evaluation.
+``benchmark_scores`` then gives ``{"benchmark", "task_count",
+"mean_score"}`` for each of them: the number of its tasks in the evaluation,
+and the mean of their rollouts that have a score. A task in two benchmarks
+counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts
+that have a score. With ``benchmark``, it is the mean of the benchmark means.
+``benchmark_scores`` is empty for another evaluation.
+
+``progress`` counts the rollouts of the evaluation, also while it runs. It is
+null when the evaluations queue no longer holds them:
+
+- ``total`` is every rollout of the evaluation: its tasks times
+  ``rollouts_per_task``.
+- ``ended`` counts the rollouts that finished or failed. ``scored`` counts the
+  ended rollouts with a score, and ``failed`` the others.
+- ``cancelled`` counts the rollouts that a cancel or a stop for failed
+  rollouts ended. They are not in ``ended``.
+- ``running`` counts the rollouts that a worker holds now.
+- ``mean_score`` is the mean of the scores so far, or null.
+- ``eta_seconds`` estimates the seconds until every rollout ends: the
+  rollouts left at the rate at which rollouts ended in the last 20 minutes. It
+  is null when no rollout ended in that time, or when the evaluation ended.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
 shows the progress of an evaluation while it runs. It answers ``{scenario,
 evaluation_id, rollouts}``: each rollout in task and repeat order, as
 ``{task, task_index, repeat, state, attempt_count, started_at, ended_at,
-score, error, calls}``.
+score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
-  ``assigned``, ``running``, ``finished`` or ``failed``.
+  ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
+  while ``max_concurrent_rollouts`` keeps the rollout out of the queue.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at``
   when it finished or failed, in epoch seconds. Each is null until then.
 - ``score`` is the rollout's score once it finished, else null.
+- ``rewards`` holds every finite reward that the rollout's verifier wrote, by
+  name, for example ``{"reward": 0.9, "rule": 1.0, "judge": 0.8}``. The
+  score is the primary reward among them. It is null for a rollout that has
+  not finished, that failed, whose verifier wrote no reward, or that finished
+  before Reef kept rewards. Reef keeps at most 64. Nothing else reads them.
 - ``error`` is the reason that a failed rollout failed, else null.
 - ``calls`` holds the totals of the rollout's model calls over all its
   attempts: ``{count, failed, prompt_tokens, completion_tokens}``. ``failed``
   counts the calls whose status is not 200. The token totals add the known
   counts only. ``calls`` is null when Reef kept no call of the rollout.
+  ``calls`` counts the agent's calls only.
+- ``verifier_calls`` holds the same totals of the calls that the rollout's
+  verifier wrote (`Calls that a verifier writes`_), or null.
 
 An unknown evaluation returns 404.
 
@@ -1137,15 +1275,32 @@ Reef returns:
 - 404 for an unknown scenario, artifact or evaluation.
 
 Reef sets no limit on the evaluations that run at once: the evaluations queue
-holds the rollouts that wait.
+holds the rollouts that wait. An evaluation process runs at most
+``evaluation.max_sandboxes`` rollouts at once, across all evaluations (see
+`Configuration <configuration.rst>`__).
+
+``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``
+cancels one evaluation. It answers the evaluation after the cancel, as ``GET
+/reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it:
+
+- A queued or running evaluation fails with the error ``cancelled by
+  request``. Each of its rollouts that did not end fails with the same error.
+- A worker that runs one of these rollouts stops its trial and the trial's
+  sandbox within seconds.
+- The rollouts that wait for ``max_concurrent_rollouts`` never start. They
+  stay ``waiting`` in the rollouts list.
+- An evaluation that ended stays as it is, so a second cancel changes nothing.
+
+An unknown scenario or evaluation returns 404. Control answers this route.
 
 Model calls of a rollout
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Reef keeps each model call that a rollout makes to the candidate, failed
-calls too. It keeps a call when the call ends, so a client that polls sees
-the calls of a running rollout. Reef keeps only the calls that reach the
-candidate, not the calls of a verifier's judge, for example.
+Reef keeps each model call that a rollout's agent makes to the candidate,
+failed calls too. It keeps a call when the call ends, so a client that polls
+sees the calls of a running rollout. After each attempt, Reef also keeps the
+calls that the task's verifier wrote, for example the calls of a judge
+(`Calls that a verifier writes`_).
 
 Each call is a record item of the scenario's owner (`Evaluation calls`_). No
 scenario trains on it, and record retention does not delete it. After an
@@ -1158,13 +1313,20 @@ answers the calls of one rollout, without their bodies:
 .. code:: json
 
    {"scenario": "my-agent", "evaluation_id": "1d0e...", "task_index": 3, "repeat": 1,
-    "calls": [{"attempt": 1, "index": 0, "path": "/v1/chat/completions", "status": 200,
-               "started_at": 1762590001.2, "duration_s": 1.84, "prompt_tokens": 2100,
-               "completion_tokens": 340, "finish_reason": "tool_calls", "tool_calls": 1}]}
+    "calls": [{"caller": "agent", "label": null, "attempt": 1, "index": 0,
+               "path": "/v1/chat/completions", "status": 200, "started_at": 1762590001.2,
+               "duration_s": 1.84, "prompt_tokens": 2100, "completion_tokens": 340,
+               "finish_reason": "tool_calls", "tool_calls": 1}]}
+
+- ``caller`` is ``agent`` for a call of the agent, and ``verifier`` for a
+  call that the verifier wrote. By default the route answers the agent's
+  calls. Add ``?caller=verifier`` for the verifier's calls. Another value
+  returns 400.
+- ``label`` is the label that the verifier gave the call, else null.
 
 - ``attempt`` is the 1-based attempt of the rollout that made the call, and
-  ``index`` the 0-based order in which the calls of that attempt ended. The
-  list is in attempt and then index order.
+  ``index`` the 0-based order in which the calls of that caller and attempt
+  ended. The list is in attempt and then index order.
 - ``status`` is the HTTP status that the agent got. ``started_at`` is in
   epoch seconds, and ``duration_s`` in seconds.
 - ``prompt_tokens``, ``completion_tokens`` and ``finish_reason`` come from the
@@ -1180,35 +1342,75 @@ returns 404.
 ``GET .../rollouts/{task_index}/{repeat}/calls/{attempt}/{index}`` answers one
 call: the fields above, plus ``request``, the JSON body that the agent sent,
 and ``response``, the JSON body that it got or the error body of a failed
-call. Each is null when the call had no JSON body. A call that Reef did not
-keep returns 404.
+call. Each is null when the call had no JSON body. Add ``?caller=verifier``
+for a call that the verifier wrote. A call that Reef did not keep returns
+404.
+
+Calls that a verifier writes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A judge calls its own model, so its calls do not reach the candidate's
+endpoint. A task's verifier can write these calls, and the trajectories of an
+agent judge, to ``/logs/verifier/judge/``. Harbor downloads the verifier
+directory after the verifier runs, and Reef keeps the files with the attempt.
+Both files are optional:
+
+- ``calls.jsonl``: one JSON object for each call, in call order:
+  ``{"request", "response", "status", "started_at", "duration_s", "path",
+  "label"}``. ``request`` is the JSON body that the judge sent, and
+  ``response`` the JSON body that it got, or null. ``status`` is the HTTP
+  status (default 200). ``started_at`` is in epoch seconds, and
+  ``duration_s`` in seconds. ``path`` defaults to ``/v1/chat/completions``.
+  ``label`` is an optional string of 1 to 200 characters, for example
+  ``judge:character_fidelity``. Reef ignores other keys.
+- ``trajectory*.json``: ATIF documents, one in each file.
+
+Reef reads at most 32 MiB of these files and keeps at most 2000 calls for
+each attempt. It skips a line that is no such call, a call over the limit, a
+file that is no ATIF document, a file over the limit and a symbolic link, and
+it logs how many it skipped. It reads the files for a failed verifier too.
+The files never change the score. A task that sets the verifier's
+``include_logs`` or ``exclude_logs`` must keep ``judge/``.
 
 Trajectories of an evaluation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Reef makes one ATIF trajectory from the kept calls of each attempt of a
-rollout. It joins the calls with status 200 in index order, as it joins the
-records of a training sample. An attempt without a 200 call has no
-trajectory.
+Reef makes ATIF trajectories from the kept calls of each attempt of a
+rollout. It links the calls with status 200 into conversations, as it links
+the records of training samples: a call continues the earlier call whose
+messages its own messages start with. An agent that plays several roles, each
+with its own messages, has one conversation for each role. Reef joins the
+calls of each conversation in index order, without the calls that a retry
+replaced, and orders the conversations by their first calls. An attempt
+without a 200 call has no trajectory.
 
 - Each call is one entry of ``extra.reef.records``. Its ``agent_record_id`` is
-  ``{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}``, and its
+  the call's record ID (`Evaluation calls`_), and its
   ``created_at`` is the call's ``started_at``. Its ``payload`` is the request
   body plus ``response``, the response body.
-- ``extra.reef.reward`` is the rollout's score for the attempt that was scored:
-  the last attempt of a finished rollout. It is null for every other attempt,
-  and for a failed score.
+- ``extra.reef.reward`` is the rollout's score for each trajectory of the
+  attempt that was scored: the last attempt of a finished rollout. It is null
+  for every other attempt, and for a failed score.
 - ``extra.reef.evaluation`` is ``{evaluation_id, task, task_index, repeat,
-  attempt, scored}``. ``scored`` is true only for the attempt that was scored.
+  attempt, caller, conversation, scored}``. ``conversation`` counts the
+  conversations of the attempt from 0. ``scored`` is true only for the
+  attempt that was scored.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``
 answers ``{scenario, evaluation_id, task_index, repeat, trajectories}``: the
-trajectory of each attempt of one rollout, in attempt order.
+trajectories of each attempt of one rollout, in attempt and then conversation
+order. Add ``?caller=verifier`` for the verifier's trajectories. In each
+attempt, these are the trajectory files that the verifier wrote, in name
+order, and then the trajectories that Reef stitches from the verifier's
+calls. A verifier trajectory has no reward. Each verifier file has
+``extra.reef.evaluation`` as ``{evaluation_id, task, task_index, repeat,
+attempt, caller, file, scored}``, where ``file`` is the name of its file and
+``scored`` is false. Another ``caller`` value returns 400.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``
 streams the trajectories of the whole evaluation as ``application/x-ndjson``:
-one trajectory on each line, in task and repeat order. By default it sends the
-last attempt of each rollout. Add ``?attempts=all`` to send every attempt.
+one trajectory on each line, in task and repeat order. It sends the agent's
+trajectories only. By default it sends the last attempt of each rollout. Add ``?attempts=all`` to send every attempt.
 Reef reads the calls of one rollout at a time, so the memory of an export does
 not grow with the evaluation. A file within the upload limits uploads as it
 is as trajectory items (`Create trajectory items <#create-trajectory-items>`__).
@@ -1838,21 +2040,43 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null}
+   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
+    "startup": {"steps": [{"phase": "prepare", "started_at": 1794150000.1, "ended_at": 1794150480.6,
+                           "detail": "Quantizing to NVFP4"},
+                          {"phase": "start", "started_at": 1794150480.6, "ended_at": null,
+                           "detail": "Waiting for a GPU"}],
+                "estimate_seconds": null}}
 
 ``model`` defaults to ``active``. It can also name an active artifact alias
 or an artifact selected for serving beside the active one. An unknown name
-returns 404.
+returns 404. One request serves the active artifact and each artifact beside
+it. An artifact that a published route of ``model`` serves already is
+``ready``, whatever the state of the request: the start of another artifact,
+or its failure, does not change it.
 
 * ``pending``: no worker has taken the startup work.
 * ``starting``: inference has taken it. Downloads, conversion, loading, and
   retries are part of this state.
 * ``ready``: startup succeeded and inference published the route.
-* ``failed``: startup ended with an error. ``error`` gives a safe message;
-  the service logs hold the diagnostic details. Control retries a failed
-  startup by itself: 60 seconds after the failure, and then after a wait that
-  doubles at each failed retry, up to one hour. A retry returns the state to
-  ``pending``. Activate the active artifact again to retry at once.
+* ``failed``: startup ended with an error. ``error`` gives a safe message:
+  the message of a runtime's ``StartupFailed`` (RFC #1299), such as an engine
+  argument that the model refuses, else a fixed text. The service logs hold the
+  diagnostic details. Control retries a failed startup by itself: 60 seconds
+  after the failure, and then after a wait that doubles at each failed retry,
+  up to one hour. A retry returns the state to ``pending``. Activate the active
+  artifact again to retry at once.
+
+A newer request, such as one for a changed serving config, replaces the
+current one at once. The work of the replaced request stops within seconds
+when the runtime reads ``reef.inference.startup.stopping()`` (RFC #1299).
+Requests of different scenarios start one after another, or at the same time
+when the runtime has more than one ``serving_slots``.
+
+``POST /reef/scenarios/{scenario}/redeploy`` deploys the engines of what the
+scenario serves again, also when they run its current settings, for example
+after a hang. A new request with the same selection replaces the current one,
+and the runtime reads ``reef.inference.startup.redeploying()``. It answers
+``{scenario}``, also for a scenario that serves nothing.
 
 ``error`` is null in every other state.
 
@@ -1867,6 +2091,26 @@ returns 404.
 While ``engine`` is ``starting``, ``engine_detail`` can say what the engine
 does now, as one short line, such as ``Loading weights · 0:42``. It is null
 otherwise.
+
+``startup`` gives the artifact's startup in three fixed phases (RFC #1283), so
+that a client shows one step bar for every backend:
+
+* ``prepare``: the serving work waits, deploys the engine, and converts or
+  quantizes the weights.
+* ``start``: a machine or container is found, and the weights reach it.
+* ``load``: the weights go into GPU memory, and kernels, CUDA graphs and
+  warm-up run.
+
+It is ``{steps, estimate_seconds}``. Each step is ``{phase, started_at,
+ended_at, detail}``, in the order of the phases, with times in epoch seconds.
+Only the last step can have ``ended_at`` null: it runs now. ``detail`` is a
+short note of what it does, or null. ``estimate_seconds`` is a guess of the
+seconds until the engine is warm, or null. While the state is ``pending`` or
+``starting``, the steps are ``prepare`` from the startup request, then the
+phases that the runtime reported for this artifact. While a ready artifact's
+engine is ``starting``, they are the phases that the inference handler reports.
+``startup`` is null otherwise. A phase that the backend does not report has no
+step.
 Reading it starts no engine.
 
 The status describes the selected

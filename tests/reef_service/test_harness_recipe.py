@@ -388,8 +388,8 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
 
     assert boot().configured_tasks() == (str(root / "held-1"), str(root / "held-2"))
     assert boot().task_directories(get_adapter("pi"))
-    with pytest.raises(RecipeConfigError, match="'hermes' cannot play Harbor task directories"):
-        boot(adapter="hermes")
+    with pytest.raises(RecipeConfigError, match="'native' cannot play Harbor task directories"):
+        boot(adapter="native")
     with pytest.raises(RecipeConfigError, match="collect_failures adds prompts"):
         boot(collect_failures=True)
     with pytest.raises(RecipeConfigError, match="one task source, not tasks and task_manifest"):

@@ -10,12 +10,18 @@ and waits until the engine is ready. It answers the agent's model calls from tha
 (``CandidateEndpoints``). The item writes no route, so no client reaches the candidate through ``served_models``, and
 no call is a record, so an evaluation never trains the scenario. The worker keeps each call of the rollout, failed
 calls too, as a record item of the scenario's owner in the data store as the call ends (``RolloutCalls``), so a client can read the calls
-of a rollout while it runs.
+of a rollout while it runs. After each attempt, it also keeps the model calls and trajectories that the task's verifier
+wrote to ``/logs/verifier/judge/`` (``verifier_output``, RFC #1293), and gives the trial to the deployment's
+``TrialObserver``, when it names one.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import logging
+import math
 import tempfile
 import threading
 import time
@@ -34,6 +40,7 @@ from reef.core.errors import ReefError
 from reef.core.evaluation import (
     EvaluationCall,
     EvaluationCallSummary,
+    EvaluationTrajectory,
     PolicyHarness,
     PolicyModel,
     RolloutRequest,
@@ -42,11 +49,12 @@ from reef.core.evaluation import (
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
+from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.workers import QueueWorker, WorkerStopped
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
-from reef.harness.harbor.agent import tree_agent
-from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
+from reef.harness.harbor.agent import tree_agent, trial_directory
+from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
@@ -63,8 +71,23 @@ DEFAULT_AGENT_HOST = "host.docker.internal"
 SERVE_WAIT_S = 12 * 3600.0
 #: The wait between two reads of a serve item, in seconds.
 SERVE_POLL_S = 1.0
+#: The seconds between two checks of a running trial's lease.
+LEASE_CHECK_S = 1.0
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
+#: The directory of a trial's verifier directory where the verifier writes its own model calls and trajectories: the
+#: task's ``/logs/verifier/judge/``, which Harbor downloads with the verifier directory (RFC #1293).
+VERIFIER_JUDGE_DIR = Path("verifier") / "judge"
+#: The file of the verifier's calls in ``VERIFIER_JUDGE_DIR``: one JSON object for each call, in call order.
+VERIFIER_CALLS_FILE = "calls.jsonl"
+#: The pattern of the names of the verifier's ATIF trajectory files in ``VERIFIER_JUDGE_DIR``.
+VERIFIER_TRAJECTORY_FILES = "trajectory*.json"
+#: The most rewards of its verifier that a rollout keeps.
+MAX_VERIFIER_REWARDS = 64
+#: The most calls that Reef keeps of the verifier of one attempt.
+MAX_VERIFIER_CALLS = 2000
+#: The most bytes of verifier files that Reef reads for one attempt.
+MAX_VERIFIER_BYTES = 32 * 1024 * 1024
 
 
 def harbor_agent(harness: Mapping[str, Any] | None) -> Mapping[str, object]:
@@ -269,12 +292,17 @@ class CandidateEndpoints(ABC):
         """Keep ``call``, a call of ``rollout``, as a record item in the data store
         (``reef.storage.record_items.evaluation_call_item``)."""
 
+    @abstractmethod
+    def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
+        """Keep ``trajectory``, which the verifier of ``rollout`` wrote, as a trajectory item in the data store
+        (``reef.storage.record_items.evaluation_trajectory_item``)."""
+
 
 class LocalCandidateEndpoints(CandidateEndpoints):
-    """The candidate's model, on loopback in the process of the evaluation workers: an ``ArtifactEndpoint`` that
+    """The candidate's model, on loopback in the process of the evaluation worker: an ``ArtifactEndpoint`` that
     sends each call to the engine that inference started, or to its scenario's runtime for an engine with no address.
 
-    Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation workers open it around each
+    Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation worker opens it around each
     rollout.
     """
 
@@ -292,6 +320,9 @@ class LocalCandidateEndpoints(CandidateEndpoints):
 
     def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
         self.artifacts.add_evaluation_call(rollout.scenario, rollout.evaluation_id, rollout.artifact_id, call)
+
+    def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
+        self.artifacts.add_evaluation_trajectory(rollout.scenario, rollout.evaluation_id, trajectory)
 
 
 def reply_summary(path: str, reply: Mapping[str, Any]) -> tuple[int | None, int | None, str | None, int]:
@@ -373,6 +404,109 @@ def evaluation_call(turn: CapturedTurn, rollout: EvaluationRollout, attempt: int
     return EvaluationCall(summary, turn.request, response)
 
 
+def verifier_call(line: str, rollout: EvaluationRollout, attempt: int, index: int) -> EvaluationCall:
+    """The verifier call ``index`` of attempt ``attempt`` of ``rollout`` that ``line`` of ``VERIFIER_CALLS_FILE``
+    holds: ``{request, response, status, started_at, duration_s, path, label}``.
+
+    ``request`` is a JSON object, ``response`` a JSON object or null, ``status`` an HTTP status (default 200),
+    ``started_at`` and ``duration_s`` numbers of seconds, ``path`` the called path (default ``/v1/chat/completions``)
+    and ``label`` a short string or absent. Other keys are ignored. The summary fields come from the response of a
+    200 call (``reply_summary``). Raise ``ValueError`` or ``TypeError`` for a line that is no such call.
+    """
+    value = json.loads(line)
+    if not isinstance(value, dict):
+        raise ValueError("a verifier call is a JSON object")
+    request, response = value.get("request"), value.get("response")
+    if not isinstance(request, dict) or not (response is None or isinstance(response, dict)):
+        raise ValueError("a verifier call has a request object and a response object or null")
+    started_at, duration_s = value.get("started_at"), value.get("duration_s")
+    if not all(
+        isinstance(time_s, int | float) and not isinstance(time_s, bool) for time_s in (started_at, duration_s)
+    ):
+        raise ValueError("a verifier call has started_at and duration_s in seconds")
+    path, status = value.get("path", "/v1/chat/completions"), value.get("status", 200)
+    if not isinstance(path, str):
+        raise ValueError("a verifier call's path is a string")
+    prompt, completion, finish, tool_calls = (
+        reply_summary(path, response) if status == 200 and response is not None else (None, None, None, 0)
+    )
+    summary = EvaluationCallSummary(
+        task_index=rollout.task_index,
+        repeat=rollout.repeat,
+        attempt=attempt,
+        index=index,
+        path=path,
+        status=status,
+        started_at=float(cast(float, started_at)),
+        duration_s=float(cast(float, duration_s)),
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        finish_reason=finish,
+        tool_calls=tool_calls,
+        caller="verifier",
+        label=value.get("label"),
+    )
+    return EvaluationCall(summary, request, response)
+
+
+def verifier_output(
+    trial: Path | None, rollout: EvaluationRollout, attempt: int
+) -> tuple[list[EvaluationCall], list[EvaluationTrajectory], int]:
+    """The calls and trajectories that the verifier of attempt ``attempt`` of ``rollout`` wrote to
+    ``VERIFIER_JUDGE_DIR`` of the trial directory ``trial``, and the number of lines and files that it skipped.
+
+    The calls come from ``VERIFIER_CALLS_FILE``, in line order, and the trajectories from the files that match
+    ``VERIFIER_TRAJECTORY_FILES``, in name order. It reads at most ``MAX_VERIFIER_BYTES`` of files and keeps at most
+    ``MAX_VERIFIER_CALLS`` calls. It skips a line that is no call (``verifier_call``), a call over the limit, a file
+    that is no ATIF document, a file over the byte limit and a symbolic link, which the task could point at this
+    host's files. A trial without the directory, or None, has no output.
+    """
+    judge = None if trial is None else trial / VERIFIER_JUDGE_DIR
+    if judge is None or not judge.is_dir() or judge.is_symlink():
+        return [], [], 0
+    calls: list[EvaluationCall] = []
+    trajectories: list[EvaluationTrajectory] = []
+    skipped, budget = 0, MAX_VERIFIER_BYTES
+    files = [judge / VERIFIER_CALLS_FILE, *sorted(judge.glob(VERIFIER_TRAJECTORY_FILES))]
+    for path in files:
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > budget:
+            skipped += 1
+            continue
+        budget -= path.stat().st_size
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if path.name != VERIFIER_CALLS_FILE:
+            try:
+                document = json.loads(text)
+                trajectories.append(
+                    EvaluationTrajectory(
+                        rollout.task_index, rollout.repeat, attempt, len(trajectories), path.name, document
+                    )
+                )
+            except (ValueError, TypeError):
+                skipped += 1
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            if len(calls) == MAX_VERIFIER_CALLS:
+                skipped += 1
+                continue
+            try:
+                calls.append(verifier_call(line, rollout, attempt, len(calls)))
+            except (ValueError, TypeError):
+                skipped += 1
+    return calls, trajectories, skipped
+
+
+def verifier_rewards(rewards: Mapping[str, float]) -> dict[str, JsonValue] | None:
+    """The rewards that a rollout keeps beside its score (RFC #1297): the first ``MAX_VERIFIER_REWARDS`` finite
+    rewards of its verifier, by name, or None when the verifier wrote none. Nothing reads them to score."""
+    kept = {name: value for name, value in rewards.items() if math.isfinite(value)}
+    return dict(list(kept.items())[:MAX_VERIFIER_REWARDS]) or None
+
+
 class RolloutCalls(CaptureObserver):
     """Keeps each call of one attempt of an evaluation rollout in the data store, as the call ends.
 
@@ -411,15 +545,34 @@ class RolloutCalls(CaptureObserver):
         self.writer.shutdown(wait=True)
 
 
+async def run_while_held(
+    runner: TaskRolloutRunner, request: RolloutRequest, lease_lost: threading.Event
+) -> TaskRollout:
+    """Run the rollout of ``request`` with ``runner`` and return it. When ``lease_lost`` is set first, cancel the run,
+    so that Harbor stops the trial and its sandbox, and raise ``WorkLeaseLost``: a client cancelled the rollout, or
+    another worker took it."""
+    run = asyncio.ensure_future(runner.run_rollouts_async([request], asyncio.Semaphore(1)))
+    while not lease_lost.is_set():
+        done, _ = await asyncio.wait({run}, timeout=LEASE_CHECK_S)
+        if done:
+            [result] = run.result()
+            return result
+    run.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run
+    raise WorkLeaseLost("the evaluation worker lost its lease")
+
+
 class EvaluationRolloutWorker(QueueWorker):
-    """One worker of the evaluation service.
+    """The worker of the evaluation service.
 
-    Values: as ``QueueWorker``, on the rollouts of the evaluations queue; ``endpoints`` opens the candidate's model
-    for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's lab; ``agent_host`` is the address at which
-    a task's container reaches this host. Every failed rollout is retried:
-    a trial fails for reasons outside its input, such as a sandbox that did not start.
+    Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
+    ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
+    lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
+    address at which a task's container reaches this host. Every failed rollout is retried: a trial fails for reasons
+    outside its input, such as a sandbox that did not start.
 
-    Purpose: the evaluation service starts one or more (``start``) and stops them (``stop``).
+    Purpose: the evaluation service starts one (``start``) and stops it (``stop``).
     """
 
     permanent_errors = ()
@@ -431,18 +584,27 @@ class EvaluationRolloutWorker(QueueWorker):
         *,
         worker_id: str,
         lab: TaskLab | None = None,
+        trial_observer: TrialObserver | None = None,
         agent_host: str = DEFAULT_AGENT_HOST,
         poll_seconds: float = 0.5,
+        slots: int = 1,
     ) -> None:
         super().__init__(
-            queue, EVALUATIONS_QUEUE, [EVALUATION_ROLLOUT_KIND], worker_id=worker_id, poll_seconds=poll_seconds
+            queue,
+            EVALUATIONS_QUEUE,
+            [EVALUATION_ROLLOUT_KIND],
+            worker_id=worker_id,
+            poll_seconds=poll_seconds,
+            slots=slots,
         )
         self.endpoints = endpoints
         self.lab = lab
+        self.trial_observer = trial_observer
         self.agent_host = agent_host
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
-        return {"score": self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count).to_json()}
+        score, rewards = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
+        return {"score": score.to_json(), "rewards": rewards}
 
     def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
         """Ask inference to serve the candidate of ``rollout``, wait until it is ready, and return the value that
@@ -466,9 +628,12 @@ class EvaluationRolloutWorker(QueueWorker):
             time.sleep(SERVE_POLL_S)
         raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
 
-    def score(self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int) -> RolloutScore:
-        """Run ``rollout`` once, when its candidate is ready, and return its score. ``attempt`` is the 1-based attempt
-        of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``)."""
+    def score(
+        self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int
+    ) -> tuple[RolloutScore, dict[str, JsonValue] | None]:
+        """Run ``rollout`` once, when its candidate is ready, and return its score and the rewards of its verifier
+        (``verifier_rewards``). ``attempt`` is the 1-based attempt of the rollout's work item; the rollout's calls are
+        kept under it (``RolloutCalls``)."""
         task_directory = self.endpoints.task_directory(rollout)
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
@@ -495,22 +660,80 @@ class EvaluationRolloutWorker(QueueWorker):
                 lab=self.lab,
                 capture_observer=calls,
             )
+            request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
-                [result] = runner.run_rollouts(
-                    [RolloutRequest(runner.harness, runner.policy_model, str(task_directory))]
-                )
+                result = asyncio.run(run_while_held(runner, request, lease_lost))
             finally:
                 calls.close()
+            # The trial directory is under ``work``, so read it before the block removes it.
+            trial = trial_directory(result.trial_uri)
+            self.keep_verifier_output(rollout, attempt, trial)
+            self.observe_trial(
+                rollout,
+                EvaluationTrial(
+                    rollout.scenario,
+                    rollout.evaluation_id,
+                    rollout.task_index,
+                    rollout.task_name,
+                    rollout.repeat,
+                    attempt,
+                    trial,
+                    result.error,
+                ),
+            )
             if not result.turns:
-                # A verifier can write a reward with no call, so that reward says nothing of the candidate's model.
-                logger.warning("rollout %s reached no model: %s", rollout.item_id(), result.error)
-                return RolloutScore.failed()
-            return runner.rollout_score(result)
+                # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
+                # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
+                # the rollout is retried as any other failed attempt.
+                raise ReefError(f"the rollout reached no model: {result.error or 'the agent made no model call'}")
+            score = runner.rollout_score(result)
+            return score, None if score.is_failed else verifier_rewards(result.rewards)
+
+    def observe_trial(self, rollout: EvaluationRollout, trial: EvaluationTrial) -> None:
+        """Give ``trial`` of ``rollout`` to the trial observer, when there is one. Its failure is logged, and the
+        rollout and its score do not change."""
+        if self.trial_observer is None:
+            return
+        try:
+            self.trial_observer.observe(trial)
+        except Exception:
+            logger.exception("the trial observer failed on rollout %s", rollout.item_id())
+
+    def keep_verifier_output(self, rollout: EvaluationRollout, attempt: int, trial: Path | None) -> None:
+        """Keep the calls and trajectories that the verifier of attempt ``attempt`` of ``rollout`` wrote to the trial
+        directory ``trial`` (``verifier_output``). They are for people to read, so a file that Reef cannot read, or a
+        call or trajectory that it cannot keep, is logged, and the rollout and its score do not change."""
+        try:
+            calls, trajectories, skipped = verifier_output(trial, rollout, attempt)
+        except OSError:
+            logger.exception("could not read the verifier output of rollout %s", rollout.item_id())
+            return
+        if skipped:
+            logger.warning("skipped %d verifier lines or files of rollout %s", skipped, rollout.item_id())
+        for call in calls:
+            try:
+                self.endpoints.add_call(rollout, call)
+            except Exception:
+                logger.exception(
+                    "could not keep verifier call %d of rollout %s", call.summary.index, rollout.item_id()
+                )
+        for trajectory in trajectories:
+            try:
+                self.endpoints.add_trajectory(rollout, trajectory)
+            except Exception:
+                logger.exception(
+                    "could not keep verifier trajectory %s of rollout %s", trajectory.name, rollout.item_id()
+                )
 
 
 __all__ = [
     "EVALUATIONS_QUEUE",
     "EVALUATION_ROLLOUT_KIND",
+    "MAX_VERIFIER_BYTES",
+    "MAX_VERIFIER_CALLS",
+    "VERIFIER_CALLS_FILE",
+    "VERIFIER_JUDGE_DIR",
+    "VERIFIER_TRAJECTORY_FILES",
     "CandidateEndpoint",
     "CandidateEndpoints",
     "EvaluationRollout",
@@ -523,4 +746,6 @@ __all__ = [
     "harbor_agent",
     "reply_summary",
     "rollout_item_id",
+    "verifier_call",
+    "verifier_output",
 ]

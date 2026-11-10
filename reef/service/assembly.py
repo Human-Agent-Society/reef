@@ -25,6 +25,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
+from reef.evaluation.trials import TrialObserver
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
@@ -90,8 +91,6 @@ def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
     return {key: value for key, value in settings.recipe_settings.items() if key not in service_owned}
 
 
-#: The evaluation rollout workers of a process that runs the evaluation service.
-ROLLOUT_WORKERS = 4
 #: The factory that ``storage.artifact_backend: git_lfs`` selects, over ``storage.artifact_repository``.
 GIT_LFS_ARTIFACT_BACKEND = "reef.artifact.git_lfs:GitLFSRepositoryBackendFactory"
 
@@ -533,16 +532,23 @@ def build_dispatcher(
             work_retention_seconds=settings.work_retention_s,
         )
         if dispatcher.services.runs_evaluation:
-            # Each worker serves its rollout's candidate itself, from the scenario's repository.
-            for _ in range(ROLLOUT_WORKERS):
-                dispatcher.workers.add(
-                    EvaluationRolloutWorker(
-                        dispatcher.queue,
-                        LocalCandidateEndpoints(dispatcher),
-                        worker_id=instance_id("evaluation"),
-                        agent_host=settings.evaluation_agent_host,
-                    )
+            # The worker serves each rollout's candidate itself, from the scenario's repository.
+            dispatcher.workers.add(
+                EvaluationRolloutWorker(
+                    dispatcher.queue,
+                    LocalCandidateEndpoints(dispatcher),
+                    worker_id=instance_id("evaluation"),
+                    trial_observer=(
+                        None
+                        if settings.evaluation_trial_observer is None
+                        else TrialObserver.from_setting(
+                            settings.evaluation_trial_observer, setting="evaluation.trial_observer"
+                        )
+                    ),
+                    agent_host=settings.evaluation_agent_host,
+                    slots=settings.evaluation_max_sandboxes,
                 )
+            )
         if dispatcher.services.runs_control and not dispatcher.services.runs_harness and recipe.harness_adapter:
             # The harness service runs in another process: it sends each import here to commit.
             dispatcher.workers.add(
@@ -598,7 +604,7 @@ def build_app(
     closed child of a managed routing deployment and hands it the router's selection credential.
 
     ``components`` names the services that this process runs besides ``control``. With ``evaluation``, this
-    process's evaluation workers serve each candidate themselves; without it, the evaluation service runs in another
+    process's evaluation worker serves each candidate itself; without it, the evaluation service runs in another
     process.
     """
     routing = None

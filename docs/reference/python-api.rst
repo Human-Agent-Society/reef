@@ -140,7 +140,17 @@ the engine behind a route with ``engine_state(served)``: ``"warm"``,
 ``"starting"``, ``"idle"`` or None (RFC #1269). The startup status of a ready
 artifact returns it as ``engine``. It must not start an engine. While an
 engine is ``"starting"``, ``engine_detail(served)`` can give one short line
-for a person, which the status returns as ``engine_detail``.
+for a person, which the status returns as ``engine_detail``, and
+``engine_steps(served)`` its ``start`` and ``load`` phases as
+``reef.inference.interfaces.StartupSteps`` (RFC #1283).
+
+While an ``InferenceRuntime`` serves an artifact, it can report the phase of
+its startup with ``reef.inference.startup.report_startup(phase, detail,
+estimate_seconds=...)``: ``prepare`` (deploy, convert or quantize), ``start``
+(a machine and the weights) or ``load`` (GPU memory, kernels, warm-up). The
+serving worker adds each report to the serving work's progress for that
+artifact, and the startup status gives them as ``startup``. Report when the
+phase or its detail changes. Outside a serving work, the call does nothing.
 
 A runtime that serves several models declares a serving field that chooses the
 model of each artifact (`Serving settings <http-api.rst#serving-settings>`__).

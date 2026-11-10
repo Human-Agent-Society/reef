@@ -19,7 +19,7 @@ from reef.artifact.repository import EnumerableRepositoryBackendFactory, Reposit
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
-from reef.core.evaluation import EvaluationCall
+from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
@@ -52,7 +52,7 @@ from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, MemoryDataStore, check_owner
 from reef.storage.data_sync import ScenarioUses
-from reef.storage.record_items import evaluation_call_item
+from reef.storage.record_items import evaluation_call_item, evaluation_trajectory_item
 from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -573,6 +573,15 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.scenario_committed(current)
             return changed
 
+    def redeploy(self, scenario: str) -> None:
+        """Deploy the engines of what ``scenario`` serves again, also when they run its current settings (RFC #1299):
+        a new serving request replaces the current one, and stops its work. A scenario that serves nothing, or a
+        dispatcher without serving, changes nothing."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.require(scenario)
+            if self.publisher is not None:
+                self.publisher.publish(current, redeploy=True)
+
     def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` of ``component`` beside the active selection of ``scenario``; that snapshot stays."""
         with self.registry.lock_for(scenario):
@@ -846,7 +855,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_settings(self, scenario: str) -> dict[str, Any]:
         """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
 
-        ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
+        ``training_mode`` is the stored mode, which control may have changed after this process loaded the
+        scenario, else the mode that the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
         scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
@@ -865,7 +875,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             job_parameters = current.stepping_trainers()[0].trainer.pipeline.sample2job.context.job_parameters
             return {
                 "scenario": scenario,
-                "training_mode": current.training_mode,
+                "training_mode": (
+                    settings.training_mode if settings.training_mode in ("auto", "manual") else current.training_mode
+                ),
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
                 "effective_activation": self.registry.effective_activation(settings),
@@ -921,14 +933,24 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """Keep ``call`` of evaluation ``evaluation_id`` as a record item of the owner of ``scenario``, for the current
         generation of the scenario (``CandidateArtifacts``). ``ReefError`` without a data store; ``ScenarioArchived``
         when the scenario was archived meanwhile."""
+        data, owner, generation = self.evaluation_data(scenario)
+        data.create(owner, [evaluation_call_item(scenario, artifact_id, evaluation_id, call)], generation=generation)
+
+    def add_evaluation_trajectory(self, scenario: str, evaluation_id: str, trajectory: EvaluationTrajectory) -> None:
+        """Keep ``trajectory``, which a verifier of evaluation ``evaluation_id`` wrote, as a trajectory item of the
+        owner of ``scenario`` (``CandidateArtifacts``). Only a create of record items checks a generation, so this
+        one does not. ``ReefError`` without a data store."""
+        data, owner, _ = self.evaluation_data(scenario)
+        data.create(owner, [evaluation_trajectory_item(scenario, evaluation_id, trajectory)])
+
+    def evaluation_data(self, scenario: str) -> tuple[DataStore, str, str]:
+        """The data store that keeps the evaluation data of ``scenario``, the scenario's owner and its current
+        generation. ``ReefError`` without a data store."""
         if self.data_store is None:
-            raise ReefError("this deployment has no data store, so it keeps no evaluation call")
+            raise ReefError("this deployment has no data store, so it keeps no evaluation data")
         with self.locked_scenario(scenario):
             owner = self.storage.read_settings(scenario).owner or scenario
-            generation = self.data_store.scenario_generation(owner, scenario)
-        self.data_store.create(
-            owner, [evaluation_call_item(scenario, artifact_id, evaluation_id, call)], generation=generation
-        )
+            return self.data_store, owner, self.data_store.scenario_generation(owner, scenario)
 
     def request_artifact_copy(self, scenario: str) -> None:
         """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""

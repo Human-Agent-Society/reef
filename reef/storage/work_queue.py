@@ -2,7 +2,8 @@
 
 A producer adds a ``WorkItem``. A worker takes the oldest item it can take, holds a lease on it while it works,
 extends the lease, adds progress, and finishes or fails it. An item whose lease expires goes back to the queue,
-so another worker continues it. Readers find changes by ``changed_sequence``. The item ID is a function of the
+so another worker continues it. A worker that stops gives its items back (``give_back``); such an attempt does not
+count toward the attempts that the queue allows, so restarts of a service do not fail a long item. Readers find changes by ``changed_sequence``. The item ID is a function of the
 item's inputs, so work that runs again writes the same result.
 
 Two fields order the work:
@@ -63,6 +64,8 @@ class WorkItem:
     - ``state`` is one of ``WORK_STATES``. ``worker_id`` and ``lease_expires_at`` are set exactly when ``state`` is
       ``assigned`` or ``running``.
     - ``attempt_count`` is the number of times a worker took the item, an integer from 0.
+    - ``stopped_attempt_count`` is the number of those attempts that the worker gave back because it stopped
+      (``WorkQueue.give_back``), an integer from 0 to ``attempt_count``.
     - ``progress`` is a tuple of JSON objects in the order a worker added them.
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
@@ -89,6 +92,7 @@ class WorkItem:
     started_at: float | None = None
     ended_at: float | None = None
     attempt_count: int = 0
+    stopped_attempt_count: int = 0
     worker_id: str | None = None
     lease_expires_at: float | None = None
     progress: tuple[Mapping[str, JsonValue], ...] = ()
@@ -115,6 +119,9 @@ class WorkItem:
                 raise ValueError(f"{name} is a finite time or None")
         if isinstance(self.attempt_count, bool) or not isinstance(self.attempt_count, int) or self.attempt_count < 0:
             raise ValueError("attempt_count is an integer from 0")
+        stopped = self.stopped_attempt_count
+        if isinstance(stopped, bool) or not isinstance(stopped, int) or not 0 <= stopped <= self.attempt_count:
+            raise ValueError("stopped_attempt_count is an integer from 0 to attempt_count")
         if self.attempt_count == 0 and self.started_at is not None:
             raise ValueError("a work item that no worker took has no started_at")
         held = self.state in HELD_STATES
@@ -211,10 +218,11 @@ class WorkQueue(ABC):
     Values: the state is a finite set of ``WorkItem`` values with distinct ``(queue, id)`` pairs, and a sequence
     counter that numbers every change across the store. ``lease_seconds`` is the lease length that ``take`` and
     ``extend_lease`` give. A worker can take one item of a queue ``max_attempts[queue]`` times, or
-    ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int.
+    ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int. An attempt
+    that its worker gave back (``give_back``) is not one of these times.
 
-    Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish and
-    fail it; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``)
+    Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish,
+    fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``)
     and record facts about it (``set_metadata``); control deletes old final items (``delete_final``).
     """
 
@@ -236,8 +244,13 @@ class WorkQueue(ABC):
         self.default_attempts = default_attempts
 
     def attempts_allowed(self, queue: str) -> int:
-        """How many times a worker can take one item of ``queue``."""
+        """How many times a worker can take one item of ``queue``, without the attempts that a worker gave back."""
         return self.max_attempts.get(queue, self.default_attempts)
+
+    def has_attempts_left(self, item: WorkItem) -> bool:
+        """Whether a worker can take ``item`` again: fewer of its attempts than ``attempts_allowed`` of its queue
+        ended otherwise than by ``give_back``. The attempt that holds a held item counts."""
+        return item.attempt_count - item.stopped_attempt_count < self.attempts_allowed(item.queue)
 
     @abstractmethod
     def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
@@ -330,6 +343,13 @@ class WorkQueue(ABC):
     ) -> WorkItem:
         """End the held attempt with ``error``: the item becomes ``queued`` when ``retryable`` and it has attempts
         left, else ``failed``, ended at ``now``. ``WorkLeaseLost`` when ``worker_id`` does not hold it."""
+
+    @abstractmethod
+    def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+        """End the held attempt because the worker stops: the item becomes ``queued`` with the error
+        ``"the worker stopped"`` and one more ``stopped_attempt_count``, so another worker continues it at once.
+        The attempt does not count toward the attempts that the queue allows. ``WorkLeaseLost`` when ``worker_id``
+        does not hold it."""
 
     @abstractmethod
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:

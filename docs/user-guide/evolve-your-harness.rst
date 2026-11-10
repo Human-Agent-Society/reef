@@ -99,7 +99,7 @@ Both ways feed the same training step (4 to 8).
      - the eval split of the uploaded tasks
    * - Agents
      - ``claude``, ``pi``, ``opencode``, ``codex`` (the adapters with a plugin)
-     - every adapter with an npm or uv ``install``
+     - every adapter with an npm, uv or git ``install``
    * - Recipes
      - ACE, ReasoningBank, GEPA (AIME example)
      - GEPA with ``TrainTaskJobData``
@@ -375,7 +375,7 @@ plays the instruction, and the tests' reward is the score
 The agent reaches Reef at ``evolution.evaluation.agent_host`` (default
 ``host.docker.internal``) in place of a loopback address. On Linux, set it
 to an address the container reaches, such as the Docker bridge gateway.
-Startup refuses task directories when the adapter has no npm or uv ``install``,
+Startup refuses task directories when the adapter has no npm, uv or git ``install``,
 when the executor is not ``local``, or with ``collect_failures``. An offline
 run's evaluation tasks must be directories too.
 

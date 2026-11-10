@@ -84,20 +84,26 @@ def write_job_data(data: JobData, directory: Path) -> None:
     directory.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{directory.name}.", dir=directory.parent))
     try:
-        lines: list[str] = []
         tasks = 0
-        for entry, sample in zip(value["samples"], data.samples, strict=True):
-            if isinstance(sample, TaskSample):
-                relative = f"{TASKS_DIR}/{tasks}/{sample.task_path.name}"
-                shutil.copytree(sample.task_path, staged / relative)
-                entry = {**entry, "task_path": relative}
-                tasks += 1
-            lines.append(json.dumps(entry, allow_nan=False, separators=(",", ":")))
-        (staged / SAMPLES_FILE).write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+        # One line at a time: the lines of a job of many trajectories are gigabytes.
+        with (staged / SAMPLES_FILE).open("w", encoding="utf-8") as lines:
+            for entry, sample in zip(value["samples"], data.samples, strict=True):
+                if isinstance(sample, TaskSample):
+                    relative = f"{TASKS_DIR}/{tasks}/{sample.task_path.name}"
+                    shutil.copytree(sample.task_path, staged / relative)
+                    entry = {**entry, "task_path": relative}
+                    tasks += 1
+                lines.write(json.dumps(entry, allow_nan=False, separators=(",", ":")) + "\n")
         if data.delayed:
-            delayed = (json.dumps(entry, allow_nan=False, separators=(",", ":")) for entry in value["delayed"])
-            (staged / DELAYED_FILE).write_text("".join(f"{line}\n" for line in delayed), encoding="utf-8")
-        header = {"format": JOB_DATA_FORMAT, "key": job_data_key(data), "sample_count": len(lines), "kind": kind}
+            with (staged / DELAYED_FILE).open("w", encoding="utf-8") as lines:
+                for entry in value["delayed"]:
+                    lines.write(json.dumps(entry, allow_nan=False, separators=(",", ":")) + "\n")
+        header = {
+            "format": JOB_DATA_FORMAT,
+            "key": job_data_key(data),
+            "sample_count": len(data.samples),
+            "kind": kind,
+        }
         (staged / JOB_FILE).write_text(json.dumps(header), encoding="utf-8")
         os.replace(staged, directory)
     except BaseException:

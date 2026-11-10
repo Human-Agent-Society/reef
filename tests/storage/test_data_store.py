@@ -18,7 +18,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
 
 from reef.core.atif_payloads import canonical_json
-from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
+from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
@@ -27,9 +27,16 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
-from reef.storage.record_items import evaluation_call_item, record_item, stored_evaluation_call
+from reef.storage.record_items import (
+    evaluation_call_item,
+    evaluation_trajectory_item,
+    evaluation_trajectory_items,
+    record_item,
+    stored_evaluation_call,
+)
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
+from reef.storage.task_collections import TaskCollection, collection_benchmarks
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
@@ -287,6 +294,78 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
     assert [found.item_id for found in store.query("acme", kind="task", scenario="coding")] == ["fix-bug"]
     with pytest.raises(ValueError, match="not a task"):
         store.task_path(store.create("acme", [trajectory("t1")])[0])
+
+
+def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, tmp_path):
+    def task(name: str, **metadata) -> NewItem:
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "instruction.md").write_text(f"Do {name}.\n")
+        return NewItem(name, tmp_path / name, {"kind": "task", **metadata})
+
+    store.create(
+        "acme",
+        [task("add", benchmarks=["lite", "full"]), task("sort", benchmarks=["full"]), task("plain"), trajectory("t1")],
+    )
+    store.create("globex", [task("other", benchmarks=["full"])])
+    assert [item.item_id for item in store.query("acme", benchmark="full")] == ["add", "sort"]
+    assert [item.item_id for item in store.query("acme", kind="task", benchmark="lite")] == ["add"]
+    assert store.query("acme", benchmark="unknown") == ()
+    assert store.query("acme", kind="trajectory", benchmark="full") == ()
+    # A patch replaces the list, and null removes it.
+    store.update("acme", ["sort"], {"benchmarks": ["lite"]})
+    store.update("acme", ["add"], {"benchmarks": None})
+    assert [item.item_id for item in store.query("acme", benchmark="lite")] == ["sort"]
+    assert store.query("acme", benchmark="full") == ()
+    for benchmarks in ("lite", ["lite", "lite"], [""], [1]):
+        with pytest.raises(ValueError, match="benchmarks"):
+            store.update("acme", ["sort"], {"benchmarks": benchmarks})
+    with pytest.raises(ValueError, match="benchmarks"):
+        store.create("acme", [trajectory("t2", benchmarks=["lite"])])
+    with pytest.raises(ValueError, match="benchmark"):
+        store.query("acme", benchmark="")
+
+
+def test_an_owner_stores_replaces_and_removes_its_collections(store):
+    coding = TaskCollection("coding", benchmarks=("lite", "full"))
+    store.put_collection("acme", coding)
+    store.put_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
+    assert store.collections("acme") == (TaskCollection("all", (), ("coding",), "benchmark"), coding)
+    assert store.collections("globex") == ()
+    store.put_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
+    assert [collection.benchmarks for collection in store.collections("acme")] == [(), ("lite",)]
+    assert store.remove_collection("acme", "coding") and not store.remove_collection("acme", "coding")
+    assert [collection.name for collection in store.collections("acme")] == ["all"]
+
+
+def test_a_collection_has_its_benchmarks_and_those_of_the_collections_it_names():
+    stored = {
+        collection.name: collection
+        for collection in (
+            TaskCollection("coding", benchmarks=("lite", "full")),
+            TaskCollection("math", benchmarks=("algebra", "lite")),
+            TaskCollection("all", benchmarks=("extra",), collections=("coding", "math")),
+            TaskCollection("first", collections=("second",)),
+            TaskCollection("second", collections=("first",)),
+            TaskCollection("open", collections=("missing",)),
+        )
+    }
+    assert collection_benchmarks(stored, "all") == ("extra", "lite", "full", "algebra")
+    with pytest.raises(ValueError, match="first -> second -> first make a cycle"):
+        collection_benchmarks(stored, "first")
+    with pytest.raises(ValueError, match="no collection 'missing'"):
+        collection_benchmarks(stored, "open")
+    assert TaskCollection.from_json(stored["all"].to_json()) == stored["all"]
+    for value in (
+        {"name": "empty"},
+        {"name": "a/b", "benchmarks": ["lite"]},
+        {"name": "self", "collections": ["self"]},
+        {"name": "twice", "benchmarks": ["lite", "lite"]},
+        {"name": "mean", "benchmarks": ["lite"], "average": "macro"},
+        {"name": "more", "benchmarks": ["lite"], "tasks": []},
+        {"benchmarks": ["lite"]},
+    ):
+        with pytest.raises(ValueError):
+            TaskCollection.from_json(value)
 
 
 def test_groups_count_the_items_of_each_metadata_value_newest_first(store):
@@ -937,6 +1016,49 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
     assert [item.item_id for item in store.query("acme", kind="record")] == ids
 
 
+def test_a_verifier_call_links_apart_from_the_agent_calls_and_a_call_kept_before_reads_as_an_agent_call(store):
+    agent, _ = evaluation_call(1, 1, 0)
+    summary = replace(agent.summary, caller="verifier", label="judge:quality")
+    verifier = EvaluationCall(summary, agent.request, agent.response)
+    verifier_item = evaluation_call_item("coding", "a1", "e1", verifier)
+    assert verifier_item.item_id == "coding/e1:0:0:1:verifier:0"
+    # A call kept before RFC #1293 has no caller and no label in its metadata.
+    old = evaluation_call_item("coding", "a1", "e1", agent)
+    location = {
+        key: value for key, value in old.metadata["origin"]["evaluation"].items() if key not in ("caller", "label")
+    }
+    old = NewItem(
+        old.item_id, old.content, {**old.metadata, "origin": {**old.metadata["origin"], "evaluation": location}}
+    )
+    store.create("acme", [old, verifier_item])
+    # The same messages in the same attempt, but a verifier call never links to an agent call.
+    assert store.record_links("acme", [verifier_item.item_id])[verifier_item.item_id].parent is None
+    assert stored_evaluation_call(store.read("acme", old.item_id)) == agent
+    assert stored_evaluation_call(store.read("acme", verifier_item.item_id)) == verifier
+    with pytest.raises(ValueError, match="evaluation call has the ID"):
+        content = {**verifier_item.content, "agent_record_id": "e1:0:0:1:0"}
+        store.create("acme", [NewItem("coding/e1:0:0:1:0", content, verifier_item.metadata)])
+
+
+def test_a_trajectory_that_a_verifier_wrote_is_no_scenarios_data(store):
+    trajectory = EvaluationTrajectory(0, 0, 1, 0, "trajectory.json", ATIF)
+    item = evaluation_trajectory_item("coding", "e1", trajectory)
+    assert item.item_id == "coding/e1:0:0:1:verifier:trajectory:0"
+    store.create("acme", [item])
+    [found] = evaluation_trajectory_items(store, "acme", "coding", "e1", content=True)
+    assert (found.content, found.scenarios, found.metadata["evaluation"]["name"]) == (ATIF, {}, "trajectory.json")
+    assert list(evaluation_trajectory_items(store, "acme", "other", "e1", content=False)) == []
+    for metadata, message in (
+        ({**item.metadata, "scenarios": {"coding": "train"}}, "empty scenarios"),
+        ({**item.metadata, "origin": {"scenario": "coding", "component": "", "records": []}}, "no origin"),
+        ({**item.metadata, "evaluation_id": "e2"}, "evaluation_id"),
+        ({**item.metadata, "evaluation": {**item.metadata["evaluation"], "attempt": 0}}, "attempt"),
+        ({"kind": "task", "evaluation_id": "e1"}, "only an evaluation call"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            store.create("acme", [NewItem("coding/other", ATIF, metadata)])
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
@@ -957,6 +1079,23 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
                 "origin": {**metadata["origin"], "evaluation": {**metadata["origin"]["evaluation"], "index": 7}},
             },
             "evaluation call has the ID",
+        ),
+        (
+            lambda metadata: {
+                **metadata,
+                "origin": {
+                    **metadata["origin"],
+                    "evaluation": {**metadata["origin"]["evaluation"], "caller": "judge"},
+                },
+            },
+            "caller",
+        ),
+        (
+            lambda metadata: {
+                **metadata,
+                "origin": {**metadata["origin"], "evaluation": {**metadata["origin"]["evaluation"], "label": "x"}},
+            },
+            "an agent call has no label",
         ),
     ],
 )

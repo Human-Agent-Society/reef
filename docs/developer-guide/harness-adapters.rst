@@ -110,10 +110,11 @@ How Reef runs an agent
        session log, and removes the root.
      - ``dirs``, ``model``, ``run.task``, ``sessions``
    * - Harbor task
-     - Starts the task's container, installs the pinned agent with npm (or
-       uv), copies in the tree, runs ``run.task`` with the instruction, and
-       scores the tests' reward.
-     - an npm or uv ``install``
+     - Starts the task's container, installs the pinned agent with npm, uv,
+       or from its git checkout into a venv, copies in the tree, runs ``run.task`` with the instruction, and
+       scores the tests' reward. The verifier can read the run as ATIF in
+       ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
+     - an npm, uv or git ``install``
    * - A person's machine
      - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
@@ -376,7 +377,10 @@ campaign adds ``terminus`` (`its README
        call. It gets the instruction as its argument and reads the binding
        (``api``, ``base_url`` ending in ``/v1``, ``api_key``, ``model``) from
        ``program/model.json``. It declares its dependencies as inline script
-       metadata (PEP 723). Only the ``openai`` dialect.
+       metadata (PEP 723). Only the ``openai`` dialect. To give a task's
+       verifier the run as ATIF, the program writes one JSONL line for each
+       model call under ``REEF_PROGRAM_SESSION_DIR``: the request body, with
+       the response body as ``response``.
 
 The comments in each ``adapter.yaml`` explain its defaults and checks.
 
@@ -534,7 +538,9 @@ Connect a new agent
       at first.
    #. Add a ``TrajectoryReader`` with ``@register_trajectory_reader`` when the
       session log has a new format (`trajectory.py
-      <../../reef/harness/tasks/trajectory.py>`__).
+      <../../reef/harness/tasks/trajectory.py>`__). Give it ``to_atif``, so
+      that a task's verifier can read the run. Wrap Harbor's converter for
+      the agent when Harbor has one.
    #. Add the name to ``BUILTIN_ADAPTERS``, or register through the
       ``reef.harness_adapters`` entry point.
    #. Add ``render.py`` only for what the file cannot state.

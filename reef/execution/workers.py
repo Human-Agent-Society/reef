@@ -116,18 +116,22 @@ class QueueWorker(ServiceWorker):
     """A worker that takes the items of some kinds from one queue and runs each one, until it stops.
 
     Values: ``queue`` holds the items; ``queue_name`` and ``kinds`` name the items that it takes; ``worker_id``
-    names it in leases; ``poll_seconds`` is the wait after a look that found no item, a positive number.
-    ``permanent_errors`` are the errors of ``run_item`` that a retry cannot fix, since the item's input stays the
-    same: ``ValueError`` by default, and a subclass names its own.
+    names it in leases; ``poll_seconds`` is the wait after a look that found no item, a positive number; ``slots``
+    is the number of items that it runs at once, a positive integer. ``permanent_errors`` are the errors of
+    ``run_item`` that a retry cannot fix, since the item's input stays the same: ``ValueError`` by default, and a
+    subclass names its own.
 
     Purpose: a service subclasses it and defines ``run_item``. Each round requeues the expired items, takes one
     item, starts it, extends its lease while ``run_item`` runs, finishes the item with what ``run_item`` returns,
-    and then calls ``item_finished``. ``run_item`` gets the event that the lease extension sets when the worker no
-    longer holds the item, so that long work can stop. Its errors end the item as follows:
+    and then calls ``item_finished``. With one slot, the round runs the item on the worker's thread. With more, it
+    runs the item on a thread of its own, and a round takes no item while every slot is busy. ``run_item`` gets the
+    event that the lease extension sets when the worker no longer holds the item, so that long work can stop. Its
+    errors end the item as follows:
 
     - ``ItemFailed``: the item fails for good, with the error's message;
     - one of ``permanent_errors``: the item fails for good;
-    - ``WorkerStopped``: the item goes back to the queue at once;
+    - ``WorkerStopped``: the item goes back to the queue at once, and the attempt does not count
+      (``WorkQueue.give_back``);
     - ``WorkLeaseLost``: the item stays with the worker that holds it now;
     - any other error: the item fails as retryable, until it uses up its attempts.
 
@@ -149,16 +153,23 @@ class QueueWorker(ServiceWorker):
         *,
         worker_id: str,
         poll_seconds: float = 0.2,
+        slots: int = 1,
     ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds is positive")
         if not kinds:
             raise ValueError("a queue worker takes one or more kinds")
+        if isinstance(slots, bool) or not isinstance(slots, int) or slots < 1:
+            raise ValueError("slots is a positive integer")
         self.queue = queue
         self.queue_name = queue_name
         self.kinds = tuple(kinds)
         self.worker_id = worker_id
         self.poll_seconds = poll_seconds
+        self.slots = slots
+        self.free_slots = threading.BoundedSemaphore(slots)
+        #: The threads of the items in progress, when the worker has more than one slot.
+        self.item_threads: list[threading.Thread] = []
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -187,6 +198,9 @@ class QueueWorker(ServiceWorker):
         if self.thread is not None:
             self.thread.join()
             self.thread = None
+        for thread in self.item_threads:
+            thread.join()
+        self.item_threads = []
 
     def run(self) -> None:
         while not self.stopped.is_set():
@@ -206,17 +220,40 @@ class QueueWorker(ServiceWorker):
                 log_failed_item(item)
 
     def run_once(self) -> bool:
-        """Take one item and run it; return whether there was one."""
-        self.requeue_expired()
-        item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
-        if item is None:
+        """Take one item and run it; return whether there was one. With more than one slot, start the item on a
+        thread of its own and return at once; return False when every slot is busy."""
+        if not self.free_slots.acquire(blocking=False):
             return False
-        if not self.keeps_log:
-            self.run_taken(item)
+        try:
+            self.requeue_expired()
+            item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
+        except BaseException:
+            self.free_slots.release()
+            raise
+        if item is None:
+            self.free_slots.release()
+            return False
+        if self.slots == 1:
+            self.run_in_slot(item)
             return True
-        with capture_log(self.queue, item):
-            self.run_taken(item)
+        self.item_threads = [thread for thread in self.item_threads if thread.is_alive()]
+        thread = threading.Thread(
+            target=self.run_in_slot, args=(item,), name=f"reef-{self.worker_id}-{item.id}", daemon=True
+        )
+        self.item_threads.append(thread)
+        thread.start()
         return True
+
+    def run_in_slot(self, item: WorkItem) -> None:
+        """Run the item that this worker took and end it, then free its slot."""
+        try:
+            if self.keeps_log:
+                with capture_log(self.queue, item):
+                    self.run_taken(item)
+            else:
+                self.run_taken(item)
+        finally:
+            self.free_slots.release()
 
     def run_taken(self, item: WorkItem) -> None:
         """Run the item that this worker took, and end it."""
@@ -229,7 +266,10 @@ class QueueWorker(ServiceWorker):
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
         except WorkerStopped:
-            self.fail(item, "the worker stopped", retryable=True)
+            try:
+                self.queue.give_back(self.queue_name, item.id, self.worker_id)
+            except WorkLeaseLost:
+                logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
         except ItemFailed as exc:
             self.fail(item, str(exc), retryable=False)

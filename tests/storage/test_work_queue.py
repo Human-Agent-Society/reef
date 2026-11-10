@@ -1,6 +1,7 @@
 import logging
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
@@ -65,6 +66,25 @@ def job(
     item_id: str, *, scenario: str = "s", kind: str = "training_job:tinker", serial_key: str | None = "s"
 ) -> NewWork:
     return NewWork("jobs", item_id, scenario, kind, {"input": item_id}, serial_key=serial_key)
+
+
+@pytest.mark.unit
+def test_an_attempt_that_its_worker_gave_back_does_not_count(open_coordination):
+    queue = open_coordination(max_attempts={"jobs": 2}).queue
+    queue.add(job("a"), now=0)
+    # A service that restarts three times gives the item back three times.
+    for restart in range(3):
+        queue.take("jobs", f"w{restart}", ["training_job:tinker"], now=restart)
+        given_back = queue.give_back("jobs", "a", f"w{restart}", now=restart)
+        assert (given_back.state, given_back.error, given_back.ended_at) == ("queued", "the worker stopped", None)
+        assert (given_back.attempt_count, given_back.stopped_attempt_count) == (restart + 1, restart + 1)
+    with pytest.raises(WorkLeaseLost):
+        queue.give_back("jobs", "a", "w2", now=3)
+    # The item still has its two attempts.
+    queue.take("jobs", "w", ["training_job:tinker"], now=4)
+    assert queue.fail("jobs", "a", "w", "transient", retryable=True, now=5).state == "queued"
+    queue.take("jobs", "w", ["training_job:tinker"], now=6)
+    assert [item.state for item in queue.requeue_expired(now=100)] == ["failed"]
 
 
 @pytest.mark.unit
@@ -195,7 +215,7 @@ def warnings_of(caplog) -> list[str]:
         (ValueError("bad input"), 2, "failed"),
         (RuntimeError("engine down"), 2, "queued"),
         (RuntimeError("engine down"), 1, "failed"),
-        (WorkerStopped(), 1, "failed"),
+        (WorkerStopped(), 1, "queued"),
     ],
 )
 def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, error, attempts, state):
@@ -242,6 +262,77 @@ def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
             assert not FailingWorker(queue, ItemFailed("unused")).run_once()
         assert queue.get("jobs", "a").state == "failed"
         assert warnings_of(caplog) == ["work item jobs/a of scenario s failed: the worker's lease expired"]
+
+
+class WaitingWorker(QueueWorker):
+    """A worker whose items run until ``release`` is set, or until the worker stops."""
+
+    def __init__(self, queue: WorkQueue, slots: int) -> None:
+        super().__init__(queue, "jobs", ["training_job:tinker"], worker_id="w", poll_seconds=0.01, slots=slots)
+        self.release = threading.Event()
+        self.lock = threading.Lock()
+        self.running: set[str] = set()
+        self.most_running = 0
+
+    def run_item(self, item, lease_lost):
+        with self.lock:
+            self.running.add(item.id)
+            self.most_running = max(self.most_running, len(self.running))
+        try:
+            while not self.release.wait(0.01):
+                if self.stopped.is_set():
+                    raise WorkerStopped
+            return {}
+        finally:
+            with self.lock:
+                self.running.discard(item.id)
+
+
+def wait_until(condition) -> None:
+    deadline = time.monotonic() + 5
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("the condition did not become true in 5 s")
+        time.sleep(0.01)
+
+
+@pytest.mark.unit
+def test_a_worker_runs_at_most_its_slots_of_items_at_once(tmp_path):
+    with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        for item_id in "abcde":
+            queue.add(job(item_id, serial_key=None))
+        worker = WaitingWorker(queue, slots=3)
+        worker.start()
+        try:
+            wait_until(lambda: len(worker.running) == 3)
+            assert [queue.get("jobs", item_id).state for item_id in "de"] == ["queued", "queued"]
+            worker.release.set()
+            wait_until(lambda: all(queue.get("jobs", item_id).state == "finished" for item_id in "abcde"))
+        finally:
+            worker.stop()
+        assert worker.most_running == 3
+
+
+@pytest.mark.unit
+def test_a_stopped_worker_returns_every_item_in_progress_to_the_queue(tmp_path):
+    with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        for item_id in "ab":
+            queue.add(job(item_id, serial_key=None))
+        worker = WaitingWorker(queue, slots=2)
+        worker.start()
+        wait_until(lambda: len(worker.running) == 2)
+        worker.stop()
+        assert worker.item_threads == []
+        assert [queue.get("jobs", item_id).state for item_id in "ab"] == ["queued", "queued"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("slots", [0, True, 1.5])
+def test_a_worker_needs_a_positive_integer_of_slots(slots):
+    with closing(SQLiteCoordinationDatabase(None)) as database, pytest.raises(ValueError, match="slots"):
+        WaitingWorker(SQLWorkQueue(database, lease_seconds=10), slots=slots)
 
 
 @pytest.mark.unit
@@ -308,7 +399,7 @@ def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path
         queue.take("jobs", "w", ["training_job:tinker"], now=1)
         queue.finish("jobs", "ended", "w", {}, now=2)
     with closing(sqlite3.connect(directory / "coordination.sqlite3")) as connection:
-        for column in ("started_at", "ended_at", "metadata_json"):
+        for column in ("started_at", "ended_at", "metadata_json", "stopped_attempt_count"):
             connection.execute(f"ALTER TABLE work_item DROP COLUMN {column}")
         connection.commit()
 
@@ -318,6 +409,8 @@ def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path
         # An ended item ended at its last change; the start of an earlier item is not known.
         assert (ended.started_at, ended.ended_at, ended.metadata) == (None, 2, {})
         assert (waiting.started_at, waiting.ended_at, waiting.metadata) == (None, None, {})
+        # Every attempt of an earlier item counts.
+        assert (ended.attempt_count, ended.stopped_attempt_count) == (1, 0)
 
 
 def test_the_queued_training_requests_of_an_older_version_move_to_their_new_queue_and_kind(tmp_path):

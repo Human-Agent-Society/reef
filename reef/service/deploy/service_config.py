@@ -18,6 +18,7 @@ from typing import Any
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
+from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
@@ -253,6 +254,19 @@ class ServiceConfig:
         public_path=("evaluation", "agent_host"),
         help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
     )
+    #: The rollouts that one process of the evaluation service runs at once, across evaluations. Each one holds a
+    #: sandbox of its task.
+    evaluation_max_sandboxes: int = config_option(
+        4,
+        public_path=("evaluation", "max_sandboxes"),
+        help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
+    )
+    #: Unset, or a ``TrialObserver`` plugin: ``package.module:ClassName`` or module and config.
+    evaluation_trial_observer: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("evaluation", "trial_observer"),
+        help="A TrialObserver plugin reference that reads each evaluation trial before its directory is removed.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -278,11 +292,15 @@ class ServiceConfig:
         public_path=("storage", "coordination_backend"),
         help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
     )
-    #: How many times a worker takes one work item before the item fails, for every queue.
+    #: How many times a worker takes one work item before the item fails, for every queue. An attempt that ends
+    #: because its worker stops, such as at a restart of the service, does not count.
     work_max_attempts: int = config_option(
         3,
         public_path=("storage", "work_max_attempts"),
-        help="Attempts of one work item (a job, a selection, a rollout, a data task) before it fails.",
+        help=(
+            "Attempts of one work item (a job, a selection, a rollout, a data task) before it fails. "
+            "An attempt that ends because its service stops does not count."
+        ),
     )
     #: How long control keeps an ended work item, so that its producer reads its result; then control deletes it.
     work_retention_s: float = config_option(
@@ -458,6 +476,11 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        sandboxes = self.evaluation_max_sandboxes
+        if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
+            raise ValueError("evaluation.max_sandboxes must be a positive integer")
+        if self.evaluation_trial_observer is not None:
+            TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:

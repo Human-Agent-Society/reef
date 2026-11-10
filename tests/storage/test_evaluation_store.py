@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
 
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
+    EvaluationCollection,
     PolicyEvaluation,
     PolicyHarness,
     PolicyModel,
@@ -41,6 +43,34 @@ def open_durable_storage(request, tmp_path):
         url, schema = request.getfixturevalue("postgres_config")
         return lambda: PostgresScenarioStorage(url, tmp_path / "files", schema=schema)
     return lambda: SQLiteScenarioStorage(tmp_path / "files")
+
+
+@pytest.mark.parametrize(("average", "mean"), [("task", 0.5), ("benchmark", 0.75)])
+def test_an_evaluation_on_a_collection_scores_each_benchmark_and_averages_as_the_collection_says(average, mean):
+    collection = EvaluationCollection(
+        average=average, name="coding", benchmarks=(("lite", ("add",)), ("full", ("add", "sort", "sum")))
+    )
+    request = replace(REQUEST, task_names=("add", "sort", "sum"), collection=collection)
+    assert ArtifactEvaluationRequest.from_json(request.to_json()) == request
+    scores = RolloutScores(
+        (
+            ("add", (RolloutScore.scored(1.0), RolloutScore.scored(1.0))),
+            ("sort", (RolloutScore.scored(0.0), RolloutScore.scored(1.0))),
+            ("sum", (RolloutScore.scored(0.0), RolloutScore.scored(0.0))),
+        )
+    )
+    running = StoredEvaluation("e1", "service-a", request, "running", 10.0)
+    assert running.to_json()["benchmark_scores"] == []
+    answer = replace(running, state="finished", finished_at=15.0, result=replace(RESULT, scores=scores)).to_json()
+    assert answer["benchmark_scores"] == [
+        {"benchmark": "lite", "task_count": 1, "mean_score": 1.0},
+        {"benchmark": "full", "task_count": 3, "mean_score": 0.5},
+    ]
+    assert answer["mean_score"] == pytest.approx(mean)
+    assert replace(running, request=REQUEST).to_json()["benchmark_scores"] == []
+    # The collection's tasks are the request's tasks.
+    with pytest.raises(ValueError, match="collection"):
+        replace(request, task_names=("add",))
 
 
 def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(storage):
@@ -99,8 +129,19 @@ def test_a_request_configures_exactly_one_side_of_the_policy():
         ({"model": "served", "task_names": ("add", "add")}, "distinct"),
         ({"model": "served", "rollouts_per_task": 0}, "positive integer"),
         ({"model": "served", "environment": ""}, "environment"),
+        ({"model": "served", "max_concurrent_rollouts": 0}, "max_concurrent_rollouts"),
+        ({"model": "served", "max_failed_fraction": 1}, "max_failed_fraction"),
+        ({"model": "served", "max_failed_fraction": True}, "max_failed_fraction"),
     ):
         with pytest.raises(ValueError, match=message):
             ArtifactEvaluationRequest("r1", "weights", **fields)
     with pytest.raises(ValueError, match="request is an object"):
         ArtifactEvaluationRequest.from_json({"artifact_id": "r1"})
+    limited = replace(REQUEST, max_concurrent_rollouts=4, max_failed_fraction=0.5)
+    assert ArtifactEvaluationRequest.from_json(limited.to_json()) == limited
+    stored_earlier = {
+        key: value
+        for key, value in REQUEST.to_json().items()
+        if key not in ("max_concurrent_rollouts", "max_failed_fraction")
+    }
+    assert ArtifactEvaluationRequest.from_json(stored_earlier) == REQUEST

@@ -5,9 +5,12 @@ of its policy configured (RFC #959). A scenario can also hold settings that Reef
 when a commit publishes a checkpoint as a new artifact, Reef queues its evaluation. ``ArtifactEvaluations``
 checks each request against the scenario and stores it in the scenario's evaluation store. It adds one
 ``evaluation_rollout`` item for each rollout to the ``evaluations`` work queue, where the evaluation service's
-workers run them (``reef.evaluation.rollout_worker``). When every rollout of an evaluation is final,
-``EvaluationResults`` reads the scores, stores their ``PolicyEvaluation``, and gives it to the scenario's activation
-rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No aiohttp types appear here.
+workers run them (``reef.evaluation.rollout_worker``). With ``max_concurrent_rollouts``, it keeps at most that many
+rollouts that are not final in the queue, and adds the next ones as rollouts end (RFC #1276). With
+``max_failed_fraction``, it stops an evaluation whose ended rollouts fail too often (RFC #1287). When every rollout of an
+evaluation is final, ``EvaluationResults`` reads the scores, stores their ``PolicyEvaluation``, and gives it to the
+scenario's activation rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No aiohttp types
+appear here.
 ``reef.service.routes.evaluations`` adapts it to HTTP.
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
@@ -35,17 +38,21 @@ from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
+    Caller,
     EvaluationCall,
     EvaluationCallTotals,
+    EvaluationCollection,
     PolicyEvaluation,
     PolicyModel,
     RolloutScore,
     RolloutScores,
     harness_item,
+    mean_score,
 )
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
+from reef.core.trajectory_index import conversations
 from reef.dispatcher import Dispatcher
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -60,19 +67,34 @@ from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tools
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
+from reef.service.collections import collection_tasks
 from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, StoredItem, record_source
 from reef.storage.evaluations import StoredEvaluation
 from reef.storage.item_kinds import evaluation_call_id
 from reef.storage.observer import RecordObserver
-from reef.storage.record_items import evaluation_call_items, evaluation_call_summary, stored_evaluation_call
+from reef.storage.record_items import (
+    evaluation_call_items,
+    evaluation_call_summary,
+    evaluation_trajectory_items,
+    stored_evaluation_call,
+)
+from reef.storage.task_collections import CollectionNotFound
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
 
 #: The error of an evaluation whose rollouts are no longer in the queue, so they never end.
 STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
+#: The error of an evaluation that a client cancelled.
+CANCELLED_ERROR = "cancelled by request"
+#: The error of each rollout that was not final when its evaluation stopped for failed rollouts.
+FAILURES_ERROR = "stopped: too many rollouts failed"
+#: The rollouts that must end before Reef checks ``max_failed_fraction``; a smaller evaluation checks at its end.
+FAILURE_CHECK_ROLLOUTS = 10
+#: The last seconds whose ended rollouts give the rate of an evaluation's time left.
+ETA_WINDOW_SECONDS = 1200.0
 #: The owner that every evaluation of the work queue stores: any service instance reads its rollouts.
 QUEUE_OWNER = "evaluations-queue"
 #: How many of a scenario's newest evaluations ``fail_stopped`` reads.
@@ -146,18 +168,74 @@ def request_settings(body: object) -> tuple[str, ArtifactEvaluationSettings]:
     )
 
 
-def attempt_trajectories(
-    scenario: str, evaluation_id: str, item: WorkItem, calls: Sequence[EvaluationCall]
-) -> list[dict[str, Any]]:
-    """The ATIF trajectory of each attempt of the rollout of ``item`` that has a 200 call among ``calls``, in attempt
-    order. ``calls`` are kept calls of that rollout, in attempt and then index order.
+def rollout_failed(item: WorkItem) -> bool:
+    """Whether ``item``, a final rollout, failed: its work item failed, or it finished with no score."""
+    if item.state != "finished":
+        return True
+    return RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"]).is_failed
 
-    ``make_trajectory`` stitches the 200 calls of one attempt, in index order. Each call is one ``AgentRecord``: its
-    ID is ``{evaluation_id}:{task_index}:{repeat}:{attempt}:{index}``, its payload the request body plus
-    ``response``, the response body, and its time the call's ``started_at``. The attempt that the rollout's score
-    came from is the last attempt of a finished rollout: its trajectory has the score's value as its reward, null
-    for a failed score, and every other trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``:
-    ``{evaluation_id, task, task_index, repeat, attempt, scored}``.
+
+def rollout_cancelled(item: WorkItem) -> bool:
+    """Whether a cancel or a stop of its evaluation ended ``item``, and not the rollout's own work."""
+    return item.state == "failed" and item.error in (CANCELLED_ERROR, FAILURES_ERROR)
+
+
+def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now: float) -> dict[str, JsonValue]:
+    """The progress of ``stored`` from ``items``, its rollouts in the queue (RFC #1287): ``{total, ended, scored,
+    failed, cancelled, running, mean_score, eta_seconds}``.
+
+    ``ended`` counts the final rollouts that no cancel or stop ended. ``mean_score`` is the mean of their number
+    scores. ``eta_seconds`` divides the rollouts left by the rate at which rollouts ended in the last
+    ``ETA_WINDOW_SECONDS``; it is None when none ended in that time, or when the evaluation ended.
+    """
+    request = stored.request
+    total = len(request.task_names) * request.rollouts_per_task
+    ended = [item for item in items if item.final and not rollout_cancelled(item)]
+    scores = [
+        RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
+        for item in ended
+        if item.state == "finished"
+    ]
+    scored = sum(not score.is_failed for score in scores)
+    window = min(ETA_WINDOW_SECONDS, now - stored.created_at)
+    recent = sum(item.ended_at is not None and item.ended_at >= now - window for item in ended)
+    eta = None
+    if stored.state in ("queued", "running") and recent and window > 0:
+        eta = (total - len(ended)) * window / recent
+    return {
+        "total": total,
+        "ended": len(ended),
+        "scored": scored,
+        "failed": len(ended) - scored,
+        "cancelled": sum(rollout_cancelled(item) for item in items),
+        "running": sum(item.state in ("assigned", "running") for item in items),
+        "mean_score": mean_score(scores),
+        "eta_seconds": eta,
+    }
+
+
+def rollout_work(rollout: EvaluationRollout) -> NewWork:
+    """The work item of ``rollout`` in the evaluations queue."""
+    return NewWork(
+        EVALUATIONS_QUEUE, rollout.item_id(), rollout.scenario, EVALUATION_ROLLOUT_KIND, rollout.to_payload()
+    )
+
+
+def attempt_trajectories(
+    scenario: str, evaluation_id: str, item: WorkItem, calls: Sequence[EvaluationCall], caller: Caller = "agent"
+) -> list[dict[str, Any]]:
+    """The ATIF trajectories of each attempt of the rollout of ``item`` that has a 200 call among ``calls``, in
+    attempt order. ``calls`` are kept calls of ``caller`` of that rollout, in attempt and then index order.
+
+    Each 200 call of an attempt is one ``AgentRecord``: its ID is the call's ``evaluation_call_id``, its payload the
+    request body plus ``response``, the response body, and its time the call's ``started_at``. ``TrajectoryIndex``
+    links the calls of one attempt into conversations, as it links the records of training samples: an agent that
+    plays several roles, each with its own messages, has one conversation for each.
+    ``make_trajectory`` stitches each conversation, without the calls that a retry replaced; the conversations are in
+    the order of their first calls. The attempt that the rollout's score came from is the last attempt of a finished
+    rollout: each of its agent trajectories has the score's value as its reward, null for a failed score, and every
+    other trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``: ``{evaluation_id, task,
+    task_index, repeat, attempt, caller, conversation, scored}``, where ``conversation`` counts from 0 in its attempt.
     """
     rollout = EvaluationRollout.from_item(item)
     finished = item.state == "finished" and item.result is not None
@@ -168,7 +246,7 @@ def attempt_trajectories(
         if summary.status != 200:
             continue
         record_id = evaluation_call_id(
-            evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index
+            evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index, summary.caller
         )
         payload = {**(call.request or {}), "response": dict(call.response or {})}
         attempts.setdefault(summary.attempt, []).append(
@@ -176,19 +254,48 @@ def attempt_trajectories(
         )
     trajectories = []
     for attempt, records in sorted(attempts.items()):
-        scored = finished and attempt == item.attempt_count
-        trajectory = make_trajectory(records, reward=score if scored else None).trajectory
-        evaluation = {
-            "evaluation_id": evaluation_id,
-            "task": rollout.task_name,
-            "task_index": rollout.task_index,
-            "repeat": rollout.repeat,
-            "attempt": attempt,
-            "scored": scored,
-        }
-        extra = trajectory["extra"]
-        trajectories.append({**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}})
+        scored = caller == "agent" and finished and attempt == item.attempt_count
+        for conversation, stitched in enumerate(conversations(records)):
+            trajectory = make_trajectory(stitched, reward=score if scored else None).trajectory
+            evaluation = {
+                "evaluation_id": evaluation_id,
+                "task": rollout.task_name,
+                "task_index": rollout.task_index,
+                "repeat": rollout.repeat,
+                "attempt": attempt,
+                "caller": caller,
+                "conversation": conversation,
+                "scored": scored,
+            }
+            extra = trajectory["extra"]
+            trajectories.append(
+                {**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}}
+            )
     return trajectories
+
+
+def verifier_trajectory(item: StoredItem, rollout: EvaluationRollout) -> dict[str, Any]:
+    """The ATIF document of the trajectory item ``item``, which the verifier of ``rollout`` wrote
+    (``evaluation_trajectory_item``), with ``extra.reef.evaluation``: ``{evaluation_id, task, task_index, repeat,
+    attempt, caller, file, scored}``, where ``caller`` is ``verifier``, ``file`` the name of its file and ``scored``
+    false. It adds an ``extra`` or ``extra.reef`` object that the document has not."""
+    location = item.metadata["evaluation"]
+    document = dict(cast(Mapping[str, Any], item.content))
+    extra = document.get("extra")
+    extra = extra if isinstance(extra, Mapping) else {}
+    reef = extra.get("reef")
+    reef = reef if isinstance(reef, Mapping) else {}
+    evaluation = {
+        "evaluation_id": location["evaluation_id"],
+        "task": rollout.task_name,
+        "task_index": rollout.task_index,
+        "repeat": rollout.repeat,
+        "attempt": location["attempt"],
+        "caller": "verifier",
+        "file": location["name"],
+        "scored": False,
+    }
+    return {**document, "extra": {**extra, "reef": {**reef, "evaluation": evaluation}}}
 
 
 class EvaluationResults:
@@ -265,17 +372,48 @@ class EvaluationResults:
                 self.stopped.wait(RESULT_POLL_SECONDS)
 
     def settle(self, scenario: str, evaluation_id: str) -> None:
-        """Start the evaluation once a worker took one of its rollouts; end it once all of them are final."""
+        """Start the evaluation once a worker took one of its rollouts; stop it when too many of its ended rollouts
+        failed (``max_failed_fraction``); add the rollouts that wait while fewer than ``max_concurrent_rollouts`` are
+        not final; end the evaluation once all of them are in the queue and final."""
         items = self.rollouts(evaluation_id, scenario)
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = current.store.evaluations.get(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
                 return
-            if not all(item.final for item in items):
+            request = stored.request
+            ended = [item for item in items if item.final]
+            failed = sum(rollout_failed(item) for item in ended)
+            total = len(request.task_names) * request.rollouts_per_task
+            limit = request.max_failed_fraction
+            if limit is not None and len(ended) >= min(FAILURE_CHECK_ROLLOUTS, total) and failed > limit * len(ended):
+                error = (
+                    f"too many rollouts failed: {failed} of {len(ended)} ended ({failed / len(ended):.0%}), "
+                    f"over the limit of {limit:.0%}"
+                )
+                logger.warning("evaluation %s of %s stopped: %s", evaluation_id, scenario, error)
+                # The rollouts end first, so that a reader that sees the failed evaluation counts them. Under this
+                # lock, no settle adds a rollout to the evaluation meanwhile.
+                for item in items:
+                    self.queue.cancel(EVALUATIONS_QUEUE, item.id, FAILURES_ERROR)
+                current.store.evaluations.fail(evaluation_id, error=error, finished_at=time.time())
+                return
+            # The queue holds a prefix of the rollouts in task and repeat order. Each next rollout has a fixed ID, so
+            # two settles at once add it once.
+            waiting = len(request.task_names) * request.rollouts_per_task - len(items)
+            if waiting > 0 and request.max_concurrent_rollouts is not None:
+                free = request.max_concurrent_rollouts - sum(not item.final for item in items)
+                template = EvaluationRollout.from_item(items[0])
+                for position in range(len(items), len(items) + min(free, waiting)):
+                    index, repeat = divmod(position, request.rollouts_per_task)
+                    self.queue.add(
+                        rollout_work(
+                            replace(template, task_index=index, task_name=request.task_names[index], repeat=repeat)
+                        )
+                    )
+            if waiting > 0 or not all(item.final for item in items):
                 if stored.state == "queued" and any(item.state in ("assigned", "running") for item in items):
                     current.store.evaluations.begin(evaluation_id)
                 return
-            request = stored.request
         rollouts = [EvaluationRollout.from_item(item) for item in items]
         names = list(dict.fromkeys(rollout.task_name for rollout in rollouts))
         scores = [
@@ -367,10 +505,10 @@ class ArtifactEvaluations:
     scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
     end.
 
-    Purpose: the evaluation routes call ``start``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
+    Purpose: the evaluation routes call ``start``, ``cancel``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
     ``call_json``, ``trajectories_json``, ``exported_rollouts`` and ``rollout_trajectories``, and the scenario update
     route calls ``configure``. ``open`` starts ``results`` and the reader of ``new_artifacts``; ``close`` stops them.
-    Every method but ``start``, ``configure``, ``open`` and ``close`` only reads.
+    Every method but ``start``, ``cancel``, ``configure``, ``open`` and ``close`` only reads.
     """
 
     def __init__(
@@ -445,6 +583,25 @@ class ArtifactEvaluations:
         artifact_id, settings = request_settings(body)
         return self.accept(scenario, artifact_id, settings, state="running")
 
+    def cancel(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
+        """Cancel the evaluation ``evaluation_id`` of ``scenario`` and return it after the cancel; None when the
+        scenario has no such evaluation.
+
+        A queued or running evaluation fails with ``CANCELLED_ERROR``, and each of its rollouts that is not final
+        fails with the same error. A worker that runs one of them stops its trial at its next lease extension. No
+        rollout that waits for ``max_concurrent_rollouts`` starts. An evaluation that ended stays as it is.
+        """
+        with self.dispatcher.locked_scenario(scenario) as current:
+            stored = current.store.evaluations.get(evaluation_id)
+            if stored is None or stored.state in ("finished", "failed"):
+                return stored
+            # ``settle`` adds rollouts under this lock and adds none to a failed evaluation, so the listed rollouts
+            # are all that it will ever have.
+            cancelled = current.store.evaluations.fail(evaluation_id, error=CANCELLED_ERROR, finished_at=time.time())
+            for item in self.results.rollouts(evaluation_id, scenario):
+                self.queue.cancel(EVALUATIONS_QUEUE, item.id, CANCELLED_ERROR)
+        return cancelled
+
     def configure(self, scenario: str, changes: Mapping[str, object]) -> dict[str, object]:
         """Store how Reef evaluates and activates each new artifact of ``scenario``, and return each changed
         setting as stored.
@@ -512,6 +669,28 @@ class ArtifactEvaluations:
         _, snapshot = current.resolve_artifact(artifact_id, component)
         artifact = snapshot.materialize()
         return request, artifact, runtime.artifact_model(artifact), runtime.api
+
+    def held_collection(self, scenario: str, name: str, held: Mapping[str, Path]) -> EvaluationCollection:
+        """The collection ``name`` of the owner of ``scenario``, with the tasks of each benchmark that are in
+        ``held``: the tasks of the scenario's eval split, by item ID. A benchmark with no such task is left out.
+
+        Raise ``ValueError`` when the owner stores no such collection, or when no task of it is in ``held``.
+        """
+        owner = self.dispatcher.scenario_owner(scenario)
+        if owner is None:
+            raise ValueError(f"scenario {scenario!r} has no owner, so it can use no collection")
+        try:
+            stored, tasks = collection_tasks(DataAccess.of(self.dispatcher).require_store(), owner, name)
+        except (NoDataStore, CollectionNotFound) as exc:
+            raise ValueError(str(exc)) from exc
+        benchmarks = tuple(
+            (benchmark, in_split)
+            for benchmark, item_ids in tasks.items()
+            if (in_split := tuple(item_id for item_id in item_ids if item_id in held))
+        )
+        if not benchmarks:
+            raise ValueError(f"the eval split of the imported tasks holds no task of the collection {name!r}")
+        return EvaluationCollection(name, stored.average, benchmarks)
 
     def tree_harness(self, scenario: str, item_id: str, api: str, tasks: Sequence[str]) -> TreeHarness:
         """The harness tree of the artifact item ``item_id`` of the owner of ``scenario``, for model calls of the
@@ -585,44 +764,45 @@ class ArtifactEvaluations:
         unknown = sorted(set(request.task_names) - set(held))
         if unknown:
             raise ValueError(f"the eval split of the imported tasks holds no tasks {unknown}")
-        names = request.task_names or tuple(held)
+        collection = None if settings.collection is None else self.held_collection(scenario, settings.collection, held)
+        if collection is not None:
+            names = tuple(name for name in held if name in collection.task_names())
+        else:
+            names = request.task_names or tuple(held)
         if not names:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
         tree = None if item is None else self.tree_harness(scenario, item, api, [str(held[name]) for name in names])
         agent = None if tree is not None else harbor_agent(request.harness)
+        # The stored request names its tasks, so that the rollouts that wait can be added later.
+        request = replace(request, task_names=names, collection=collection)
+        rollouts = [
+            EvaluationRollout(
+                scenario,
+                evaluation_id,
+                request.artifact_id,
+                request.component,
+                index,
+                name,
+                repeat,
+                model,
+                agent,
+                request.environment,
+                cast(dict[str, JsonValue], selection),
+                tree,
+            )
+            for index, name in enumerate(names)
+            for repeat in range(request.rollouts_per_task)
+        ]
         # The rollouts go to the queue before the evaluation exists, so that no reader sees an evaluation whose
         # rollouts are missing. An evaluation runs on all of its tasks or on none: when a step fails, the added
         # rollouts are cancelled and no evaluation is stored.
         added: list[str] = []
         try:
-            for index, name in enumerate(names):
-                for repeat in range(request.rollouts_per_task):
-                    rollout = EvaluationRollout(
-                        scenario,
-                        evaluation_id,
-                        request.artifact_id,
-                        request.component,
-                        index,
-                        name,
-                        repeat,
-                        model,
-                        agent,
-                        request.environment,
-                        cast(dict[str, JsonValue], selection),
-                        tree,
-                    )
-                    self.queue.add(
-                        NewWork(
-                            EVALUATIONS_QUEUE,
-                            rollout.item_id(),
-                            scenario,
-                            EVALUATION_ROLLOUT_KIND,
-                            rollout.to_payload(),
-                        )
-                    )
-                    added.append(rollout.item_id())
+            for rollout in rollouts[: request.max_concurrent_rollouts]:
+                self.queue.add(rollout_work(rollout))
+                added.append(rollout.item_id())
             with self.dispatcher.locked_scenario(scenario) as current:
                 stored = current.store.evaluations.create(
                     evaluation_id=evaluation_id,
@@ -643,23 +823,26 @@ class ArtifactEvaluations:
 
     def rollouts_json(self, scenario: str, evaluation_id: str) -> list[dict[str, Any]] | None:
         """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
-        attempt_count, started_at, ended_at, score, error, calls}``; None when ``scenario`` has no evaluation
-        ``evaluation_id``.
+        attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``; None when ``scenario`` has no
+        evaluation ``evaluation_id``.
 
-        ``state`` is the rollout's queue state, and ``started_at`` and ``ended_at`` are its work item's times.
-        ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``error`` is the reason of a
-        failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept calls as JSON, or
-        null when the data store keeps no call of it. It reads the metadata of the evaluation's calls, not their
-        content.
+        ``state`` is the rollout's queue state, or ``waiting`` for a rollout that ``max_concurrent_rollouts`` keeps
+        out of the queue yet. ``started_at`` and ``ended_at`` are its work item's times.
+        ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``rewards`` is every reward
+        of its verifier (``verifier_rewards``, RFC #1297), and null when it has none, as for a rollout that finished
+        before Reef kept them; ``error`` is the reason of a failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept agent calls as JSON,
+        or null when the data store keeps no agent call of it; ``verifier_calls`` is the same for its verifier calls.
+        It reads the metadata of the evaluation's calls, not their content.
         """
-        if self.get(scenario, evaluation_id) is None:
+        stored = self.get(scenario, evaluation_id)
+        if stored is None:
             return None
-        totals: dict[tuple[int, int], EvaluationCallTotals] = {}
+        totals: dict[tuple[int, int, Caller], EvaluationCallTotals] = {}
         place = self.call_store(scenario)
         kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
         for call_item in kept:
             summary = evaluation_call_summary(call_item)
-            key = (summary.task_index, summary.repeat)
+            key = (summary.task_index, summary.repeat, summary.caller)
             found = totals.get(key)
             totals[key] = EvaluationCallTotals(
                 (0 if found is None else found.count) + 1,
@@ -668,10 +851,12 @@ class ArtifactEvaluations:
                 (0 if found is None else found.completion_tokens) + (summary.completion_tokens or 0),
             )
         views = []
-        for item in self.results.rollouts(evaluation_id, scenario):
+        items = self.results.rollouts(evaluation_id, scenario)
+        for item in items:
             rollout = EvaluationRollout.from_item(item)
             finished = item.state == "finished" and item.result is not None
-            calls = totals.get((rollout.task_index, rollout.repeat))
+            calls = totals.get((rollout.task_index, rollout.repeat, "agent"))
+            verifier_calls = totals.get((rollout.task_index, rollout.repeat, "verifier"))
             views.append(
                 {
                     "task": rollout.task_name,
@@ -682,8 +867,29 @@ class ArtifactEvaluations:
                     "started_at": item.started_at,
                     "ended_at": item.ended_at,
                     "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
+                    "rewards": cast(Mapping[str, object], item.result).get("rewards") if finished else None,
                     "error": item.error,
                     "calls": None if calls is None else calls.to_json(),
+                    "verifier_calls": None if verifier_calls is None else verifier_calls.to_json(),
+                }
+            )
+        request = stored.request
+        for position in range(len(items), len(request.task_names) * request.rollouts_per_task):
+            index, repeat = divmod(position, request.rollouts_per_task)
+            views.append(
+                {
+                    "task": request.task_names[index],
+                    "task_index": index,
+                    "repeat": repeat,
+                    "state": "waiting",
+                    "attempt_count": 0,
+                    "started_at": None,
+                    "ended_at": None,
+                    "score": None,
+                    "rewards": None,
+                    "error": None,
+                    "calls": None,
+                    "verifier_calls": None,
                 }
             )
         return views
@@ -695,17 +901,20 @@ class ArtifactEvaluations:
         data = self.dispatcher.data_store
         return None if data is None or owner is None else (data, owner)
 
-    def rollout_items(self, scenario: str, evaluation_id: str, task_index: int, repeat: int) -> list[StoredItem]:
-        """The items of the kept calls of rollout ``(task_index, repeat)`` of one evaluation, without their content, in
-        attempt and then index order."""
+    def rollout_items(
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller
+    ) -> list[StoredItem]:
+        """The items of the kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation, without
+        their content, in attempt and then index order."""
         place = self.call_store(scenario)
         found = [
             item
             for item in (
                 () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
             )
-            if (item.metadata["origin"]["evaluation"]["task_index"], item.metadata["origin"]["evaluation"]["repeat"])
-            == (task_index, repeat)
+            if (summary := evaluation_call_summary(item)).task_index == task_index
+            and summary.repeat == repeat
+            and summary.caller == caller
         ]
         return sorted(
             found,
@@ -716,12 +925,12 @@ class ArtifactEvaluations:
         )
 
     def rollout_calls(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller = "agent"
     ) -> tuple[EvaluationCall, ...]:
-        """The kept calls of rollout ``(task_index, repeat)`` of one evaluation, with their bodies, in attempt and
-        then index order. It reads the content of this rollout's calls only."""
+        """The kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation, with their bodies, in
+        attempt and then index order. It reads the content of these calls only."""
         place = self.call_store(scenario)
-        items = self.rollout_items(scenario, evaluation_id, task_index, repeat)
+        items = self.rollout_items(scenario, evaluation_id, task_index, repeat, caller)
         if place is None or not items:
             return ()
         data, owner = place
@@ -729,39 +938,71 @@ class ArtifactEvaluations:
         return tuple(stored_evaluation_call(read[item.item_id]) for item in items if item.item_id in read)
 
     def calls_json(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller = "agent"
     ) -> list[dict[str, JsonValue]] | None:
-        """The summaries of the kept calls of rollout ``(task_index, repeat)`` of one evaluation as JSON, in attempt
-        and then index order; None when ``scenario`` has no evaluation ``evaluation_id``. It reads no content."""
+        """The summaries of the kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation as JSON,
+        in attempt and then index order; None when ``scenario`` has no evaluation ``evaluation_id``. It reads no
+        content."""
         if self.get(scenario, evaluation_id) is None:
             return None
-        items = self.rollout_items(scenario, evaluation_id, task_index, repeat)
+        items = self.rollout_items(scenario, evaluation_id, task_index, repeat, caller)
         return [evaluation_call_summary(item).to_json() for item in items]
 
     def call_json(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int
+        self,
+        scenario: str,
+        evaluation_id: str,
+        task_index: int,
+        repeat: int,
+        attempt: int,
+        index: int,
+        caller: Caller = "agent",
     ) -> dict[str, JsonValue] | None:
-        """The kept call with the key ``(task_index, repeat, attempt, index)`` of one evaluation as JSON, with its
-        bodies; None when ``scenario`` has no such evaluation or call. It reads the call's item by its ID."""
+        """The kept call with the key ``(task_index, repeat, attempt, caller, index)`` of one evaluation as JSON, with
+        its bodies; None when ``scenario`` has no such evaluation or call. It reads the call's item by its ID."""
         place = self.call_store(scenario)
         if place is None or self.get(scenario, evaluation_id) is None:
             return None
         data, owner = place
-        item = data.read(owner, f"{scenario}/{evaluation_call_id(evaluation_id, task_index, repeat, attempt, index)}")
+        record_id = evaluation_call_id(evaluation_id, task_index, repeat, attempt, index, caller)
+        item = data.read(owner, f"{scenario}/{record_id}")
         if item is None or item.kind != "record" or record_source(item.metadata) != "evaluation":
             return None
         return stored_evaluation_call(item).to_json()
 
     def trajectories_json(
-        self, scenario: str, evaluation_id: str, task_index: int, repeat: int
+        self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller = "agent"
     ) -> list[dict[str, Any]] | None:
-        """The trajectory of each attempt of rollout ``(task_index, repeat)`` of one evaluation
-        (``attempt_trajectories``), in attempt order; None when ``scenario`` has no evaluation ``evaluation_id``. A
-        rollout that the queue does not hold has none."""
+        """The trajectories of ``caller`` of each attempt of rollout ``(task_index, repeat)`` of one evaluation, in
+        attempt order; None when ``scenario`` has no evaluation ``evaluation_id``. A rollout that the queue does not
+        hold has none. The agent's trajectories are stitched from its calls (``attempt_trajectories``). In each
+        attempt, the verifier's trajectories are the files that it wrote (``verifier_trajectory``), in name order, and
+        then the trajectories stitched from its calls."""
         if self.get(scenario, evaluation_id) is None:
             return None
         item = self.queue.get(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, task_index, repeat))
-        return [] if item is None else self.rollout_trajectories(scenario, evaluation_id, item, every_attempt=True)
+        if item is None:
+            return []
+        if caller == "agent":
+            return self.rollout_trajectories(scenario, evaluation_id, item, every_attempt=True)
+        rollout = EvaluationRollout.from_item(item)
+        place = self.call_store(scenario)
+        written = sorted(
+            (
+                found
+                for found in (
+                    () if place is None else evaluation_trajectory_items(*place, scenario, evaluation_id, content=True)
+                )
+                if (found.metadata["evaluation"]["task_index"], found.metadata["evaluation"]["repeat"])
+                == (task_index, repeat)
+            ),
+            key=lambda found: (found.metadata["evaluation"]["attempt"], found.metadata["evaluation"]["index"]),
+        )
+        calls = self.rollout_calls(scenario, evaluation_id, task_index, repeat, "verifier")
+        stitched = attempt_trajectories(scenario, evaluation_id, item, calls, "verifier")
+        views = [verifier_trajectory(found, rollout) for found in written] + stitched
+        # A stable sort keeps the files of an attempt before its stitched trajectories.
+        return sorted(views, key=lambda view: view["extra"]["reef"]["evaluation"]["attempt"])
 
     def exported_rollouts(self, scenario: str, evaluation_id: str) -> tuple[WorkItem, ...] | None:
         """The rollout items of one evaluation, in task and repeat order, for an export of its trajectories; None when
@@ -786,6 +1027,28 @@ class ArtifactEvaluations:
         with self.dispatcher.locked_scenario(scenario) as current:
             return current.store.evaluations.get(evaluation_id)
 
+    def status_json(self, scenario: str, evaluations: Sequence[StoredEvaluation]) -> list[dict[str, object]]:
+        """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
+        ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the queue
+        once for all of them."""
+        rollouts: dict[str, list[WorkItem]] = {}
+        if evaluations:
+            for item in self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND):
+                # The payload names the evaluation; ``EvaluationRollout`` wrote it (``to_payload``).
+                rollouts.setdefault(str(item.payload["evaluation_id"]), []).append(item)
+        now = time.time()
+        return [
+            {
+                **stored.to_json(),
+                "progress": (
+                    evaluation_progress(stored, rollouts[stored.evaluation_id], now)
+                    if stored.evaluation_id in rollouts
+                    else None
+                ),
+            }
+            for stored in evaluations
+        ]
+
     def newest(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations of ``scenario``, newest first."""
         with self.dispatcher.locked_scenario(scenario) as current:
@@ -793,6 +1056,8 @@ class ArtifactEvaluations:
 
 
 __all__ = [
+    "CANCELLED_ERROR",
+    "FAILURES_ERROR",
     "QUEUE_OWNER",
     "STOPPED_ERROR",
     "ArtifactEvaluations",

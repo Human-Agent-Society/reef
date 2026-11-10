@@ -3,10 +3,22 @@ from __future__ import annotations
 import asyncio
 import json
 
+from typing import cast
+
 from aiohttp import web
 
+from reef.core.evaluation import CALLERS, Caller
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.routes.payload import read_object
+
+
+def caller_query(request: web.Request) -> Caller:
+    """The ``caller`` query of a call or trajectory route: ``agent`` when absent. ``ValueError``, which answers HTTP
+    400, for another value than a ``Caller``."""
+    caller = request.query.get("caller", "agent")
+    if caller not in CALLERS:
+        raise ValueError(f"caller is one of {', '.join(CALLERS)}")
+    return cast(Caller, caller)
 
 
 def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
@@ -14,10 +26,12 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
     async def evaluation(request: web.Request) -> web.Response:
         evaluation_id = request.match_info["evaluation_id"]
-        stored = await asyncio.to_thread(evaluations.get, request.match_info["scenario"], evaluation_id)
+        scenario = request.match_info["scenario"]
+        stored = await asyncio.to_thread(evaluations.get, scenario, evaluation_id)
         if stored is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
-        return web.json_response(stored.to_json(), headers={"Cache-Control": "no-store"})
+        [view] = await asyncio.to_thread(evaluations.status_json, scenario, [stored])
+        return web.json_response(view, headers={"Cache-Control": "no-store"})
 
     async def rollouts(request: web.Request) -> web.Response:
         scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
@@ -33,7 +47,9 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
         scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
         # A path number that is not an integer is a ValueError, which answers HTTP 400.
         task_index, repeat = int(request.match_info["task_index"]), int(request.match_info["repeat"])
-        views = await asyncio.to_thread(evaluations.calls_json, scenario, evaluation_id, task_index, repeat)
+        views = await asyncio.to_thread(
+            evaluations.calls_json, scenario, evaluation_id, task_index, repeat, caller_query(request)
+        )
         if views is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(
@@ -49,8 +65,14 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
     async def call(request: web.Request) -> web.Response:
         scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
-        key = tuple(int(request.match_info[name]) for name in ("task_index", "repeat", "attempt", "index"))
-        view = await asyncio.to_thread(evaluations.call_json, scenario, evaluation_id, *key)
+        task_index, repeat, attempt, index = (
+            int(request.match_info[name]) for name in ("task_index", "repeat", "attempt", "index")
+        )
+        key = (task_index, repeat, attempt, index)
+        caller = caller_query(request)
+        view = await asyncio.to_thread(
+            evaluations.call_json, scenario, evaluation_id, task_index, repeat, attempt, index, caller
+        )
         if view is None:
             raise web.HTTPNotFound(text=f"evaluation {evaluation_id!r} keeps no call {'/'.join(map(str, key))}")
         return web.json_response(view, headers={"Cache-Control": "no-store"})
@@ -58,7 +80,9 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
     async def trajectories(request: web.Request) -> web.Response:
         scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
         task_index, repeat = int(request.match_info["task_index"]), int(request.match_info["repeat"])
-        views = await asyncio.to_thread(evaluations.trajectories_json, scenario, evaluation_id, task_index, repeat)
+        views = await asyncio.to_thread(
+            evaluations.trajectories_json, scenario, evaluation_id, task_index, repeat, caller_query(request)
+        )
         if views is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(
@@ -96,8 +120,9 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
         scenario = request.match_info["scenario"]
         # A limit that is not a positive integer is a ValueError, which answers HTTP 400.
         listed = await asyncio.to_thread(evaluations.newest, scenario, limit=int(request.query.get("limit", "50")))
+        views = await asyncio.to_thread(evaluations.status_json, scenario, listed)
         return web.json_response(
-            {"scenario": scenario, "evaluations": [stored.to_json() for stored in listed]},
+            {"scenario": scenario, "evaluations": views},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -119,14 +144,22 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
 
 def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
-    """The start of an evaluation, which control accepts."""
+    """The start and the cancel of an evaluation, which control accepts."""
 
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)
         stored = await asyncio.to_thread(evaluations.start, request.match_info["scenario"], body)
         return web.json_response(stored.to_json(), status=202)
 
+    async def cancel(request: web.Request) -> web.Response:
+        evaluation_id = request.match_info["evaluation_id"]
+        stored = await asyncio.to_thread(evaluations.cancel, request.match_info["scenario"], evaluation_id)
+        if stored is None:
+            raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
+        return web.json_response(stored.to_json())
+
     app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
+    app.router.add_post("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel", cancel)
 
 
 __all__ = ["register_evaluation_reads", "register_evaluation_writes"]

@@ -763,12 +763,16 @@ segment files instead. A segment is one JSON Lines file per owner. The
 database keeps the place of each line, and a read fetches only the lines that
 it needs.
 
-- The content of each new trajectory item goes to a segment when the item is
-  created. One ``create`` call writes one segment.
+- A write of new trajectory items with at least 1 MiB of content, such as an
+  upload, goes to one segment when the items are created.
 - Every 5 minutes, the data service moves the content that the database still
-  holds into segments: the messages of record items, and trajectory items from
-  before you set the backend. It moves an owner's content when at least 64 MiB
-  of it waits, oldest first, in segments of at least 64 MiB.
+  holds into segments: the messages of record items, the trajectory items of
+  smaller writes, and trajectory items from before you set the backend. It
+  moves an owner's content when at least 64 MiB of it waits, oldest first, in
+  segments of at least 64 MiB.
+- In the same run, the data service merges segments of less than 1 MiB into
+  segments of at least 64 MiB, when an owner has at least 64 MiB in them. A
+  read of many items then sends fewer requests to the segment store.
 - A segment that no item uses for 24 hours is deleted.
 
 ``local`` keeps the segments in ``<agent-record-dir>/segments``. Only the

@@ -59,10 +59,15 @@ CONTAINER_ROOT = "/reef-run"
 COMMAND_FILE = "command.json"
 #: The directory under the agent's log directory that receives the agent's session files.
 SESSIONS_DIR = "sessions"
+#: The ATIF document of the run under the agent's log directory, and the pattern of it and its continuations.
+TRAJECTORY_FILE = "trajectory.json"
+TRAJECTORY_FILES = "trajectory*.json"
 #: The install kinds an agent can have in a task's container.
-CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv"})
+CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv", "git"})
 #: Where Astral's installer puts uv in a task's container, under the agent user's own home.
 CONTAINER_UV = "$HOME/.local/bin/uv"
+#: Where a git install keeps its checkout (``src``) and its venv (``venv``) in a task's container.
+CONTAINER_GIT_AGENT = "$HOME/.reef-agent"
 #: Where the bridge's relay lives in a task's container, and the loopback port on which it answers the bridge client.
 RELAY_DIR = "/tmp/reef-relay"
 RELAY_TUNNEL_PORT = 47811
@@ -75,7 +80,7 @@ RELAY_READY_SECONDS = 60.0
 def can_run_in_task_container(descriptor: AdapterDescriptor) -> bool:
     """Whether ``descriptor``'s agent can play a Harbor task directory in the task's container.
 
-    The agent needs an install that works in any glibc container (npm or uv), and
+    The agent needs an install that works in any glibc container (npm, uv, or git), and
     its command must take the task as text: an adapter whose ``{task}`` is
     the task directory runs the task through its own runner.
     """
@@ -90,7 +95,8 @@ class AdapterAgent(BaseInstalledAgent):
     """A Harbor agent that runs one Reef adapter's binary in a task's container.
 
     Values: ``package`` and ``version`` name the package to install, and
-    ``install_kind`` its channel: ``npm``, or ``uv`` for uv itself;
+    ``install_kind`` its channel: ``npm``, ``uv`` for uv itself, or ``git``
+    for a checkout of ``repository`` at ``ref``, installed editable into a venv;
     ``binary`` is the command the package installs; ``argv`` is the adapter's
     ``run.task`` argument template, with ``{task}`` slots; ``env`` is the
     run environment, already pointed at ``CONTAINER_ROOT``;
@@ -116,16 +122,24 @@ class AdapterAgent(BaseInstalledAgent):
         env: Mapping[str, str],
         writable_paths: Sequence[str],
         sessions: str,
+        trajectory_format: str,
         files_dir: str,
         timeout_s: float,
         install_kind: str = "npm",
+        repository: str = "",
+        ref: str = "",
         bridge_port: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, version=version, **kwargs)
+        self.reader = reader_for(trajectory_format)
         if install_kind not in CONTAINER_INSTALL_KINDS:
             raise ValueError(f"install kind {install_kind!r} cannot install in a task's container")
+        if install_kind == "git" and not (repository and ref):
+            raise ValueError("a git install needs a repository and a ref")
         self.install_kind = install_kind
+        self.repository = repository
+        self.ref = ref
         self.bridge_port = bridge_port
         self.package = package
         self.binary = binary
@@ -145,19 +159,26 @@ class AdapterAgent(BaseInstalledAgent):
     def get_version_command(self) -> str | None:
         if self.install_kind == "uv":
             return f'"{CONTAINER_UV}" --version'
+        if self.install_kind == "git":
+            return f'"{CONTAINER_GIT_AGENT}/venv/bin/{self.binary}" --version'
         return f". ~/.nvm/nvm.sh; {shlex.quote(self.binary)} --version"
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        # nvm and Astral's installer need curl; a task image without it gets it from apt, as Harbor's own npm
-        # agents do.
+        # nvm and Astral's installer need curl, and a git install needs git; a task image without them gets them
+        # from apt, as Harbor's own npm agents do.
+        tools = ("curl", "git") if self.install_kind == "git" else ("curl",)
         await self.exec_as_root(
             environment,
-            command="command -v curl >/dev/null || (apt-get update && apt-get install -y curl)",
+            command=" && ".join(
+                f"(command -v {tool} >/dev/null || (apt-get update && apt-get install -y {tool}))" for tool in tools
+            ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
         if self.install_kind == "uv":
             command = uv_install_command(str(self._version))
+        elif self.install_kind == "git":
+            command = self.git_install_command()
         else:
             command = (
                 f"set -euo pipefail; {nvm_node_install_snippet()} && "
@@ -179,7 +200,9 @@ class AdapterAgent(BaseInstalledAgent):
         assignments = " ".join(shlex.quote(f"{name}={value}") for name, value in self.env.items())
         # The agent resolves from the user's own home before the run environment moves HOME to the root. uv keeps
         # its cache and Pythons there too, so the program's dependencies install once per container.
-        if self.install_kind == "uv":
+        if self.install_kind == "git":
+            find_agent = f'agent="{CONTAINER_GIT_AGENT}/venv/bin/{self.binary}"'
+        elif self.install_kind == "uv":
             find_agent = (
                 f'agent="{CONTAINER_UV}" && export UV_CACHE_DIR="$HOME/.cache/uv" '
                 'UV_PYTHON_INSTALL_DIR="$HOME/.local/share/uv/python"'
@@ -197,6 +220,9 @@ class AdapterAgent(BaseInstalledAgent):
         sessions = f"{CONTAINER_ROOT}/{self.sessions}"
         if await environment.is_dir(sessions):
             await environment.download_dir(sessions, self.logs_dir / SESSIONS_DIR)
+        # Only Reef writes the ATIF files that the verifier reads. Harbor's upload adds files but removes none.
+        planted = shlex.quote(str(self.environment_logs_dir)) + "/" + TRAJECTORY_FILES
+        await self.exec_as_root(environment, command=f"rm -f {planted}")
 
     @contextlib.asynccontextmanager
     async def bridged(self, environment: BaseEnvironment) -> AsyncIterator[None]:
@@ -296,16 +322,49 @@ class AdapterAgent(BaseInstalledAgent):
         installs at the python adapter's pin unless it is the agent's own install."""
         if (await environment.exec(command="command -v python3")).return_code == 0:
             return "python3"
-        if self.install_kind != "uv":
+        if self.install_kind not in ("uv", "git"):
             install = get_adapter("python").install
             if install is None:
                 raise ProgramLaunchError("the python adapter declares no uv install for the bridge's relay")
             await self.exec_as_agent(environment, command=uv_install_command(install.version))
         return f'"{CONTAINER_UV}" run --no-project --python 3.12'
 
+    def git_install_command(self) -> str:
+        """The shell command that installs the agent from a checkout at the pinned ref, as Reef does on a person's
+        machine (``reef.harness.tasks.vendor_install``): editable into a venv, without the checkout's ``.git``. uv
+        is at the python adapter's pin, and builds the venv with Python 3.12."""
+        install = get_adapter("python").install
+        if install is None:
+            raise ProgramLaunchError("the python adapter declares no uv install for a git install")
+        source, venv = f"{CONTAINER_GIT_AGENT}/src", f"{CONTAINER_GIT_AGENT}/venv"
+        return (
+            f'{uv_install_command(install.version)} && rm -rf "{CONTAINER_GIT_AGENT}" && '
+            f"git clone --quiet --depth 1 --branch {shlex.quote(self.ref)} {shlex.quote(self.repository)} "
+            f'"{source}" && rm -rf "{source}/.git" && "{CONTAINER_UV}" venv --quiet --python 3.12 "{venv}" && '
+            f'"{CONTAINER_UV}" pip install --quiet --python "{venv}/bin/python" -e "{source}" && '
+            f'"{venv}/bin/{self.binary}" --version'
+        )
+
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
-        """Keep Harbor's context as it is: Reef reads the session files, not Harbor's token counts."""
+        """Write the run's ATIF documents beside the session files, for the task's verifier (RFC #1290).
+
+        Harbor uploads the log directory to the container before the verifier starts. Harbor's context stays as it
+        is: Reef reads the session files, not Harbor's token counts. A session that does not convert writes no ATIF,
+        and the run goes on.
+        """
+        for planted in self.logs_dir.glob(TRAJECTORY_FILES):
+            planted.unlink()
+        try:
+            documents = self.reader.to_atif(self.logs_dir / SESSIONS_DIR)
+        except Exception:
+            self.logger.warning("the agent's sessions do not convert to ATIF", exc_info=True)
+            return
+        names = [TRAJECTORY_FILE, *(f"trajectory.cont-{index}.json" for index in range(1, len(documents)))]
+        for index, document in enumerate(documents):
+            if index + 1 < len(names):
+                document = {**document, "continued_trajectory_ref": names[index + 1]}
+            (self.logs_dir / names[index]).write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
 
 def uv_install_command(version: str) -> str:
@@ -357,6 +416,8 @@ def adapter_agent_kwargs(
     """The keyword arguments of an ``AdapterAgent`` for ``descriptor``, whose install is ``install``."""
     return {
         "install_kind": install.kind,
+        "repository": install.repository,
+        "ref": install.ref,
         "package": install.package,
         "version": install.version,
         "binary": descriptor.binary,
@@ -364,6 +425,7 @@ def adapter_agent_kwargs(
         "env": headless_env(descriptor, Path(CONTAINER_ROOT)),
         "writable_paths": list(descriptor.writable_paths),
         "sessions": descriptor.trajectory_path,
+        "trajectory_format": descriptor.trajectory_format,
         "files_dir": str(files_dir),
         "timeout_s": timeout,
     }
@@ -437,7 +499,7 @@ def run_harbor_task(
     if not can_run_in_task_container(descriptor):
         raise TaskRunError(
             f"adapter {descriptor.name!r} cannot play a Harbor task directory in the task's container: "
-            "it needs an npm install, and a command that takes the task as text"
+            "it needs an npm, uv or git install, and a command that takes the task as text"
         )
     install = descriptor.install
     if install is None:

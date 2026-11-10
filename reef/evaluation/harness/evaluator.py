@@ -207,7 +207,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         self.task_containers = task_directories and not descriptor.takes_task_directory
         if self.task_containers and not can_run_in_task_container(descriptor):
             raise ValueError(
-                f"adapter {descriptor.name!r} cannot play a Harbor task directory: it needs an npm install"
+                f"adapter {descriptor.name!r} cannot play a Harbor task directory: it needs an npm, uv or git install"
             )
         if not agent_host:
             raise ValueError("agent_host must name the address at which a task container reaches Reef")

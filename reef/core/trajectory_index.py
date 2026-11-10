@@ -8,7 +8,8 @@ memory for a record-to-sample stage. Both use ``call_key`` and ``best_parent``, 
 
 Let ``P`` be a payload with a message list (``payload_provider``), and ``canonical(v)`` the JSON of ``v`` with sorted
 keys and compact separators. The request values of ``P`` are its ``system`` or ``instructions`` value, when it has
-one, and then each message of its message list. ``trajectory_sha256(P)`` is the SHA-256 of ``"trajectory:" +
+one, and then each message of its message list, each in its ATIF form (``atif_form``, RFC #1300), so that a
+provider's spelling of one message, such as ``cache_control``, cannot split a conversation. ``trajectory_sha256(P)`` is the SHA-256 of ``"trajectory:" +
 canonical(shape)``, where the shape holds the provider, the field names and ``P["tools"]``: two calls have one value
 if and only if they have the same API format and the same tools. ``prefix_sha256(P)[i]`` chains the first ``i + 1``
 request values onto it, so two calls of one trajectory have a common prefix of ``i + 1`` request values if and only
@@ -22,7 +23,17 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from reef.core.atif_payloads import OPENAI_CHAT, OPENAI_RESPONSES, canonical_json, payload_provider, reply_messages
+from reef.core.atif_payloads import (
+    ELEMENTS,
+    OPENAI_CHAT,
+    OPENAI_RESPONSES,
+    atif_message,
+    canonical_json,
+    payload_provider,
+    plain_message,
+    reply_messages,
+    step,
+)
 from reef.core.records_types import AgentRecord, RequestType
 
 
@@ -31,16 +42,25 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def comparable_message(message: Any) -> Any:
-    """A message as a later request resends it: a client drops the fields that a server sets to null."""
-    if isinstance(message, Mapping):
-        return {key: value for key, value in message.items() if value is not None}
-    return message
+def atif_form(value: Any, provider: str, *, system: bool = False) -> Any:
+    """The ATIF form of one request value or reply message (RFC #1300): its ATIF elements, without the patch that
+    restores the raw value, with text-only content as one string. Two spellings of one message, such as a string and
+    one text part, or a part with ``cache_control``, have one form. A value that is no message stays as it is."""
+    if system:
+        elements = [step("system", atif_message(value))]
+    elif isinstance(value, Mapping):
+        elements = ELEMENTS[provider](value, copied=False)
+    else:
+        return value
+    return [
+        {name: plain_message(item) if name in ("message", "content") else item for name, item in element.items()}
+        for element in elements
+    ]
 
 
-def reply_sha256(messages: Sequence[Any]) -> str:
-    """The hash that compares reply messages with the messages of a later request (``comparable_message``)."""
-    return sha256_text(canonical_json([comparable_message(message) for message in messages]))
+def reply_sha256(values: Sequence[Any]) -> str:
+    """The hash that compares reply messages with the messages of a later request, both in their ATIF form."""
+    return sha256_text(canonical_json(list(values)))
 
 
 @dataclass(frozen=True)
@@ -103,9 +123,9 @@ def call_key(payload: Mapping[str, Any]) -> CallKey | None:
     system_field = next(
         (name for name in ("system", "instructions") if name in payload and provider != OPENAI_CHAT), None
     )
-    request = list(payload[message_field])
+    request = [atif_form(message, provider) for message in payload[message_field]]
     if system_field is not None:
-        request.insert(0, payload[system_field])
+        request.insert(0, atif_form(payload[system_field], provider, system=True))
     shape: dict[str, Any] = {"provider": provider, "message_field": message_field, "system_field": system_field}
     if "tools" in payload:
         shape["tools"] = payload["tools"]
@@ -118,7 +138,7 @@ def call_key(payload: Mapping[str, Any]) -> CallKey | None:
             prefixes.append(previous)
     except (TypeError, ValueError) as exc:
         raise TypeError("a record must contain JSON-serializable values") from exc
-    replies = reply_messages(payload.get("response")) or []
+    replies = [atif_form(message, provider) for message in reply_messages(payload.get("response")) or []]
     return CallKey(
         trajectory, tuple(request), tuple(prefixes), len(replies), reply_sha256(replies) if replies else None
     )
@@ -285,13 +305,26 @@ class TrajectoryIndex:
                 self.by_list[self.calls.pop(record_id).list_sha256].remove(record_id)
 
 
+def conversations(records: Sequence[AgentRecord]) -> list[list[AgentRecord]]:
+    """The inference records of ``records`` linked into conversations by ``TrajectoryIndex``, in the order of their
+    first records. Each conversation holds its records oldest first, without the calls that a retry replaced."""
+    index = TrajectoryIndex()
+    for record in records:
+        index.add(record)
+    by_id = {record.agent_record_id: record for record in records}
+    order = {record_id: position for position, record_id in enumerate(by_id)}
+    ends = (index.trajectory(record_id) for record_id in by_id if index.is_end(record_id))
+    return [[by_id[record_id] for record_id in calls] for calls in sorted(ends, key=lambda calls: order[calls[0]])]
+
+
 __all__ = [
     "CallKey",
     "ParentCandidate",
     "TrajectoryIndex",
+    "atif_form",
     "best_parent",
     "call_key",
-    "comparable_message",
+    "conversations",
     "reply_sha256",
     "sha256_text",
     "trajectory_calls",

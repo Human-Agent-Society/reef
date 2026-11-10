@@ -278,7 +278,7 @@ class HarnessEvolutionRecipe(Recipe):
             if not can_run_in_task_container(descriptor):
                 raise RecipeConfigError(
                     f"adapter {descriptor.name!r} cannot play Harbor task directories: Reef installs the agent in "
-                    "each task's container with npm, and the adapter declares no npm install"
+                    "each task's container with npm, uv or git, and the adapter declares no such install"
                 )
             if self.evolution.executor != "local":
                 raise RecipeConfigError(
