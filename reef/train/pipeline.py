@@ -41,8 +41,9 @@ from __future__ import annotations
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
+from itertools import batched
 from typing import Any
 
 from reef.core.job_data import JobOutcome
@@ -55,7 +56,8 @@ from reef.pipeline_context import PipelineContext
 from reef.record2sample import NoSamples, Record2Sample, RecordSetUnit
 from reef.record2sample.staleness import ServedArtifacts
 from reef.sample2job import NoJobData, Sample2Job
-from reef.storage.samples import SAMPLE_KINDS, StoredSample, consumed_sample_id, memory_samples
+from reef.storage.data import MAX_QUERY_LIMIT
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, StoredSample, consumed_sample_id, memory_samples
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
@@ -184,8 +186,8 @@ class TrainingPipeline:
         self.sample2job = NoJobData(context) if sample2job is None else sample2job
         self.supported_training_modes = self.sample2job.supported_training_modes
         self.training_requests: dict[str, TrainingRequest] = {}
-        #: Whether this trainer takes each queued request, by ID. ``request_entries`` decides it once: it reads every
-        #: sample of the request, and ``holds_job_data`` runs on each poll.
+        #: Whether this trainer takes each queued request, by ID. ``count_request_entries`` decides it once: it reads
+        #: every sample of the request, and ``holds_job_data`` runs on each poll.
         self.takes_request: dict[str, bool] = {}
         self.consumed_requests: set[str] = set()
         #: What the failed step of each failed request said, by request ID.
@@ -517,14 +519,43 @@ class TrainingPipeline:
                 untrainable.append(stored.sample_id)
             else:
                 entries.append((stored, sample))
+        self.check_entries(untrainable, {stored.kind for stored, _ in entries}, len(entries))
+        return tuple(entries)
+
+    def check_entries(self, untrainable: Sequence[str], kinds: Set[SampleKind], entry_count: int) -> None:
+        """Raise ``ValueError`` as ``request_entries`` does for a request whose stored samples have ``untrainable``
+        IDs that this trainer cannot train, and ``entry_count`` others, of ``kinds``."""
         if untrainable:
             raise ValueError(f"this trainer cannot train the samples {sorted(untrainable)}")
-        if len({stored.kind for stored, _ in entries}) > 1:
+        if len(kinds) > 1:
             raise ValueError("a request names samples of one kind: trajectories or tasks")
         limit = self.sample2job.max_job_samples
-        if limit is not None and len(entries) > limit:
+        if limit is not None and entry_count > limit:
             raise ValueError(f"one job's data holds at most {limit} samples")
-        return tuple(entries)
+
+    def count_request_entries(self, request: TrainingRequest, *, all_stored: bool) -> int:
+        """The number of samples that ``request_entries`` gives for ``request``; raise ``ValueError`` as it does.
+        With ``all_stored``, raise ``ValueError`` first when the store lacks a sample that ``request`` names.
+
+        It reads ``MAX_QUERY_LIMIT`` samples at a time and keeps none: a request can name tens of thousands of
+        trajectories, whose content is gigabytes.
+        """
+        stored_ids: set[str] = set()
+        untrainable: list[str] = []
+        kinds: set[SampleKind] = set()
+        for sample_ids in batched(dict.fromkeys(request.samples), MAX_QUERY_LIMIT):
+            for stored in self.store.get(sample_ids):
+                stored_ids.add(stored.sample_id)
+                if self.trainable(stored) is None:
+                    untrainable.append(stored.sample_id)
+                else:
+                    kinds.add(stored.kind)
+        unknown = sorted(set(request.samples) - stored_ids)
+        if all_stored and unknown:
+            raise ValueError(f"the scenario holds no samples {unknown}")
+        entry_count = len(stored_ids) - len(untrainable)
+        self.check_entries(untrainable, kinds, entry_count)
+        return entry_count
 
     def check_request(self, request: TrainingRequest) -> None:
         """Raise ``ValueError`` unless this trainer can run ``request``: the store holds each sample that it names,
@@ -534,11 +565,7 @@ class TrainingPipeline:
             if not self.sample2job.reads_requests:
                 raise ValueError("the request names no samples to train")
             return
-        samples = self.store.get(request.samples)
-        unknown = sorted(set(request.samples) - {stored.sample_id for stored in samples})
-        if unknown:
-            raise ValueError(f"the scenario holds no samples {unknown}")
-        self.sample_entries(samples)
+        self.count_request_entries(request, all_stored=True)
 
     def next_job_listing(self) -> tuple[Mapping[str, Any], ...]:
         """The samples of the next automatic job (``auto_entries``) as JSON: ``sample_id``, ``kind``, ``group``,
@@ -626,7 +653,7 @@ class TrainingPipeline:
             return self.sample2job.reads_requests
         if request.id not in self.takes_request:
             try:
-                self.takes_request[request.id] = bool(self.request_entries(request))
+                self.takes_request[request.id] = self.count_request_entries(request, all_stored=False) > 0
             except ValueError:
                 # Another trainer's request.
                 self.takes_request[request.id] = False

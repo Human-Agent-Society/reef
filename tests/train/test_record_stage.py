@@ -847,12 +847,25 @@ def test_a_request_reads_its_samples_in_batches_and_a_poll_does_not_read_them_ag
         return read_many(owner, item_ids, **options)
 
     monkeypatch.setattr(data, "read_many", counted)
+    get, held = SampleStore.get, []
+
+    def counted_get(store: SampleStore, sample_ids: Any) -> Any:
+        held.append(len(sample_ids))
+        return get(store, sample_ids)
+
+    monkeypatch.setattr(SampleStore, "get", counted_get)
     request = training_request(*names)
     processor.check_request(request)
     assert reads == [MAX_QUERY_LIMIT, 1]
     processor.queue_requests([request])
     assert processor.holds_job_data(None) and processor.holds_job_data(None)
     assert reads == [MAX_QUERY_LIMIT, 1] * 2, "the pipeline decides once whether it takes a queued request"
+    assert held == [MAX_QUERY_LIMIT, 1] * 2, "a check holds the content of one batch of samples at a time"
+    # A sample that left the scenario does not stop the pipeline from taking the request.
+    gone = replace(training_request("gone", names[0]), id="with-gone")
+    processor.consume_request(request.id)
+    processor.queue_requests([gone])
+    assert processor.holds_job_data(None)
 
 
 class TaskJobData(RecordingJobData):
