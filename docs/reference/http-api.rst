@@ -1506,10 +1506,12 @@ when nothing was refused. A step whose merged list holds more than 8 items is
 skipped. Reef never runs a check: the
 client runs the checks where the harness runs, after the person read them.
 
-The two modes differ in what starts a step and what it trains. ``auto``, the
-default, trains on traffic when ``job_samples`` samples wait, and refuses a
-request with HTTP 400. ``manual`` starts a job only for a request,
-oldest first, one per step. The step trains the samples that the request
+The two modes differ in what starts a job. ``auto``, the default, also
+starts a job on its own: when ``job_samples`` samples wait, or when the
+deployment's training manager says so (``training.manager``, see
+`Configuration <configuration.rst>`__). ``manual`` starts a job only for a
+request. In both modes a request trains, oldest first, one per step, and
+before the samples that wait. The step trains the samples that the request
 names, whatever ``job_samples``:
 
 - A weight recipe needs ``samples``, and refuses a request without it

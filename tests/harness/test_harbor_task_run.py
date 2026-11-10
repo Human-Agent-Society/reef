@@ -280,9 +280,34 @@ def test_a_container_reaches_a_loopback_model_route_at_the_agent_host() -> None:
 
 def test_the_tools_that_a_task_gives_its_agent_are_found_in_its_config(tmp_path: Path) -> None:
     task = harbor_task(tmp_path)
-    assert task_agent_tools(task) == ()
+    pi, python = get_adapter("pi"), get_adapter("python")
+    assert task_agent_tools(python, task) == ()
 
     config = (task / "task.toml").read_text()
     server = '[[environment.mcp_servers]]\nname = "search"\ntransport = "sse"\nurl = "http://search:8000/sse"\n'
     (task / "task.toml").write_text(f'{config}\n[environment]\nskills_dir = "/skills"\n\n{server}')
-    assert task_agent_tools(task) == ("mcp_servers", "skills_dir")
+    # pi names the directory where it reads a task's skills; the python adapter names none.
+    assert task_agent_tools(pi, task) == ("mcp_servers",)
+    assert task_agent_tools(python, task) == ("mcp_servers", "skills_dir")
+
+
+def test_the_agent_copies_the_skills_of_the_task_into_its_skills_directory_before_the_tree(tmp_path: Path) -> None:
+    pi = get_adapter("pi")
+    assert pi.task_skills_path == "pi-agent/skills"
+    kwargs = adapter_agent_kwargs(pi, pi.install, tmp_path / "files", 60.0)
+
+    class OrderedEnvironment(RecordingEnvironment):
+        async def upload_dir(self, source, target) -> None:
+            self.events.append(f"upload {target}")
+
+    def run_events(logs: Path, **task: str) -> list[str]:
+        logs.mkdir()
+        environment = OrderedEnvironment()
+        asyncio.run(AdapterAgent(logs, **kwargs, **task).run("Play.", environment, AgentContext()))
+        return environment.events
+
+    copy = f"mkdir -p {CONTAINER_ROOT}/pi-agent/skills && cp -R /skills/. {CONTAINER_ROOT}/pi-agent/skills/"
+    events = run_events(tmp_path / "with", skills_dir="/skills")
+    copied = next(index for index, event in enumerate(events) if copy in event)
+    assert copied < events.index(f"upload {CONTAINER_ROOT}")
+    assert not any("cp -R" in event for event in run_events(tmp_path / "without"))

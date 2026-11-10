@@ -103,7 +103,10 @@ class AdapterAgent(BaseInstalledAgent):
     ``writable_paths`` are directories under the root that the agent writes;
     ``sessions`` is the session directory under the root; ``files_dir`` is a
     local directory that holds the rendered tree as it lands under the root;
-    ``timeout_s`` bounds the command. ``bridge_port`` is the loopback port of
+    ``timeout_s`` bounds the command. ``task_skills`` is the directory under
+    the root where the agent reads a task's skills, or ``None`` when it reads
+    none: a run copies the task's ``skills_dir``, which Harbor names, there
+    before the tree, so the tree's file wins on one path. ``bridge_port`` is the loopback port of
     the rollout's capture proxy on this host when the container cannot reach
     it: the agent then bridges the container's ``127.0.0.1:<bridge_port>`` to
     it while the command runs (:meth:`bridged`).
@@ -128,6 +131,7 @@ class AdapterAgent(BaseInstalledAgent):
         install_kind: str = "npm",
         repository: str = "",
         ref: str = "",
+        task_skills: str | None = None,
         bridge_port: int | None = None,
         **kwargs: Any,
     ) -> None:
@@ -140,6 +144,7 @@ class AdapterAgent(BaseInstalledAgent):
         self.install_kind = install_kind
         self.repository = repository
         self.ref = ref
+        self.task_skills = task_skills
         self.bridge_port = bridge_port
         self.package = package
         self.binary = binary
@@ -191,6 +196,12 @@ class AdapterAgent(BaseInstalledAgent):
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         directories = [CONTAINER_ROOT, *(f"{CONTAINER_ROOT}/{path}" for path in self.writable_paths)]
         await self.exec_as_root(environment, command=f"mkdir -p {' '.join(map(shlex.quote, directories))}")
+        if self.skills_dir and self.task_skills is not None:
+            # The task's skills land before the tree, so the tree's file wins on one path.
+            skills = shlex.quote(f"{CONTAINER_ROOT}/{self.task_skills}")
+            await self.exec_as_root(
+                environment, command=f"mkdir -p {skills} && cp -R {shlex.quote(self.skills_dir)}/. {skills}/"
+            )
         await environment.upload_dir(self.files_dir, CONTAINER_ROOT)
         # The agent may run as a user other than root, and it writes its sessions under the root.
         await self.exec_as_root(environment, command=f"chmod -R a+rwX {CONTAINER_ROOT}")
@@ -428,6 +439,7 @@ def adapter_agent_kwargs(
         "trajectory_format": descriptor.trajectory_format,
         "files_dir": str(files_dir),
         "timeout_s": timeout,
+        "task_skills": descriptor.task_skills_path,
     }
 
 
@@ -461,12 +473,13 @@ def tree_agent(
     }
 
 
-def task_agent_tools(task: Path) -> tuple[str, ...]:
-    """The settings of the Harbor task directory ``task`` that ``AdapterAgent`` does not give its agent."""
+def task_agent_tools(descriptor: AdapterDescriptor, task: Path) -> tuple[str, ...]:
+    """The settings of the Harbor task directory ``task`` that ``AdapterAgent`` does not give ``descriptor``'s agent:
+    ``mcp_servers`` for every adapter, and ``skills_dir`` for an adapter that names no ``task_skills_path``."""
     environment = TaskConfig.model_validate_toml((task / "task.toml").read_text(encoding="utf-8")).environment
     return (
         *(("mcp_servers",) if environment.mcp_servers else ()),
-        *(("skills_dir",) if environment.skills_dir else ()),
+        *(("skills_dir",) if environment.skills_dir and descriptor.task_skills_path is None else ()),
     )
 
 

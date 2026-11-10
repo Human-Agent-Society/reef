@@ -29,6 +29,7 @@ from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
+from reef.dispatcher.manager_worker import ManagedTraining, TrainingManagerWorker
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
 from reef.dispatcher.serving import ServingWorker
@@ -44,7 +45,7 @@ from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.factory import ItemStart
-from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
+from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshots import ServedBesideArtifact
 from reef.storage.artifact_items import request_artifact_copy
@@ -57,8 +58,26 @@ from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
-from reef.storage.work_queue import WorkItem
-from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker, cancel_request_jobs
+from reef.storage.work_queue import FINAL_STATES, WorkItem
+from reef.train.job_queue import (
+    JobExperimentRecorder,
+    JobQueueComponent,
+    TrainingJobWorker,
+    cancel_request_jobs,
+    cancel_scenario_job,
+    scenario_jobs,
+)
+from reef.train.manager import (
+    MANAGER_REQUEST_PREFIX,
+    MANAGER_SESSION,
+    Cancel,
+    ManagedJob,
+    ManagerAction,
+    ManagerView,
+    Train,
+    TrainFrom,
+    TrainingManager,
+)
 from reef.train.trainer import Trainer
 from reef.train.training_requests import RequestCancel, TrainingRequestQueue
 
@@ -74,7 +93,14 @@ class BackgroundThreads:
     idle_unload_thread: Thread | None = None
 
 
-class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, CandidateArtifacts, ScenarioUses):
+def managed_request(request: object) -> bool:
+    """Whether ``request``, a job's request in the job listing or None, is one that a training manager filed."""
+    return isinstance(request, Mapping) and str(request.get("id", "")).startswith(MANAGER_REQUEST_PREFIX)
+
+
+class Dispatcher(
+    ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, CandidateArtifacts, ScenarioUses, ManagedTraining
+):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's
@@ -113,6 +139,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
         work_retention_seconds: float = 7 * 24 * 3600.0,
         training_max_jobs: int = 1,
+        training_manager: TrainingManager | None = None,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -222,7 +249,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
-        self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
+        # With a training manager, a trainer in ``auto`` mode starts no job by Reef's own rule.
+        self.local_workers = LocalTrainingWorkers(
+            self.registry, self.errors, held=hold_local_cycles, automatic_jobs=training_manager is None
+        )
         #: The writer of serving requests, when this process runs control.
         self.publisher: ServedModelsPublisher | None = None
         #: Set when another control instance took the lease (``control_lease_lost``).
@@ -249,6 +279,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
             self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
+            if training_manager is not None:
+                self.workers.add(TrainingManagerWorker(training_manager, self))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
         if self.services.runs_inference and recipe.runtime is not None and recipe.runtime.serves_requests:
@@ -615,6 +647,86 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).train_from(artifact_id, component)
 
+    def manager_views(self) -> tuple[ManagerView, ...]:
+        """One view for each trainer that trains, of each loaded scenario in ``auto`` mode (``ManagedTraining``)."""
+        views: list[ManagerView] = []
+        for loaded in self.registry.loaded_scenarios():
+            with self.registry.lock_instance(loaded) as state:
+                if state is not InstanceState.CURRENT or loaded.training_mode != "auto":
+                    continue
+                queued = () if loaded.training_requests is None else loaded.training_requests.queued()
+                jobs = tuple(
+                    ManagedJob(
+                        str(job["id"]),
+                        "queued" if job["state"] == "queued" else "running",
+                        None if job["train_from_artifact_id"] is None else str(job["train_from_artifact_id"]),
+                        managed_request(job["request"]),
+                    )
+                    for job in scenario_jobs(self.queue, loaded.name)
+                    if job["state"] not in FINAL_STATES
+                )
+                artifacts, starts = loaded.artifacts(), loaded.artifact_status()
+                for component_trainer in loaded.trainers:
+                    trainer, component = component_trainer.trainer, component_trainer.component
+                    if not trainer.trains or trainer.job_samples is None:
+                        continue
+                    listing = loaded.next_job_listing(component)
+                    views.append(
+                        ManagerView(
+                            scenario=loaded.name,
+                            component=component,
+                            training_start=starts[component]["training_start"],
+                            selection_serves=loaded.selection_serves(),
+                            untrained_samples=tuple(sample["sample_id"] for sample in listing["samples"]),
+                            job_samples=trainer.job_samples,
+                            waiting_requests=len(queued) - len(trainer.consumed_among(r.id for r in queued)),
+                            jobs=jobs,
+                            artifacts=tuple(row for row in artifacts if row["component"] == component),
+                        )
+                    )
+        return tuple(views)
+
+    def run_manager_action(self, view: ManagerView, action: ManagerAction, *, job_limit: int) -> None:
+        """Run ``action`` for the trainer of ``view`` (``ManagedTraining``): a ``Train`` action files a request with
+        an ID that starts with ``MANAGER_REQUEST_PREFIX``, a ``TrainFrom`` action sets the training start, and a ``Cancel`` action
+        cancels the job."""
+        if isinstance(action, TrainFrom):
+            self.train_from(view.scenario, action.artifact_id, view.component)
+        elif isinstance(action, Cancel):
+            cancel_scenario_job(self.queue, view.scenario, action.job_id)
+        else:
+            self.file_manager_request(view, action, job_limit)
+
+    def file_manager_request(self, view: ManagerView, action: Train, job_limit: int) -> None:
+        """File the request of ``action``, unless the scenario has ``job_limit`` manager requests whose jobs wait or
+        run, or that wait for a job. The count is read now, since ``view`` can be old."""
+        with self.locked_scenario(view.scenario) as current:
+            queued = () if current.training_requests is None else current.training_requests.queued()
+            waiting = sum(request.id.startswith(MANAGER_REQUEST_PREFIX) for request in queued)
+        running = sum(
+            managed_request(job["request"])
+            for job in scenario_jobs(self.queue, view.scenario)
+            if job["state"] not in FINAL_STATES
+        )
+        if waiting + running >= job_limit:
+            logger.info(
+                "scenario %r: the training manager's request is dropped: %d of its jobs wait or run",
+                view.scenario,
+                waiting + running,
+            )
+            return
+        payload: dict[str, Any] = {
+            "text": action.reason,
+            "session": MANAGER_SESSION,
+            "artifact_id": view.training_start or "",
+            "samples": list(action.samples),
+        }
+        if action.parameters:
+            payload["parameters"] = dict(action.parameters)
+        if action.train_from is not None:
+            payload["train_from"] = action.train_from
+        self.accept_request(view.scenario, payload, request_id=f"{MANAGER_REQUEST_PREFIX}{uuid.uuid4().hex}")
+
     def import_target(self, scenario: str, component: str | None) -> str:
         """The component of ``scenario`` an import into ``component`` lands in; raise as ``import_artifact`` does.
 
@@ -798,7 +910,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
         """The next automatic job of the trainer of ``component`` (the only one when None): its mode and samples."""
         with self.locked_scenario(scenario) as current:
-            return self.trainer_of(current, component).next_job_listing()
+            return current.next_job_listing(component)
 
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""

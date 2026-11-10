@@ -491,15 +491,6 @@ class Trainer:
                 "evicted_body_bytes": loss.body_bytes,
             }
 
-    def pipeline_ready(self) -> bool:
-        """Advance the pipeline and return whether it holds the next job's data; the caller holds the lock.
-
-        Only the worker's cycle advances the pipeline, so a finished background job stays running until that cycle
-        collects it, and the worker polls until then. Queries from other threads use ``holds_job_data``. A trainer
-        that trains nothing is never ready.
-        """
-        return self.trains and self._pipeline.ready(self.job_samples)
-
     def push_retained(self, item: AgentRecord) -> None:
         """Consumption state is independent of record visibility in storage."""
         if item.agent_record_id in self.consumed_record_ids:
@@ -664,17 +655,17 @@ class Trainer:
         with self._lock:
             return self.pending_step.result if isinstance(self.pending_step, PendingTrainingResult) else None
 
-    def reserve_job(self, serving_artifact_id: str | None = None) -> JobData | None:
+    def reserve_job(self, serving_artifact_id: str | None = None, *, automatic_jobs: bool = True) -> JobData | None:
         """Reserve the data of the job that the trainer submits next, or return the reserved data. Return None when
         the trainer accepts no job now (``accepts_job``), when no job data is ready, and while a result waits for
         its commit. ``serving_artifact_id`` is the artifact that serves the scenario now, for the staleness check of
-        the pipeline."""
+        the pipeline. Without ``automatic_jobs``, only a request's job data is ready."""
         with self._lock:
             if isinstance(self.pending_step, PendingTrainingResult):
                 return None
             if self.pending_step is None and not self.accepts_job():
                 return None
-            return self.reserve_job_data(serving_artifact_id)
+            return self.reserve_job_data(serving_artifact_id, automatic_jobs)
 
     def submit_job(
         self, data: JobData, *, start: str | None = None, train_from_artifact_id: str | None = None
@@ -738,7 +729,7 @@ class Trainer:
             self.pending_step = replace(pending, consumed_ids=self._pipeline.discard_request(request.id))
         return TrainingCommit(dict(self._state), {"skipped": "request failed", "error": error})
 
-    def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
+    def reserve_job_data(self, serving_artifact_id: str | None, automatic_jobs: bool = True) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
 
         ``serving_artifact_id`` is the artifact that serves the scenario now.
@@ -749,9 +740,11 @@ class Trainer:
         if serving_artifact_id is not None:
             self._pipeline.observe_serving_artifact_id(serving_artifact_id)
         # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
-        if not self.pipeline_ready():
+        # Without a sample count the pipeline starts no automatic job (``TrainingPipeline.holds_job_data``).
+        sample_count = self.job_samples if automatic_jobs else None
+        if not (self.trains and self._pipeline.ready(sample_count)):
             return None
-        data = self._pipeline.build_job_data(self.job_samples)
+        data = self._pipeline.build_job_data(sample_count)
         self.pending_step = JobDataReservation(data)
         return data
 

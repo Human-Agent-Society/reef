@@ -726,9 +726,11 @@ class ArtifactEvaluations:
         if api not in descriptor.model_binding:
             raise ValueError(f"adapter {adapter!r} cannot call this runtime's API dialect {api!r}")
         for task in tasks:
-            tools = task_agent_tools(Path(task))
+            tools = task_agent_tools(descriptor, Path(task))
             if tools:
-                raise ValueError(f"task {task!r} needs {', '.join(tools)}, which a harness tree's agent does not get")
+                raise ValueError(
+                    f"task {task!r} needs {', '.join(tools)}, which adapter {adapter!r} does not give its agent"
+                )
         files = self.sources.open(uri)
         tree = HarnessTree({path: files.read_bytes(path).decode("utf-8") for path in files.paths()})
         validation = validate_tree(tree, descriptor)
