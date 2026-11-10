@@ -45,6 +45,12 @@ def open_store(request, tmp_path):
     task_files.close()
 
 
+@pytest.fixture(autouse=True)
+def create_segments(monkeypatch):
+    """Each ``create`` call of these tests writes its trajectory items as a segment, whatever their size."""
+    monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", 0)
+
+
 def waiting_rows(store) -> tuple[int, int]:
     """The trajectory items and the record nodes whose content the database of ``store`` still holds."""
     items, nodes = store.items_table, store.nodes_table
@@ -91,6 +97,27 @@ def test_new_trajectory_items_go_to_one_segment_and_read_back(open_store, tmp_pa
         # The same content again writes no new segment.
         store.create("acme", [trajectory("t1", "one")])
         assert len(segment_files(tmp_path)) == 1
+
+
+def test_small_new_trajectory_items_wait_in_the_database_for_one_segment(open_store, monkeypatch, tmp_path):
+    created = [trajectory(f"t{number}", str(number)) for number in range(3)]
+    size = len(json.dumps(created[0].content, separators=(",", ":")))
+    monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", 2 * size)
+    monkeypatch.setattr(sql_data, "PACK_BYTES", 3 * size)
+    with closing(open_store()) as store:
+        # One item for each call, as a stage stores its samples.
+        for item in created[:2]:
+            store.create("acme", [item])
+        store.maintain()
+        assert waiting_rows(store) == (2, 0) and segment_files(tmp_path) == []
+        store.create("acme", [created[2]])
+        store.maintain()
+        assert waiting_rows(store) == (0, 0)
+        assert [len(path.read_text().splitlines()) for path in segment_files(tmp_path)] == [3]
+        assert [item.content for item in store.query("acme")] == [item.content for item in created]
+        # A call with enough content writes its own segment.
+        store.create("acme", [trajectory("t3", "3"), trajectory("t4", "4")])
+        assert waiting_rows(store) == (0, 0) and len(segment_files(tmp_path)) == 2
 
 
 def test_a_read_of_many_items_reads_their_segment_lines_together(open_store, monkeypatch):
