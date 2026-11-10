@@ -37,7 +37,7 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-from harbor.models.task.config import TaskConfig
+from harbor.models.task.config import MCPServerConfig, TaskConfig
 
 from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.execution.sandbox import relay as sandbox_relay
@@ -390,7 +390,9 @@ def uv_install_command(version: str) -> str:
 class TreeAgent(AdapterAgent):
     """An ``AdapterAgent`` that renders one harness tree for its model when Harbor builds it.
 
-    Values: ``adapter`` names the adapter, and ``tree_dir`` is the directory of the tree. ``model``, ``base_url``,
+    Values: ``adapter`` names the adapter, and ``tree_dir`` is the directory of the tree. ``mcp_servers``, which
+    Harbor passes, are the MCP servers of the task: the render writes them into the agent's config
+    (``task_mcp_overlays``). ``model``, ``base_url``,
     ``api_key`` and ``api`` are the values of a ``ModelBinding``. ``files_dir`` receives the rendered tree. ``bridge``
     bridges the container's loopback to ``base_url``, a loopback URL of this host, as ``AdapterAgent``'s
     ``bridge_port``. The other values are ``AdapterAgent``'s.
@@ -414,7 +416,12 @@ class TreeAgent(AdapterAgent):
     ) -> None:
         descriptor = get_adapter(adapter)
         binding = ModelBinding(base_url, model, api_key, api)
-        files = render_tree(HarnessTree.read(Path(tree_dir)), descriptor, binding.config_overlays(descriptor))
+        files = render_tree(
+            HarnessTree.read(Path(tree_dir)),
+            descriptor,
+            binding.config_overlays(descriptor),
+            task_overlays=task_mcp_overlays(descriptor, kwargs.get("mcp_servers") or ()),
+        )
         write_rendered(descriptor, files, Path(files_dir), CONTAINER_ROOT)
         if bridge:
             kwargs["bridge_port"] = urllib.parse.urlparse(base_url).port
@@ -473,12 +480,47 @@ def tree_agent(
     }
 
 
+def task_mcp_overlays(
+    descriptor: AdapterDescriptor, servers: Sequence[MCPServerConfig]
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """The ``(config target, data)`` pair that gives ``descriptor``'s agent the MCP ``servers`` of a task, as
+    ``render_tree``'s ``task_overlays``, or nothing without servers.
+
+    ``ValueError`` when the adapter declares no ``run.task.mcp``, or no entry for the transport of a server.
+    """
+    if not servers:
+        return ()
+    mcp = descriptor.task_mcp
+    if mcp is None:
+        raise ValueError(f"adapter {descriptor.name!r} does not give its agent the MCP servers of a task")
+    entries: dict[str, Any] = {}
+    for server in servers:
+        if server.transport not in mcp.entries:
+            raise ValueError(
+                f"adapter {descriptor.name!r} cannot use the {server.transport} MCP server {server.name!r}"
+            )
+        entries[server.name] = mcp.entry(
+            server.transport, command=server.command or "", args=server.args, url=server.url or ""
+        )
+    return ((mcp.target, {mcp.key: entries}),)
+
+
 def task_agent_tools(descriptor: AdapterDescriptor, task: Path) -> tuple[str, ...]:
-    """The settings of the Harbor task directory ``task`` that ``AdapterAgent`` does not give ``descriptor``'s agent:
-    ``mcp_servers`` for every adapter, and ``skills_dir`` for an adapter that names no ``task_skills_path``."""
+    """The settings of the Harbor task directory ``task`` that ``TreeAgent`` does not give ``descriptor``'s agent.
+
+    ``mcp_servers`` for an adapter that names no ``task_mcp``, or none for the transport of one of the servers;
+    ``mcp_servers headers`` for a server with HTTP headers, which no adapter's agent gets; and ``skills_dir`` for
+    an adapter that names no ``task_skills_path``.
+    """
     environment = TaskConfig.model_validate_toml((task / "task.toml").read_text(encoding="utf-8")).environment
+    mcp, servers = descriptor.task_mcp, environment.mcp_servers
     return (
-        *(("mcp_servers",) if environment.mcp_servers else ()),
+        *(
+            ("mcp_servers",)
+            if servers and (mcp is None or any(server.transport not in mcp.entries for server in servers))
+            else ()
+        ),
+        *(("mcp_servers headers",) if any(server.headers for server in servers) else ()),
         *(("skills_dir",) if environment.skills_dir and descriptor.task_skills_path is None else ()),
     )
 
@@ -597,5 +639,6 @@ __all__ = [
     "can_run_in_task_container",
     "run_harbor_task",
     "task_agent_tools",
+    "task_mcp_overlays",
     "tree_agent",
 ]
