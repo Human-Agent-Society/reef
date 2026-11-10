@@ -152,6 +152,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel``                                                              | cancel one training job of the scenario           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel``                                                      | cancel one training request of the scenario       |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                                                            | the scenario's training samples, in use order     |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/sample-processing``                                                                  | the scenario's sample processing tasks and counts |
@@ -1777,6 +1779,25 @@ job of the scenario. It answers ``{scenario, job}``, with the job as ``GET
 The trainer reads the failed job and records its end. An unknown scenario, or
 a job that the scenario does not have, returns 404. Control answers this
 route.
+
+``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel`` cancels one
+training request of the scenario (``POST /reef/train``), so that it trains no
+job, or no further. ``request_id`` is the ``agent_record_id`` of the request.
+It answers ``{scenario, request_id, queued, job}``:
+
+- A request that waits in the queue fails with the error ``cancelled by
+  request``. The trainer consumes it with a commit that has ``skipped:
+  "request failed"`` and that error, reads none of its samples, and submits no
+  job. ``queued`` is ``true``.
+- Each job of the request that has not ended is cancelled, as ``POST
+  /reef/scenarios/{scenario}/jobs/{job_id}/cancel`` does. ``job`` is the newest
+  job of the request after the cancel, or ``null`` for a request with no job.
+- A job that control adds for the request after the cancel, because it was
+  building the job's data, is cancelled when it enters the queue.
+- A request whose job ended stays as it is, so a second cancel changes nothing.
+
+An unknown scenario, or a request that the scenario does not have, returns
+404. Control answers this route.
 
 Deleting a scenario
 -------------------
