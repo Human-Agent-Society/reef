@@ -334,3 +334,15 @@ def test_the_evaluation_section_sets_the_sandboxes_that_one_process_holds_at_onc
             service_config_from_mapping(resolved)
         return
     assert service_config_from_mapping(resolved).evaluation_max_sandboxes == sandboxes
+
+
+def test_the_evaluation_section_names_a_trial_observer_plugin() -> None:
+    observer = "tests.evaluation.test_rollout_worker:ReadingObserver"
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"trial_observer": observer}})
+    assert service_config_from_mapping(resolved).evaluation_trial_observer == observer
+
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"trial_observer": "json:loads"}})
+    with pytest.raises(
+        ValueError, match=r"evaluation\.trial_observer .* must name a class that inherits TrialObserver"
+    ):
+        service_config_from_mapping(resolved)
