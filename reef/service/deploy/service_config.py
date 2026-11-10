@@ -292,11 +292,15 @@ class ServiceConfig:
         public_path=("storage", "coordination_backend"),
         help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
     )
-    #: How many times a worker takes one work item before the item fails, for every queue.
+    #: How many times a worker takes one work item before the item fails, for every queue. An attempt that ends
+    #: because its worker stops, such as at a restart of the service, does not count.
     work_max_attempts: int = config_option(
         3,
         public_path=("storage", "work_max_attempts"),
-        help="Attempts of one work item (a job, a selection, a rollout, a data task) before it fails.",
+        help=(
+            "Attempts of one work item (a job, a selection, a rollout, a data task) before it fails. "
+            "An attempt that ends because its service stops does not count."
+        ),
     )
     #: How long control keeps an ended work item, so that its producer reads its result; then control deletes it.
     work_retention_s: float = config_option(

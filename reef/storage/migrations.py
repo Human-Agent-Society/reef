@@ -170,16 +170,17 @@ def migrate_data_trajectories(connection: Connection, items: Table, nodes: Table
 
 
 def migrate_work_item_columns(connection: Connection, work_items: Table) -> None:
-    """Add to an existing ``work_item`` table the columns that it lacks: ``started_at``, ``ended_at`` and
-    ``metadata_json``. A final item that was stored before ended at its last change (``changed_at``), since a
-    final item did not change; the start of an earlier item is not known, so it stays NULL. Earlier items have no
-    metadata.
+    """Add to an existing ``work_item`` table the columns that it lacks: ``started_at``, ``ended_at``,
+    ``metadata_json`` and ``stopped_attempt_count``. A final item that was stored before ended at its last change
+    (``changed_at``), since a final item did not change; the start of an earlier item is not known, so it stays
+    NULL. Earlier items have no metadata, and every attempt of an earlier item counts, so its
+    ``stopped_attempt_count`` is 0.
 
     Run in the caller's schema transaction, after ``create_all``; a table that ``create_all`` made has them all.
     """
     columns = {column["name"] for column in inspect(connection).get_columns(work_items.name, schema=work_items.schema)}
     operations = Operations(MigrationContext.configure(connection))
-    for name in ("started_at", "ended_at", "metadata_json"):
+    for name in ("started_at", "ended_at", "metadata_json", "stopped_attempt_count"):
         if name not in columns:
             column = work_items.c[name]
             operations.add_column(
