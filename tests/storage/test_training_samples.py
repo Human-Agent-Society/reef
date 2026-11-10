@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,7 @@ from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, MemoryDataStore, NewItem
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.samples import TASK_PATH_READERS, SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -272,6 +273,26 @@ def test_the_listing_of_the_imported_tasks_reads_no_task_files(scenario, monkeyp
         (task.sample_id, task.split, task.sample.metadata["task"]["files_digest"], task.train_counts)
         for task in imported
     ]
+
+
+def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, monkeypatch):
+    samples = scenario.samples
+    names = [f"task-{index}" for index in range(TASK_PATH_READERS)]
+    for name in names:
+        scenario.task(name, "eval")
+    scenario.data.create("acme", [upload("trajectory", math="train")])
+    expected = tuple(stored.sample.task_path for stored in samples.get(names))
+
+    # Each read waits until every reader has started one: a store that reads one directory at a time never ends.
+    started = threading.Barrier(TASK_PATH_READERS, timeout=10)
+    task_path = scenario.data.task_path
+
+    def slow_task_path(item):
+        started.wait()
+        return task_path(item)
+
+    monkeypatch.setattr(scenario.data, "task_path", slow_task_path)
+    assert samples.task_paths([*reversed(names), "trajectory", "missing"]) == expected
 
 
 def legacy_sample_tables(connection, schema: str | None, storage_id: str | None) -> None:
