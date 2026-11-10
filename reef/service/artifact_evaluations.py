@@ -34,7 +34,7 @@ from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import ArtifactSources
-from reef.core.errors import CommitPending, ReefError
+from reef.core.errors import CommitPending, ReefError, UnknownScenario
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
@@ -363,12 +363,20 @@ class EvaluationResults:
                     # The payload names the evaluation; ``EvaluationRollout`` wrote it (``to_payload``).
                     touched[str(item.payload["evaluation_id"])] = item.scenario
             for evaluation_id, scenario in touched.items():
-                try:
-                    self.settle(scenario, evaluation_id)
-                except Exception:
-                    logger.exception("could not end evaluation %s of %s", evaluation_id, scenario)
+                self.settle_changed(scenario, evaluation_id)
             if not changes:
                 self.stopped.wait(RESULT_POLL_SECONDS)
+
+    def settle_changed(self, scenario: str, evaluation_id: str) -> None:
+        """Settle the evaluation ``evaluation_id`` of ``scenario``, whose rollout items changed (``settle``), and log
+        a failure. The queue keeps the rollout items of a deleted scenario until their retention ends, and the
+        evaluation went with the scenario, so an unknown scenario is no failure."""
+        try:
+            self.settle(scenario, evaluation_id)
+        except UnknownScenario:
+            logger.debug("evaluation %s: its scenario %s no longer exists", evaluation_id, scenario)
+        except Exception:
+            logger.exception("could not end evaluation %s of %s", evaluation_id, scenario)
 
     def settle(self, scenario: str, evaluation_id: str) -> None:
         """Start the evaluation once a worker took one of its rollouts; stop it when too many of its ended rollouts
