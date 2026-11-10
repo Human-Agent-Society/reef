@@ -66,6 +66,14 @@ run:
       - "{task}"
     # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
     skills: codex/skills
+    # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the
+    # entry of a server of each transport.
+    # Codex reads no SSE server.
+    mcp:
+      target: primary
+      key: mcp_servers
+      stdio: {command: "{command}", args: "{args}"}
+      streamable-http: {url: "{url}"}
   # How a person's machine runs Codex on a snapshot: the person's own ~/.codex stays. register
   # installs the plugin reef from the local marketplace reef at the install root, and again for
   # each snapshot, because Codex reads a copy in its plugin cache; the plugin then loads in every
