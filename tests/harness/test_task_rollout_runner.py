@@ -430,6 +430,32 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
     assert lab.most_building == 3, "no task waits for the build of another task"
 
 
+@pytest.mark.parametrize(
+    ("environment", "has_compose", "gpu_count", "config"),
+    [
+        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True}}),
+        ("modal", False, 0, {"type": "modal"}),
+        ("modal", True, 1, {"type": "modal"}),
+        ("e2b", True, 0, {"type": "e2b"}),
+    ],
+    ids=["modal-compose", "modal-dockerfile", "modal-compose-gpu", "e2b-compose"],
+)
+def test_only_a_modal_compose_task_with_no_gpu_runs_on_the_vm_runtime(
+    reef: StandInReef, tmp_path: Path, environment: str, has_compose: bool, gpu_count: int, config: dict
+) -> None:
+    task_path = tmp_path / "tasks" / "t"
+    (task_path / "environment").mkdir(parents=True)
+    (task_path / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    if has_compose:
+        (task_path / "environment" / "docker-compose.yaml").write_text("services:\n  main: {}\n")
+    (task_path / "task.toml").write_text(f'[environment]\ngpus = {gpu_count}\nnetwork_mode = "no-network"\n')
+    lab = StandInLab({"reward": 1.0})
+    running = runner(reef, tmp_path, lab, concurrency=2, environment=environment)
+    running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task_path))] * 2)
+    assert [build["overrides"] for build in lab.builds] == [{"environment": config}]
+    assert [call["overrides"]["environment"] for call in lab.calls] == [config, config]
+
+
 def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None:
     paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2")]
     lab = TemplateLab()
