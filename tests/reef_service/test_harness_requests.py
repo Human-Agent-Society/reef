@@ -106,8 +106,6 @@ def test_a_request_needs_a_request_mode_and_commits_through_the_train_route(tmp_
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            response = await post_request(client, train_request("run tests first", release_id="rel-3"))
-            assert response.status == 400 and "training_mode='manual'" in await response.text()
             response = await client.post("/reef/scenarios/agents/update", json={"training_mode": "manual"})
             assert response.status == 200
             response = await post_request(client, train_request("run tests first", release_id="rel-3"))

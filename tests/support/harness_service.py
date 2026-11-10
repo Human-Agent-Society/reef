@@ -38,6 +38,7 @@ from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JobQueueComponent
+from reef.train.manager import TrainingManager
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainingCommit
 
@@ -56,11 +57,17 @@ def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
     return ScenarioRoot(Artifact.local(directory), RootSource("default", inputs=recipe.default_start().inputs))
 
 
-def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: bool = False) -> Dispatcher:
+def harness_dispatcher(
+    tmp_path: Path,
+    recipe: Recipe,
+    *,
+    hold_local_cycles: bool = False,
+    training_manager: TrainingManager | None = None,
+) -> Dispatcher:
     """A dispatcher over ``recipe`` with a seeded repository, a durable commit history and a data store.
 
     A test that prepares and commits each step itself sets ``hold_local_cycles``, so no local cycle commits the
-    same step a second time.
+    same step a second time. ``training_manager`` decides what the scenarios in ``auto`` mode train.
     """
     storage = data_storage(tmp_path / "agent-record")
     return Dispatcher(
@@ -72,6 +79,7 @@ def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: boo
         data_store=storage.data,
         hold_local_cycles=hold_local_cycles,
         coordination=memory_coordination(),
+        training_manager=training_manager,
     )
 
 

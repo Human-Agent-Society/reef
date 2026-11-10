@@ -66,6 +66,7 @@ from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 from reef.train.component import TrainingComponent, build_training_component
+from reef.train.manager import TrainingManager
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
@@ -531,6 +532,11 @@ def build_dispatcher(
             components=components,
             work_retention_seconds=settings.work_retention_s,
             training_max_jobs=settings.training_max_jobs,
+            training_manager=(
+                None
+                if settings.training_manager is None
+                else TrainingManager.from_setting(settings.training_manager, setting="training.manager")
+            ),
         )
         if dispatcher.services.runs_evaluation:
             # The worker serves each rollout's candidate itself, from the scenario's repository.

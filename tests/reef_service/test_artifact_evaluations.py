@@ -939,7 +939,9 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=settings)
             assert response.status == 400 and "not an artifact item" in await response.text()
 
-            monkeypatch.setattr("reef.service.artifact_evaluations.task_agent_tools", lambda task: ("mcp_servers",))
+            monkeypatch.setattr(
+                "reef.service.artifact_evaluations.task_agent_tools", lambda descriptor, task: ("mcp_servers",)
+            )
             body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 400 and "mcp_servers" in await response.text()

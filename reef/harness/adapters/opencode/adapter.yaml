@@ -83,6 +83,8 @@ run:
     argv: ["run", "--format", "json", "--auto", "{task}"]
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
+    # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
+    skills: opencode/skills
   # How a person's machine runs opencode on a snapshot: the person's own ~/.config/opencode stays.
   # register adds the plugin to its global plugin list, and opencode loads it in place in every
   # session; on a key or name both define, the snapshot's wins. opencode has no command that
