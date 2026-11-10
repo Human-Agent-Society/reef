@@ -75,6 +75,14 @@ run:
     # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
     # The tree's skills render there too, and the tree's skill wins on one name.
     skills: hermes/skills
+    # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the
+    # entry of a server of each transport.
+    mcp:
+      target: primary
+      key: mcp_servers
+      stdio: {command: "{command}", args: "{args}"}
+      sse: {url: "{url}"}
+      streamable-http: {url: "{url}"}
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.
