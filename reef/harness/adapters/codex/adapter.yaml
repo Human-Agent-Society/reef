@@ -64,6 +64,8 @@ run:
       - workspace-write
       - --skip-git-repo-check
       - "{task}"
+    # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
+    skills: codex/skills
   # How a person's machine runs Codex on a snapshot: the person's own ~/.codex stays. register
   # installs the plugin reef from the local marketplace reef at the install root, and again for
   # each snapshot, because Codex reads a copy in its plugin cache; the plugin then loads in every
