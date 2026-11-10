@@ -884,7 +884,8 @@ class ArtifactEvaluations:
                     "ended_at": item.ended_at,
                     "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
                     "rewards": cast(Mapping[str, object], item.result).get("rewards") if finished else None,
-                    "error": item.error,
+                    # A rollout that finished with a failed score keeps its reason in its result.
+                    "error": cast(Mapping[str, object], item.result).get("error") if finished else item.error,
                     "calls": None if calls is None else calls.to_json(),
                     "verifier_calls": None if verifier_calls is None else verifier_calls.to_json(),
                 }
