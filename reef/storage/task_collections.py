@@ -37,9 +37,10 @@ class TaskCollection:
     """A named set of benchmarks of one owner.
 
     Values: ``name`` is a non-empty string without ``/``, other than ``.`` and ``..``. ``benchmarks`` and
-    ``collections`` are tuples of distinct non-empty strings, and one of them or both are non-empty. ``collections``
-    names other collections of the same owner, and does not have ``name``. ``average`` is ``task`` or ``benchmark``:
-    how an evaluation on the collection computes its mean score (``EvaluationCollection``).
+    ``collections`` are tuples of distinct non-empty strings. Each of them can be empty: a collection with neither
+    has no benchmark, and a client can add them later. ``collections`` names other collections of the same owner,
+    and does not have ``name``. ``average`` is ``task`` or ``benchmark``: how an evaluation on the collection
+    computes its mean score (``EvaluationCollection``).
     Purpose: a client stores it (``DataStore.put_collection``); the collection routes and an evaluation on the
     collection read its benchmarks (``collection_benchmarks``).
     """
@@ -54,8 +55,6 @@ class TaskCollection:
             raise ValueError(f"a collection name must be a non-empty name without '/', got {self.name!r}")
         object.__setattr__(self, "benchmarks", check_names(self.benchmarks, "a collection's benchmarks"))
         object.__setattr__(self, "collections", check_names(self.collections, "a collection's collections"))
-        if not self.benchmarks and not self.collections:
-            raise ValueError("a collection names one or more benchmarks or collections")
         if self.name in self.collections:
             raise ValueError(f"the collection {self.name!r} cannot name itself")
         if self.average not in COLLECTION_AVERAGES:

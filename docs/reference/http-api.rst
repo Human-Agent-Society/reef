@@ -912,8 +912,8 @@ them (`Evaluate an artifact`_).
 - ``PUT /reef/namespaces/{owner}/collections/{name}`` creates the collection,
   or replaces the one with the name. The body takes ``benchmarks``,
   ``collections`` and ``average``. ``collections`` names other collections of
-  the owner: the collection also has their benchmarks. One of the two lists
-  or both are non-empty. ``average`` is ``task`` (the default) or
+  the owner: the collection also has their benchmarks. Each list is empty
+  by default, so ``{}`` creates an empty collection. ``average`` is ``task`` (the default) or
   ``benchmark``: how an evaluation on the collection computes its
   ``mean_score``. The response is ``{"owner", "name", "benchmarks",
   "collections", "average"}``. Reef returns 400 for a name in ``collections``
