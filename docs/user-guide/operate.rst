@@ -761,6 +761,9 @@ it needs.
   smaller writes, and trajectory items from before you set the backend. It
   moves an owner's content when at least 64 MiB of it waits, oldest first, in
   segments of at least 64 MiB.
+- In the same run, the data service merges segments of less than 1 MiB into
+  segments of at least 64 MiB, when an owner has at least 64 MiB in them. A
+  read of many items then sends fewer requests to the segment store.
 - A segment that no item uses for 24 hours is deleted.
 
 ``local`` keeps the segments in ``<agent-record-dir>/segments``. Only the
