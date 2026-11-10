@@ -1389,6 +1389,10 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
             # A scenario of two components needs the component, and the artifact must be one of that component.
             unnamed = await client.post("/reef/scenarios/agent/update", json={"served": body["served"]})
             assert unnamed.status == 400 and "name the component" in await unnamed.text()
+            # The next automatic job is one trainer's, so a scenario of several components names the component.
+            unnamed = await client.get("/reef/scenarios/agent/next-job")
+            assert unnamed.status == 400 and "name one with component" in await unnamed.text()
+            assert (await client.get(f"/reef/scenarios/agent/next-job?component={WEIGHTS}")).status == 200
             other = await client.post("/reef/scenarios/agent/update", json={**body, "component": WEIGHTS})
             assert other.status == 404
             assert (await (await client.get("/reef/scenarios/agent/settings")).json())["served"] == before
