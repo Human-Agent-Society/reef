@@ -902,11 +902,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 
-    def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
-        """The scenario's imported tasks in the order they arrived, each with its train counts."""
+    def listed_imported_tasks(self, scenario: str) -> tuple[ListedSample, ...]:
+        """The listing of the scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.locked_scenario(scenario) as current:
             samples = self.storage.sample_store(scenario, current.store)
-            return () if samples is None else samples.imported_tasks()
+            return () if samples is None else samples.listed_imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""

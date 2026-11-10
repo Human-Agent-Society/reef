@@ -85,14 +85,17 @@ class ListedSample:
     """What a listing shows of one sample: the values of ``StoredSample`` without its content.
 
     Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component`` and ``group`` are those of
-    ``StoredSample``, and ``kind`` is the kind of its item.
+    ``StoredSample``. ``kind`` is the kind of its item, and ``digest`` is the digest of its item: of a task, the
+    digest of its files.
 
-    Purpose: ``SampleStore.listing`` makes it, and the listing routes read it.
+    Purpose: ``SampleStore.listing`` and ``SampleStore.listed_imported_tasks`` make it, and the listing routes read
+    it.
     """
 
     sequence: int
     sample_id: str
     kind: SampleKind
+    digest: str
     split: SplitName
     train_counts: Mapping[str, int]
     component: str | None
@@ -184,11 +187,14 @@ class SampleStore:
             after_sequence = uses[-1][0]
         return ()
 
-    def listing(self, *, after_sequence: int = 0, limit: int = 256) -> tuple[ListedSample, ...]:
+    def listing(
+        self, *, after_sequence: int = 0, limit: int = 256, kind: SampleKind | None = None
+    ) -> tuple[ListedSample, ...]:
         """The samples whose use sequence is above ``after_sequence``, in use order, at most ``limit``, without their
-        content: a scenario can hold more trajectories than a listing can read in time."""
+        content: a scenario can hold more trajectories than a listing can read in time. Only ``kind``'s if given."""
+        kinds = SAMPLE_KINDS if kind is None else (kind,)
         uses = self.data.scenario_items(
-            self.owner, self.scenario, kinds=SAMPLE_KINDS, after=after_sequence, limit=limit, content=False
+            self.owner, self.scenario, kinds=kinds, after=after_sequence, limit=limit, content=False
         )
         counts = self.state.train_counts([item.item_id for _, item in uses])
         return tuple(self.listed_sample(sequence, item, counts.get(item.item_id, {})) for sequence, item in uses)
@@ -199,6 +205,7 @@ class SampleStore:
             sequence,
             item.item_id,
             cast(SampleKind, item.kind),
+            item.digest,
             cast(SplitName, item.scenarios[self.scenario]),
             train_counts,
             None if own is None else own["component"],
@@ -262,6 +269,16 @@ class SampleStore:
         after_sequence = 0
         while page := self.page(after_sequence=after_sequence, kind="task"):
             found.extend(stored for stored in page if stored.component is None and split in (None, stored.split))
+            after_sequence = page[-1].sequence
+        return tuple(found)
+
+    def listed_imported_tasks(self) -> tuple[ListedSample, ...]:
+        """The listing of ``imported_tasks()``: the same tasks in the same order. It reads no task files, so a
+        listing of many tasks does not wait for a remote task file store."""
+        found: list[ListedSample] = []
+        after_sequence = 0
+        while page := self.listing(after_sequence=after_sequence, limit=MAX_QUERY_LIMIT, kind="task"):
+            found.extend(listed for listed in page if listed.component is None)
             after_sequence = page[-1].sequence
         return tuple(found)
 

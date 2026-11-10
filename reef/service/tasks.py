@@ -68,7 +68,8 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
 def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]:
     """The scenario's imported tasks in arrival order: ``{scenario, tasks: [{name, split, files_digest, trained}]}``.
 
-    ``trained`` is whether a committed job of any trainer of the scenario trained the task.
+    ``trained`` is whether a committed job of any trainer of the scenario trained the task. The listing reads no
+    task files.
     """
     return {
         "scenario": scenario,
@@ -76,9 +77,9 @@ def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]
             {
                 "name": task.sample_id,
                 "split": task.split,
-                "files_digest": task.sample.metadata["task"]["files_digest"],
+                "files_digest": task.digest,
                 "trained": bool(task.train_counts),
             }
-            for task in dispatcher.imported_tasks(scenario)
+            for task in dispatcher.listed_imported_tasks(scenario)
         ],
     }
