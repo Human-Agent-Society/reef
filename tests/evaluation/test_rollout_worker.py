@@ -88,7 +88,14 @@ class UnreachableEndpoints(CandidateEndpoints):
 
 
 class OpenEndpoints(UnreachableEndpoints):
-    """Endpoints that open an address that no agent calls, for tasks under ``root``."""
+    """Task-root endpoints for worker tests, with an address supplied by ``open``.
+
+    Values have a ``Path`` root and the inherited call and trajectory lists, initially empty, with no refused call index.
+    ``task_directory`` creates ``root / rollout.task_name``, writes an empty ``task.toml``, and returns that directory.
+    File errors propagate. Call and trajectory recording follow ``UnreachableEndpoints``.
+    The default ``open`` ignores its inputs and yields ``http://127.0.0.1:9`` with no token or server.
+    Subclasses can supply a live address for tests whose agents make calls.
+    """
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -155,11 +162,25 @@ def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing
 
 
 class AnsweringEndpoints(OpenEndpoints):
-    """Endpoints that open a model address that answers each call with an empty completion."""
+    """Endpoints for the failed-score test's model call, with the state and task operations of ``OpenEndpoints``.
+
+    Values add no instance state. ``open`` ignores its inputs and starts an HTTP server on an unused loopback port.
+    It yields that server's URL with no token; ``Handler`` defines its responses.
+    Context exit stops and closes the server, including when the caller raises. Server setup errors propagate.
+    """
 
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         class Handler(BaseHTTPRequestHandler):
+            """One request handler, constructed by this endpoint's server with only ``BaseHTTPRequestHandler`` state.
+
+            ``do_POST`` accepts a body with a nonnegative integer ``Content-Length``, or an empty body without that header.
+            It reads that many bytes and returns HTTP 200 with JSON body ``{"choices": []}``.
+            The response has ``Content-Type: application/json`` and the body's byte length as ``Content-Length``.
+            Invalid length conversion and I/O errors propagate. ``log_message`` ignores its arguments and writes nothing.
+            Other request handling follows ``BaseHTTPRequestHandler``.
+            """
+
             def do_POST(self) -> None:
                 self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 body = b'{"choices": []}'
@@ -182,7 +203,16 @@ class AnsweringEndpoints(OpenEndpoints):
 
 
 class CalledThenFailedLab(TaskLab):
-    """A lab whose agent makes one model call, and whose trial then ends with an error and no reward."""
+    """A stateless ``TaskLab`` for the worker test of a failure after a model call.
+
+    ``run`` requires ``agent["kwargs"]`` to be a mapping with an ``api_base`` string naming a reachable HTTP base URL.
+    It ignores ``task_path``, ``key``, ``tags``, ``overrides``, and all other agent entries.
+    It POSTs ``{"model": "m", "messages": []}`` as JSON to ``{api_base}/chat/completions``, with a 10-second timeout.
+    After reading the response, it returns a ``RolloutRow`` with empty rewards and no trial URI.
+    Its error is ``VerifierTimeoutError: the verifier ran past 600 s``.
+    Input and request errors propagate; the lab keeps no state or trial files.
+    ``build_environment`` ignores both inputs and returns ``""`` to simulate a successful build without starting an environment.
+    """
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         api_base = cast(Mapping[str, str], agent["kwargs"])["api_base"]
