@@ -18,6 +18,7 @@ import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import batched
 from pathlib import Path
@@ -31,6 +32,9 @@ from reef.storage.tasks import LocalTaskFileStore, SplitName
 CONSUMED_SAMPLE_PREFIX = "sample:"
 #: The prefix of a record ID in a ``TrainingState`` that a stage ended and no commit named when it was stored.
 ENDED_RECORD_PREFIX = "ended:"
+#: The task directories that ``SampleStore.task_paths`` reads from the task file store at the same time. A remote
+#: store downloads each directory, and one download at a time takes minutes for some thousand tasks.
+TASK_PATH_READERS = 8
 
 SampleKind = Literal["trajectory", "task"]
 SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
@@ -235,6 +239,25 @@ class SampleStore:
             for batch in batched(items, MAX_QUERY_LIMIT)
             for stored in self.stored([(item.sequence, item) for item in batch])
         )
+
+    def task_paths(self, sample_ids: Sequence[str]) -> tuple[Path, ...]:
+        """The task directories of the tasks of ``sample_ids`` that the scenario uses, in the order of their items.
+
+        It gives the directories that ``get`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
+        the task file store at the same time. An ID of a trajectory, or of an item that the scenario does not use,
+        gives no directory.
+        """
+        items = sorted(
+            (
+                item
+                for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
+                for item in self.data.read_many(self.owner, batch)
+                if self.scenario in item.scenarios and item.kind == "task"
+            ),
+            key=lambda item: item.sequence,
+        )
+        with ThreadPoolExecutor(max_workers=TASK_PATH_READERS) as readers:
+            return tuple(readers.map(self.data.task_path, items))
 
     def stored(self, uses: Sequence[tuple[int, StoredItem]]) -> tuple[StoredSample, ...]:
         """The samples of the uses ``uses`` that are trajectories or tasks, with their train counts."""
