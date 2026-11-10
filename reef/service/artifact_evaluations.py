@@ -670,9 +670,9 @@ class ArtifactEvaluations:
         artifact = snapshot.materialize()
         return request, artifact, runtime.artifact_model(artifact), runtime.api
 
-    def held_collection(self, scenario: str, name: str, held: Mapping[str, Path]) -> EvaluationCollection:
+    def held_collection(self, scenario: str, name: str, held: frozenset[str]) -> EvaluationCollection:
         """The collection ``name`` of the owner of ``scenario``, with the tasks of each benchmark that are in
-        ``held``: the tasks of the scenario's eval split, by item ID. A benchmark with no such task is left out.
+        ``held``: the item IDs of the tasks of the scenario's eval split. A benchmark with no such task is left out.
 
         Raise ``ValueError`` when the owner stores no such collection, or when no task of it is in ``held``.
         """
@@ -756,24 +756,40 @@ class ArtifactEvaluations:
             request, _artifact, model, api = self.checked(current, artifact_id, settings)
             selection = {**current.artifact_selection().to_dict(), request.component: request.artifact_id}
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
-            held = {
-                stored.sample_id: stored.sample.task_path
-                for stored in (() if samples is None else samples.imported_tasks(split="eval"))
-                if isinstance(stored.sample, TaskSample)
-            }
-        unknown = sorted(set(request.task_names) - set(held))
+            # The listing reads no task files: the eval split can hold many more tasks than the evaluation runs.
+            held = tuple(
+                listed.sample_id
+                for listed in (() if samples is None else samples.listed_imported_tasks())
+                if listed.split == "eval"
+            )
+        held_names = frozenset(held)
+        unknown = sorted(set(request.task_names) - held_names)
         if unknown:
             raise ValueError(f"the eval split of the imported tasks holds no tasks {unknown}")
-        collection = None if settings.collection is None else self.held_collection(scenario, settings.collection, held)
+        collection = (
+            None if settings.collection is None else self.held_collection(scenario, settings.collection, held_names)
+        )
         if collection is not None:
-            names = tuple(name for name in held if name in collection.task_names())
+            collection_names = collection.task_names()
+            names = tuple(name for name in held if name in collection_names)
         else:
-            names = request.task_names or tuple(held)
+            names = request.task_names or held
         if not names:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
-        tree = None if item is None else self.tree_harness(scenario, item, api, [str(held[name]) for name in names])
+        if item is None:
+            tree = None
+        else:
+            # Only a harness tree is checked against the task files, and only against the tasks that it runs.
+            with self.dispatcher.locked_scenario(scenario) as current:
+                samples = self.dispatcher.storage.sample_store(scenario, current.store)
+                directories = [
+                    str(stored.sample.task_path)
+                    for stored in (() if samples is None else samples.get(names))
+                    if isinstance(stored.sample, TaskSample)
+                ]
+            tree = self.tree_harness(scenario, item, api, directories)
         agent = None if tree is not None else harbor_agent(request.harness)
         # The stored request names its tasks, so that the rollouts that wait can be added later.
         request = replace(request, task_names=names, collection=collection)
