@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import tarfile
 from pathlib import Path
 
@@ -97,6 +98,89 @@ def test_a_query_pages_by_sequence_and_a_task_item_reads_without_content(tmp_pat
         ):
             assert (await client.get(base + query, headers=AUTH)).status == 400, query
         assert (await client.delete(f"{base}/missing", headers=AUTH)).status == 404
+
+    served(dispatcher, check)
+
+
+def test_a_collection_names_benchmarks_and_adds_their_tasks_to_a_scenario(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+
+    def archive(*names: str) -> bytes:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for port, name in enumerate(names, start=9000):
+                tar.add(write_harbor_task(task_for(name, "record-1", port), tmp_path / name), arcname=name)
+        return buffer.getvalue()
+
+    async def check(client: TestClient) -> None:
+        base, stored = "/reef/namespaces/acme/data", "/reef/namespaces/acme/collections"
+        await client.post("/reef/scenarios", headers=AUTH, json={"name": "math", "owner": "acme"})
+        for names, benchmarks in ((("add", "sort"), ["full"]), (("sum",), ["extra"])):
+            response = await client.post(
+                f"{base}/tasks",
+                params={"metadata": json.dumps({"benchmarks": benchmarks})},
+                headers={**AUTH, "Content-Type": "application/gzip"},
+                data=archive(*names),
+            )
+            assert response.status == 201, await response.text()
+        # A task can be in two benchmarks.
+        patch = {"ids": ["add"], "patch": {"benchmarks": ["full", "lite"]}}
+        assert (await client.post(f"{base}/metadata", headers=AUTH, json=patch)).status == 200
+        listed = await (await client.get(f"{base}?benchmark=lite", headers=AUTH)).json()
+        assert [item["id"] for item in listed["items"]] == ["add"]
+
+        coding = {"benchmarks": ["lite", "full"]}
+        saved = await client.put(f"{stored}/coding", headers=AUTH, json=coding)
+        assert saved.status == 200, await saved.text()
+        assert await saved.json() == {
+            "owner": "acme",
+            "name": "coding",
+            "collections": [],
+            "average": "task",
+            **coding,
+        }
+        everything = {"benchmarks": ["extra"], "collections": ["coding"], "average": "benchmark"}
+        assert (await client.put(f"{stored}/all", headers=AUTH, json=everything)).status == 200
+        names = [entry["name"] for entry in (await (await client.get(stored, headers=AUTH)).json())["collections"]]
+        assert names == ["all", "coding"]
+        read = await (await client.get(f"{stored}/all", headers=AUTH)).json()
+        assert read["benchmark_task_counts"] == [
+            {"benchmark": "extra", "task_count": 1},
+            {"benchmark": "lite", "task_count": 1},
+            {"benchmark": "full", "task_count": 2},
+        ]
+        assert (read["task_count"], read["average"]) == (3, "benchmark")
+        for name, body in (
+            ("coding", {"collections": ["all"]}),
+            ("open", {"collections": ["missing"]}),
+            ("empty", {}),
+            ("named", {"name": "other", "benchmarks": ["lite"]}),
+        ):
+            assert (await client.put(f"{stored}/{name}", headers=AUTH, json=body)).status == 400, name
+
+        added = await client.post(
+            f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math", "split": "eval"}
+        )
+        assert added.status == 200, await added.text()
+        assert (await added.json())["task_count"] == 2
+        used = await (await client.get(f"{base}?kind=task&scenario=math", headers=AUTH)).json()
+        assert {item["id"]: item["metadata"]["scenarios"] for item in used["items"]} == {
+            "add": {"math": "eval"},
+            "sort": {"math": "eval"},
+        }
+        bad_split = {"scenario": "math", "split": "dev"}
+        assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json=bad_split)).status == 400
+        assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math"})).status == 400
+
+        # A collection that another one names stays; a deleted collection changes no task.
+        assert (await client.delete(f"{stored}/coding", headers=AUTH)).status == 400
+        assert (await client.delete(f"{stored}/all", headers=AUTH)).status == 200
+        assert (await client.delete(f"{stored}/coding", headers=AUTH)).status == 200
+        for method in ("GET", "DELETE"):
+            assert (await client.request(method, f"{stored}/coding", headers=AUTH)).status == 404
+        missing = {"scenario": "math", "split": "eval"}
+        assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json=missing)).status == 404
+        assert len((await (await client.get(f"{base}?benchmark=full", headers=AUTH)).json())["items"]) == 2
 
     served(dispatcher, check)
 
