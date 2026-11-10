@@ -48,6 +48,8 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
         dispatcher.set_scenario_owner("t", "s")
         dispatcher.accept_record(report("r1"))
         record_item_ids(dispatcher, 1)
+        # The test reads the records itself from here on: the samples service must not read them first.
+        dispatcher.workers.stop()
         dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": "train"}})
         dispatcher.sync_items("s", ["t"])
         with dispatcher.locked_scenario("t") as current:
