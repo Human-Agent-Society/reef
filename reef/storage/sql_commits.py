@@ -13,13 +13,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from threading import RLock
 
-from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select, update
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select
 from sqlalchemy.engine import Connection
 
 from reef.storage.commit_history import CommitHistory, same_commit
 from reef.storage.commits import CommitHistoryError, CommitRecord, encode_commit
-from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase, batches
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
 def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -51,20 +50,17 @@ class SQLCommitHistory(CommitHistory):
 
     Values: ``database`` is the open scenario database whose transactions the
     history uses. ``table`` is the commit table and the namespace of this
-    generation. ``train_counts`` is the train count table
-    (``sample_train_count_table``) in the same namespace. ``label`` names the table for error messages, and ``durable``
+    generation. ``label`` names the table for error messages, and ``durable``
     is true when the database outlives the process. ``records()`` is the rows
     of the namespace in step order, decoded. The cached records are always a
     prefix of those rows, so a read fetches only the steps after them; a
     locked block that rolls back clears the cache. A row deleted by anything
     but this class is outside the contract.
 
-    ``append`` stores a new commit and adds one to the train count of the
-    commit's trainer (``record.component``, or ``""`` when it names none) for
-    each sample whose ``consumed_sample_id`` the commit lists, in one
-    transaction. An
-    append of a commit that is already stored changes nothing, so a retry
-    counts no sample twice.
+    ``append`` stores a new commit. An append of a commit that is already
+    stored changes nothing. The train counts of the scenario's samples are a
+    count over these rows (``SQLTrainingState``), so a retry counts no sample
+    twice.
 
     Purpose: a SQL scenario database makes it in ``commit_history()``.
     ``CommitHistoryScenarioStore`` reads and appends through it.
@@ -83,14 +79,12 @@ class SQLCommitHistory(CommitHistory):
         self,
         database: SQLScenarioDatabase,
         table: ScopedTable,
-        train_counts: ScopedTable,
         *,
         label: str,
         durable: bool,
     ) -> None:
         self.database = database
         self.table = table
-        self.train_counts = train_counts
         self._label = label
         self._durable = durable
         self._lock = RLock()
@@ -138,32 +132,6 @@ class SQLCommitHistory(CommitHistory):
             connection.execute(
                 self.table.table.insert().values(**self.table.scope, step=record.step, commit_json=encoded)
             )
-            sample_ids = sorted(
-                consumed.removeprefix(CONSUMED_SAMPLE_PREFIX)
-                for consumed in record.consumed_ids
-                if consumed.startswith(CONSUMED_SAMPLE_PREFIX)
-            )
-            if sample_ids:
-                counts = self.train_counts.table
-                component = record.component or ""
-                self.database._insert_if_absent(
-                    connection,
-                    counts,
-                    [
-                        {**self.train_counts.scope, "sample_id": sample_id, "component": component, "train_count": 0}
-                        for sample_id in sample_ids
-                    ],
-                )
-                for batch in batches(sample_ids):
-                    connection.execute(
-                        update(counts)
-                        .where(
-                            self.train_counts.condition(),
-                            counts.c.component == component,
-                            counts.c.sample_id.in_(batch),
-                        )
-                        .values(train_count=counts.c.train_count + 1)
-                    )
 
     @contextmanager
     def _transaction(self, *, write: bool) -> Iterator[Connection]:
