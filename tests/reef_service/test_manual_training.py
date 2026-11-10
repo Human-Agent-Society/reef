@@ -1437,3 +1437,60 @@ def test_manual_collects_the_failures_each_request_step_carries(tmp_path, open_d
             assert calls[1] == ("again", ("fails-2", "fails-3"))
 
     asyncio.run(run())
+
+
+class _FirstJobWaits(StubTrainingComponent):
+    """Holds the job of the request ``one`` until ``release`` is set."""
+
+    def __init__(self, checkpoint_root):
+        super().__init__(checkpoint_root)
+        self.started, self.release = Event(), Event()
+
+    def train(self, job):
+        if job.request_id == "one":
+            self.started.set()
+            assert self.release.wait(10)
+        return super().train(job)
+
+
+def test_a_client_cancels_a_queued_request_and_the_job_of_a_request(tmp_path, open_dispatcher):
+    component = _FirstJobWaits(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    for receipt in ("a", "b", "c"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
+    assert component.started.wait(10)
+    file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
+    file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
+
+    async def cancel(request_id):
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            response = await client.post(f"/reef/scenarios/s/requests/{request_id}/cancel")
+            return response.status, await response.json() if response.status == 200 else None
+
+    try:
+        # A queued request fails, and has no job.
+        assert asyncio.run(cancel("two")) == (200, {"scenario": "s", "request_id": "two", "queued": True, "job": None})
+        # The job of a request that a commit consumed is cancelled.
+        status, body = asyncio.run(cancel("one"))
+        assert (status, body["queued"]) == (200, False)
+        assert (body["job"]["state"], body["job"]["error"]) == ("failed", "cancelled by request")
+        assert asyncio.run(cancel("missing"))[0] == 404
+    finally:
+        component.release.set()
+    assert _wait(lambda: _committed_skip(dispatcher, "two") == "request failed"), _job_events(dispatcher)
+    assert _committed_row(dispatcher, "two")["error"] == "cancelled by request"
+    # The queue moves on to the next request, and the cancelled one never got a job.
+    assert _wait(lambda: ("three", "submitted") in _job_events(dispatcher)), _job_events(dispatcher)
+    assert _wait(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
+    assert _wait(lambda: [job.request_id for job in component.submitted] == ["one", "three"]), component.submitted
+    # A second cancel changes nothing.
+    assert asyncio.run(cancel("two")) == (200, {"scenario": "s", "request_id": "two", "queued": False, "job": None})
