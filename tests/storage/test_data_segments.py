@@ -160,6 +160,29 @@ def test_maintain_moves_waiting_content_into_segments_and_reads_stay_exact(open_
         assert store.record_links("acme", ["coding/call-4"])["coding/call-4"].parent == "coding/call-3"
 
 
+def test_maintain_merges_the_segments_of_small_writes_and_reads_stay_exact(open_store, monkeypatch, tmp_path):
+    created = [trajectory(f"t{number}", str(number)) for number in range(3)]
+    size = len(json.dumps(created[0].content, separators=(",", ":")))
+    with closing(open_store()) as store:
+        # One segment for each item, as a store of an earlier version wrote them.
+        for item in created:
+            store.create("acme", [item])
+        assert [len(path.read_text().splitlines()) for path in segment_files(tmp_path)] == [1, 1, 1]
+        monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", 2**20)
+        monkeypatch.setattr(sql_data, "PACK_BYTES", 2 * size)
+        store.maintain()
+        # The two oldest fill one segment; the third waits for more. The old segments stay for a reader.
+        assert sorted(len(path.read_text().splitlines()) for path in segment_files(tmp_path)) == [1, 1, 1, 2]
+        assert [item.content for item in store.query("acme")] == [item.content for item in created]
+        monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+        store.maintain()
+        assert sorted(len(path.read_text().splitlines()) for path in segment_files(tmp_path)) == [1, 2]
+        assert [item.content for item in store.read_many("acme", ["t2", "t0"])] == [
+            created[2].content,
+            created[0].content,
+        ]
+
+
 def test_maintain_deletes_only_segments_that_no_row_uses(open_store, monkeypatch, tmp_path):
     monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
     with closing(open_store()) as store:
