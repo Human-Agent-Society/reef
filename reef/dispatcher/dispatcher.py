@@ -58,9 +58,9 @@ from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import WorkItem
-from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
+from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker, cancel_request_jobs
 from reef.train.trainer import Trainer
-from reef.train.training_requests import TrainingRequestQueue
+from reef.train.training_requests import RequestCancel, TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -701,6 +701,21 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             item = ingest.file_request(current, request_id or uuid.uuid4().hex, payload)
             self.local_workers.wake(current)
             return item
+
+    def cancel_request(self, scenario: str, request_id: str) -> RequestCancel | None:
+        """Cancel the training request ``request_id`` of ``scenario``, so that it trains no job, or no further.
+
+        A queued request fails with ``REQUEST_CANCELLED_ERROR`` (``ScenarioTrainingRequests.cancel``), and the
+        scenario's workers wake to consume it with a skip row. Each job of the request that has not ended is
+        cancelled (``cancel_request_jobs``). Return None when the scenario has no such request. The scenario must
+        exist.
+        """
+        with self.locked_scenario(scenario) as current:
+            item = None if current.training_requests is None else current.training_requests.cancel(request_id)
+            if item is None:
+                return None
+            self.local_workers.wake(current)
+            return RequestCancel(not item.final, cancel_request_jobs(self.queue, scenario, request_id))
 
     def accept_records(self, items: Sequence[AgentRecord]) -> tuple[AgentRecord, ...]:
         """Validate an ordered import batch, commit it, then wake its consumer."""

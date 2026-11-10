@@ -868,6 +868,28 @@ def test_a_request_reads_its_samples_in_batches_and_a_poll_does_not_read_them_ag
     assert processor.holds_job_data(None)
 
 
+@pytest.mark.unit
+def test_the_data_of_a_failed_request_holds_no_sample_and_reads_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = PipelineContext("s", training_mode="manual")
+    processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
+    upload(processor.store.store, "upload")
+    request = training_request("upload")
+
+    def refuse(store: SampleStore, sample_ids: Any) -> Any:
+        raise AssertionError("a failed request reads no sample")
+
+    monkeypatch.setattr(SampleStore, "get", refuse)
+    # The queue gives the failure of a request that a client cancelled, or whose step failed.
+    processor.queue_requests([request], {request.id: "cancelled by request"})
+    assert processor.holds_job_data(None)
+    data = processor.build_job_data(None)
+    assert (data.data_id, data.samples, data.request) == (f"s:request:{request.id}", (), request)
+    # The trainer releases the data and consumes the request alone (``Trainer.skip_failed_request``).
+    processor.release_job_data(data.data_id)
+    assert processor.discard_request(request.id) == frozenset({request.id})
+    assert not processor.holds_job_data(None)
+
+
 class TaskJobData(RecordingJobData):
     """Recording job data that also trains the scenario's imported train tasks."""
 

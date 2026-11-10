@@ -257,6 +257,15 @@ def register_scenario_writes(
             raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training job {job_id!r}")
         return web.json_response({"scenario": scenario, "job": job})
 
+    async def cancel_request(request: web.Request) -> web.Response:
+        scenario, request_id = request.match_info["scenario"], request.match_info["request_id"]
+        cancelled = await asyncio.to_thread(request_service.dispatcher.cancel_request, scenario, request_id)
+        if cancelled is None:
+            raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training request {request_id!r}")
+        return web.json_response(
+            {"scenario": scenario, "request_id": request_id, "queued": cancelled.queued, "job": cancelled.job}
+        )
+
     async def train_from_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         artifact_id, component = await read_artifact_selection(request)
@@ -275,6 +284,7 @@ def register_scenario_writes(
     app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/redeploy", redeploy_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/jobs/{job_id}/cancel", cancel_job)
+    app.router.add_post("/reef/scenarios/{scenario}/requests/{request_id}/cancel", cancel_request)
 
 
 __all__ = ["register_scenario_reads", "register_scenario_writes"]
