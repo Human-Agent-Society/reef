@@ -77,7 +77,6 @@ from reef.train.manager import (
     TrainFrom,
     TrainingManager,
 )
-from reef.train.trainer import Trainer
 from reef.train.training_requests import RequestCancel, TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
@@ -954,6 +953,8 @@ class Dispatcher(
     def next_job(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
         """The next automatic job of the trainer of ``component`` (the only one when None): its mode and samples."""
         with self.locked_scenario(scenario) as current:
+            if component is None and len(current.trainers) > 1:
+                raise ValueError(f"scenario {current.name!r} has several components: name one with component")
             return current.next_job_listing(component)
 
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
@@ -967,13 +968,6 @@ class Dispatcher(
         with self.locked_scenario(scenario) as current:
             samples = self.storage.sample_store(scenario, current.store)
             return () if samples is None else samples.listing(after_sequence=after_sequence, limit=limit)
-
-    @staticmethod
-    def trainer_of(current: Scenario, component: str | None) -> Trainer:
-        """The trainer of ``component`` in ``current``; ``ValueError`` for None in a scenario of several."""
-        if component is None and len(current.trainers) > 1:
-            raise ValueError(f"scenario {current.name!r} has several components: name one with component")
-        return current.trainer_for(component)
 
     @contextmanager
     def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
