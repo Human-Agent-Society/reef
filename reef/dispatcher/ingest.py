@@ -46,8 +46,8 @@ def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any])
 
     A retry of a request that the scenario queued before returns its item, whatever the training mode now.
     Otherwise the scenario must train in ``manual`` mode, the text and ``requires`` must pass the screens
-    (``training_request_refusal``), and a trainer that trains must take the request's samples
-    (``Trainer.check_request``). Raise ``ValueError`` for a refused request, and
+    (``training_request_refusal``), a trainer that trains must take the request's samples
+    (``Trainer.check_request``), and ``train_from`` must name an artifact of the scenario. Raise ``ValueError`` for a refused request, and
     ``RecordConflict`` for an ID that the scenario queued with another payload.
     """
     if current.training_requests is None:
@@ -66,7 +66,12 @@ def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any])
             refusal = training_request_refusal(request["text"], request["requires"])
             if refusal is not None:
                 raise ValueError(refusal)
-            check_request(trainers, TrainingRequest.from_dict(request))
+            parsed = TrainingRequest.from_dict(request)
+            check_request(trainers, parsed)
+            if parsed.train_from is not None and not any(
+                row["artifact_id"] == parsed.train_from for row in current.artifact_rows()
+            ):
+                raise ValueError(f"train_from names no artifact of the scenario: {parsed.train_from!r}")
         return current.training_requests.file(request_id, request)
     except RecordConflict:
         current.operations.increment("ingest/rejected_conflict_total")

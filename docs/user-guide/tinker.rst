@@ -187,8 +187,9 @@ checkpoints referenced by Reef.
 Requests that are already admitted keep the sampler of the snapshot they
 started with. Restart creates a fresh runtime-load incarnation and serves the
 active selection. Train-from works: Reef imports the older artifact's manifest
-into the component, cancels the running job, and the next job starts from that
-artifact's weights and optimizer state.
+into the component, cancels the running job that continues the start before,
+and the next job that names no start begins from that artifact's weights and
+optimizer state.
 
 Serve on inference engines
 --------------------------

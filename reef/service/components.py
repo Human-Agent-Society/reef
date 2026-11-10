@@ -237,6 +237,7 @@ class TrainingApp(ComponentApp):
                     coordination.work_queue,
                     data_store,
                     worker_id=instance_id(f"training-{component.name}"),
+                    slots=settings.training_max_jobs,
                 )
                 for component in components
             )

@@ -56,7 +56,9 @@ Serving and training use separate selections:
 - Each trainer has a training start: the artifact its next job or evolve
   step starts from. It begins at the creation artifact and moves to its own
   newest output after training. ``train-from`` selects an existing artifact
-  and leaves serving unchanged.
+  and leaves serving unchanged. A request's ``train_from`` gives one job its
+  own start: that job does not move the training start, so it can run beside
+  the other jobs of the scenario.
 - ``serve`` adds an artifact beside the active selection. It records the
   selected component mapping without publishing bytes. Later activation does
   not change that served mapping. ``stop-serving`` removes the extra route.

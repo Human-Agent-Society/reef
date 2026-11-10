@@ -88,20 +88,28 @@ through ``reef.train.jobs.JobLoop``:
 #. The scenario's training worker reads the job's status every 2 seconds.
    Each new checkpoint is a candidate. The recipe's candidate evaluation
    decides whether Reef publishes it; the default selects every checkpoint.
-#. Training is linear: the next job starts from the last saved checkpoint,
-   whether or not evaluation selected it. Evaluation decides only what is
-   served.
+#. A job continues the trainer's training start unless its request names
+   another start with ``train_from``. A job that continues the training start
+   begins there and moves it to each checkpoint that it saves, whether or not
+   evaluation selected the checkpoint. The trainer runs one such job at a
+   time. Evaluation decides only what is served.
+#. A job with its own start begins from that artifact and never moves the
+   training start. The trainer submits it while other jobs of its scenario
+   run when the component has ``concurrent_jobs``: a job then depends only on
+   its own start, data and parameters. The Tinker component has it. Without
+   it, the trainer runs one job at a time.
 #. A failed job ends like a finished one. Reef consumed the records of its data
    when it submitted the job, so they do not train again.
 #. For a ``train-from``, Reef first imports the snapshot with
-   ``import_start`` and cancels the running job. It then writes the
-   ``train_from`` commit. The next job starts from the imported snapshot. A
-   component that cannot load a snapshot refuses it, and Reef answers the
-   request with HTTP 400. Activating an artifact changes only what serves; the
+   ``import_start`` and cancels the running job that continues the start
+   before. It then writes the ``train_from`` commit. The next job that names
+   no start begins from the imported snapshot. A component that cannot load a
+   snapshot refuses it, and Reef answers the request with HTTP 400. A
+   request's ``train_from`` takes its start with ``import_start`` too. Activating an artifact changes only what serves; the
    component never sees it.
 
 The trainer stores its state, a ``JobLoopState``, in the scenario's commit
-record. The state holds ``start``, ``job``, ``finished_jobs`` and
+record. The state holds ``start``, ``jobs``, ``finished_jobs`` and
 ``last_job``. A component never learns the scenario. Per-scenario state, such
 as one adapter per scenario, belongs to serving.
 
@@ -114,7 +122,8 @@ must also serve each scenario its own weights.
 ``reef.train.local_jobs.LocalJobComponent`` is the base of the built-in
 components. It keeps each job in a directory under the component's job root:
 ``job.json``, ``checkpoints.json`` and, once the job ended, ``result.json``.
-It runs jobs one at a time in a thread. A subclass implements ``check_job``
+It runs jobs one at a time in a thread; a subclass with ``concurrent_jobs``
+runs every submitted job in its own thread. A subclass implements ``check_job``
 and ``run``. It must call ``start_jobs()`` once it can train. Until then no
 job runs, including the jobs that a restart left. After a restart,
 ``start_jobs()`` resumes the unfinished jobs in submission order.

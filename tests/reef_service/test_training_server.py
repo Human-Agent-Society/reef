@@ -535,7 +535,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             block = await math_status(client)
             if (
                 block["finished_jobs"] == finished_jobs
-                and (block["training_job"] is not None) == running
+                and bool(block["training_jobs"]) == running
                 and block["served_artifact_id"]
                 == dispatcher.get_or_create_scenario("math").artifact_status()["weights"]["active"]
             ):
@@ -547,7 +547,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         async with TestClient(TestServer(create_app(dispatcher))) as client:
             dispatcher.get_or_create_scenario("math")
             idle = await wait_for(client, finished_jobs=0, running=False)
-            assert (idle["training_job"], idle["finished_jobs"]) == (None, 0)
+            assert (idle["training_jobs"], idle["finished_jobs"]) == ([], 0)
             assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
             assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters
 
@@ -559,7 +559,15 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             while not component.submitted and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
             (job,) = component.submitted
-            assert running["training_job"] == {"job_id": job.job_id, "backend": "stub", "checkpoints_handled": 0}
+            assert running["training_jobs"] == [
+                {
+                    "job_id": job.job_id,
+                    "start": job.start,
+                    "checkpoints_handled": 0,
+                    "train_from": None,
+                    "backend": "stub",
+                }
+            ]
 
             component.finish_jobs()
             finished = await wait_for(client, finished_jobs=1, running=False)

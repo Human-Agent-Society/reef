@@ -223,6 +223,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return True
 
     @property
+    def concurrent_jobs(self) -> bool:
+        return True
+
+    @property
     def base_start(self) -> str:
         """``base/``, which this property prepares on its first use in a process (``prepared_base``)."""
         return str(self.prepared_base())

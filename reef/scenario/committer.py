@@ -554,8 +554,9 @@ class ScenarioCommitter:
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Set ``component``'s training start to ``artifact_id``; return the artifact.
 
-        The trainer's running job is cancelled, and its next job or step
-        starts from the artifact. The active selection does not change.
+        The trainer's running job that continues the start before is cancelled, and its next job that names no
+        start begins from the artifact. The jobs with their own start keep running. The active selection does not
+        change.
         ``component`` may be left out when the scenario has one component.
         The trainer takes the start first, then the ``"train_from"`` record
         lands at the next step; a restart before the trainer's next training
@@ -740,10 +741,22 @@ class ScenarioCommitter:
             if start is not None:
                 self.start_trainer(component_trainer, self._artifacts.resolve(start.snapshot))
 
-    def start_trainer(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> None:
-        """Start ``component_trainer`` from its component of ``release``."""
+    def training_start(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> str:
+        """The start of a job of ``component_trainer`` that trains from its component of ``snapshot``: what the
+        training component imports of it (``Trainer.import_start``), which can copy weights for minutes. Raise
+        ``TrainingStartRefused`` when the trainer cannot start from it."""
         artifact = self._binding.components.component_artifact(snapshot, component_trainer.component).materialize()
-        component_trainer.trainer.start_from(artifact)
+        return component_trainer.trainer.import_start(artifact)
+
+    def request_start(self, artifact_id: str, component: str) -> str:
+        """The start of a job of ``component``'s trainer that trains from ``artifact_id`` (``training_start``). Raise
+        as :meth:`resolve_artifact` does, and ``TrainingStartRefused``."""
+        selected, snapshot = self.resolve_artifact(artifact_id, component)
+        return self.training_start(self.component_trainer(selected.component), snapshot)
+
+    def start_trainer(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> None:
+        """Start ``component_trainer`` from its component of ``snapshot``."""
+        component_trainer.trainer.start_from(self.training_start(component_trainer, snapshot))
 
     def commit(self, result: TrainingCommit, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending training result as one atomic version record.
@@ -850,7 +863,7 @@ class ScenarioCommitter:
         durable = self._store.durable
         if publication.component is None:
             publication = SavedArtifactPublication(publication.artifact, component)
-        publication = self.with_training_starts(publication)
+        publication = self.with_training_starts(publication, prepared.train_from)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
             # The durable snapshot must exist before inference can take the committed selection.
@@ -889,16 +902,19 @@ class ScenarioCommitter:
 
         self.finish_committed_step(prepared, record, trainer, expected=head, expected_checkpoint=checkpoint)
 
-    def with_training_starts(self, publication: SavedArtifactPublication) -> SavedArtifactPublication:
-        """``publication``, whose artifact names its training starts (``training_starts_of``): its trainer's training
-        start, then that start's own training starts (RFC #1263). An inference runtime serves a training artifact
+    def with_training_starts(
+        self, publication: SavedArtifactPublication, train_from: str | None
+    ) -> SavedArtifactPublication:
+        """``publication``, whose artifact names its training starts (``training_starts_of``): ``train_from``, the
+        start that its job named, or else its trainer's training start, then that start's own training starts
+        (RFC #1263). An inference runtime serves a training artifact
         as the nearest of them that has a serving setting. A publication without a start stays as it is.
         """
         component = publication.component
         if component is None:
             return publication
         # A component that the scenario does not serve has no start; ``stage_publication`` refuses it.
-        start = self.artifact_status().get(component, {}).get("training_start")
+        start = train_from or self.artifact_status().get(component, {}).get("training_start")
         if start is None:
             return publication
         _, snapshot = self.resolve_artifact(start, component)
@@ -1179,6 +1195,7 @@ class ScenarioCommitter:
             consumed_ids=prepared.consumed_ids,
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
+            train_from=prepared.train_from if checkpoint else None,
             component=self.component_on_record(component),
             components=components,
             selection=self.recorded_selection(snapshot),
