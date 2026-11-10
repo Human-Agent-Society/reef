@@ -10,7 +10,9 @@ in the task file store, in each owner's partition.
 With a segment store, the content of a trajectory item, and the content of a trajectory node, can live in a segment
 line instead (``reef.storage.segments``). ``create`` writes the content of new trajectory items as one segment
 when it is at least ``CREATE_SEGMENT_BYTES``. ``maintain`` moves the rest into segments once an owner has
-``PACK_BYTES`` of it, and deletes the segments that no row uses. ``data_segment`` lists each segment that the store wrote, so that ``maintain`` finds the unused ones.
+``PACK_BYTES`` of it, merges the segments of small writes (``merge_small_segments``), and deletes the segments
+that no row uses. ``data_segment`` lists each segment that the store wrote, so that ``maintain`` finds the unused
+ones.
 """
 
 from __future__ import annotations
@@ -1248,6 +1250,78 @@ class SQLDataStore(DataStore):
                 moved += len(rows)
         return moved
 
+    def small_segment_items(self) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+        """The join condition of ``data_item`` and ``data_segment``, and the condition of the item rows whose content
+        is in a segment that a small write made: one of less than ``CREATE_SEGMENT_BYTES``."""
+        items, segment = self.items_table, self.segment_table
+        return (
+            and_(items.c.owner == segment.c.owner, items.c.segment_id == segment.c.segment_id),
+            segment.c.byte_count < min(CREATE_SEGMENT_BYTES, PACK_BYTES),
+        )
+
+    def merge_small_segments(self, owner: str) -> int:
+        """Move the trajectory content of ``owner`` that is in small segments (``small_segment_items``) into segments
+        of at least ``PACK_BYTES``, oldest first, while at least ``PACK_BYTES`` of it is there; return the number of
+        rows moved. A read of many items then sends fewer requests to the segment store.
+
+        A reader that holds the old place of a line still reads it: ``delete_unused_segments`` keeps the old
+        segment for ``UNUSED_SEGMENT_SECONDS``. The caller holds ``pack_lock(owner)``.
+        """
+        partition = self.partition(owner)
+        if partition is None:
+            return 0
+        items, segment = self.items_table, self.segment_table
+        joined, small = self.small_segment_items()
+        source = items.join(segment, joined)
+        condition = and_(items.c.owner == owner, small)
+        moved = 0
+        while True:
+            rows: list[RowMapping] = []
+            total = 0
+            with self.transaction() as connection:
+                waiting = select(func.sum(items.c.segment_length)).select_from(source).where(condition)
+                if (connection.scalar(waiting) or 0) < PACK_BYTES:
+                    break
+                result = connection.execute(
+                    select(items.c.sequence, items.c.segment_id, items.c.segment_offset, items.c.segment_length)
+                    .select_from(source)
+                    .where(condition)
+                    .order_by(items.c.sequence)
+                ).mappings()
+                for row in result:
+                    rows.append(row)
+                    total += int(row["segment_length"])
+                    if total >= PACK_BYTES:
+                        break
+                result.close()
+            lines = [
+                SegmentLine(row["segment_id"], int(row["segment_offset"]), int(row["segment_length"])) for row in rows
+            ]
+            places = self.write_segment(partition, partition.read_text(lines))
+            with self.transaction() as connection:
+                # A row that another write moved meanwhile keeps its new place.
+                connection.execute(
+                    update(items)
+                    .where(
+                        items.c.owner == owner,
+                        items.c.sequence == bindparam("row_sequence"),
+                        items.c.segment_id == bindparam("old_segment_id"),
+                    )
+                    .values(**{name: bindparam(f"new_{name}") for name in SEGMENT_COLUMNS}),
+                    [
+                        {
+                            "row_sequence": row["sequence"],
+                            "old_segment_id": row["segment_id"],
+                            "new_segment_id": place.segment_id,
+                            "new_segment_offset": place.offset,
+                            "new_segment_length": place.length,
+                        }
+                        for row, place in zip(rows, places, strict=True)
+                    ],
+                )
+            moved += len(rows)
+        return moved
+
     def maintain(self) -> None:
         super().maintain()
         if self.segments is None:
@@ -1263,10 +1337,23 @@ class SQLDataStore(DataStore):
                         .having(func.sum(size) >= PACK_BYTES)
                     )
                 )
-        for owner in sorted(owners):
+        items, segment = self.items_table, self.segment_table
+        joined, small = self.small_segment_items()
+        with self.transaction() as connection:
+            scattered = set(
+                connection.scalars(
+                    select(items.c.owner)
+                    .select_from(items.join(segment, joined))
+                    .where(small)
+                    .group_by(items.c.owner)
+                    .having(func.sum(items.c.segment_length) >= PACK_BYTES)
+                )
+            )
+        for owner in sorted(owners | scattered):
             with self.pack_lock(owner) as locked:
                 if locked:
                     self.pack(owner)
+                    self.merge_small_segments(owner)
         self.delete_unused_segments()
 
     def delete_unused_segments(self) -> int:
