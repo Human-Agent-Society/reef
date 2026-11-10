@@ -1270,6 +1270,11 @@ downgrade without restoring a compatible backup.
    ``evaluation.max_sandboxes`` : 4
        the task sandboxes that one process of the evaluation service holds at once, across all evaluations. Each
        running rollout holds one. Set it to the quota of the sandbox provider, divided by the evaluation processes.
+   ``evaluation.trial_observer`` : unset
+       a ``TrialObserver`` plugin (``reef.evaluation.trials``), as ``package.module:ClassName`` or ``module`` and
+       ``config``. The evaluation worker gives it each trial: the rollout, the attempt, the trial directory and the
+       error. It runs before the worker removes the directory, so it can keep the logs of the agent and the verifier.
+       Its failure is logged and does not change the rollout.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe

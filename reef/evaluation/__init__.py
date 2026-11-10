@@ -12,8 +12,10 @@ built-in evaluators, selectors and rules.
 holds ``HarnessCandidate``, its evaluator ``HarnessTaskEvaluator``, the
 ``TaskScorer`` contract that a deployment names, the history that is the
 score cache, and the ``compare``, ``floor`` and ``none`` publication policies.
-``rollout_worker`` runs the rollouts of an artifact evaluation, and
-``artifact_endpoint`` answers their model calls from the evaluated artifact.
+``rollout_worker`` runs the rollouts of an artifact evaluation,
+``artifact_endpoint`` answers their model calls from the evaluated artifact, and
+``trials`` holds the ``TrialObserver`` contract that reads each trial before the
+worker removes it (``evaluation.trial_observer``).
 """
 
 from reef.core.activation import ActivationRule, MadeArtifact
