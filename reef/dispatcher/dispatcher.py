@@ -47,7 +47,6 @@ from reef.scenario.committer import ComponentArtifact
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
-from reef.scenario.snapshots import ServedBesideArtifact
 from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
@@ -616,13 +615,66 @@ class Dispatcher(
             if self.publisher is not None:
                 self.publisher.publish(current, redeploy=True)
 
-    def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
-        """Serve ``artifact_id`` of ``component`` beside the active selection of ``scenario``; that snapshot stays."""
+    def set_served(self, scenario: str, served: Mapping[str, int], component: str | None = None) -> dict[str, Any]:
+        """Make ``served`` what ``scenario`` serves of ``component``, and return the mapping (RFC #1325).
+
+        ``served`` maps the artifact IDs of one component to traffic weights: integers from 0 to 100 that sum to
+        100, one or more. Afterwards the scenario serves exactly these artifacts of the component. The artifact with
+        the largest weight, the first in sorted order among equals, is the active one: it answers every request
+        that names no artifact and gets no bucket. With more than one weight above 0, the weights are the traffic
+        split, and an artifact whose route does not exist yet leaves its requests to the active artifact. An
+        artifact with weight 0 answers only the requests that name it. ``component`` may be left out when the
+        scenario has one component.
+
+        Raise ``UnknownScenario`` for an unknown scenario, the errors of ``Scenario.resolve_artifact`` for an
+        artifact that is not one of the component, ``ReefError`` when the runtime serves one artifact and
+        ``served`` names more, and ``ValueError`` when this service does not run control.
+        """
+        if self.publisher is None:
+            raise ValueError("this service does not run control, so it cannot change what a scenario serves")
+        active_id = min(served, key=lambda artifact_id: (-served[artifact_id], artifact_id))
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
-            changed = current.serve(artifact_id, component)
+            name = current.artifact_snapshot(active_id, component)[0]
+            for artifact_id in served:
+                current.artifact_snapshot(artifact_id, name)
+            beside = {artifact_id for artifact_id, entry in current.served_beside().items() if entry.component == name}
+            others = set(served) - {active_id}
+            # The artifact that is active now keeps its route while the new one starts.
+            for artifact_id in sorted(others - beside):
+                current.serve(artifact_id, name)
+            current.activate(active_id, name)
+            for artifact_id in sorted(beside - others):
+                current.stop_serving(artifact_id)
+            split = dict(served) if sum(weight > 0 for weight in served.values()) > 1 else {}
+            self.publisher.publish(current, retry_failed=True)
+            self.publisher.write_traffic_weights(scenario, split)
             self.scenario_committed(current)
-            return changed
+            return {"served": self.served_mapping(current)[name]}
+
+    def served_mapping(self, current: Scenario) -> dict[str, dict[str, int]]:
+        """What ``current`` serves, by component: each served artifact of the component with its traffic weight.
+
+        The served artifacts are the active one and those that the scenario serves beside it. Without a traffic
+        split the active artifact has 100 and the others 0. With a split, each has its weight, and the active
+        artifact also has the weights of the artifacts that the scenario does not serve, since it answers their
+        requests.
+        """
+        weights = dict(self.coordination.served_models.read_traffic_weights(current.name))
+        beside = current.served_beside()
+        mapping: dict[str, dict[str, int]] = {}
+        for name, status in current.artifact_status().items():
+            active_id = status["active"]
+            if active_id is None:
+                continue
+            served = {active_id, *(artifact_id for artifact_id, entry in beside.items() if entry.component == name)}
+            if set(weights) & served:
+                unserved = sum(weight for artifact_id, weight in weights.items() if artifact_id not in served)
+                mapping[name] = {artifact_id: weights.get(artifact_id, 0) for artifact_id in sorted(served)}
+                mapping[name][active_id] += unserved
+            else:
+                mapping[name] = {artifact_id: 100 if artifact_id == active_id else 0 for artifact_id in sorted(served)}
+        return mapping
 
     def restore(self, scenario: str, step: int) -> Mapping[str, str]:
         """Restore the complete selection at a recorded scenario step and queue its serving startup."""
@@ -633,14 +685,6 @@ class Dispatcher(
                 self.publisher.publish(current, retry_failed=True)
             self.scenario_committed(current)
             return selection
-
-    def stop_serving(self, scenario: str, artifact_id: str) -> ServedBesideArtifact:
-        """Stop serving ``artifact_id`` beside the active selection of ``scenario``; the active selection stays."""
-        with self.registry.lock_for(scenario):
-            current = self.registry.require(scenario)
-            changed = current.stop_serving(artifact_id)
-            self.scenario_committed(current)
-            return changed
 
     def train_from(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer of ``scenario`` from ``artifact_id``; what serves stays."""
@@ -966,17 +1010,6 @@ class Dispatcher(
                 "effective_serving_config": current.effective_serving_config(current.serving_config),
             }
 
-    def set_traffic_weights(self, scenario: str, weights: Mapping[str, int]) -> dict[str, Any]:
-        """Make ``weights`` the traffic split of an existing ``scenario``, and return them. The artifacts must serve
-        already. Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an artifact without a route.
-        """
-        if self.publisher is None:
-            raise ValueError("this service does not run control, so it cannot change a traffic split")
-        with self.registry.lock_for(scenario):
-            self.registry.require(scenario)
-            self.publisher.write_traffic_weights(scenario, weights)
-            return {"traffic_weights": dict(weights)}
-
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self.registry.stored_settings(scenario)
@@ -991,7 +1024,7 @@ class Dispatcher(
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
         with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
         after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
-        a load does. ``traffic_weights`` is the scenario's traffic split, ``{}`` without one. ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
+        a load does. ``served`` is what the scenario serves, by component (``served_mapping``). ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
         (``PipelineContext.job_parameters``), which a request's ``parameters`` merge into; a kind that the
         recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
         """
@@ -1012,7 +1045,7 @@ class Dispatcher(
                 "effective_activation": self.registry.effective_activation(settings),
                 "serving_config": settings.serving_config.to_json(),
                 "effective_serving_config": effective_serving,
-                "traffic_weights": dict(self.coordination.served_models.read_traffic_weights(scenario)),
+                "served": self.served_mapping(current),
                 "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 

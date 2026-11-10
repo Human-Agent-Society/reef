@@ -1,4 +1,4 @@
-"""Artifacts served beside the active selection, each at its own URL (RFC #997)."""
+"""What a scenario serves: the ``served`` mapping of artifact IDs to weights, and each artifact's own URL (RFCs #997, #1325)."""
 
 from __future__ import annotations
 
@@ -101,10 +101,10 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
 ) -> None:
     async def run() -> None:
         value, _, _, newest, older = two_artifacts(tmp_path)
-        served = value.serve("math", older["artifact_id"])
-        assert served.artifact_id == older["artifact_id"]
+        mapping = {newest["artifact_id"]: 100, older["artifact_id"]: 0}
+        assert value.set_served("math", mapping) == {"served": mapping}
         wait_for_serving(value)
-        # The artifact served beside the active one has its own row, under the runtime's model name for it.
+        # The artifact with weight 0 has its own row, under the runtime's model name for it.
         rows = value.coordination.served_models.read_scenario("math")
         assert rows[older["artifact_id"]] == ServedArtifact(
             older["artifact_id"], "http://trainer", f"sampler:{older['artifact_id']}"
@@ -120,7 +120,7 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
                 f"/reef/scenarios/math/artifacts/{older['artifact_id']}/v1/chat/completions", json=CHAT
             )
             assert beside.status == 200
-            # The active selection answers at its artifact's URL without a serve.
+            # The active artifact answers at its artifact's URL too.
             active = await client.post(
                 f"/reef/scenarios/math/artifacts/{newest['artifact_id']}/v1/chat/completions", json=CHAT
             )
@@ -148,39 +148,90 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
 
 
 @pytest.mark.unit
-def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp_path) -> None:
+def test_a_mapping_serves_exactly_its_artifacts_and_the_commit_history_records_each_change(tmp_path) -> None:
     value, _, _, newest, older = two_artifacts(tmp_path)
     scenario = value.get_or_create_scenario("math")
-    # Serving the active artifact keeps it serving after another activation.
-    value.serve("math", newest["artifact_id"])
-    value.activate("math", older["artifact_id"])
-    assert scenario.serving_artifact_id() == older["artifact_id"]
-    assert scenario.served_beside()[newest["artifact_id"]].selection.components == {"weights": newest["artifact_id"]}
+    new_id, old_id = newest["artifact_id"], older["artifact_id"]
+    # The older artifact becomes active, and the artifact that was active stays loaded with weight 0.
+    assert value.set_served("math", {old_id: 100, new_id: 0}) == {"served": {old_id: 100, new_id: 0}}
+    assert scenario.serving_artifact_id() == old_id
+    assert scenario.served_beside()[new_id].selection.components == {"weights": new_id}
     rows = {row["artifact_id"]: row for row in value.list_artifacts("math")}
-    assert (rows[newest["artifact_id"]]["served"], rows[newest["artifact_id"]]["active"]) == (True, False)
-    assert (rows[older["artifact_id"]]["served"], rows[older["artifact_id"]]["active"]) == (False, True)
-    # A second serve of a served artifact changes nothing.
+    assert (rows[new_id]["served"], rows[new_id]["active"]) == (True, False)
+    assert (rows[old_id]["served"], rows[old_id]["active"]) == (False, True)
+    # The same mapping again changes nothing.
     steps = len(scenario.store.history())
-    value.serve("math", newest["artifact_id"])
+    assert value.set_served("math", {old_id: 100, new_id: 0}) == {"served": {old_id: 100, new_id: 0}}
     assert len(scenario.store.history()) == steps
 
-    stopped = value.stop_serving("math", newest["artifact_id"])
-    assert stopped.artifact_id == newest["artifact_id"]
+    # A mapping without the artifact stops it.
+    assert value.set_served("math", {old_id: 100}) == {"served": {old_id: 100}}
     assert [record.operation for record in scenario.store.history()[-3:]] == ["serve", "activate", "stop_serving"]
-    assert newest["artifact_id"] not in scenario.served_beside()
+    assert new_id not in scenario.served_beside()
     with pytest.raises(ArtifactNotFound):
-        value.stop_serving("math", newest["artifact_id"])
-    # The active selection still answers at its artifact's URL; the stopped artifact has no row.
+        scenario.stop_serving(new_id)
+    # The active artifact still answers at its artifact's URL; the stopped artifact has no row.
     wait_for_serving(value)
     rows = value.coordination.served_models.read_scenario("math")
-    assert older["artifact_id"] in rows and newest["artifact_id"] not in rows
+    assert old_id in rows and new_id not in rows
+    value.close()
+
+
+@pytest.mark.unit
+def test_a_mapping_of_one_artifact_makes_it_active_and_stops_the_artifacts_served_beside(tmp_path) -> None:
+    value, _, _, newest, older = two_artifacts(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    new_id, old_id = newest["artifact_id"], older["artifact_id"]
+    value.set_served("math", {new_id: 100, old_id: 0})
+    assert set(scenario.served_beside()) == {old_id}
+    # The artifact that was served beside becomes the only served artifact.
+    assert value.set_served("math", {old_id: 100}) == {"served": {old_id: 100}}
+    assert scenario.serving_artifact_id() == old_id
+    assert not scenario.served_beside()
+    assert value.scenario_settings("math")["served"] == {"weights": {old_id: 100}}
+    wait_for_serving(value)
+    rows = value.coordination.served_models.read_scenario("math")
+    assert old_id in rows and new_id not in rows
+    value.close()
+
+
+@pytest.mark.unit
+def test_the_largest_weight_is_active_and_the_first_in_sorted_order_among_equals(tmp_path) -> None:
+    value, _, _, newest, older = two_artifacts(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    first, last = sorted([newest["artifact_id"], older["artifact_id"]])
+    value.set_served("math", {first: 50, last: 50})
+    assert scenario.serving_artifact_id() == first
+    assert value.scenario_settings("math")["served"] == {"weights": {first: 50, last: 50}}
+    value.set_served("math", {first: 40, last: 60})
+    assert scenario.serving_artifact_id() == last
+    assert set(scenario.served_beside()) == {first}
+    assert value.scenario_settings("math")["served"] == {"weights": {first: 40, last: 60}}
+    value.close()
+
+
+@pytest.mark.unit
+def test_a_mapping_that_names_an_unknown_artifact_changes_nothing(tmp_path) -> None:
+    value, _, _, newest, older = two_artifacts(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    new_id, old_id = newest["artifact_id"], older["artifact_id"]
+    steps = len(scenario.store.history())
+    for mapping in ({"missing": 100}, {new_id: 60, "missing": 40}, {old_id: 100, "missing": 0}):
+        with pytest.raises(ArtifactNotFound):
+            value.set_served("math", mapping)
+    with pytest.raises(ValueError, match="no component 'other'"):
+        value.set_served("math", {old_id: 100}, "other")
+    assert len(scenario.store.history()) == steps
+    assert scenario.serving_artifact_id() == new_id and not scenario.served_beside()
+    assert value.coordination.served_models.read_traffic_weights("math") == {}
+    assert value.scenario_settings("math")["served"] == {"weights": {new_id: 100}}
     value.close()
 
 
 @pytest.mark.unit
 def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
-    value, _, backend_factory, _, older = two_artifacts(tmp_path)
-    value.serve("math", older["artifact_id"])
+    value, _, backend_factory, newest, older = two_artifacts(tmp_path)
+    value.set_served("math", {newest["artifact_id"]: 100, older["artifact_id"]: 0})
     value.close()
 
     component = ImportingComponent(tmp_path / "restarted-export")
@@ -199,56 +250,85 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_serve(tmp_path) -> None:
+def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_second_served_artifact(tmp_path) -> None:
     value, _, _ = dispatcher(tmp_path)
     train(value, 1)
-    older = value.get_or_create_scenario("math").artifacts()[-1]
+    active, older = value.get_or_create_scenario("math").artifacts()
     scenario = value.get_or_create_scenario("math")
     steps = len(scenario.store.history())
-    with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
-        value.serve("math", older["artifact_id"])
+    for mapping in (
+        {active["artifact_id"]: 100, older["artifact_id"]: 0},
+        {active["artifact_id"]: 0, older["artifact_id"]: 100},
+    ):
+        with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
+            value.set_served("math", mapping)
     assert len(scenario.store.history()) == steps
+    assert scenario.serving_artifact_id() == active["artifact_id"]
     value.close()
 
 
 @pytest.mark.unit
-def test_serve_and_stop_serving_http_api(tmp_path, monkeypatch) -> None:
+def test_served_http_api(tmp_path, monkeypatch) -> None:
     async def run() -> None:
-        value, _, _, _, older = two_artifacts(tmp_path)
+        value, _, _, newest, older = two_artifacts(tmp_path)
+        new_id, old_id = newest["artifact_id"], older["artifact_id"]
         client = TestClient(TestServer(create_app(value)))
         await client.start_server()
+
+        async def update(body: dict[str, object], scenario: str = "math"):
+            return await client.post(f"/reef/scenarios/{scenario}/update", json=body)
+
+        async def served() -> dict[str, dict[str, int]]:
+            return (await (await client.get("/reef/scenarios/math/settings")).json())["served"]
+
         try:
-            body = {"artifact_id": older["artifact_id"]}
-            served = await client.post("/reef/scenarios/math/serve", json=body)
-            assert served.status == 200
-            assert await served.json() == {
-                "scenario": "math",
-                "component": older["component"],
-                "artifact_id": older["artifact_id"],
-            }
+            assert await served() == {"weights": {new_id: 100}}
+            # Weight 0 loads an artifact beside the active one.
+            beside = {new_id: 100, old_id: 0}
+            loaded = await update({"served": beside, "component": older["component"]})
+            assert loaded.status == 200
+            assert await loaded.json() == {"scenario": "math", "served": beside}
             listed = await (await client.get("/reef/scenarios/math/artifacts")).json()
-            assert [row["artifact_id"] for row in listed["artifacts"] if row["served"]] == [older["artifact_id"]]
-            refused = await client.post(
-                "/reef/scenarios/math/stop-serving", json={**body, "component": older["component"]}
-            )
-            assert refused.status == 400
-            stopped = await client.post("/reef/scenarios/math/stop-serving", json=body)
+            assert [row["artifact_id"] for row in listed["artifacts"] if row["served"]] == [old_id]
+            assert await served() == {"weights": beside}
+
+            # Each refused body leaves what the scenario serves.
+            for body in (
+                {"component": older["component"]},
+                {"served": beside, "component": ""},
+                {"served": beside, "component": 1},
+                {"served": beside, "component": "other"},
+                {"served": {}},
+                {"served": None},
+                {"served": [new_id]},
+                {"served": {new_id: 90}},
+                {"served": {new_id: 60, old_id: 60}},
+                {"served": {new_id: 100.0}},
+                {"served": {new_id: 101, old_id: -1}},
+                {"served": {old_id: 100}, "traffic_weights": None},
+            ):
+                refused = await update(body)
+                assert refused.status == 400, (body, await refused.text())
+            for body in ({"served": {"missing": 100}}, {"served": {new_id: 100, "missing": 0}}):
+                assert (await update(body)).status == 404, body
+            assert (await update({"served": beside}, scenario="other")).status == 404
+            assert await served() == {"weights": beside}
+
+            # A mapping without the artifact stops it.
+            stopped = await update({"served": {new_id: 100}})
             assert stopped.status == 200
-            assert await stopped.json() == {
-                "scenario": "math",
-                "component": older["component"],
-                "artifact_id": older["artifact_id"],
-            }
-            for path in ("serve", "stop-serving"):
-                missing = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": "missing"})
-                assert missing.status == 404
-                unknown = await client.post(f"/reef/scenarios/other/{path}", json=body)
-                assert unknown.status == 404
-                empty = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": " "})
-                assert empty.status == 400
+            assert await stopped.json() == {"scenario": "math", "served": {new_id: 100}}
+            listed = await (await client.get("/reef/scenarios/math/artifacts")).json()
+            assert not [row for row in listed["artifacts"] if row["served"]]
+
+            # The three operations that ``served`` replaced have no route.
+            for path in ("activate", "serve", "stop-serving"):
+                removed = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": old_id})
+                assert removed.status in (404, 405), path
+            assert await served() == {"weights": {new_id: 100}}
 
             monkeypatch.setattr(Trainer, "has_pending_commit", property(lambda self: True))
-            waiting = await client.post("/reef/scenarios/math/serve", json=body)
+            waiting = await update({"served": beside})
             assert waiting.status == 409
         finally:
             await client.close()

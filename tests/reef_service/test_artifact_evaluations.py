@@ -1269,7 +1269,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            await created(client, tmp_path, "add")
+            active = await created(client, tmp_path, "add")
             assert await settings_of(client) == {
                 "scenario": "s",
                 "training_mode": "auto",
@@ -1278,7 +1278,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "effective_activation": {"module": "never", "config": {}},
                 "serving_config": {},
                 "effective_serving_config": {"weights": {}},
-                "traffic_weights": {},
+                "served": {"weights": {active: 100}},
                 "job_parameters": {"trajectory": {}, "task": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}

@@ -1364,7 +1364,7 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
     dispatchers: _Dispatchers,
 ) -> None:
     """Each catalog row names its harness artifact; exactly one row is active, and posting a row's artifact_id and
-    component to the activate route makes that row the active one."""
+    component as the ``served`` mapping of the update route makes that row the active one."""
     from aiohttp.test_utils import TestClient
 
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
@@ -1383,12 +1383,22 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
             assert [row["active"] for row in rows] == [False, False, True]
             assert all(row["component"] == HARNESS and row["activated"] for row in rows)
             first = rows[1]
-            body = {"artifact_id": first["artifact_id"], "component": first["component"]}
-            answer = await client.post("/reef/scenarios/agent/activate", json=body)
+            body = {"served": {first["artifact_id"]: 100}, "component": first["component"]}
+            before = (await (await client.get("/reef/scenarios/agent/settings")).json())["served"]
+            assert before[HARNESS] == {rows[2]["artifact_id"]: 100} and set(before) == {HARNESS, WEIGHTS}
+            # A scenario of two components needs the component, and the artifact must be one of that component.
+            unnamed = await client.post("/reef/scenarios/agent/update", json={"served": body["served"]})
+            assert unnamed.status == 400 and "name the component" in await unnamed.text()
+            other = await client.post("/reef/scenarios/agent/update", json={**body, "component": WEIGHTS})
+            assert other.status == 404
+            assert (await (await client.get("/reef/scenarios/agent/settings")).json())["served"] == before
+            answer = await client.post("/reef/scenarios/agent/update", json=body)
             assert answer.status == 200, await answer.text()
-            assert (await answer.json())["artifact_id"] == first["artifact_id"]
+            assert (await answer.json())["served"] == {first["artifact_id"]: 100}
             rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             assert [row["artifact_id"] for row in rows if row["active"]] == [first["artifact_id"]]
+            after = (await (await client.get("/reef/scenarios/agent/settings")).json())["served"]
+            assert after == {**before, HARNESS: {first["artifact_id"]: 100}}
         finally:
             await client.close()
 
