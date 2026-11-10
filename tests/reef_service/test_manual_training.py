@@ -22,6 +22,7 @@ from tests.support.samples_service import make_samples as produce_samples
 from tests.support.serving import wait_for_serving
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 
+from reef.artifact.artifact import ArtifactNotFound
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
@@ -45,6 +46,7 @@ from reef.storage.tasks import LocalTaskFileStore
 from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.manager import MANAGER_REQUEST_PREFIX, MANAGER_SESSION, Train, TrainFrom, TrainingManager
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.training_requests import ScenarioTrainingRequests
@@ -350,11 +352,13 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
     assert len(seen) == 1
 
 
-def test_auto_rejects_manual_requests(tmp_path, open_dispatcher):
+def test_auto_takes_a_request(tmp_path, open_dispatcher):
     dispatcher = open_dispatcher(harness_recipe(tmp_path, lambda workspace, services: None))
-    dispatcher.get_or_create_scenario("s")
-    with pytest.raises(ValueError, match="training_mode='manual'"):
-        file_request(dispatcher, "one")
+    scenario = dispatcher.get_or_create_scenario("s")
+    assert scenario.training_mode == "auto"
+    assert file_request(dispatcher, "one") == "one"
+    # The request's step commits in auto mode: a request trains before the waiting samples.
+    assert _wait(lambda: _committed_row(dispatcher, "one") is not None)
 
 
 def test_manual_runs_the_request_of_a_stage_that_reads_requests(records, build, training_requests):
@@ -555,36 +559,28 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, bu
     assert (following.request is not None) == (target == "manual")
 
 
-def test_switch_preserves_incomplete_auto_batch_and_unread_manual_requests(records, build, training_requests):
+def test_a_request_trains_in_auto_before_the_waiting_samples_and_leaves_them(records, build, training_requests):
     backend = RecordingComponent()
     trainer = build(backend, mode="auto", job_samples=2)
     records.append(inference("a"))
     make_samples(trainer)
     assert trainer.advance_job() is None
-    trainer.set_training_mode("manual")
+    # One sample waits, fewer than a job's samples. A request trains at once, in auto too.
     file(training_requests, "change")
-    # Change back before the accepted request has been read.
-    trainer.set_training_mode("auto")
-    make_samples(trainer)
-    assert trainer.advance_job() is None
-    records.append(inference("b"))
-    make_samples(trainer)
-    result = trainer.advance_job()
-    assert [source_record_id(item) for item in backend.batches[-1].samples] == ["a", "b"]
-    trainer.settle_commit(trainer.prepare_commit(result))
-    commit_running_job(trainer)
-    # The automatic job did not consume the request: it stays queued for manual.
-    make_samples(trainer)
-    assert not training_requests.get("change").final
-    trainer.set_training_mode("manual")
     make_samples(trainer)
     result = trainer.advance_job()
     assert backend.batches[-1].request_id == "change"
     trainer.settle_commit(trainer.prepare_commit(result))
     commit_running_job(trainer)
-    trainer.set_training_mode("auto")
     make_samples(trainer)
+    assert training_requests.get("change").final
     assert trainer.advance_job() is None
+    # The waiting sample still trains in the automatic job, once a second one arrives.
+    records.append(inference("b"))
+    make_samples(trainer)
+    result = trainer.advance_job()
+    assert [source_record_id(item) for item in backend.batches[-1].samples] == ["a", "b"]
+    assert backend.batches[-1].request_id is None
 
 
 @pytest.mark.parametrize("takes_requests", [False, True], ids=["record-only", "harness"])
@@ -1222,11 +1218,96 @@ def test_a_request_whose_start_the_component_refuses_fails_and_the_next_request_
     dispatcher.accept_request("s", refused, request_id="one")
     file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
 
-    # The refused request ends with a skip row and no job; the request after it trains.
-    assert _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == 1)
-    assert [job.request_id for job in component.submitted] == ["two"]
+    # The refused request ends with a skip row and no job; the request after it trains. The failed step reloads
+    # the scenario, so the rows are read once the second job ran.
+    assert _wait(lambda: [job.request_id for job in component.submitted] == ["two"])
+    assert _wait(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
     skipped = _committed_row(dispatcher, "one")
     assert skipped["skipped"] == "request failed" and "these weights do not load" in skipped["error"]
+
+
+class GatedManager(TrainingManager):
+    """Trains every untrained sample in one job once ``open`` is set and no request or job waits."""
+
+    def __init__(self) -> None:
+        self.open = threading.Event()
+
+    def actions(self, view):
+        if not self.open.is_set() or not view.untrained_samples or view.waiting_requests or view.jobs:
+            return ()
+        return (Train(view.untrained_samples, "train what waits"),)
+
+
+def managed_dispatcher(tmp_path, component, manager, **options):
+    """A dispatcher whose scenarios train in ``auto`` mode, one job for each sample by Reef's own rule, under
+    ``manager``; with two reported records of scenario "s", which its active artifact answered, stored as samples."""
+    recipe = _RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="auto")
+    dispatcher = harness_dispatcher(tmp_path, recipe, training_manager=manager, **options)
+    answered_by = dispatcher.get_or_create_scenario("s").serving_artifact_id()
+    for receipt in ("a", "b"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+                artifact_id=answered_by,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    return dispatcher
+
+
+def test_a_training_manager_decides_the_jobs_of_a_scenario_in_auto_mode(tmp_path):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    manager = GatedManager()
+    dispatcher = managed_dispatcher(tmp_path, component, manager)
+    try:
+        scenario = dispatcher.get_or_create_scenario("s")
+        samples = stored_samples_of(dispatcher, "a", "b")
+        # Reef starts no job by its own rule, although the samples of a job wait: one sample, the stage's job size.
+        assert _wait(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
+        [view] = dispatcher.manager_views()
+        assert (view.scenario, view.job_samples, view.selection_serves, view.jobs) == ("s", 1, True, ())
+        assert view.training_start is not None and component.submitted == []
+
+        manager.open.set()
+        assert _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") >= 1)
+        first = component.submitted[0]
+        assert first.request_id.startswith(MANAGER_REQUEST_PREFIX) and first.sample_count == 1
+        requests = [(record.metrics or {}).get("training_request") for record in scenario.store.history()]
+        assert {request["session"] for request in requests if request} == {MANAGER_SESSION}
+        # The trained sample no longer waits.
+        assert _wait(lambda: samples[0] not in dispatcher.manager_views()[0].untrained_samples)
+    finally:
+        dispatcher.close()
+
+
+def test_reef_runs_a_managers_actions_and_drops_a_request_above_its_job_limit(tmp_path):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    # The cycles are held, so a filed request stays queued.
+    dispatcher = managed_dispatcher(tmp_path, component, GatedManager(), hold_local_cycles=True)
+    try:
+        scenario = dispatcher.get_or_create_scenario("s")
+        samples = stored_samples_of(dispatcher, "a", "b")
+        assert _wait(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
+        [view] = dispatcher.manager_views()
+        dispatcher.run_manager_action(view, Train(samples[:1], "first"), job_limit=1)
+        dispatcher.run_manager_action(view, Train(samples[1:], "second"), job_limit=1)
+        assert [request.text for request in scenario.training_requests.queued()] == ["first"]
+        dispatcher.run_manager_action(view, Train(samples[1:], "second", train_from=view.training_start), job_limit=2)
+        second = scenario.training_requests.queued()[1]
+        assert (second.text, second.train_from) == ("second", view.training_start)
+        [view] = dispatcher.manager_views()
+        assert view.waiting_requests == 2
+
+        step = scenario.scenario_step
+        dispatcher.run_manager_action(view, TrainFrom(view.training_start), job_limit=1)
+        assert scenario.store.history()[-1].operation == "train_from" and scenario.scenario_step == step + 1
+        with pytest.raises(ArtifactNotFound):
+            dispatcher.run_manager_action(view, TrainFrom("no-such-artifact"), job_limit=1)
+    finally:
+        dispatcher.close()
 
 
 def test_a_running_jobs_step_takes_no_commit_lock(tmp_path, open_dispatcher, monkeypatch):

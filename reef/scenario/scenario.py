@@ -278,32 +278,34 @@ class Scenario:
             self.job_ends_read_step[component_trainer.component] = new[-1].step
         return component_trainer.trainer.produce_samples(selection)
 
-    def next_commit(self, component: str | None = None) -> TrainingCommit | None:
+    def selection_serves(self) -> bool:
+        """Whether the artifact that the scenario selected answers its requests now. True for a scenario that loads
+        no weights, since it serves one fixed model, and for one whose runtime answers no requests."""
+        runtime = self.runtime
+        return not (
+            self._binding.components.loaded_component is not None
+            and runtime is not None
+            and runtime.serves_requests
+            and self._binding.served_models is not None
+            and self.served_artifact_id() != self.serving_artifact_id()
+        )
+
+    def next_commit(self, component: str | None = None, *, automatic_jobs: bool = True) -> TrainingCommit | None:
         """Prepare ``component``'s next commit: a running job's checkpoint or end, or a job's submission.
 
         The caller runs one step of the scenario at a time, as the dispatcher's cycle lock does. Thus no training
         commit of another trainer lands while the step runs, and an activation refuses to run while the job data is
         reserved. News of a running job reads only the job's state, so it takes no commit lock. A submission of a
-        lone trainer holds the commit lock. With several trainers it runs outside that lock.
+        lone trainer holds the commit lock. With several trainers it runs outside that lock. Without
+        ``automatic_jobs``, the trainer submits only the jobs of requests: a training manager decides
+        (``reef.train.manager``).
         """
         trainer = self.trainer_for(component)
-        # The staleness check measures data against the weights that serve; a scenario that loads no weights
-        # serves one fixed model, so its data never goes stale.
-        runtime = self.runtime
-        weights_load = self._binding.components.loaded_component is not None and runtime is not None
-        serving = self.served_artifact_id() if weights_load else None
         # Automatic training waits until the selected artifact serves, so that it does not train the samples of the
         # artifact before. A job's end waits too: the worker polls while a job runs, so the step after the end
         # comes without a new record. A request names its samples (``TrainingPipeline.request_entries``), so manual
         # training does not wait, also when the selected artifact does not start.
-        if (
-            trainer.pipeline.training_mode == "auto"
-            and weights_load
-            and runtime is not None
-            and runtime.serves_requests
-            and self._binding.served_models is not None
-            and serving != self.serving_artifact_id()
-        ):
+        if trainer.pipeline.training_mode == "auto" and automatic_jobs and not self.selection_serves():
             return None
         result = trainer.pending_result() or trainer.poll_jobs()
         if result is not None:
@@ -312,25 +314,25 @@ class Scenario:
         self.refresh_requests()
         if not trainer.job_slot_free():
             return None
+        # The staleness check measures data against the weights that serve; a scenario that loads no weights
+        # serves one fixed model, so its data never goes stale.
+        weights_load = self._binding.components.loaded_component is not None and self.runtime is not None
+        serving = self.served_artifact_id() if weights_load else None
         if len(self.trainers) > 1:
-            return self.prepare_job(component, serving)
+            return self.prepare_job(component, serving, automatic_jobs)
         with self._committer.lock:
-            return self.prepare_job(component, serving)
+            return self.prepare_job(component, serving, automatic_jobs)
 
-    def prepare_job(self, component: str | None, serving: str | None) -> TrainingCommit | None:
+    def prepare_job(
+        self, component: str | None, serving: str | None, automatic_jobs: bool = True
+    ) -> TrainingCommit | None:
         """Give ``component``'s trainer the served artifacts of the commit history, and submit its next job when the
         job's data is ready. The job of a request that names ``train_from`` starts from that artifact
         (``ScenarioCommitter.request_start``); any other job continues the training start."""
         component_trainer = self._committer.component_trainer(component)
         trainer = component_trainer.trainer
-        served_component = self.served_component()
-        if serving is not None and served_component is not None:
-            history = self.snapshot_queries.served_history(
-                self._committer.step, served_component, self._committer.component_names()
-            )
-            if history:
-                trainer.restore_served_artifacts(history, self.served_beside())
-        data = trainer.reserve_job(serving)
+        self.restore_served_artifacts(trainer, serving)
+        data = trainer.reserve_job(serving, automatic_jobs=automatic_jobs)
         if data is None:
             return None
         component = component_trainer.component
@@ -343,6 +345,27 @@ class Scenario:
         return trainer.submit_job(
             data, start=self._committer.request_start(artifact_id, component), train_from_artifact_id=artifact_id
         )
+
+    def restore_served_artifacts(self, trainer: Trainer, serving: str | None) -> None:
+        """Give ``trainer`` the served artifacts of the commit history, for the staleness check of its pipeline.
+        ``serving`` is the artifact that serves now, or None for a scenario that loads no weights: its data never
+        goes stale."""
+        served_component = self.served_component()
+        if serving is None or served_component is None:
+            return
+        history = self.snapshot_queries.served_history(
+            self._committer.step, served_component, self._committer.component_names()
+        )
+        if history:
+            trainer.restore_served_artifacts(history, self.served_beside())
+
+    def next_job_listing(self, component: str | None = None) -> Mapping[str, Any]:
+        """The training mode of ``component``'s trainer and the samples of its next automatic job
+        (``Trainer.next_job_listing``), measured against the artifacts that the scenario served."""
+        trainer = self.trainer_for(component)
+        weights_load = self._binding.components.loaded_component is not None and self.runtime is not None
+        self.restore_served_artifacts(trainer, self.served_artifact_id() if weights_load else None)
+        return trainer.next_job_listing()
 
     def fail_pending_request(self, error: str, component: str | None = None) -> bool:
         """Store that ``component``'s reserved request failed with ``error``, so that its next job data is a skip row,

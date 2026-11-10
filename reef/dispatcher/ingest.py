@@ -44,18 +44,16 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
 def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any]) -> WorkItem:
     """Check a training request and queue it in ``current``'s requests; return its queue item.
 
-    A retry of a request that the scenario queued before returns its item, whatever the training mode now.
-    Otherwise the scenario must train in ``manual`` mode, the text and ``requires`` must pass the screens
-    (``training_request_refusal``), a trainer that trains must take the request's samples
-    (``Trainer.check_request``), and ``train_from`` must name an artifact of the scenario. Raise ``ValueError`` for a refused request, and
+    A retry of a request that the scenario queued before returns its item. Otherwise the text and ``requires``
+    must pass the screens (``training_request_refusal``), a trainer that trains must take the request's samples
+    (``Trainer.check_request``), and ``train_from`` must name an artifact of the scenario. The training mode does
+    not matter: a request trains in ``auto`` too. Raise ``ValueError`` for a refused request, and
     ``RecordConflict`` for an ID that the scenario queued with another payload.
     """
     if current.training_requests is None:
         raise ValueError(f"scenario {current.name!r} takes no training requests: it has no training request queue")
     try:
         retry = current.training_requests.get(request_id) is not None
-        if not retry and current.training_mode == "auto":
-            raise ValueError("explicit training requests require training_mode='manual'")
         trainers = [
             component_trainer.trainer for component_trainer in current.trainers if component_trainer.trainer.trains
         ]
