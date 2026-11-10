@@ -149,6 +149,107 @@ def mean_score(scores: Iterable[RolloutScore]) -> float | None:
     return math.fsum(values) / len(values) if values else None
 
 
+#: How an evaluation on a collection computes its mean score: ``task`` is the mean of every rollout, and ``benchmark``
+#: is the mean of the mean scores of the benchmarks.
+CollectionAverage = Literal["task", "benchmark"]
+COLLECTION_AVERAGES: tuple[CollectionAverage, ...] = ("task", "benchmark")
+
+
+@dataclass(frozen=True)
+class EvaluationCollection:
+    """The collection that an evaluation runs on, with the tasks of each of its benchmarks (RFC #1312).
+
+    Values: ``name`` is the non-empty name of the collection. ``average`` is ``task`` or ``benchmark``.
+    ``benchmarks`` is a non-empty tuple of ``(benchmark, task_names)`` pairs with distinct non-empty benchmark names;
+    each ``task_names`` is a non-empty tuple of distinct non-empty task names. A task can be in several benchmarks.
+    Purpose: the evaluation service makes it when it accepts a request that names a collection, and stores it in
+    the ``ArtifactEvaluationRequest``; ``StoredEvaluation.to_json`` reads the scores of a result with it.
+    """
+
+    name: str
+    average: CollectionAverage
+    benchmarks: tuple[tuple[str, tuple[str, ...]], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("an evaluation collection has a non-empty name")
+        if self.average not in COLLECTION_AVERAGES:
+            raise ValueError(f"an evaluation collection's average is one of {', '.join(COLLECTION_AVERAGES)}")
+        if not isinstance(self.benchmarks, tuple) or not self.benchmarks:
+            raise ValueError("an evaluation collection has one or more benchmarks")
+        for entry in self.benchmarks:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise TypeError("an evaluation collection's benchmarks are (benchmark, task_names) pairs")
+            benchmark, task_names = entry
+            if (
+                not isinstance(benchmark, str)
+                or not benchmark
+                or not isinstance(task_names, tuple)
+                or not task_names
+                or any(not isinstance(name, str) or not name for name in task_names)
+                or len(set(task_names)) != len(task_names)
+            ):
+                raise ValueError("each benchmark of an evaluation collection has a name and distinct task names")
+        if len({benchmark for benchmark, _ in self.benchmarks}) != len(self.benchmarks):
+            raise ValueError("the benchmarks of an evaluation collection have distinct names")
+
+    def task_names(self) -> frozenset[str]:
+        """Every task of the collection."""
+        return frozenset(name for _, task_names in self.benchmarks for name in task_names)
+
+    def benchmark_scores(self, scores: RolloutScores) -> list[dict[str, Any]]:
+        """The score of each benchmark, in order: ``{"benchmark", "task_count", "mean_score"}``. ``task_count`` is
+        the number of the benchmark's tasks, and ``mean_score`` is ``mean_score`` of the rollouts of those tasks in
+        ``scores``. A task in two benchmarks counts in both."""
+        by_task = dict(scores.tasks)
+        return [
+            {
+                "benchmark": benchmark,
+                "task_count": len(task_names),
+                "mean_score": mean_score(score for name in task_names for score in by_task.get(name, ())),
+            }
+            for benchmark, task_names in self.benchmarks
+        ]
+
+    def mean_score(self, scores: RolloutScores) -> float | None:
+        """The mean score of ``scores`` by ``average``: the mean of every rollout for ``task``; for ``benchmark``, the
+        mean of the benchmark means that are not None, or None when there is none."""
+        if self.average == "task":
+            return mean_score(scores.rollouts())
+        means = [entry["mean_score"] for entry in self.benchmark_scores(scores) if entry["mean_score"] is not None]
+        return math.fsum(means) / len(means) if means else None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "average": self.average,
+            "benchmarks": [
+                {"benchmark": benchmark, "task_names": list(task_names)} for benchmark, task_names in self.benchmarks
+            ],
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> EvaluationCollection:
+        """The collection that ``to_json`` gave; raise ``ValueError`` for any other value."""
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"name", "average", "benchmarks"}
+            or not isinstance(value["benchmarks"], list)
+            or any(
+                not isinstance(entry, Mapping)
+                or set(entry) != {"benchmark", "task_names"}
+                or not isinstance(entry["task_names"], list)
+                for entry in value["benchmarks"]
+            )
+        ):
+            raise ValueError("an evaluation collection is an object of name, average and benchmarks")
+        return cls(
+            value["name"],
+            value["average"],
+            tuple((entry["benchmark"], tuple(entry["task_names"])) for entry in value["benchmarks"]),
+        )
+
+
 #: The kind of an artifact. A ``harness`` is a whole agent harness that Reef runs as it is, such as a Harbor agent
 #: or an adapter's binary. A ``harness_plugin`` installs into a base harness, such as an evolved tree, a skill
 #: tree, or request defaults. A ``model`` is a whole model, such as a provider's model or full weights. A ``model_adapter`` is a LoRA
@@ -308,6 +409,8 @@ class ArtifactEvaluationRequest:
     ``TaskRolloutRunner``'s ``agent``), or an artifact item of a harness tree of the scenario's owner (an object
     with a non-empty ``item`` and no other key); or ``model``, the non-empty name of the deployment's model binding that a
     harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
+    ``collection`` is None, or the ``EvaluationCollection`` that the evaluation runs on; its tasks are then exactly
+    ``task_names``.
     ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
     ``max_concurrent_rollouts`` is the most rollouts of the evaluation that run at once, a positive int, or None for
     no limit. ``max_failed_fraction`` is the largest fraction of failed rollouts, a number greater than 0 and less
@@ -324,6 +427,7 @@ class ArtifactEvaluationRequest:
     environment: str = "docker"
     max_concurrent_rollouts: int | None = None
     max_failed_fraction: float | None = None
+    collection: EvaluationCollection | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -358,6 +462,11 @@ class ArtifactEvaluationRequest:
             or len(set(self.task_names)) != len(self.task_names)
         ):
             raise ValueError("an artifact evaluation's task_names are distinct non-empty strings")
+        if self.collection is not None and (
+            not isinstance(self.collection, EvaluationCollection)
+            or self.collection.task_names() != frozenset(self.task_names)
+        ):
+            raise ValueError("an artifact evaluation's collection is an EvaluationCollection of its task_names")
         count = self.rollouts_per_task
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("an artifact evaluation's rollouts_per_task is a positive integer")
@@ -381,16 +490,18 @@ class ArtifactEvaluationRequest:
             "environment": self.environment,
             "max_concurrent_rollouts": self.max_concurrent_rollouts,
             "max_failed_fraction": self.max_failed_fraction,
+            "collection": None if self.collection is None else self.collection.to_json(),
         }
 
     @classmethod
     def from_json(cls, value: object) -> ArtifactEvaluationRequest:
         """The request that ``to_json`` gave; raise ``ValueError`` for any other value. A request stored before
-        ``max_concurrent_rollouts`` or ``max_failed_fraction`` existed has no such limit."""
+        ``max_concurrent_rollouts`` or ``max_failed_fraction`` existed has no such limit, and one stored before
+        ``collection`` existed has no collection."""
         keys = {"artifact_id", "component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
         if (
             not isinstance(value, Mapping)
-            or set(value) - {"max_concurrent_rollouts", "max_failed_fraction"} != keys
+            or set(value) - {"max_concurrent_rollouts", "max_failed_fraction", "collection"} != keys
             or not isinstance(value["task_names"], list)
         ):
             raise ValueError(f"an artifact evaluation request is an object of {sorted(keys)}")
@@ -404,6 +515,7 @@ class ArtifactEvaluationRequest:
             value["environment"],
             value.get("max_concurrent_rollouts"),
             value.get("max_failed_fraction"),
+            None if value.get("collection") is None else EvaluationCollection.from_json(value["collection"]),
         )
 
 
@@ -414,7 +526,9 @@ class ArtifactEvaluationSettings:
 
     Values: ``component`` is None, for the one component of the snapshots that has a kind, or a non-empty
     component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task``, ``environment``,
-    ``max_concurrent_rollouts`` and ``max_failed_fraction`` meet the conditions of ``ArtifactEvaluationRequest``. Purpose: a client's evaluation
+    ``max_concurrent_rollouts`` and ``max_failed_fraction`` meet the conditions of ``ArtifactEvaluationRequest``.
+    ``collection`` is None, or the non-empty name of a collection of the scenario's owner, and then ``task_names`` is
+    empty: the evaluation runs the eval tasks of the collection. Purpose: a client's evaluation
     request is these settings and an artifact ID, and a scenario keeps settings to evaluate each new artifact with;
     ``request`` makes the request of one artifact.
     """
@@ -427,16 +541,22 @@ class ArtifactEvaluationSettings:
     environment: str = "docker"
     max_concurrent_rollouts: int | None = None
     max_failed_fraction: float | None = None
+    collection: str | None = None
 
     def __post_init__(self) -> None:
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
             raise ValueError("an artifact evaluation's component is None or a non-empty string")
+        if self.collection is not None and (not isinstance(self.collection, str) or not self.collection):
+            raise ValueError("an artifact evaluation's collection is None or a non-empty collection name")
+        if self.collection is not None and self.task_names:
+            raise ValueError("an artifact evaluation gives collection or task_names, not both")
         # The request of any snapshot checks every other field.
         checked = self.request("any", self.component or "any")
         object.__setattr__(self, "harness", checked.harness)
 
     def request(self, artifact_id: str, component: str) -> ArtifactEvaluationRequest:
-        """The request to evaluate ``component`` of the artifact ``artifact_id`` with these settings."""
+        """The request to evaluate ``component`` of the artifact ``artifact_id`` with these settings. It has no
+        collection: the evaluation service adds the tasks of ``collection`` when it accepts the request."""
         return ArtifactEvaluationRequest(
             artifact_id,
             component,
@@ -459,6 +579,7 @@ class ArtifactEvaluationSettings:
             "environment": self.environment,
             "max_concurrent_rollouts": self.max_concurrent_rollouts,
             "max_failed_fraction": self.max_failed_fraction,
+            "collection": self.collection,
         }
 
     @classmethod
@@ -479,6 +600,7 @@ class ArtifactEvaluationSettings:
             "environment",
             "max_concurrent_rollouts",
             "max_failed_fraction",
+            "collection",
         }
         unknown = sorted(set(value) - known)
         if unknown:
@@ -495,6 +617,7 @@ class ArtifactEvaluationSettings:
             value.get("environment", "docker"),
             value.get("max_concurrent_rollouts"),
             value.get("max_failed_fraction"),
+            value.get("collection"),
         )
 
 
@@ -817,6 +940,7 @@ class EvaluationCallTotals:
 __all__ = [
     "ARTIFACT_KINDS",
     "CALLERS",
+    "COLLECTION_AVERAGES",
     "FAILED",
     "MAX_CALL_LABEL_CHARACTERS",
     "ArtifactEvaluationRequest",
@@ -826,9 +950,11 @@ __all__ = [
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
+    "CollectionAverage",
     "EvaluationCall",
     "EvaluationCallSummary",
     "EvaluationCallTotals",
+    "EvaluationCollection",
     "EvaluationResult",
     "EvaluationTrajectory",
     "PolicyEvaluation",

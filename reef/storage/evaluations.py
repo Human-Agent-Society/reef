@@ -80,7 +80,18 @@ class StoredEvaluation:
             raise ValueError("a stored evaluation's error is a non-empty string")
 
     def to_json(self) -> dict[str, object]:
-        """The evaluation as an evaluation route answers it: the request, the state, and the result or error."""
+        """The evaluation as an evaluation route answers it: the request, the state, and the result or error.
+
+        ``mean_score`` and ``benchmark_scores`` follow the request's collection (``EvaluationCollection``). Without
+        a collection, ``mean_score`` is the mean of every rollout and ``benchmark_scores`` is empty.
+        """
+        collection = self.request.collection
+        if self.result is None:
+            mean_score = None
+        elif collection is None:
+            mean_score = self.result.mean_score
+        else:
+            mean_score = collection.mean_score(self.result.scores)
         return {
             "evaluation_id": self.evaluation_id,
             "state": self.state,
@@ -88,7 +99,10 @@ class StoredEvaluation:
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "policy_evaluation": None if self.result is None else self.result.to_json(),
-            "mean_score": None if self.result is None else self.result.mean_score,
+            "mean_score": mean_score,
+            "benchmark_scores": (
+                [] if self.result is None or collection is None else collection.benchmark_scores(self.result.scores)
+            ),
             "error": self.error,
         }
 
