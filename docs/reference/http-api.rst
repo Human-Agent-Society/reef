@@ -89,6 +89,16 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/exports/{id}``                                                                    | the status of one export                          |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/collections``                                                                          | the owner's collections of benchmarks             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/collections/{name}``                                                                   | create or replace one collection                  |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/collections/{name}``                                                                   | one collection, with its task counts              |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/collections/{name}``                                                                | delete one collection                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/collections/{name}/scenarios``                                                        | add a collection's tasks to a scenario split      |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                                                                 | submit feedback about one or more trajectories    |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                                                                  | enqueue one training request                      |
@@ -557,7 +567,8 @@ for the deployment (RFC #1028). An item is content and metadata:
   ``origin``: the scenario that made a record or an artifact. A record's
   ``origin.source`` is ``inference`` or ``evaluation``; a record without it is
   ``inference``. ``kind``, ``owner``, ``origin`` and ``evaluation_id`` never
-  change. You can add other keys.
+  change. A task can have ``benchmarks``: the names of the benchmarks that
+  it is in (`Benchmarks and collections`_). You can add other keys.
 
 Each item belongs to one owner. The routes have the owner in the path:
 ``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
@@ -813,9 +824,10 @@ an artifact item: see `Create a scenario`_.
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&group_key=&group_value=&after=&limit=&content=``
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&benchmark=&group_key=&group_value=&after=&limit=&content=``
   lists the owner's items in the order they arrived: ``{"owner", "items",
-  "next"}``. ``kind`` and ``scenario`` filter the items. ``group_key`` keeps
+  "next"}``. ``kind`` and ``scenario`` filter the items. ``benchmark`` keeps
+  only the tasks of one benchmark. ``group_key`` keeps
   only the items of one group of the groups route below: those with the
   string ``group_value`` under ``group_key`` in their metadata, or with no
   string there when ``group_value`` is not given. ``group_value`` without
@@ -874,6 +886,54 @@ GET of ``.../data/imports/<x>`` or ``.../data/exports/<x>`` reads a transfer.
 So GET cannot read an item whose ID ends in ``/archive``, or whose ID is
 ``imports/<x>`` or ``exports/<x>`` with ``<x>`` one path segment. Give such
 items other IDs.
+
+Benchmarks and collections
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A benchmark is a name for a set of the owner's tasks. Reef does not store it:
+a task is in a benchmark when the list ``benchmarks`` of its metadata has the
+name. Set the list when you create the tasks, or with a metadata patch:
+``metadata={"benchmarks": ["terminal-bench"]}``. It holds distinct non-empty
+strings, so a task can be in several benchmarks. Only a task has it.
+
+A collection is a stored list of benchmarks under one name. Use it to add
+several benchmarks to a scenario in one call, and to evaluate an artifact on
+them (`Evaluate an artifact`_).
+
+.. code:: bash
+
+   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/collections/coding \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"benchmarks": ["terminal-bench", "swe-bench-lite"]}'
+
+- ``PUT /reef/namespaces/{owner}/collections/{name}`` creates the collection,
+  or replaces the one with the name. The body takes ``benchmarks``,
+  ``collections`` and ``average``. ``collections`` names other collections of
+  the owner: the collection also has their benchmarks. One of the two lists
+  or both are non-empty. ``average`` is ``task`` (the default) or
+  ``benchmark``: how an evaluation on the collection computes its
+  ``mean_score``. The response is ``{"owner", "name", "benchmarks",
+  "collections", "average"}``. Reef returns 400 for a name in ``collections``
+  that the owner does not store, and for collections that name each other in
+  a cycle.
+- ``GET /reef/namespaces/{owner}/collections`` lists the owner's collections
+  by name: ``{"owner", "collections"}``.
+- ``GET /reef/namespaces/{owner}/collections/{name}`` returns one collection
+  with ``benchmark_task_counts``, a list of ``{"benchmark", "task_count"}``
+  for each of its benchmarks, and ``task_count``. ``task_count`` counts a task
+  that is in two benchmarks once.
+- ``DELETE /reef/namespaces/{owner}/collections/{name}`` deletes the
+  collection and returns ``{"owner", "name", "deleted": true}``. No task
+  changes. Reef returns 400 while another collection names it.
+- ``POST /reef/namespaces/{owner}/collections/{name}/scenarios`` takes
+  ``{"scenario", "split"}``. Reef adds each task that the collection has now
+  to that split of the scenario, with the checks of a metadata patch. A task
+  that joins a benchmark later does not join the scenario. The response is
+  ``{"owner", "name", "scenario", "split", "task_count", "synced"}``. A
+  collection without tasks returns 400.
+
+An unknown collection returns 404.
 
 Download an item
 ~~~~~~~~~~~~~~~~
@@ -1086,6 +1146,10 @@ The body takes these fields:
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.
   The stored request names the tasks that the evaluation runs.
+- ``collection``: a collection of the scenario's owner (`Benchmarks and
+  collections`_). Reef runs the eval tasks that are in the collection, each
+  one once. A request sets ``collection`` or ``task_names``, not both. Reef
+  returns 400 for an unknown collection, and for one with no eval task.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.
 - ``max_concurrent_rollouts``: the most rollouts of this evaluation that run
@@ -1111,13 +1175,14 @@ it runs and after it ends:
 
    {"evaluation_id": "1d0e...", "state": "finished",
     "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
-                "model": null, "task_names": ["sum-391"], "rollouts_per_task": 2, "environment": "docker",
+                "model": null, "task_names": ["sum-391"], "collection": null, "rollouts_per_task": 2,
+                "environment": "docker",
                 "max_concurrent_rollouts": null, "max_failed_fraction": 0.5},
     "created_at": 1793169552.2, "finished_at": 1793169840.7,
     "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
                           "model": {"name": "Qwen/Qwen3-8B", "adapter": "tinker://.../sampler"},
                           "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
-    "mean_score": 0.5, "error": null,
+    "mean_score": 0.5, "benchmark_scores": [], "error": null,
     "progress": {"total": 2, "ended": 2, "scored": 2, "failed": 0, "cancelled": 0, "running": 0,
                  "mean_score": 0.5, "eta_seconds": null}}
 
@@ -1130,6 +1195,16 @@ does not resume it. ``mean_score`` is the mean of the rollouts that have a
 score: a failed rollout does not count as 0. ``GET
 /reef/scenarios/{scenario}/evaluations`` lists the evaluations, newest first,
 at most ``limit`` (50 by default).
+
+For an evaluation on a collection, the stored ``collection`` is ``{"name",
+"average", "benchmarks"}``. ``benchmarks`` gives ``{"benchmark",
+"task_names"}`` for each benchmark that has a task in the evaluation.
+``benchmark_scores`` then gives ``{"benchmark", "task_count",
+"mean_score"}`` for each of them: the number of its tasks in the evaluation,
+and the mean of their rollouts that have a score. A task in two benchmarks
+counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts
+that have a score. With ``benchmark``, it is the mean of the benchmark means.
+``benchmark_scores`` is empty for another evaluation.
 
 ``progress`` counts the rollouts of the evaluation, also while it runs. It is
 null when the evaluations queue no longer holds them:

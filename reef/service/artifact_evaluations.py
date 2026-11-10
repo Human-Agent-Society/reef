@@ -41,6 +41,7 @@ from reef.core.evaluation import (
     Caller,
     EvaluationCall,
     EvaluationCallTotals,
+    EvaluationCollection,
     PolicyEvaluation,
     PolicyModel,
     RolloutScore,
@@ -66,6 +67,7 @@ from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tools
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
+from reef.service.collections import collection_tasks
 from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, StoredItem, record_source
@@ -78,6 +80,7 @@ from reef.storage.record_items import (
     evaluation_trajectory_items,
     stored_evaluation_call,
 )
+from reef.storage.task_collections import CollectionNotFound
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
@@ -667,6 +670,28 @@ class ArtifactEvaluations:
         artifact = snapshot.materialize()
         return request, artifact, runtime.artifact_model(artifact), runtime.api
 
+    def held_collection(self, scenario: str, name: str, held: Mapping[str, Path]) -> EvaluationCollection:
+        """The collection ``name`` of the owner of ``scenario``, with the tasks of each benchmark that are in
+        ``held``: the tasks of the scenario's eval split, by item ID. A benchmark with no such task is left out.
+
+        Raise ``ValueError`` when the owner stores no such collection, or when no task of it is in ``held``.
+        """
+        owner = self.dispatcher.scenario_owner(scenario)
+        if owner is None:
+            raise ValueError(f"scenario {scenario!r} has no owner, so it can use no collection")
+        try:
+            stored, tasks = collection_tasks(DataAccess.of(self.dispatcher).require_store(), owner, name)
+        except (NoDataStore, CollectionNotFound) as exc:
+            raise ValueError(str(exc)) from exc
+        benchmarks = tuple(
+            (benchmark, in_split)
+            for benchmark, item_ids in tasks.items()
+            if (in_split := tuple(item_id for item_id in item_ids if item_id in held))
+        )
+        if not benchmarks:
+            raise ValueError(f"the eval split of the imported tasks holds no task of the collection {name!r}")
+        return EvaluationCollection(name, stored.average, benchmarks)
+
     def tree_harness(self, scenario: str, item_id: str, api: str, tasks: Sequence[str]) -> TreeHarness:
         """The harness tree of the artifact item ``item_id`` of the owner of ``scenario``, for model calls of the
         dialect ``api`` on the Harbor task directories ``tasks``.
@@ -739,7 +764,11 @@ class ArtifactEvaluations:
         unknown = sorted(set(request.task_names) - set(held))
         if unknown:
             raise ValueError(f"the eval split of the imported tasks holds no tasks {unknown}")
-        names = request.task_names or tuple(held)
+        collection = None if settings.collection is None else self.held_collection(scenario, settings.collection, held)
+        if collection is not None:
+            names = tuple(name for name in held if name in collection.task_names())
+        else:
+            names = request.task_names or tuple(held)
         if not names:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
         evaluation_id = uuid.uuid4().hex
@@ -747,7 +776,7 @@ class ArtifactEvaluations:
         tree = None if item is None else self.tree_harness(scenario, item, api, [str(held[name]) for name in names])
         agent = None if tree is not None else harbor_agent(request.harness)
         # The stored request names its tasks, so that the rollouts that wait can be added later.
-        request = replace(request, task_names=names)
+        request = replace(request, task_names=names, collection=collection)
         rollouts = [
             EvaluationRollout(
                 scenario,
