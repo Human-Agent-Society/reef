@@ -9,7 +9,7 @@ A jobs-queue item:
 
 - ``id`` is the job ID, which ``JobLoop.job_id`` makes from the job's inputs;
 - ``kind`` is ``training_job:<component name>``, so a worker takes only the jobs of its component;
-- ``scenario`` and ``serial_key`` are the job's scenario, so the jobs of one scenario run one at a time, in the order control added them;
+- ``scenario`` is the job's scenario; the item has no ``serial_key``, so a free worker takes it at once;
 - ``payload`` is the job (``job_payload``): its backend, start, parameters, component and previous job, the reference of its job data
   directory (``JobDataRef.to_dict``), and the summary of its training request for the job listing;
 - each ``progress`` entry is one ``SavedCheckpoint``, in step order;
@@ -280,8 +280,8 @@ class JobQueueComponent(TrainingComponent):
 
     Values: ``component`` is the training component whose jobs the queue carries; its name, release format, base
     artifact and starts describe the jobs. ``queue`` is the work queue. ``owns_component`` is whether ``close``
-    closes ``component``; a training worker owns it otherwise. A job goes to the queue under its scenario, which is
-    also its serial key, so the jobs of one scenario run one at a time, in the order of their submission.
+    closes ``component``; a training worker owns it otherwise. A job goes to the queue under its scenario, with no
+    serial key: the trainer decides which jobs of a scenario run at the same time (``JobLoop.accepts_job``).
 
     Purpose: control's trainers submit jobs and read their status through it (``JobLoop``); the training service
     runs the jobs with ``TrainingJobWorker``.
@@ -318,6 +318,10 @@ class JobQueueComponent(TrainingComponent):
     @property
     def shares_scenarios(self) -> bool:
         return self.component.shares_scenarios
+
+    @property
+    def concurrent_jobs(self) -> bool:
+        return self.component.concurrent_jobs
 
     def check_job(self, job: TrainingJob) -> None:
         self.component.check_job(job)
@@ -356,9 +360,7 @@ class JobQueueComponent(TrainingComponent):
             text, parameters = given.get("text", ""), given.get("parameters", {})
             request = {"id": job.request_id, "text": text, "parameters": parameters}
         payload = job_payload(job, request)
-        self.queue.add(
-            NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload, serial_key=job.scenario)
-        )
+        self.queue.add(NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload))
         if job.request_id is not None:
             held = self.queue.get(TRAINING_REQUESTS_QUEUE, job.request_id)
             if held is not None and REQUEST_FAILURE_KEY in held.metadata:
@@ -443,7 +445,7 @@ class TrainingJobWorker(QueueWorker):
 
     Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``data_store`` is the data store,
     which keeps the data directory of each job; ``poll_seconds`` is also the wait between two looks at a
-    running job.
+    running job; ``slots`` is the number of jobs that the worker runs at the same time.
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
     closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses
@@ -459,10 +461,13 @@ class TrainingJobWorker(QueueWorker):
         *,
         worker_id: str,
         poll_seconds: float = 0.5,
+        slots: int = 1,
     ) -> None:
         if isinstance(component, JobQueueComponent):
             raise TypeError("a training worker runs jobs on the component itself, not on a jobs-queue component")
-        super().__init__(queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds)
+        super().__init__(
+            queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds, slots=slots
+        )
         self.component = component
         self.data_store = data_store
 

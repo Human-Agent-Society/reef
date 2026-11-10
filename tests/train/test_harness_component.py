@@ -111,10 +111,13 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
     # The job loop of every component asks the component for the parts; the activation rule reads them: the step
     # rewrote the rules of the seed tree.
     loop = JobLoop(component, scenario="demo", scenario_component=COMPONENT)
-    published = loop.publish(JobLoopState(seed_start(component, tmp_path), RunningJob("one")), checkpoint)
+    # The parts are those that changed from the job's own start, wherever the training start is.
+    first = RunningJob("one", seed_start(component, tmp_path))
+    published = loop.publish(JobLoopState(checkpoint.path, (first,)), first, checkpoint)
     assert published.result.artifact is not None and published.result.changed_kinds == {"rules"}
     # From a start that holds the same tree, nothing changed.
-    again = loop.publish(JobLoopState(checkpoint.path, RunningJob("two")), checkpoint)
+    second = RunningJob("two", checkpoint.path)
+    again = loop.publish(JobLoopState(checkpoint.path, (second,)), second, checkpoint)
     assert again.result.changed_kinds == frozenset()
 
 

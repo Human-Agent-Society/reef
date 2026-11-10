@@ -47,7 +47,8 @@ class TrainingJob:
     ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
     with ``read_job_data(job.data_dir, job.data_id)`` and cuts it into optimizer batches by its own batch size),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
-    trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
+    trainer submits the job. The jobs of one scenario can run at the same time when the component has
+    ``concurrent_jobs``; each starts from its own ``start``.
     ``request_id`` is the ID of the training request that the job trains, or None. Reef's job listing reads it; a
     component does not need it. ``component`` is the scenario component that the job trains, or None when the
     trainer names none. ``previous_job_id`` is the last job whose end the trainer committed, or None before the
@@ -276,6 +277,16 @@ class TrainingComponent(ABC):
         scenario's job never trains another scenario's weights, and the
         scenario registry lets several training scenarios share the
         component. The default is False.
+        """
+        return False
+
+    @property
+    def concurrent_jobs(self) -> bool:
+        """Whether several jobs of one scenario can run on this component at the same time.
+
+        True exactly when a job depends only on its own ``start``, data and parameters, and never on a job that
+        runs beside it or on ``previous_job_id``. The default is False: the trainer then submits a job only when
+        no other job of its scenario runs.
         """
         return False
 

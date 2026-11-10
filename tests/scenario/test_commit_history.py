@@ -510,7 +510,9 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     assert [record.training_job_id for record in records] == [first_job] * 3 + [second_job] * 3
     submitted, _, finished = records[:3]
     # The submission consumes the batch's records; the later commits of the job consume none.
-    assert submitted.algorithm_state["job"] == {"job_id": first_job, "checkpoints_handled": 0}
+    assert submitted.algorithm_state["jobs"] == [
+        {"job_id": first_job, "start": component.submitted[0].start, "checkpoints_handled": 0, "train_from": None}
+    ]
     assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("math", "r1:0"))})
     assert submitted.high_water_sequence == 2
     assert finished.algorithm_state["finished_jobs"] == 1
@@ -1145,7 +1147,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     assert scenario.trainer.state == result.state
     # The training worker hands the queued job to the component on its own thread.
     wait_until(lambda: component.trained_data, "the training worker did not run the job")
-    assert scenario.trainer.state["job"]["job_id"] == component.submitted[0].job_id
+    assert [job["job_id"] for job in scenario.trainer.state["jobs"]] == [component.submitted[0].job_id]
     assert scenario.trainer.pending_job_data is None
     assert scenario.store.training_run_position() == (0, 1)
     assert len(scenario.store.history()) == 1
@@ -1267,7 +1269,7 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     located = scenario.store.history()
     assert located[0].snapshot == located[1].snapshot == current  # no new artifact published
     state = JobLoopState.from_dict(ended.algorithm_state)
-    assert state.job is None and state.finished_jobs == 1 and state.last_job.event == "finished"
+    assert state.jobs == () and state.finished_jobs == 1 and state.last_job.event == "finished"
     assert submitted.high_water_sequence == ended.high_water_sequence == 2
     assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("skills", "r1:0"))})
 

@@ -279,12 +279,12 @@ class Scenario:
         return component_trainer.trainer.produce_samples(selection)
 
     def next_commit(self, component: str | None = None) -> TrainingCommit | None:
-        """Prepare ``component``'s next commit: a job's submission, or a running job's checkpoint or end.
+        """Prepare ``component``'s next commit: a running job's checkpoint or end, or a job's submission.
 
         The caller runs one step of the scenario at a time, as the dispatcher's cycle lock does. Thus no training
         commit of another trainer lands while the step runs, and an activation refuses to run while the job data is
-        reserved. A running job's step reads only the job's state, so it takes no commit lock and reads no pipeline.
-        Another step of a lone trainer holds the commit lock. With several trainers it runs outside that lock.
+        reserved. News of a running job reads only the job's state, so it takes no commit lock. A submission of a
+        lone trainer holds the commit lock. With several trainers it runs outside that lock.
         """
         trainer = self.trainer_for(component)
         # The staleness check measures data against the weights that serve; a scenario that loads no weights
@@ -293,8 +293,9 @@ class Scenario:
         weights_load = self._binding.components.loaded_component is not None and runtime is not None
         serving = self.served_artifact_id() if weights_load else None
         # Automatic training waits until the selected artifact serves, so that it does not train the samples of the
-        # artifact before. A request names its samples (``TrainingPipeline.request_entries``), so manual training
-        # does not wait, also when the selected artifact does not start.
+        # artifact before. A job's end waits too: the worker polls while a job runs, so the step after the end
+        # comes without a new record. A request names its samples (``TrainingPipeline.request_entries``), so manual
+        # training does not wait, also when the selected artifact does not start.
         if (
             trainer.pipeline.training_mode == "auto"
             and weights_load
@@ -304,19 +305,24 @@ class Scenario:
             and serving != self.serving_artifact_id()
         ):
             return None
-        if trainer.job_running:
-            return trainer.advance_job()
+        result = trainer.pending_result() or trainer.poll_jobs()
+        if result is not None:
+            return result
+        # The next request decides whether the trainer takes one more job beside the running ones.
+        self.refresh_requests()
+        if not trainer.job_slot_free():
+            return None
         if len(self.trainers) > 1:
             return self.prepare_job(component, serving)
         with self._committer.lock:
             return self.prepare_job(component, serving)
 
     def prepare_job(self, component: str | None, serving: str | None) -> TrainingCommit | None:
-        """Give ``component``'s trainer the requests and the served artifacts of the commit history, and take its next
-        step: a job's submission when its data is ready."""
+        """Give ``component``'s trainer the served artifacts of the commit history, and submit its next job when the
+        job's data is ready. The job of a request that names ``train_from`` starts from that artifact
+        (``ScenarioCommitter.request_start``); any other job continues the training start."""
         component_trainer = self._committer.component_trainer(component)
         trainer = component_trainer.trainer
-        self.refresh_requests()
         served_component = self.served_component()
         if serving is not None and served_component is not None:
             history = self.snapshot_queries.served_history(
@@ -324,11 +330,17 @@ class Scenario:
             )
             if history:
                 trainer.restore_served_artifacts(history, self.served_beside())
-        # Only a job's submission needs the start, and it reads the commit history.
-        train_from_artifact_id = (
-            self.artifact_status()[component_trainer.component]["training_start"] if trainer.job_due() else None
+        data = trainer.reserve_job(serving)
+        if data is None:
+            return None
+        component = component_trainer.component
+        if data.request is None or data.request.train_from is None:
+            # The job listing names the artifact of the training start, which the commit history holds.
+            return trainer.submit_job(data, train_from_artifact_id=self.artifact_status()[component]["training_start"])
+        artifact_id = data.request.train_from
+        return trainer.submit_job(
+            data, start=self._committer.request_start(artifact_id, component), train_from_artifact_id=artifact_id
         )
-        return trainer.advance_job(serving_artifact_id=serving, train_from_artifact_id=train_from_artifact_id)
 
     def fail_pending_request(self, error: str, component: str | None = None) -> bool:
         """Store that ``component``'s reserved request failed with ``error``, so that its next job data is a skip row,

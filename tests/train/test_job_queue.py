@@ -159,7 +159,8 @@ def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the
     view.submit(job("j1"))
     view.submit(job("j1"))  # a second submit of one ID does nothing
     item = queue.get(JOBS_QUEUE, "j1")
-    assert (item.scenario, item.kind, item.serial_key) == ("s", job_kind("steps"), "s")
+    # The item has no serial key: a free worker takes it beside another job of its scenario.
+    assert (item.scenario, item.kind, item.serial_key) == ("s", job_kind("steps"), None)
 
     status = wait_for(lambda: view.status("j1"), "finished")
     assert [checkpoint.step for checkpoint in status.checkpoints] == [1, 2]

@@ -2,7 +2,8 @@
 
 ``LocalJobComponent`` is the base of the Tinker and Slime components. It owns
 the job bookkeeping that the ``TrainingComponent`` contract asks for: a job is
-durable once ``submit`` returns, jobs run one at a time in submission order,
+durable once ``submit`` returns, jobs run one at a time in submission order (or at once, for a subclass with
+``concurrent_jobs``),
 ``status`` reads a job from its files, and a restarted component resumes each
 job that has not ended. A subclass trains one job in :meth:`run`.
 """
@@ -49,7 +50,8 @@ def submitted_job(job_id: str, backend: str, submitted: Mapping[str, Any]) -> Tr
 
 
 class LocalJobComponent(TrainingComponent):
-    """A training component that runs each job in its own thread, one job at a time.
+    """A training component that runs its jobs in threads of its own process: one job at a time, or every submitted
+    job at once when the subclass has ``concurrent_jobs``.
 
     ``jobs_root`` holds one directory per job, named by the job ID, with
     ``job.json`` (the submitted job, whose data is the reference of its job data directory with its local
@@ -69,6 +71,8 @@ class LocalJobComponent(TrainingComponent):
         self.queue: deque[str] = deque()
         self.closed = False
         self.job_thread: threading.Thread | None = None
+        #: The threads of the jobs that a component with ``concurrent_jobs`` runs beside its job thread.
+        self.concurrent_threads: list[threading.Thread] = []
 
     def start_jobs(self) -> None:
         """Run the jobs that have not ended, in submission order: those a previous process left and those submitted.
@@ -194,7 +198,7 @@ class LocalJobComponent(TrainingComponent):
             if not (directory / JOB_FILE).exists() or (directory / RESULT_FILE).exists():
                 return
             write_json(directory / RESULT_FILE, {"state": "failed", "metrics": {}, "error": "cancelled"})
-            if job_id in self.queue and self.queue[0] != job_id:
+            if job_id in self.queue:
                 self.queue.remove(job_id)
 
     def close(self) -> None:
@@ -205,38 +209,48 @@ class LocalJobComponent(TrainingComponent):
             self.jobs_lock.notify_all()
         if self.job_thread is not None:
             self.job_thread.join()
+        for thread in self.concurrent_threads:
+            thread.join()
         self.close_resources()
 
     # -- The job thread
 
     def run_jobs(self) -> None:
-        """The job thread: run the queued jobs one at a time until the component closes."""
+        """The job thread: take the queued jobs in order until the component closes. It runs each job itself, so one
+        at a time; a component with ``concurrent_jobs`` gets a thread for each job, so they run at once."""
         while True:
             with self.jobs_lock:
                 while not self.queue and not self.closed:
                     self.jobs_lock.wait()
                 if self.closed:
                     return
-                job_id = self.queue[0]
-                # A job cancelled while it waited at the head of the queue never starts.
-                cancelled = (self.job_directory(job_id) / RESULT_FILE).exists()
-            directory = self.job_directory(job_id)
-            result: dict[str, Any] | None = None
-            if not cancelled:
-                try:
-                    submitted = read_json(directory / JOB_FILE)
-                    if submitted is None:
-                        raise RuntimeError(f"training job {job_id} has no job file")
-                    job = submitted_job(job_id, self.name, submitted)
-                    result = {"state": "finished", "metrics": dict(self.run(job, directory))}
-                except Exception as exc:
-                    logger.exception("%s training job %s failed", self.name, job_id)
-                    result = {"state": "failed", "metrics": {}, "error": f"{type(exc).__name__}: {exc}"}
-            with self.jobs_lock:
-                if self.closed:
-                    # The job did not end: a restart resumes it.
-                    return
-                if result is not None and not (directory / RESULT_FILE).exists():
-                    write_json(directory / RESULT_FILE, result)
-                if self.queue and self.queue[0] == job_id:
-                    self.queue.popleft()
+                job_id = self.queue.popleft()
+                if self.concurrent_jobs:
+                    thread = threading.Thread(
+                        target=self.run_job, args=(job_id,), name=f"reef-{self.name}-job-{job_id[:8]}", daemon=True
+                    )
+                    self.concurrent_threads = [*(live for live in self.concurrent_threads if live.is_alive()), thread]
+                    thread.start()
+                    continue
+            self.run_job(job_id)
+
+    def run_job(self, job_id: str) -> None:
+        """Run the job ``job_id`` to its end and write its result; a job that a cancel ended never starts."""
+        directory = self.job_directory(job_id)
+        with self.jobs_lock:
+            cancelled = (directory / RESULT_FILE).exists()
+        result: dict[str, Any] | None = None
+        if not cancelled:
+            try:
+                submitted = read_json(directory / JOB_FILE)
+                if submitted is None:
+                    raise RuntimeError(f"training job {job_id} has no job file")
+                job = submitted_job(job_id, self.name, submitted)
+                result = {"state": "finished", "metrics": dict(self.run(job, directory))}
+            except Exception as exc:
+                logger.exception("%s training job %s failed", self.name, job_id)
+                result = {"state": "failed", "metrics": {}, "error": f"{type(exc).__name__}: {exc}"}
+        with self.jobs_lock:
+            # A job of a closed component did not end: a restart resumes it.
+            if not self.closed and result is not None and not (directory / RESULT_FILE).exists():
+                write_json(directory / RESULT_FILE, result)
