@@ -336,6 +336,18 @@ def test_the_evaluation_section_sets_the_sandboxes_that_one_process_holds_at_onc
     assert service_config_from_mapping(resolved).evaluation_max_sandboxes == sandboxes
 
 
+@pytest.mark.parametrize(("jobs", "valid"), [(4, True), (0, False), (True, False)])
+def test_the_training_section_sets_the_jobs_that_one_process_runs_at_once(jobs, valid) -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "training": {"max_jobs": jobs}})
+
+    if not valid:
+        with pytest.raises(ValueError, match=r"training\.max_jobs"):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).training_max_jobs == jobs
+    assert service_config_from_mapping(translate_layout({"reef": {"token": "t"}})).training_max_jobs == 1
+
+
 def test_the_evaluation_section_names_a_trial_observer_plugin() -> None:
     observer = "tests.evaluation.test_rollout_worker:ReadingObserver"
     resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"trial_observer": observer}})

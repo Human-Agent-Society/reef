@@ -165,28 +165,37 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
 
 def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer() -> None:
     finished = JobOutcome("job-2", "stub", "finished")
-    running = JobLoopState(
-        "stub:base", job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished
+    jobs = (
+        RunningJob("job-3", "stub:base", checkpoints_handled=1),
+        RunningJob("job-4", "stub:other", train_from="a1"),
     )
+    running = JobLoopState("stub:base", jobs, finished_jobs=2, last_job=finished)
     loop = JobLoop(StubTrainingComponent(), scenario="s")
     dispatcher = bound_dispatcher(scenario_double(job_loop=loop, state=running.to_dict()))
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["training_job"] == {"job_id": "job-3", "backend": "stub", "checkpoints_handled": 1}
+    assert status["training_jobs"] == [{**job.to_dict(), "backend": "stub"} for job in jobs]
+    assert status["training_jobs"][1] == {
+        "job_id": "job-4",
+        "start": "stub:other",
+        "checkpoints_handled": 0,
+        "train_from": "a1",
+        "backend": "stub",
+    }
     assert status["finished_jobs"] == 2
 
     dispatcher.registry.get_optional("s").trainer.state = JobLoopState(
         "stub:base", finished_jobs=3, last_job=finished
     ).to_dict()
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["training_job"] is None
+    assert status["training_jobs"] == []
     assert status["finished_jobs"] == 3
 
 
 def test_status_of_a_trainer_without_a_job_loop_has_no_job_fields() -> None:
     status = bound_dispatcher(scenario_double()).build_training_status()["scenarios"]["s"]
 
-    assert "training_job" not in status
+    assert "training_jobs" not in status
     assert "finished_jobs" not in status
 
 

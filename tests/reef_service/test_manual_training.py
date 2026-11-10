@@ -44,7 +44,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
-from reef.train.jobs import JobLoop
+from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.training_requests import ScenarioTrainingRequests
@@ -1137,28 +1137,117 @@ def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatc
     assert [job["train_from_artifact_id"] for job in asyncio.run(listing())] == [creation, creation, third_start]
 
 
-def test_a_running_jobs_step_reads_no_requests_and_takes_no_commit_lock(tmp_path, open_dispatcher, monkeypatch):
-    """A poll of a running job can wait on the training service, so an activation does not wait for the poll."""
+def test_a_request_that_names_train_from_starts_its_job_there_and_leaves_the_training_start(tmp_path, open_dispatcher):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    for receipt in ("a", "b", "c"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    component_name = scenario.trainers[0].component
+
+    def training_start():
+        return scenario.artifact_status()[component_name]["training_start"]
+
+    def finished(count):
+        return _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == count)
+
+    creation = training_start()
+    file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
+    assert finished(1)
+    checkpoint = training_start()
+    assert checkpoint != creation
+
+    async def file_with_train_from(receipt, sample_receipt, train_from):
+        body = {**train_body(receipt, stored_samples_of(dispatcher, sample_receipt)), "train_from": train_from}
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
+            return response.status, await response.text()
+
+    status, text = asyncio.run(file_with_train_from("missing", "b", "no-such-artifact"))
+    assert status == 400 and "train_from names no artifact of the scenario" in text
+    status, text = asyncio.run(file_with_train_from("two", "b", creation))
+    assert status == 200, text
+    assert finished(2)
+
+    # The job starts from what the component imported of the named artifact, not from the first job's checkpoint.
+    first, second = component.submitted
+    [imported] = component.imported
+    assert (second.start, second.train_from_artifact_id) == (str(imported), creation)
+    assert second.start != JobLoopState.from_dict(scenario.trainer.state).start
+    # Its checkpoint names the start: the training start stays, and the new artifact's parent is the named artifact.
+    [record] = [record for record in scenario.store.history() if record.train_from is not None]
+    assert (record.train_from, record.checkpoint, record.sets_training_start) == (creation, True, False)
+    assert training_start() == checkpoint
+    newest = dispatcher.list_artifacts("s")[0]
+    assert newest["parent_artifact_id"] == creation
+    # The next request names no start, so its job continues the training start: the first job's checkpoint.
+    file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
+    assert finished(3)
+    third = component.submitted[2]
+    assert third.train_from_artifact_id == checkpoint and third.start not in (first.start, second.start)
+    assert dispatcher.list_artifacts("s")[0]["parent_artifact_id"] == checkpoint
+
+
+def test_a_request_whose_start_the_component_refuses_fails_and_the_next_request_trains(
+    tmp_path, open_dispatcher, monkeypatch
+):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    for receipt in ("a", "b"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
+
+    def refuse(artifact_dir):
+        raise ValueError("these weights do not load")
+
+    monkeypatch.setattr(component, "import_start", refuse)
+    refused = {**train_body("one", stored_samples_of(dispatcher, "a")), "train_from": creation}
+    dispatcher.accept_request("s", refused, request_id="one")
+    file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
+
+    # The refused request ends with a skip row and no job; the request after it trains.
+    assert _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == 1)
+    assert [job.request_id for job in component.submitted] == ["two"]
+    skipped = _committed_row(dispatcher, "one")
+    assert skipped["skipped"] == "request failed" and "these weights do not load" in skipped["error"]
+
+
+def test_a_running_jobs_step_takes_no_commit_lock(tmp_path, open_dispatcher, monkeypatch):
+    """A poll of a running job can wait on the training service, so an activation does not wait for the poll. The
+    step ends without the commit lock while the running job leaves no room for the next one."""
     component = SubmitRaisesForRequestOne(tmp_path / "checkpoints")
     dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
     scenario = dispatcher.get_or_create_scenario("s")
     trainer = scenario.trainers[0].trainer
     polled = threading.Event()
 
-    def poll(**_):
+    def poll():
         polled.set()
 
-    def read_requests():
-        raise AssertionError("a running job's step reads no requests")
-
-    monkeypatch.setattr(type(trainer), "job_running", property(lambda self: True))
-    monkeypatch.setattr(trainer, "advance_job", poll)
-    monkeypatch.setattr(scenario, "refresh_requests", read_requests)
+    monkeypatch.setattr(trainer, "poll_jobs", poll)
+    monkeypatch.setattr(trainer, "job_slot_free", lambda: False)
     with scenario._committer.lock:
         step = threading.Thread(target=scenario.next_commit, daemon=True)
         step.start()
-        assert polled.wait(10), "the step waited for the commit lock"
-    step.join(10)
+        step.join(10)
+        assert polled.is_set() and not step.is_alive(), "the step waited for the commit lock"
 
 
 def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp_path, records, training_requests):

@@ -46,7 +46,7 @@ class JobDataReservation:
     Values: ``data`` is JobData. ``consumed_ids`` is None while the pipeline holds the reservation. Otherwise,
     ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})``: a failed request released
     its samples and consumed only that request.
-    Purpose: Trainer.reserve_job_data makes this phase; advance_job replaces it with PendingTrainingResult once
+    Purpose: Trainer.reserve_job_data makes this phase; submit_job replaces it with PendingTrainingResult once
     submission or request skipping returns. It contains no training result or prepared commit.
     """
 
@@ -79,7 +79,7 @@ class PendingTrainingResult:
     ``prepared_commit`` is None until Trainer.prepare_commit prepares the commit. When set,
     ``result.state`` is a mapping, ``prepared_commit.algorithm_state == result.state`` and
     ``prepared_commit.training_job_id == result.training_job_id``.
-    Purpose: Trainer.advance_job makes this phase. prepare_commit acknowledges its data once and records the snapshot,
+    Purpose: Trainer.poll_jobs and Trainer.submit_job make this phase. prepare_commit acknowledges its data once and records the snapshot,
     which a retry of the preparation returns. Trainer.settle_commit reads it only after scenario settlement and then clears
     the pending phase.
     """
@@ -261,7 +261,7 @@ class Trainer:
         self.job_ends_read = 0
         if job_loop is not None:
             restored = JobLoopState.from_dict(self._state)
-            self.job_ends_read = restored.finished_jobs - (restored.job is None and restored.last_job is not None)
+            self.job_ends_read = restored.finished_jobs - (not restored.jobs and restored.last_job is not None)
         self.pending_step: JobDataReservation | PendingTrainingResult | None = None
         # The result of the last pending step a commit put on record: committing it again is a second step.
         self.recorded_result: TrainingCommit | None = None
@@ -375,17 +375,23 @@ class Trainer:
     def job_running(self) -> bool:
         """Whether this trainer's committed state names a running job, which its worker polls."""
         with self._lock:
-            return self._job_loop is not None and JobLoopState.from_dict(self._state).job is not None
+            return self._job_loop is not None and bool(JobLoopState.from_dict(self._state).jobs)
 
-    def job_due(self) -> bool:
-        """Whether ``advance_job`` submits a job now: no job runs, no result waits for its commit, and the job's data
-        is reserved or ready."""
+    def accepts_job(self) -> bool:
+        """Whether the trainer submits its next job now (``JobLoop.accepts_job``). The next job continues the
+        training start unless it is the job of a request that names ``train_from``. The caller holds the lock."""
+        if self._job_loop is None:
+            return False
+        request = self._pipeline.next_request()
+        continues = request is None or request.train_from is None
+        return self._job_loop.accepts_job(JobLoopState.from_dict(self._state), continues=continues)
+
+    def job_slot_free(self) -> bool:
+        """Whether ``reserve_job`` can give job data now: data is reserved, or the trainer accepts a job."""
         with self._lock:
-            if self._job_loop is None or isinstance(self.pending_step, PendingTrainingResult):
-                return False
-            if JobLoopState.from_dict(self._state).job is not None:
-                return False
-            return self.pending_step is not None or self.pipeline_ready()
+            return isinstance(self.pending_step, JobDataReservation) or (
+                self.pending_step is None and self.accepts_job()
+            )
 
     def needs_polling(self) -> bool:
         """Whether the trainer's worker polls at a fixed interval: a job runs, or the pipeline's own work runs.
@@ -393,10 +399,8 @@ class Trainer:
         Otherwise the worker sleeps until the next accepted record.
         """
         with self._lock:
-            if self._job_loop is not None:
-                state = JobLoopState.from_dict(self._state)
-                if state.job is not None:
-                    return True
+            if self._job_loop is not None and JobLoopState.from_dict(self._state).jobs:
+                return True
             return self._pipeline.background_jobs_running()
 
     @property
@@ -638,67 +642,91 @@ class Trainer:
             if not records:
                 return
 
-    def advance_job(
-        self, *, serving_artifact_id: str | None = None, train_from_artifact_id: str | None = None
-    ) -> TrainingCommit | None:
-        """Move the job forward: submit the next job when its data is ready, or read the running job's progress. Return
-        the next commit, if any.
+    def poll_jobs(self) -> TrainingCommit | None:
+        """Read the progress of the running jobs. Return the next commit about one of them, or None: when a result
+        waits for its commit or job data is reserved, when no job runs, and while every job runs with nothing new."""
+        with self._lock:
+            if self._job_loop is None or self.pending_step is not None:
+                return None
+            observed_state = self._state
+        # Reading a job's checkpoints can take a while: the trainer lock stays free, so status remains live.
+        with self.operations.measure("execution"):
+            polled = self._job_loop.poll(JobLoopState.from_dict(observed_state))
+        with self._lock:
+            # A new training start, or a reservation, since the poll read the state: the next cycle polls again.
+            if polled is None or self._state is not observed_state or self.pending_step is not None:
+                return None
+            self.pending_step = PendingTrainingResult(data=None, result=polled.result)
+            return polled.result
 
-        Returns ``None`` when this trainer trains nothing, when no job data is ready, or while a job runs
-        with nothing new to commit. ``serving_artifact_id`` is the artifact
-        that serves the scenario now, for the staleness check of the pipeline. ``train_from_artifact_id`` is the
-        artifact of the training start, which a submitted job records for the job listing.
+    def pending_result(self) -> TrainingCommit | None:
+        """The result that waits for its commit, or None."""
+        with self._lock:
+            return self.pending_step.result if isinstance(self.pending_step, PendingTrainingResult) else None
+
+    def reserve_job(self, serving_artifact_id: str | None = None) -> JobData | None:
+        """Reserve the data of the job that the trainer submits next, or return the reserved data. Return None when
+        the trainer accepts no job now (``accepts_job``), when no job data is ready, and while a result waits for
+        its commit. ``serving_artifact_id`` is the artifact that serves the scenario now, for the staleness check of
+        the pipeline."""
+        with self._lock:
+            if isinstance(self.pending_step, PendingTrainingResult):
+                return None
+            if self.pending_step is None and not self.accepts_job():
+                return None
+            return self.reserve_job_data(serving_artifact_id)
+
+    def submit_job(
+        self, data: JobData, *, start: str | None = None, train_from_artifact_id: str | None = None
+    ) -> TrainingCommit:
+        """Submit the job of ``data``, which ``reserve_job`` gave, and return its commit.
+
+        The job of a request that names ``train_from`` starts from ``start``, what ``import_start`` gave for that
+        artifact. Any other job gives no ``start`` and continues the training start; ``train_from_artifact_id`` is
+        then the artifact of the training start, which the job records for the job listing. A failed request
+        (``request_failure``) submits no job: its commit consumes the request alone.
         """
         with self._lock:
-            if not self.trains:
-                return None
-            if isinstance(self.pending_step, PendingTrainingResult):
-                return self.pending_step.result
             observed_state = self._state
-            loop_state = None if self._job_loop is None else JobLoopState.from_dict(observed_state)
-            job = None if loop_state is None else loop_state.job
-            data = None if job is not None else self.reserve_job_data(serving_artifact_id)
-            if job is None and data is None:
-                return None
-        # Submitting a job or reading its checkpoints can take a while.
+        # Submitting a job writes its data directory, which can take a while.
         # Keep the job data reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
-            result: TrainingCommit | None
-            failure = None if data is None or data.request is None else self._pipeline.request_failure(data.request.id)
-            if data is None:
-                polled = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
-                result = None if polled is None else polled.result
-            elif data.request is not None and failure is not None:
+            failure = None if data.request is None else self._pipeline.request_failure(data.request.id)
+            if data.request is not None and failure is not None:
                 # Committed without a job: the failed request is consumed alone and the catalog row names why.
                 result = self.skip_failed_request(data, data.request, failure)
             else:
-                parameters = self._pipeline.sample2job.job_parameters(data)
                 result = (
                     self.job_loop_required()
                     .submit(
                         JobLoopState.from_dict(observed_state),
                         data,
-                        parameters,
+                        self._pipeline.sample2job.job_parameters(data),
+                        start=start,
+                        train_from=None if start is None or data.request is None else data.request.train_from,
                         train_from_artifact_id=train_from_artifact_id,
                     )
                     .result
                 )
         with self._lock:
-            if data is None:
-                # A new training start set meanwhile replaced the state this poll read: its result is stale.
-                if result is None or self._state is not observed_state:
-                    return None
-                self.pending_step = PendingTrainingResult(data=None, result=result)
-            else:
-                reservation = self.pending_step
-                if not isinstance(reservation, JobDataReservation) or reservation.data_id != data.data_id:
-                    raise RuntimeError("trainer reservation changed while its step was being prepared")
-                if result is None:
-                    raise RuntimeError("submitting reserved job data returned no result")
-                self.pending_step = PendingTrainingResult(
-                    data=data, result=result, consumed_ids=reservation.consumed_ids
-                )
+            reservation = self.pending_step
+            if not isinstance(reservation, JobDataReservation) or reservation.data_id != data.data_id:
+                raise RuntimeError("trainer reservation changed while its step was being prepared")
+            self.pending_step = PendingTrainingResult(data=data, result=result, consumed_ids=reservation.consumed_ids)
             return result
+
+    def advance_job(
+        self, *, serving_artifact_id: str | None = None, train_from_artifact_id: str | None = None
+    ) -> TrainingCommit | None:
+        """Move the trainer's jobs forward and return the next commit, if any: the result that waits for its commit,
+        else news of a running job (``poll_jobs``), else the submission of the next job, which continues the
+        training start (``reserve_job``, ``submit_job``). A scenario gives the job of a request that names
+        ``train_from`` its own start (``Scenario.prepare_job``)."""
+        result = self.pending_result() or self.poll_jobs()
+        if result is not None or not self.trains:
+            return result
+        data = self.reserve_job(serving_artifact_id)
+        return None if data is None else self.submit_job(data, train_from_artifact_id=train_from_artifact_id)
 
     def skip_failed_request(self, data: JobData, request: TrainingRequest, error: str) -> TrainingCommit:
         """Consume the request alone; the samples of its job data stay untrained."""
@@ -784,6 +812,7 @@ class Trainer:
                 released_ids=released,
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
+                train_from=result.train_from,
             )
             self.pending_step = replace(pending, prepared_commit=prepared)
             return prepared
@@ -806,42 +835,36 @@ class Trainer:
             self.pending_step = None
 
     def cancel_job(self) -> None:
-        """Cancel the running training job at its component; nothing for a trainer without one."""
+        """Cancel the running training jobs at their component; nothing for a trainer without one."""
         if self._job_loop is None:
             return
         with self._lock:
             state = JobLoopState.from_dict(self._state)
         self._job_loop.cancel(state)
 
-    def start_from(self, artifact: Artifact) -> None:
-        """Set the training start to ``artifact``, and cancel the running job.
-
-        ``artifact`` is the trainer's component of a snapshot, materialized. A
-        trainer's next job starts from what its training component imports of
-        ``artifact`` (``TrainingComponent.import_start``). Raise ``TrainingStartRefused``,
-        and change nothing, when this trainer cannot start from ``artifact``;
-        raise ``CommitPending`` while a commit is in preparation.
-        """
+    def import_start(self, artifact: Artifact) -> str:
+        """The start of a job that trains from ``artifact``, the trainer's component of a snapshot, materialized:
+        what its training component imports of it (``TrainingComponent.import_start``), which can copy weights for
+        minutes. Raise ``TrainingStartRefused`` when this trainer cannot start from ``artifact``."""
         tree = artifact.local_path
         if tree is None:
             raise TrainingStartRefused(f"artifact {artifact.ref.revision!r} has no local files to train from")
+        if self._job_loop is None:
+            raise TrainingStartRefused(f"the trainer of scenario {self.scenario!r} trains nothing to start")
+        try:
+            return self._job_loop.component.import_start(tree)
+        except ValueError as exc:
+            raise TrainingStartRefused(f"scenario {self.scenario!r} cannot train from this artifact: {exc}") from exc
+
+    def start_from(self, start: str) -> None:
+        """Set the training start to ``start``, what ``import_start`` gave for an artifact, and cancel the running
+        job that continues the start before (``JobLoop.started_from``). Raise ``CommitPending`` while a commit is in
+        preparation."""
         with self._lock:
             if self.pending_step is not None:
                 raise CommitPending("cannot set the training start while a training result waits for its commit")
-            observed_state = self._state
-        job_loop = self._job_loop
-        if job_loop is None:
-            raise TrainingStartRefused(f"the trainer of scenario {self.scenario!r} trains nothing to start")
-        # An import copies weights, which can take minutes: the trainer lock stays free meanwhile.
-        try:
-            imported = job_loop.component.import_start(tree)
-        except ValueError as exc:
-            raise TrainingStartRefused(f"scenario {self.scenario!r} cannot train from this artifact: {exc}") from exc
-        with self._lock:
-            if self.pending_step is not None or self._state is not observed_state:
-                raise CommitPending("a training result reached its commit while the training start was being set")
-            # The running job is cancelled only once the new start is sure to apply.
-            self._state = job_loop.started_from(JobLoopState.from_dict(self._state), imported).to_dict()
+            loop_state = JobLoopState.from_dict(self._state)
+            self._state = self.job_loop_required().started_from(loop_state, start).to_dict()
 
     def close(self) -> None:
         """Release the pipeline, which the trainer owns.

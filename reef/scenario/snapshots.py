@@ -199,8 +199,9 @@ class ScenarioSnapshots:
     def artifact_parents(self, scenario_step: int, components: tuple[str, ...]) -> dict[str, str | None]:
         """The parent artifact of each output, derived from that component's training start or synced active tree.
 
-        Creation and external imports have no local parent. Training follows its component's training start,
-        including explicit ``train_from`` operations. A sync follows its previously active artifact. Storage
+        Creation and external imports have no local parent. Training follows the start that its job named
+        (``CommitRecord.train_from``), or else its component's training start, including explicit ``train_from``
+        operations. A sync follows its previously active artifact. Storage
         commit ancestry never substitutes for these component relationships.
         """
         active = self.bound_artifact_ids(self.creation_artifact.revision, components, scenario_step)
@@ -215,7 +216,7 @@ class ScenarioSnapshots:
                     if artifact_id is None or artifact_id in parents:
                         continue
                     if record.operation == "training":
-                        parent = starts.get(name)
+                        parent = record.train_from or starts.get(name)
                     elif record.operation == "sync":
                         parent = active.get(name)
                     else:
