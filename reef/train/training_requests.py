@@ -31,11 +31,27 @@ logger = logging.getLogger(__name__)
 TRAINING_REQUESTS_QUEUE = "training_requests"
 #: The ``WorkItem.metadata`` key that holds what the failed step of a request said.
 REQUEST_FAILURE_KEY = "failure"
+#: The failure of a request that a client cancelled (``ScenarioTrainingRequests.cancel``).
+REQUEST_CANCELLED_ERROR = "cancelled by request"
 
 
 def training_request_kind(scenario: str) -> str:
     """The work-item kind of the requests of ``scenario``."""
     return f"training_request:{scenario}"
+
+
+@dataclass(frozen=True)
+class RequestCancel:
+    """The result of one cancel of a training request.
+
+    Values: ``queued`` is whether no commit had consumed the request, so the cancel made it fail and it trains no
+    job. ``job`` is the newest training job of the request after the cancel, as ``job_json`` gives it, or None for a
+    request with no job.
+    Purpose: ``Dispatcher.cancel_request`` makes it, and the cancel route answers with it.
+    """
+
+    queued: bool
+    job: dict[str, JsonValue] | None
 
 
 @dataclass(frozen=True)
@@ -61,8 +77,8 @@ class ScenarioTrainingRequests:
     Values: ``queue`` is the work queue store; ``scenario`` a non-empty scenario name; ``worker_id`` the worker that
     takes an item to finish it. The items are those of ``TRAINING_REQUESTS_QUEUE`` with this scenario, as the module
     docstring defines them.
-    Purpose: the dispatcher files requests (``file``); a scenario gives the queued ones to its trainers and
-    finishes those that a commit consumed (``give``); the request page reads one (``get``).
+    Purpose: the dispatcher files requests (``file``) and cancels them (``cancel``); a scenario gives the queued ones
+    to its trainers and finishes those that a commit consumed (``give``); the request page reads one (``get``).
     """
 
     queue: WorkQueue
@@ -107,6 +123,16 @@ class ScenarioTrainingRequests:
         """Store that the step of the request ``request_id`` failed with ``error``, so that a reload or a restart
         still consumes the request with a skip row."""
         self.queue.set_metadata(TRAINING_REQUESTS_QUEUE, request_id, REQUEST_FAILURE_KEY, error)
+
+    def cancel(self, request_id: str) -> WorkItem | None:
+        """Cancel the request ``request_id``: a queued request fails with ``REQUEST_CANCELLED_ERROR``
+        (``mark_failed``), unless its step failed before, so a trainer consumes it with a skip row and no job. A
+        request that a commit consumed does not change. Return the item as it was before the call, or None when the
+        scenario has no such request."""
+        item = self.get(request_id)
+        if item is not None and not item.final and REQUEST_FAILURE_KEY not in item.metadata:
+            self.mark_failed(request_id, REQUEST_CANCELLED_ERROR)
+        return item
 
     def failures(self) -> dict[str, str]:
         """What the failed step of each queued request said, by ID; a request whose step did not fail has none."""
@@ -153,4 +179,12 @@ class ScenarioTrainingRequests:
             trainer.queue_requests(pending, failures)
 
 
-__all__ = ["TRAINING_REQUESTS_QUEUE", "ScenarioTrainingRequests", "TrainingRequestQueue", "training_request_kind"]
+__all__ = [
+    "REQUEST_CANCELLED_ERROR",
+    "REQUEST_FAILURE_KEY",
+    "TRAINING_REQUESTS_QUEUE",
+    "RequestCancel",
+    "ScenarioTrainingRequests",
+    "TrainingRequestQueue",
+    "training_request_kind",
+]

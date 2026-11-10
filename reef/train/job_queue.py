@@ -52,7 +52,7 @@ from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
-from reef.train.training_requests import TRAINING_REQUESTS_QUEUE
+from reef.train.training_requests import REQUEST_FAILURE_KEY, TRAINING_REQUESTS_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +264,17 @@ def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[st
     return job_json(item if cancelled is None else cancelled)
 
 
+def cancel_request_jobs(queue: WorkQueue, scenario: str, request_id: str) -> dict[str, JsonValue] | None:
+    """Cancel each training job of ``scenario`` that trains the request ``request_id``, as ``cancel_scenario_job``
+    does; return the newest of them after the cancel, or None when the request has no job."""
+    newest: dict[str, JsonValue] | None = None
+    for item in queue.items(JOBS_QUEUE, scenario=scenario):
+        request = request_summary(item)
+        if request is not None and request["id"] == request_id:
+            newest = cancel_scenario_job(queue, scenario, item.id)
+    return newest
+
+
 class JobQueueComponent(TrainingComponent):
     """The training component that control uses: it adds jobs to the jobs queue instead of running them.
 
@@ -328,7 +339,11 @@ class JobQueueComponent(TrainingComponent):
 
     def submit(self, job: TrainingJob) -> None:
         """Check ``job`` and add it to the jobs queue, with the summary of its training request, which the queue
-        of training requests still holds, for the job listing."""
+        of training requests still holds, for the job listing.
+
+        A job of a request that failed meanwhile, such as one that a client cancelled while control built the job's
+        data, is cancelled as soon as it is in the queue. A cancel marks the request first and cancels its jobs
+        second, so one of the two finds the job."""
         if job.backend != self.name:
             raise ValueError(f"the job is for {job.backend!r}, not the {self.name!r} training component")
         if self.queue.get(JOBS_QUEUE, job.job_id) is not None:
@@ -344,6 +359,10 @@ class JobQueueComponent(TrainingComponent):
         self.queue.add(
             NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload, serial_key=job.scenario)
         )
+        if job.request_id is not None:
+            held = self.queue.get(TRAINING_REQUESTS_QUEUE, job.request_id)
+            if held is not None and REQUEST_FAILURE_KEY in held.metadata:
+                self.queue.cancel(JOBS_QUEUE, job.job_id, JOB_CANCELLED_ERROR)
 
     def status(self, job_id: str) -> JobStatus:
         item = self.queue.get(JOBS_QUEUE, job_id)
@@ -510,6 +529,7 @@ __all__ = [
     "JobExperimentRecorder",
     "JobQueueComponent",
     "TrainingJobWorker",
+    "cancel_request_jobs",
     "cancel_scenario_job",
     "job_from_item",
     "job_json",
