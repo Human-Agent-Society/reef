@@ -130,7 +130,8 @@ class QueueWorker(ServiceWorker):
 
     - ``ItemFailed``: the item fails for good, with the error's message;
     - one of ``permanent_errors``: the item fails for good;
-    - ``WorkerStopped``: the item goes back to the queue at once;
+    - ``WorkerStopped``: the item goes back to the queue at once, and the attempt does not count
+      (``WorkQueue.give_back``);
     - ``WorkLeaseLost``: the item stays with the worker that holds it now;
     - any other error: the item fails as retryable, until it uses up its attempts.
 
@@ -265,7 +266,10 @@ class QueueWorker(ServiceWorker):
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
         except WorkerStopped:
-            self.fail(item, "the worker stopped", retryable=True)
+            try:
+                self.queue.give_back(self.queue_name, item.id, self.worker_id)
+            except WorkLeaseLost:
+                logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
         except ItemFailed as exc:
             self.fail(item, str(exc), retryable=False)

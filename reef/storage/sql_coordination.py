@@ -175,6 +175,7 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("started_at", Float, nullable=True),
         Column("ended_at", Float, nullable=True),
         Column("attempt_count", Integer, nullable=False),
+        Column("stopped_attempt_count", Integer, nullable=False, server_default="0"),
         Column("worker_id", Text, nullable=True),
         Column("lease_expires_at", Float, nullable=True),
         Column("progress_json", Text, nullable=False),
@@ -925,6 +926,7 @@ def item_from_row(row: RowMapping) -> WorkItem:
         started_at=None if row["started_at"] is None else float(row["started_at"]),
         ended_at=None if row["ended_at"] is None else float(row["ended_at"]),
         attempt_count=int(row["attempt_count"]),
+        stopped_attempt_count=int(row["stopped_attempt_count"]),
         worker_id=row["worker_id"],
         lease_expires_at=None if row["lease_expires_at"] is None else float(row["lease_expires_at"]),
         progress=tuple(json.loads(row["progress_json"])),
@@ -1218,7 +1220,7 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            again = retryable and item.attempt_count < self.attempts_allowed(queue)
+            again = retryable and self.has_attempts_left(item)
             return self.save(
                 connection,
                 counter,
@@ -1229,6 +1231,22 @@ class SQLWorkQueue(WorkQueue):
                 worker_id=None,
                 lease_expires_at=None,
                 ended_at=None if again else moment,
+            )
+
+    def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+        moment = clock(now)
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            item = self.held(connection, queue, item_id, worker_id, moment)
+            return self.save(
+                connection,
+                counter,
+                item,
+                moment,
+                state="queued",
+                error="the worker stopped",
+                worker_id=None,
+                lease_expires_at=None,
+                stopped_attempt_count=item.stopped_attempt_count + 1,
             )
 
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
@@ -1277,7 +1295,7 @@ class SQLWorkQueue(WorkQueue):
             expired = [item_from_row(row) for row in connection.execute(query).mappings().all()]
             changed = []
             for item in expired:
-                again = item.attempt_count < self.attempts_allowed(item.queue)
+                again = self.has_attempts_left(item)
                 changed.append(
                     self.save(
                         connection,
