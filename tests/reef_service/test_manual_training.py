@@ -1196,6 +1196,39 @@ def test_a_request_that_names_train_from_starts_its_job_there_and_leaves_the_tra
     assert dispatcher.list_artifacts("s")[0]["parent_artifact_id"] == checkpoint
 
 
+def test_a_request_whose_start_the_component_refuses_fails_and_the_next_request_trains(
+    tmp_path, open_dispatcher, monkeypatch
+):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    for receipt in ("a", "b"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
+
+    def refuse(artifact_dir):
+        raise ValueError("these weights do not load")
+
+    monkeypatch.setattr(component, "import_start", refuse)
+    refused = {**train_body("one", stored_samples_of(dispatcher, "a")), "train_from": creation}
+    dispatcher.accept_request("s", refused, request_id="one")
+    file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
+
+    # The refused request ends with a skip row and no job; the request after it trains.
+    assert _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == 1)
+    assert [job.request_id for job in component.submitted] == ["two"]
+    skipped = _committed_row(dispatcher, "one")
+    assert skipped["skipped"] == "request failed" and "these weights do not load" in skipped["error"]
+
+
 def test_a_running_jobs_step_takes_no_commit_lock(tmp_path, open_dispatcher, monkeypatch):
     """A poll of a running job can wait on the training service, so an activation does not wait for the poll. The
     step ends without the commit lock while the running job leaves no room for the next one."""

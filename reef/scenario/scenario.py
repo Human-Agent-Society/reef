@@ -334,10 +334,12 @@ class Scenario:
         if data is None:
             return None
         component = component_trainer.component
-        if data.request is None or data.request.train_from is None:
+        request = data.request
+        # A failed request submits no job, so it takes no start: an import that failed must not fail again.
+        if request is None or request.train_from is None or trainer.pipeline.request_failure(request.id) is not None:
             # The job listing names the artifact of the training start, which the commit history holds.
             return trainer.submit_job(data, train_from_artifact_id=self.artifact_status()[component]["training_start"])
-        artifact_id = data.request.train_from
+        artifact_id = request.train_from
         return trainer.submit_job(
             data, start=self._committer.request_start(artifact_id, component), train_from_artifact_id=artifact_id
         )
