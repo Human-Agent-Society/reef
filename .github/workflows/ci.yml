@@ -54,8 +54,12 @@ jobs:
         run: python .github/scripts/check_readme_i18n.py
       # The Go module proxy gives actionlint, and the Go checksum database checks it. A download from GitHub
       # releases can fail with HTTP 504 for hours.
+      # The toolchain is pinned: without it, Go takes the newest patch release that the proxy lists, and the step
+      # fails with HTTP 404 while that release has no download yet.
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+        env:
+          GOTOOLCHAIN: go1.26.10
       - run: pipx run pre-commit run --all-files --show-diff-on-failure
         env:
           # These repository-wide checks have dedicated steps in this job.
