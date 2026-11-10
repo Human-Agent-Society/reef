@@ -17,8 +17,10 @@ declares four things and, optionally, the checks of the agent's config files:
 - ``model``: per API dialect, the config templates that point the agent at a
   model endpoint (``model_binding``).
 - ``run``: ``task``, the headless invocation (``{task}`` substituted
-  per run) and the variables beside the relocation ones, and ``layer``,
-  how a person's machine runs the agent (``AdapterLayer``).
+  per run), the variables beside the relocation ones, and optionally
+  ``skills``, the directory under the root where the agent reads the skills
+  that a Harbor task gives it; and ``layer``, how a person's machine runs
+  the agent (``AdapterLayer``).
 - ``config`` (optional checks): named JSON config files with their enforced
   defaults (a ``primary`` target is required) and their checks (a key of the
   merged config and the matcher every value there must match; see
@@ -329,6 +331,9 @@ class AdapterDescriptor:
     #: True when the ``{task}`` argv slot takes a task directory (a Harbor task) rather than an instruction, the text the
     #: model reads, so an evaluation hands the adapter task directories instead of instructions.
     takes_task_directory: bool = False
+    #: The directory under the run root where the agent reads the skills that a Harbor task gives it
+    #: (``environment.skills_dir``), each as ``<name>/SKILL.md``; ``None`` when the agent reads no such directory.
+    task_skills_path: str | None = None
     #: Config templates (``target`` and ``data``) that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -413,8 +418,11 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     if not isinstance(run, Mapping) or not set(run) <= {"task", "layer"}:
         raise DescriptorError(f"{where} requires 'run': its task command, and optionally its layer")
     task_run = run.get("task")
-    if not isinstance(task_run, Mapping) or not set(task_run) <= {"argv", "env"}:
-        raise DescriptorError(f"{where} run 'task' must be an object of argv and env")
+    if not isinstance(task_run, Mapping) or not set(task_run) <= {"argv", "env", "skills"}:
+        raise DescriptorError(f"{where} run 'task' must be an object of argv, env and skills")
+    task_skills_path = None
+    if task_run.get("skills") is not None:
+        (task_skills_path,) = relative_paths([task_run["skills"]], f"{where} run task 'skills'")
     flags = task_run.get("env", {})
     if not isinstance(flags, Mapping) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in flags.items()
@@ -471,6 +479,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         install=parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         takes_task_directory=takes_task_directory,
+        task_skills_path=task_skills_path,
         host_env=dict(host_env),
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,

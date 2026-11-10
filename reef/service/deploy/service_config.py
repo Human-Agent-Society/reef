@@ -29,6 +29,7 @@ from reef.storage.scenario import ScenarioStorage
 from reef.storage.segments import SegmentStore
 from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.tasks import TaskFileStore
+from reef.train.manager import TrainingManager
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,12 @@ class ServiceConfig:
         1,
         public_path=("training", "max_jobs"),
         help="The training jobs that one process of the training service runs at once for each training component.",
+    )
+    #: Unset, or a ``TrainingManager`` plugin: ``package.module:ClassName`` or module and config.
+    training_manager: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("training", "manager"),
+        help="A TrainingManager plugin reference: it decides what the scenarios in auto mode train.",
     )
     inference_handler_factory: str | None = config_option(
         None, public_path=("inference", "handler_factory"), help="Dotted InferenceHandler subclass with from_config()."
@@ -482,6 +489,8 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if self.training_manager is not None:
+            TrainingManager.reference(self.training_manager, setting="training.manager")
         max_jobs = self.training_max_jobs
         if isinstance(max_jobs, bool) or not isinstance(max_jobs, int) or max_jobs < 1:
             raise ValueError("training.max_jobs must be a positive integer")

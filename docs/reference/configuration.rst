@@ -482,6 +482,13 @@ component allows it; the Tinker component does (see `Executors
 <../developer-guide/executors.rst>`__). Each running job needs its own
 compute, so set the value to what the machines hold.
 
+``training.manager`` names a ``TrainingManager`` plugin
+(``reef.train.manager``), as ``package.module:ClassName`` or as ``module`` and
+``config``. Without it, a scenario in ``auto`` mode starts a job when
+``job_samples`` untrained samples wait. With it, Reef starts no job by that
+rule: the manager decides. See `Decide what a scenario trains
+<../developer-guide/executors.rst#decide-what-a-scenario-trains>`__.
+
 ``training.timeout-s`` bounds each call to the training workers, in seconds.
 With Slime, it bounds each worker call of a job, such as training and
 checkpoint saves; when omitted, the bound is four hours. With Tinker, it

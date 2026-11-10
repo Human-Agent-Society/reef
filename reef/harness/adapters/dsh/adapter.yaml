@@ -127,6 +127,9 @@ run:
     argv: ["--profile", "headless", "--", "--", "{task}"]
     env:
       DSH_TELEMETRY_MODE: "DISABLED"
+    # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
+    # The tree's skills render there too, and the tree's skill wins on one name.
+    skills: dsh/skills
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
 # are optional: a new adapter can start with the paths alone.

@@ -68,6 +68,8 @@ run:
       DISABLE_UPDATES: "1"
       DISABLE_TELEMETRY: "1"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
+    skills: claude/skills
   # How a person's machine runs Claude Code on a snapshot: the person's own ~/.claude stays.
   # register installs the plugin reef from the local marketplace reef at the install root, and
   # Claude Code loads it in place in every session; a session that Reef starts also takes the

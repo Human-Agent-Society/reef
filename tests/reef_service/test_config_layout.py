@@ -348,6 +348,15 @@ def test_the_training_section_sets_the_jobs_that_one_process_runs_at_once(jobs, 
     assert service_config_from_mapping(translate_layout({"reef": {"token": "t"}})).training_max_jobs == 1
 
 
+def test_the_training_section_names_a_training_manager_plugin() -> None:
+    reference = "tests.train.test_manager:TrainThenFail"
+    resolved = translate_layout({"reef": {"token": "t"}, "training": {"manager": reference}})
+    assert service_config_from_mapping(resolved).training_manager == reference
+    assert service_config_from_mapping(translate_layout({"reef": {"token": "t"}})).training_manager is None
+    with pytest.raises(ValueError, match=r"training\.manager"):
+        service_config_from_mapping(translate_layout({"reef": {"token": "t"}, "training": {"manager": 3}}))
+
+
 def test_the_evaluation_section_names_a_trial_observer_plugin() -> None:
     observer = "tests.evaluation.test_rollout_worker:ReadingObserver"
     resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"trial_observer": observer}})

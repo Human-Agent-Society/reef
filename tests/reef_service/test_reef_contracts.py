@@ -1225,7 +1225,8 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
                     references=("missing",),
                 )
             )
-        with pytest.raises(ValueError, match="training_mode"):
+        # A refused request: the scenario has no trainer that trains.
+        with pytest.raises(ValueError, match="require a training backend"):
             dispatcher.accept_request("math", {"text": "train"})
         scenario = dispatcher.get_or_create_scenario("math")
 

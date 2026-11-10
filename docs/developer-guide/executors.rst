@@ -131,6 +131,43 @@ job runs, including the jobs that a restart left. After a restart,
 `Tinker integration <../reference/python-api.rst#tinker-integration>`__ in
 the Python API describes the Tinker component.
 
+Decide what a scenario trains
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In ``auto`` mode Reef starts a job by its own rule: a trainer trains when
+``job_samples`` untrained samples wait. A deployment can replace the rule
+with a training manager, a ``TrainingManager`` plugin that
+``training.manager`` names. An agent that plans experiments is one use.
+
+Control asks the manager every 2 seconds, once for each trainer of each
+loaded scenario in ``auto`` mode. ``actions(view)`` reads a ``ManagerView``
+and returns the actions that Reef runs, in order:
+
+- ``Train(samples, reason, parameters, train_from)`` files a training
+  request, as ``POST /reef/train`` does. With ``train_from`` the job starts
+  from that artifact and runs beside the other jobs. Without it the job
+  continues the training start.
+- ``TrainFrom(artifact_id)`` sets the training start.
+- ``Cancel(job_id)`` cancels a job.
+
+The view holds the training start, whether the selected artifact serves, the
+untrained samples that an automatic job would train next, the job size, the
+number of waiting requests, the jobs that have not ended, and the artifact
+listing with each artifact's metrics.
+
+Reef limits a manager in three ways. It checks each action as it checks a
+person's request, because the view can be old when the action runs. It drops
+a ``Train`` action while ``job_limit`` jobs of the manager's requests wait or
+run; the default limit is 1. And a manager has no action that changes what a
+scenario serves: the activation rule decides that. A request of a manager has
+the session ``training-manager``, and the commit of its job keeps the
+action's ``reason`` as the request's text.
+
+The manager runs on one thread of control, outside every scenario lock, so a
+slow decision delays only the other managed trainers. An error in
+``actions``, or a refused action, is logged, and the next round reads the
+trainer again.
+
 Serving saved weights
 ---------------------
 
