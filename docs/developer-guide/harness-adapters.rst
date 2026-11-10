@@ -75,7 +75,9 @@ pi's ``adapter.yaml``, shortened:
      - config templates per dialect (``openai``, ``responses``,
        ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``
    * - ``run.task``
-     - the headless command (``{task}``, ``{root}``) and its variables
+     - the headless command (``{task}``, ``{root}``) and its variables;
+       optionally ``skills``, the directory under the root where the agent
+       reads the skills of a Harbor task
    * - ``run.layer``
      - a person's machine: the agent's own commands that install the plugin
        and remove it (``register``, ``unregister``), and the ``args`` and
@@ -112,9 +114,13 @@ How Reef runs an agent
    * - Harbor task
      - Starts the task's container, installs the pinned agent with npm, uv,
        or from its git checkout into a venv, copies in the tree, runs ``run.task`` with the instruction, and
-       scores the tests' reward. The verifier can read the run as ATIF in
+       scores the tests' reward. A task that sets ``environment.skills_dir``
+       needs an adapter with ``run.task.skills``: Reef copies the task's
+       skills there before the tree, so the tree's file wins on one path. No
+       adapter's agent gets a task's ``mcp_servers``, and an evaluation
+       refuses such a task. The verifier can read the run as ATIF in
        ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
-     - an npm, uv or git ``install``
+     - an npm, uv or git ``install``, ``run.task.skills``
    * - A person's machine
      - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
