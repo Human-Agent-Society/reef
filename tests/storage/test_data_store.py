@@ -355,8 +355,10 @@ def test_a_collection_has_its_benchmarks_and_those_of_the_collections_it_names()
     with pytest.raises(ValueError, match="no collection 'missing'"):
         collection_benchmarks(stored, "open")
     assert TaskCollection.from_json(stored["all"].to_json()) == stored["all"]
+    empty = TaskCollection.from_json({"name": "empty"})
+    assert (empty.benchmarks, empty.collections) == ((), ())
+    assert collection_benchmarks({"empty": empty}, "empty") == ()
     for value in (
-        {"name": "empty"},
         {"name": "a/b", "benchmarks": ["lite"]},
         {"name": "self", "collections": ["self"]},
         {"name": "twice", "benchmarks": ["lite", "lite"]},

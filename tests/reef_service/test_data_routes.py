@@ -153,10 +153,16 @@ def test_a_collection_names_benchmarks_and_adds_their_tasks_to_a_scenario(tmp_pa
         for name, body in (
             ("coding", {"collections": ["all"]}),
             ("open", {"collections": ["missing"]}),
-            ("empty", {}),
             ("named", {"name": "other", "benchmarks": ["lite"]}),
         ):
             assert (await client.put(f"{stored}/{name}", headers=AUTH, json=body)).status == 400, name
+        # A collection can be empty: it has no task, so it adds none to a scenario.
+        assert (await client.put(f"{stored}/empty", headers=AUTH, json={})).status == 200
+        empty = await (await client.get(f"{stored}/empty", headers=AUTH)).json()
+        assert (empty["benchmarks"], empty["collections"], empty["task_count"]) == ([], [], 0)
+        to_eval = {"scenario": "math", "split": "eval"}
+        assert (await client.post(f"{stored}/empty/scenarios", headers=AUTH, json=to_eval)).status == 400
+        assert (await client.delete(f"{stored}/empty", headers=AUTH)).status == 200
 
         added = await client.post(
             f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math", "split": "eval"}
