@@ -10,8 +10,8 @@ An ``activation`` section has this shape::
 - ``always`` (``AlwaysActivate``) activates every new artifact, except a harness tree that changes a reviewed
   kind: a kind in ``review_kinds``. A harness recipe adds the parts its adapter always reviews. It is the
   default.
-- ``never`` (``NeverActivate``) activates none; a person activates each one
-  (``POST /reef/scenarios/{scenario}/activate``).
+- ``never`` (``NeverActivate``) activates none; a person sets what the scenario serves
+  (``served`` of ``POST /reef/scenarios/{scenario}/update``).
 - ``evaluated`` (``EvaluatedActivation``) activates an artifact once an evaluation of it finishes with a
   ``mean_score`` of at least ``min_mean_score``. The scenario's ``artifact_evaluation`` settings evaluate each
   new artifact.

@@ -117,7 +117,6 @@ def test_artifact_id_routes_reject_empty_and_whitespace_bodies_with_400() -> Non
         try:
             for path, key in (
                 ("/reef/scenarios", "artifact_id"),
-                ("/reef/scenarios/x/activate", "artifact_id"),
                 ("/reef/scenarios/x/train-from", "artifact_id"),
             ):
                 for value in ("", "   "):
@@ -156,17 +155,16 @@ def test_create_and_update_refuse_the_retired_release_id_and_model_keys() -> Non
             update = await client.post("/reef/scenarios/s/update", json={"model": None})
             assert (
                 update.status == 400
-                and "training_mode, artifact_evaluation, activation, serving_config or traffic_weights"
-                in await update.text()
+                and "training_mode, artifact_evaluation, activation, serving_config or served" in await update.text()
             )
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("path", ["/reef/scenarios/x/activate", "/reef/scenarios/x/train-from"])
+@pytest.mark.parametrize("path", ["/reef/scenarios/x/update", "/reef/scenarios/x/train-from"])
 def test_activation_routes_reject_non_object_bodies_with_400(path: str) -> None:
-    """#228 — activate and train-from share the read_object path with the other JSON routes."""
+    """#228 — update and train-from share the read_object path with the other JSON routes."""
 
     async def run() -> None:
         client = TestClient(

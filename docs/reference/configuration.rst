@@ -1832,9 +1832,10 @@ can select one of the built-in rules for itself with
 scenario that selects none.
 
 An artifact that the rule does not activate stays inactive. A person can
-activate it with ``POST /reef/scenarios/{scenario}/activate``. Activation does
-not change where training continues. `Activate an artifact
-<../user-guide/operate.rst#activate-an-artifact>`__ describes activation, and
+activate it with the ``served`` setting of
+``POST /reef/scenarios/{scenario}/update``. Activation does
+not change where training continues. `Set what a scenario serves
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ describes activation, and
 `Go back to an older artifact
 <../user-guide/operate.rst#go-back-to-an-older-artifact>`__ describes how to
 make an older artifact serve for good.

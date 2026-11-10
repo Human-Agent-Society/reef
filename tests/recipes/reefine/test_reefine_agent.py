@@ -499,7 +499,7 @@ def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(u
         assert upstream.gets[-1] == ("/api/v1/models?output_modalities=speech", "Bearer sk-or-test")
 
         assert post(f"{base}/trial", {"task": "say hi"}) == (200, b'{"task": "say hi"}')
-        assert post(f"{base}/reef/scenarios/s/activate", {})[0] == 404
+        assert post(f"{base}/reef/scenarios/s/update", {})[0] == 404
         wrong = base.replace(base.rsplit("/", 1)[1], "not-the-token")
         assert post(f"{wrong}/v1/chat/completions", {"messages": []})[0] == 404
         # The budget of three is spent: the chat, the speech call, and this one is refused.

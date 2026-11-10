@@ -90,13 +90,13 @@ leave the active selection unchanged.
 
 A snapshot that changes an extension stays inactive, because an extension
 runs in pi's process with your privileges. Inspect its files and declared
-requirements on the page before you serve it. Then activate it with the
-artifact id the page names:
+requirements on the page before you serve it. Then activate it: set `served`
+to the artifact id the page names, with weight 100:
 
 ```bash
 curl -fsS -H 'Content-Type: application/json' \
-  -d '{"artifact_id": "<the artifact id the page names>"}' \
-  http://127.0.0.1:8901/reef/scenarios/reefine-example/activate
+  -d '{"served": {"<the artifact id the page names>": 100}}' \
+  http://127.0.0.1:8901/reef/scenarios/reefine-example/update
 ```
 
 ## 5. Pull the result
