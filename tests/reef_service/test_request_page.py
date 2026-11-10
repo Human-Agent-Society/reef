@@ -250,15 +250,15 @@ def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is
     assert "Artifact 12345678 is ready but does not serve yet." in page
     assert "storage:unrelated" not in page
     assert REFRESH not in page
-    # The next action is the activate call, runnable as it stands with the scenario header.
-    activate_call = html.escape(
-        f'POST /reef/scenarios/{SCENARIO}/activate {json.dumps({"artifact_id": "artifact:123456789abc"})}'
+    # The next action is the update call that serves the artifact alone, runnable as it stands.
+    serve_call = html.escape(
+        f'POST /reef/scenarios/{SCENARIO}/update {json.dumps({"served": {"artifact:123456789abc": 100}})}'
     )
-    assert f"<h3>Read this page, then activate it</h3><code>{activate_call}</code>" in page
+    assert f"<h3>Read this page, then serve it</h3><code>{serve_call}</code>" in page
     page = request_page(_record(), [CREATION, {**inactive, "active": True, "activated": True}], now=1_100.0)
     assert '<span class="selected">Published</span>' in page
     assert "Published as artifact 12345678" in page
-    assert "What changed" in _sections(page) and "activate it</h3>" not in page
+    assert "What changed" in _sections(page) and "serve it</h3>" not in page
 
 
 def test_a_rejected_request_names_the_missed_run_on_both_pages() -> None:

@@ -15,7 +15,6 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from harbor.models.agent.context import AgentContext
-from harbor.models.task.config import MCPServerConfig
 
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
@@ -28,14 +27,12 @@ from reef.harness.harbor.agent import (
     can_run_in_task_container,
     run_harbor_task,
     task_agent_tools,
-    task_mcp_overlays,
     tree_agent,
 )
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError
 from reef.harness.tasks.trajectory import failed_trial_error
-from reef.harness.tree import HarnessTree, RenderError, render_tree
 
 SESSION_EVENT = {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "391"}]}}
 
@@ -292,81 +289,6 @@ def test_the_tools_that_a_task_gives_its_agent_are_found_in_its_config(tmp_path:
     # pi names the directory where it reads a task's skills; the python adapter names none.
     assert task_agent_tools(pi, task) == ("mcp_servers",)
     assert task_agent_tools(python, task) == ("mcp_servers", "skills_dir")
-    # opencode reads a task's MCP servers, but no adapter gives its agent a server's HTTP headers; Codex reads no
-    # SSE server.
-    assert task_agent_tools(get_adapter("opencode"), task) == ()
-    assert task_agent_tools(get_adapter("codex"), task) == ("mcp_servers",)
-    (task / "task.toml").write_text(f'{config}\n{server}headers = {{ Authorization = "Bearer ${{TOKEN}}" }}\n')
-    assert task_agent_tools(get_adapter("opencode"), task) == ("mcp_servers headers",)
-
-
-MCP_SERVERS = [
-    MCPServerConfig(name="search", transport="streamable-http", url="http://search:8000/mcp"),
-    MCPServerConfig(name="files", transport="stdio", command="files-server", args=["--root", "/app"]),
-]
-
-
-def test_each_adapter_writes_the_mcp_servers_of_a_task_as_its_agent_reads_them() -> None:
-    def overlay(adapter: str) -> tuple[str, dict]:
-        ((target, data),) = task_mcp_overlays(get_adapter(adapter), MCP_SERVERS)
-        return target, data
-
-    assert overlay("opencode") == (
-        "agent",
-        {
-            "mcp": {
-                "search": {"type": "remote", "url": "http://search:8000/mcp", "oauth": False},
-                "files": {"type": "local", "command": ["files-server", "--root", "/app"]},
-            }
-        },
-    )
-    assert overlay("claude") == (
-        "mcp",
-        {
-            "mcpServers": {
-                "search": {"type": "http", "url": "http://search:8000/mcp"},
-                "files": {"type": "stdio", "command": "files-server", "args": ["--root", "/app"]},
-            }
-        },
-    )
-    expected = {
-        "search": {"url": "http://search:8000/mcp"},
-        "files": {"command": "files-server", "args": ["--root", "/app"]},
-    }
-    assert overlay("codex") == ("primary", {"mcp_servers": expected})
-    assert overlay("hermes") == ("primary", {"mcp_servers": expected})
-
-    assert task_mcp_overlays(get_adapter("pi"), []) == ()
-    with pytest.raises(ValueError, match="'pi' does not give its agent the MCP servers"):
-        task_mcp_overlays(get_adapter("pi"), MCP_SERVERS)
-    sse = [MCPServerConfig(name="events", transport="sse", url="http://events:8000/sse")]
-    with pytest.raises(ValueError, match="'codex' cannot use the sse MCP server 'events'"):
-        task_mcp_overlays(get_adapter("codex"), sse)
-
-
-def test_a_tree_agent_renders_the_mcp_servers_of_its_task_and_a_tree_cannot_write_them(tmp_path: Path) -> None:
-    (tmp_path / "tree").mkdir()
-    binding = {"model": "m", "base_url": "http://127.0.0.1:8901", "api_key": "reef"}
-
-    def rendered(adapter: str, api: str, **task: object) -> Path:
-        files = tmp_path / f"{adapter}-{len(task)}"
-        spec = tree_agent(get_adapter(adapter), api=api, tree_dir=tmp_path / "tree", files_dir=files, timeout=60.0)
-        TreeAgent(tmp_path / "logs", **{**spec["kwargs"], **binding}, **task)
-        return files
-
-    codex = (rendered("codex", "responses", mcp_servers=MCP_SERVERS) / "codex" / "config.toml").read_text()
-    assert '[mcp_servers.search]\nurl = "http://search:8000/mcp"' in codex
-    state = rendered("claude", "anthropic", mcp_servers=MCP_SERVERS) / "claude" / ".claude.json"
-    assert set(json.loads(state.read_text())["mcpServers"]) == {"search", "files"}
-    # A run without MCP servers leaves Claude Code's state file to Claude Code.
-    assert not (rendered("claude", "anthropic") / "claude" / ".claude.json").exists()
-
-    # The checks of a config target hold on the tree: only Reef writes these keys, for a task.
-    servers = json.dumps({"mcpServers": {"own": {"type": "http", "url": "http://own"}}})
-    with pytest.raises(RenderError, match="Reef writes the MCP servers of a task"):
-        render_tree(HarnessTree({"config/mcp.json": servers}), get_adapter("claude"))
-    with pytest.raises(RenderError, match="a Codex plugin carries no config keys"):
-        render_tree(HarnessTree({"config/primary.json": '{"mcp_servers": {}}'}), get_adapter("codex"))
 
 
 def test_the_agent_copies_the_skills_of_the_task_into_its_skills_directory_before_the_tree(tmp_path: Path) -> None:

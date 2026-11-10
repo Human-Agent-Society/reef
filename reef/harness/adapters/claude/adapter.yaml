@@ -70,14 +70,6 @@ run:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
     skills: claude/skills
-    # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the
-    # entry of a server of each transport.
-    mcp:
-      target: mcp
-      key: mcpServers
-      stdio: {type: stdio, command: "{command}", args: "{args}"}
-      sse: {type: sse, url: "{url}"}
-      streamable-http: {type: http, url: "{url}"}
   # How a person's machine runs Claude Code on a snapshot: the person's own ~/.claude stays.
   # register installs the plugin reef from the local marketplace reef at the install root, and
   # Claude Code loads it in place in every session; a session that Reef starts also takes the
@@ -113,14 +105,6 @@ config:
       - key: env
         match: Each(Key(IsIn(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"])))
         reason: Reef's model binding chooses the endpoint, the credential and the model
-  # Claude Code's own state file, where it reads the MCP servers of the user. Only Reef writes it, with the MCP
-  # servers of a Harbor task; a run without them renders no such file.
-  mcp:
-    path: "claude/.claude.json"
-    checks:
-      - key: "."
-        match: Eq({})
-        reason: Reef writes the MCP servers of a task, and a plugin carries no state of Claude Code
   # The plugin's hooks: when each extension script runs.
   hooks:
     path: "plugin/hooks/hooks.json"

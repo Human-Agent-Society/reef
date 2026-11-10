@@ -627,10 +627,10 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
             )
             assert (await waiting.json())["requires"] == REQUIRES
             response = await client.post(
-                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["artifact_id"]}
+                "/reef/scenarios/agents/update", json={"served": {inactive["artifact_id"]: 100}}
             )
             assert response.status == 200
-            assert (await response.json())["artifact_id"] == inactive["artifact_id"]
+            assert (await response.json())["served"] == {inactive["artifact_id"]: 100}
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["artifact_id"] == inactive["artifact_id"] and head["requires"] == REQUIRES
             assert head["evaluation"] == inactive["metrics"]

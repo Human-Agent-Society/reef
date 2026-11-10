@@ -128,7 +128,7 @@ class TrafficWeights:
             if type(weight) is not int or not 0 <= weight <= BUCKET_COUNT:
                 raise ValueError(f"the traffic weight of {artifact_id!r} must be an integer from 0 to {BUCKET_COUNT}")
         if self.by_artifact and sum(self.by_artifact.values()) != BUCKET_COUNT:
-            raise ValueError(f"traffic_weights must sum to {BUCKET_COUNT}")
+            raise ValueError(f"the traffic weights must sum to {BUCKET_COUNT}")
 
     @classmethod
     def from_json(cls, value: object) -> TrafficWeights:
@@ -136,7 +136,7 @@ class TrafficWeights:
         if value is None:
             return cls()
         if not isinstance(value, Mapping):
-            raise ValueError("traffic_weights must map each artifact ID to its weight, or be null")
+            raise ValueError("the traffic weights must map each artifact ID to its weight")
         return cls(dict(value))
 
     @property
@@ -387,7 +387,7 @@ class InferenceReplica:
         """The row that answers ``payload``, with the choice of the scenario's traffic split.
 
         The choice is None when the scenario has no split, the request names another row, Reef cannot identify the
-        conversation, or the selected artifact has no route. Then ``row_for_model`` gives the row. Only a split computes
+        conversation, or the selected artifact has no route, as while it starts. Then ``row_for_model`` gives the row. Only a split computes
         a bucket.
         """
         serving = self.cache.serving(scenario, refresh=refresh)
@@ -400,7 +400,7 @@ class InferenceReplica:
             selected = serving.rows.get(artifact_id)
             if selected is not None:
                 return selected, TrafficChoice(artifact_id, bucket, weights)
-            logger.warning("scenario %s: artifact %s has a traffic weight but no route", scenario, artifact_id)
+            # The artifact has no route yet, or the scenario stopped serving it: the active artifact answers.
         return row_for_model(scenario, serving.rows, model), None
 
     def record(

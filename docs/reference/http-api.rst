@@ -111,7 +111,8 @@ Routes
 | ``GET /reef/scenarios/{scenario}/inference/status``                                                                   | artifact startup state; ``?model=active`` by      |
 |                                                                                                                       | default                                           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``                                                                            | update a scenario's settings                      |
+| ``POST /reef/scenarios/{scenario}/update``                                                                            | update a scenario's settings, and set the         |
+|                                                                                                                       | artifacts that it serves                          |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/settings``                                                                           | read a scenario's settings                        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -132,17 +133,10 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/artifacts``                                                                         | import a directory as a new artifact              |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/activate``                                                                          | make an existing artifact the one that serves     |
-+-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/restore``                                                                           | restore the complete selection at an earlier step |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/train-from``                                                                        | set the artifact a trainer starts its next job or |
 |                                                                                                                       | step from                                         |
-+-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/serve``                                                                             | serve an artifact beside the active selection     |
-+-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/stop-serving``                                                                      | stop serving an artifact beside the active        |
-|                                                                                                                       | release                                           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/redeploy``                                                                          | deploy the served engines again (RFC #1299)       |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -1861,8 +1855,9 @@ body holds one or more of these settings. Reef rejects other fields:
 - ``activation``: the scenario's activation rule, below.
 - ``serving_config``: the serving fields that the scenario sets over the
   deployment's values (`Serving config`_).
-- ``traffic_weights``: how Reef divides the scenario's model requests between
-  its artifacts (`Traffic weights`_).
+- ``served``: the artifacts that the scenario serves of one component, each
+  with its weight (`Set what a scenario serves`_). ``component`` names that
+  component, and is valid only together with ``served``.
 
 The response holds the scenario name and each setting that the request
 changed. To change the data processor's mode:
@@ -1961,29 +1956,28 @@ the scenario's settings, so a reload and a restart keep it. A stored field that
 the deployment no longer accepts is ignored with a warning, and the scenario
 serves with the deployment's values until a person changes the config.
 
-Traffic weights
-~~~~~~~~~~~~~~~
+Traffic split
+~~~~~~~~~~~~~
 
-The ``traffic_weights`` setting divides the scenario's model requests between
-its artifacts. For example, it can send 5% of the requests to a new artifact. It
-maps artifact IDs to integers from 0 to 100 that sum to 100:
+When the ``served`` setting gives more than one artifact a weight above 0, the
+weights divide the scenario's model requests between those artifacts (`Set
+what a scenario serves`_). For example, this mapping sends 5% of the requests
+to a new artifact:
 
 .. code:: json
 
-   {"traffic_weights": {"artifact:a": 95, "artifact:b": 5}}
+   {"served": {"artifact:a": 95, "artifact:b": 5}}
 
-To start a split:
+Reef starts each artifact of the mapping that does not serve yet. Until an
+artifact has started, the active artifact answers its requests, so no request
+fails. Inference replicas use new weights within a few seconds, without a
+restart. A mapping with one weight above 0 ends the split, so the active
+artifact answers again.
 
-1. Serve each artifact with ``POST /reef/scenarios/{scenario}/serve``, unless it is
-   the active artifact.
-2. Wait until each artifact has started.
-3. Send the weights. Inference replicas use them within a few seconds, without a
-   restart.
-
-The request replaces the stored weights. ``null`` ends the split, so the active
-artifact answers again. Reef answers HTTP 400 for invalid weights, and for an
-artifact with a weight above 0 that has no route. An artifact that stops serving
-keeps its weight, and its requests go to the active artifact.
+The activation rule can make a newer artifact active during a split. The split
+keeps its weights. The new active artifact then answers the requests of each
+artifact of the split that the scenario no longer serves, and the other
+artifacts keep their shares.
 
 The weights apply to a model request that names ``active``, or a model that the
 scenario does not serve under that name:
@@ -2017,7 +2011,7 @@ replica.
 The record names the artifact that answered in ``artifact_id``, and holds the
 bucket and the weights in ``metadata.traffic``. These records train like other
 records, because the staleness check accepts an artifact that the scenario serves
-beside its active selection. That check does not read the weights. A job can then
+beside its active artifact. That check does not read the weights. A job can then
 hold samples of several artifacts. Each sample keeps its own ``artifact_id`` and
 recorded log probabilities.
 
@@ -2037,6 +2031,7 @@ scenario:
      "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
      "serving_config": {"weights": {"temperature": 0.6}},
      "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
+     "served": {"weights": {"artifact:a": 95, "artifact:b": 5}},
      "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
@@ -2047,8 +2042,12 @@ scenario:
   class of its own, ``module`` is the ``package.module:ClassName`` of that class.
 - ``serving_config`` is the stored `serving config <#serving-config>`__, ``{}``
   when the scenario sets no field.
-- ``traffic_weights`` is the scenario's `traffic split <#traffic-weights>`__, ``{}``
-  without one.
+- ``served`` maps each component to the artifacts that the scenario serves of
+  it, each with its weight (`Set what a scenario serves`_). Without a traffic
+  split, the active artifact has 100 and each other served artifact has 0. With
+  a split, each artifact has its weight. The active artifact also has the
+  weight of each artifact of the split that the scenario no longer serves,
+  because it answers their requests.
 - ``effective_serving_config`` maps the served component to each of its serving
   fields that has a value: the scenario's value, else the deployment's.
 - ``job_parameters`` maps a sample kind (``trajectory`` or ``task``) to the
@@ -2167,8 +2166,9 @@ Send the same body you would send to the provider. Reef never touches your
 sampling parameters, and no artifact adds to the request.
 
 Reef answers the request from the scenario's row in ``served_models``. The
-request's ``model`` selects the row of an artifact served beside the active
-selection when it names one; any other ``model`` selects the active row. Reef
+request's ``model`` selects the row of a served artifact when it names one;
+any other ``model`` selects the active row, or the row that a `traffic split
+<#traffic-split>`__ gives the request. Reef
 keeps that row for the whole request. It sends the request to the engine at
 the row's URL under the row's model name, and records the snapshot of the row's
 artifact, even if an activation completes mid-request. `Run the services in
@@ -2522,8 +2522,7 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 | ``activated``         | true when the artifact has been active at some time  |
 +-----------------------+------------------------------------------------------+
 | ``served``            | true when the scenario serves the artifact beside    |
-|                       | its active selection (`Serve an artifact beside the  |
-|                       | active selection`_)                                  |
+|                       | the active artifact (`Set what a scenario serves`_)  |
 +-----------------------+------------------------------------------------------+
 | ``metrics``,          | training rows only: the step's metrics and the       |
 | ``record_progress``   | record high-water mark that the step consumed        |
@@ -2661,7 +2660,7 @@ nothing, takes no import.
 
 Reef stores the new artifact and appends an ``import`` operation. Serving
 selections and training starts stay unchanged, and the activation rule does
-not run. Activate the artifact or train from it as from any other artifact.
+not run. Serve the artifact or train from it as from any other artifact.
 The answer comes after the artifact is durable, so give a large import a
 long client timeout.
 
@@ -2683,40 +2682,152 @@ long client timeout.
 | 503    | the source failed, for example S3 refused the read                 |
 +--------+--------------------------------------------------------------------+
 
-Activate an artifact
-~~~~~~~~~~~~~~~~~~~~
+Set what a scenario serves
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pulling an older artifact changes only your local copy. A scenario keeps
-one selected ``artifact_id`` per component. ``GET /reef/harness`` serves the
-selected harness tree. Inference serves the last selection that completed
-startup.
-To select another artifact, send ``POST /reef/scenarios/{scenario}/activate``:
+Pulling an older artifact changes only your local copy. A scenario serves one
+or more artifacts of each component, and one of them is the active artifact.
+``GET /reef/harness`` serves the active harness tree. The default inference
+routes answer from the active artifact that completed startup.
+
+The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` sets what
+the scenario serves of one component. It maps artifact IDs to weights:
 
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"artifact_id": "<id>"}' \
-     "$REEF_URL/reef/scenarios/code-repair/activate"
+     -d '{"served": {"<id>": 100}}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
 
-The body is ``{"artifact_id": "<id>", "component": "<name>"}``. Leave out
-``component`` when the scenario has one component. The answer is
-``{scenario, component, artifact_id}``: the selected artifact and its
-component.
+Afterwards the scenario serves exactly the artifacts of the mapping. These
+examples use the artifacts ``a`` and ``b`` of one component, where ``a`` is
+the active artifact before the request:
 
-The response accepts the selection. Poll `Startup status`_ before sending
-requests that require the new artifact. A repeated activation retries a
-failed startup at once without writing another activation record, and sets
-the wait of the automatic retries back to 60 seconds.
++--------------------------+-------------------------------------------------+
+| ``served``               | Result                                          |
++==========================+=================================================+
+| ``{"b": 100}``           | ``b`` becomes the active artifact, and Reef     |
+|                          | stops every other served artifact               |
++--------------------------+-------------------------------------------------+
+| ``{"a": 95, "b": 5}``    | a traffic split: ``b`` answers 5% of the        |
+|                          | requests                                        |
++--------------------------+-------------------------------------------------+
+| ``{"a": 100, "b": 0}``   | Reef loads ``b``, which answers only the        |
+|                          | requests that name it                           |
++--------------------------+-------------------------------------------------+
+| ``{"a": 100}``           | Reef stops serving ``b``                        |
++--------------------------+-------------------------------------------------+
 
-Activation atomically replaces the selected artifact of ``component`` and
-appends an ``activate`` operation with the complete component mapping.
-Other components keep their IDs. It creates no artifact or repository
-revision, whether the scenario has one component or several.
+The body is ``{"served": {"<id>": <weight>, ...}, "component": "<name>"}``:
 
-Activating the active artifact changes nothing. Activation never changes a
-trainer's training start. A full-weight serving runtime that activates the
-root snapshot after it served a checkpoint loads the root's files.
+- ``served`` holds one or more artifact IDs of one component. Each weight is
+  an integer from 0 to 100, and the weights sum to 100.
+- ``component`` names the component. Leave it out when the scenario has one
+  component. A scenario with several components requires it.
+
+Reef reads the mapping as follows:
+
+- **The largest weight selects the active artifact.** Among equal weights, the
+  first ID in sorted order is active. The active artifact answers each request
+  that names no artifact, unless a traffic split gives the request to another
+  artifact.
+- **More than one weight above 0 is a traffic split.** `Traffic split`_
+  describes how Reef divides the requests.
+- **Weight 0 loads an artifact.** The artifact answers only the requests that
+  name it (`Call one served artifact`_).
+- **An artifact that the mapping leaves out stops serving.**
+
+The answer is ``{"scenario": "<name>", "served": {...}}`` with the mapping
+that the scenario now serves of the component. Reef checks the mapping before
+it changes anything: a mapping that names an unknown artifact, or an artifact
+of another component, changes nothing.
+
+The response accepts the mapping, and inference loads the artifacts in the
+background. Poll `Startup status`_ before sending requests that require the
+new active artifact. A repeated request retries a failed startup at once
+without writing another operation, and sets the wait of the automatic retries
+back to 60 seconds.
+
+Reef appends one operation for each artifact that changes: ``activate`` for a
+new active artifact, ``serve`` for an artifact that starts to serve beside it,
+and ``stop_serving`` for one that stops. Each operation holds the complete
+component mapping, so a restart keeps what the scenario serves. Other
+components keep their artifacts. The request creates no artifact or
+repository revision, and it never changes a trainer's training start. A
+full-weight serving runtime that makes the root snapshot active after it
+served a checkpoint loads the root's files.
+
++--------+--------------------------------------------------------------------+
+| Status | Cause                                                              |
++========+====================================================================+
+| 200    | the scenario serves the mapping                                    |
++--------+--------------------------------------------------------------------+
+| 400    | a malformed body; an empty mapping, a weight that is not an        |
+|        | integer from 0 to 100, or weights that do not sum to 100;          |
+|        | ``component`` without ``served``; an unknown ``component``, or     |
+|        | ``component`` is missing in a scenario with several components;    |
+|        | an artifact has no durable bytes; the runtime cannot serve the     |
+|        | artifact; the mapping names several artifacts, and the runtime     |
+|        | answers only from the snapshot it has loaded or the store keeps    |
+|        | no durable commit history                                          |
++--------+--------------------------------------------------------------------+
+| 404    | unknown scenario; an artifact that is not one of the component     |
++--------+--------------------------------------------------------------------+
+| 409    | a training result waits for its commit; send the request again     |
+|        | after the commit                                                   |
++--------+--------------------------------------------------------------------+
+
+`Activation rule <../user-guide/operate.rst#activation-rule>`__ explains when
+Reef makes a new artifact active automatically. `Go back to an older artifact
+<../user-guide/operate.rst#go-back-to-an-older-artifact>`__ explains how to
+go back to an older one for good.
+
+Call one served artifact
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The default inference routes answer from the active artifact, or from the
+artifact that a traffic split selects. Each served artifact also answers at
+its own URL. Give an artifact weight 0 to:
+
+- keep an older artifact answering while a newer one is active;
+- try a new artifact before it is active.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"served": {"<active id>": 100, "<id>": 0}}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
+
+Send an inference call to
+``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where
+``{route}`` is ``chat/completions``, ``responses``, ``messages`` or
+``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and
+never creates a scenario. Reef records it like a call to ``/v1/{route}``,
+and the record names the ``artifact_id`` that answered. A call to ``/v1/{route}``
+whose ``model`` is the ``artifact_id`` of a served artifact is answered by that
+artifact too. An artifact that the scenario does not serve has no URL: its
+calls answer HTTP 404.
+
+In a scenario with several components, an artifact served beside the active
+one stays bound to the artifacts of the other components that were active
+when it started to serve. A later activation does not change that binding.
+
+The activation rule and a restore change the active artifact alone. The
+artifacts served beside it stay served. Training continues from each
+trainer's independently selected training start.
+The staleness check of a recipe counts only the artifacts that the scenario
+served as active, so it refuses the records of a served artifact that was not
+active within ``max_staleness`` artifacts.
+
+The runtime must answer each call from the artifact that the call names.
+The Tinker runtime does, so a Tinker scenario can serve any of its
+artifacts together. A runtime that loads weights into engines answers only
+from the snapshot it has loaded, so Reef refuses a mapping of several
+artifacts there. A scenario whose components load nothing into a runtime,
+such as a harness scenario, can serve any of its artifacts together. A store
+without a durable commit history also refuses a mapping of several artifacts.
 
 Restore a scenario selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2729,7 +2840,8 @@ as it stood after that step. Use ``{"step": 0}`` for the starting artifacts.
 The answer is ``{scenario, components}``, where ``components`` maps every
 component name to its restored ``artifact_id``. A changed selection appends
 a ``restore`` operation. It creates no artifact or repository revision and
-leaves each trainer's start and separately served artifacts unchanged.
+leaves each trainer's start, the other served artifacts and the traffic
+split unchanged.
 Restoring the current selection is a no-op. Poll `Startup status`_ before
 using the restored inference artifact.
 
@@ -2775,100 +2887,18 @@ Whether a trainer can start from an artifact depends on the trainer:
 A weight artifact without optimizer state, such as a root snapshot made from
 the default start, starts training with a new optimizer state.
 
-Both routes answer these statuses:
+The route answers these statuses:
 
 +--------+--------------------------------------------------------------------+
 | Status | Cause                                                              |
 +========+====================================================================+
-| 200    | the artifact is active (``activate``) or is the trainer's start    |
-|        | (``train-from``)                                                   |
+| 200    | the artifact is the trainer's start                                |
 +--------+--------------------------------------------------------------------+
 | 400    | a malformed body; the artifact has no durable bytes; an unknown    |
 |        | ``component``, or ``component`` is missing in a scenario with      |
-|        | several components; ``activate``: the runtime cannot serve the     |
-|        | artifact; ``train-from``: the trainer cannot start from the        |
-|        | artifact                                                           |
+|        | several components; the trainer cannot start from the artifact     |
 +--------+--------------------------------------------------------------------+
 | 404    | unknown scenario or artifact                                       |
-+--------+--------------------------------------------------------------------+
-| 409    | a training result waits for its commit; send the request again     |
-|        | after the commit                                                   |
-+--------+--------------------------------------------------------------------+
-
-`Activate an artifact <../user-guide/operate.rst#activate-an-artifact>`__
-explains when Reef activates a new artifact automatically. `Go back to an
-older artifact <../user-guide/operate.rst#go-back-to-an-older-artifact>`__
-explains how to go back to an older one for good.
-
-Serve an artifact beside the active selection
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The default inference routes answer from the active selection. Serve an
-artifact beside the active selection to:
-
-- keep an older artifact answering while a newer one is active;
-- try a new artifact before it is active.
-
-.. code:: bash
-
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"artifact_id": "<id>"}' \
-     "$REEF_URL/reef/scenarios/code-repair/serve"
-
-The body and answer are as for ``activate``: ``{scenario, component,
-artifact_id}``. Reef records the served selection without creating an
-artifact or repository revision. In a scenario with several components, the
-other selected artifacts stay bound to this served selection, including after
-a later activation.
-
-A served artifact answers at its own URL. Send an inference call to
-``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where
-``{route}`` is ``chat/completions``, ``responses``, ``messages`` or
-``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and
-never creates a scenario. Reef records it like a call to ``/v1/{route}``,
-and the record names the ``artifact_id`` that answered. A call to ``/v1/{route}``
-whose ``model`` is the ``artifact_id`` of a served artifact is answered by that
-artifact too. An artifact that is not served beside the active selection has no
-URL: its calls answer HTTP 404.
-
-A serve appends a ``serve`` record, so the artifact stays served after a
-restart. It changes neither the active selection, nor the chain tip, nor a
-training start. An activation does not change what is served: serve the
-active artifact first to keep it answering after you activate another one.
-Serving a served artifact changes nothing. Training continues from each
-trainer's independently selected training start.
-The staleness check of a recipe counts only the artifacts that the scenario
-served as active, so it refuses the records of a served artifact that was not
-active within ``max_staleness`` artifacts.
-
-``POST /reef/scenarios/{scenario}/stop-serving`` with ``{"artifact_id":
-"<id>"}`` ends the serve and appends a ``stop_serving`` record. It answers
-``{scenario, component, artifact_id}``. The artifact's URL
-answers HTTP 404 afterwards.
-
-The runtime must answer each call from the artifact that the call names.
-The Tinker runtime does, so a Tinker scenario can serve any of its
-artifacts. A runtime that loads weights into engines answers only from the
-snapshot it has loaded, so Reef refuses a serve there. A scenario whose
-components load nothing into a runtime, such as a harness scenario, can serve
-any of its artifacts. A store without a durable commit history also refuses
-a serve.
-
-+--------+--------------------------------------------------------------------+
-| Status | Cause                                                              |
-+========+====================================================================+
-| 200    | the artifact is served (``serve``) or no longer served beside the  |
-|        | active selection (``stop-serving``)                                |
-+--------+--------------------------------------------------------------------+
-| 400    | a malformed body; ``serve``: the artifact has no durable bytes, an |
-|        | unknown ``component`` or a missing one in a scenario of several    |
-|        | components, the runtime answers only from the snapshot it has      |
-|        | loaded, or the store keeps no durable commit history;              |
-|        | ``stop-serving``: the body names a ``component``                   |
-+--------+--------------------------------------------------------------------+
-| 404    | unknown scenario or artifact; ``stop-serving``: the scenario does  |
-|        | not serve the artifact beside its active selection                 |
 +--------+--------------------------------------------------------------------+
 | 409    | a training result waits for its commit; send the request again     |
 |        | after the commit                                                   |
@@ -2883,7 +2913,8 @@ a tree whose patch changes a file of a kind listed in the ``always`` rule's
 ``native_loop``). The step creates an artifact but does not activate it. Its row carries ``active: false`` and
 ``activated: false``. The manifest keeps serving the active selection, and
 ``?artifact_id=`` pulls the inactive tree for a trial run. To make it serve,
-send the row's ``artifact_id`` to ``POST /reef/scenarios/{scenario}/activate``.
+send ``{"served": {"<artifact_id>": 100}}`` with the row's ``artifact_id`` to
+``POST /reef/scenarios/{scenario}/update`` (`Set what a scenario serves`_).
 
 ``GET /reef/harness/artifacts`` lists only the harness component's artifacts.
 A weights update does not create another harness artifact. Each row's
@@ -2925,7 +2956,7 @@ step settles the request, the page reloads every five seconds and shows the
 request's state and the step's activity (its latest 80 lines). The catalog row
 whose ``metrics.training_request.id`` is the record id settles the page: it
 then shows the result, the next action (``GET /reef/harness`` for an active
-selection, the activate request for an inactive one), ``method_summary``, the
+selection, the update request that serves an inactive one), ``method_summary``, the
 patch with each file's kind of the harness tree (from the row's
 ``patch_parts``), and ``method_notes``. An unknown id, or one that is not a
 training request, is HTTP 404.
@@ -3103,8 +3134,8 @@ Status codes
 +========+=============================================================+
 | 400    | malformed body, a missing or empty ``x-reef-scenario`` on a |
 |        | scenario-scoped route, a report violating the recipe's      |
-|        | declared schema, or an activation or a train-from naming an |
-|        | artifact that Reef cannot serve or train from               |
+|        | declared schema, or a ``served`` mapping or a train-from    |
+|        | naming an artifact that Reef cannot serve or train from     |
 +--------+-------------------------------------------------------------+
 | 401    | missing or wrong bearer token, or ``x-api-key`` when no     |
 |        | Authorization header is sent; the two harness pages also    |
@@ -3120,8 +3151,9 @@ Status codes
 |        | configured harness recipe, or a scenario that serves no     |
 |        | files                                                       |
 +--------+-------------------------------------------------------------+
-| 409    | a record id resent with different content, an activation or |
-|        | a train-from while a training result waits for its commit,  |
+| 409    | a record id resent with different content, a ``served``     |
+|        | mapping or a train-from while a training result waits for   |
+|        | its commit,                                                 |
 |        | or an engine that answered under another model name or      |
 |        | aborted the request on both attempts                        |
 +--------+-------------------------------------------------------------+
@@ -3214,7 +3246,12 @@ The operations are:
 - ``import``: create an artifact from an external source.
 - ``sync``: create a harness artifact and select it for serving and training
   in one operation. Its ``activated`` value is true.
-- ``serve`` and ``stop_serving``: add or remove a separately served artifact.
+- ``serve`` and ``stop_serving``: add or remove an artifact that the scenario
+  serves beside the active one.
+
+A ``served`` request appends ``activate``, ``serve`` and ``stop_serving``
+operations, one for each artifact that changes (`Set what a scenario
+serves`_).
 
 Activation, restore and serving do not create artifacts or repository
 revisions. An import or training step can create an artifact without changing

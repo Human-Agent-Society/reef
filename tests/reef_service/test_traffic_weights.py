@@ -1,4 +1,4 @@
-"""A scenario's traffic split: which served artifact answers a request."""
+"""A scenario's traffic split, the weights above 0 of its ``served`` mapping: which served artifact answers a request."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from collections import Counter
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing.routing_fakes import routing_dispatcher
 from tests.reef_service.test_served_artifacts import ArtifactEcho, two_artifacts, wait_for_serving
 
 from reef.dispatcher import Dispatcher
@@ -26,9 +25,9 @@ def chat(user: str = "hi", *later: str) -> dict[str, object]:
     return {"model": "active", "messages": turns}
 
 
-def serving_both(value: Dispatcher, older: str) -> None:
-    """Serve ``older`` beside the active artifact, and wait until its route is published."""
-    value.serve("math", older)
+def serving_both(value: Dispatcher, active: str, beside: str) -> None:
+    """Serve ``beside`` with weight 0 beside the ``active`` artifact, and wait until its route is published."""
+    value.set_served("math", {active: 100, beside: 0})
     wait_for_serving(value)
 
 
@@ -104,17 +103,18 @@ def test_conversations_split_near_the_weights() -> None:
 def test_weights_split_requests_and_each_record_names_the_artifact_that_answered(tmp_path) -> None:
     async def run() -> None:
         value, _, _, newest, older = two_artifacts(tmp_path)
-        serving_both(value, older["artifact_id"])
         handler = ArtifactEcho()
         client = TestClient(TestServer(create_app(value, inference_handler=handler)))
         await client.start_server()
         try:
-            weights = {newest["artifact_id"]: 50, older["artifact_id"]: 50}
-            update = await client.post("/reef/scenarios/math/update", json={"traffic_weights": weights})
+            # The larger weight keeps the newest artifact active; the mapping starts the older one.
+            weights = {newest["artifact_id"]: 60, older["artifact_id"]: 40}
+            update = await client.post("/reef/scenarios/math/update", json={"served": weights})
             assert update.status == 200
-            assert (await update.json())["traffic_weights"] == weights
+            assert (await update.json())["served"] == weights
             settings = await (await client.get("/reef/scenarios/math/settings")).json()
-            assert settings["traffic_weights"] == weights
+            assert settings["served"] == {"weights": weights}
+            wait_for_serving(value)
 
             answers = []
             for n in range(60):
@@ -160,10 +160,12 @@ def test_weights_split_requests_and_each_record_names_the_artifact_that_answered
             assert handler.artifact_ids[0] == older["artifact_id"]
             assert set(handler.artifact_ids[1:]) == {newest["artifact_id"]}
 
-            # null ends the split: the active artifact answers everything.
+            # One weight above 0 ends the split: the active artifact answers everything.
             handler.artifact_ids.clear()
-            cleared = await client.post("/reef/scenarios/math/update", json={"traffic_weights": None})
+            whole = {newest["artifact_id"]: 100, older["artifact_id"]: 0}
+            cleared = await client.post("/reef/scenarios/math/update", json={"served": whole})
             assert cleared.status == 200
+            assert value.coordination.served_models.read_traffic_weights("math") == {}
             for n in range(20):
                 await client.post("/v1/chat/completions", json=chat(f"user {n}"), headers=HEADERS)
             assert set(handler.artifact_ids) == {newest["artifact_id"]}
@@ -178,25 +180,31 @@ def test_weights_split_requests_and_each_record_names_the_artifact_that_answered
 def test_a_separate_inference_service_follows_a_ratio_change_without_a_restart(tmp_path) -> None:
     async def run() -> None:
         value, _, _, newest, older = two_artifacts(tmp_path)
-        serving_both(value, older["artifact_id"])
         handler = ArtifactEcho()
         storage = SQLiteScenarioStorage(tmp_path / "agent-record")
         app = build_inference_app(value.coordination.served_models, storage, FixedEngineClients(handler), tokens=None)
         client = TestClient(TestServer(app))
         await client.start_server()
 
-        async def answered_by() -> set[str]:
+        async def answered_by() -> list[str]:
             handler.artifact_ids.clear()
             for n in range(40):
                 answer = await client.post("/v1/chat/completions", json=chat(f"user {n}"), headers=HEADERS)
                 assert answer.status == 200
-            return set(handler.artifact_ids)
+            return list(handler.artifact_ids)
+
+        def expected(weights: dict[str, int]) -> list[str]:
+            split = TrafficWeights(weights)
+            return [split.artifact_for(conversation_bucket("math", chat(f"user {n}"))) for n in range(40)]
 
         try:
-            value.set_traffic_weights("math", {newest["artifact_id"]: 100, older["artifact_id"]: 0})
-            assert await answered_by() == {newest["artifact_id"]}
-            value.set_traffic_weights("math", {newest["artifact_id"]: 0, older["artifact_id"]: 100})
-            assert await answered_by() == {older["artifact_id"]}
+            mostly_newest = {newest["artifact_id"]: 90, older["artifact_id"]: 10}
+            mostly_older = {newest["artifact_id"]: 10, older["artifact_id"]: 90}
+            assert expected(mostly_newest) != expected(mostly_older)
+            for weights in (mostly_newest, mostly_older):
+                value.set_served("math", weights)
+                wait_for_serving(value)
+                assert await answered_by() == expected(weights)
         finally:
             await client.close()
             storage.close()
@@ -206,21 +214,45 @@ def test_a_separate_inference_service_follows_a_ratio_change_without_a_restart(t
 
 
 @pytest.mark.unit
-def test_an_artifact_without_a_route_cannot_get_a_weight_over_http(tmp_path) -> None:
+def test_an_artifact_gets_its_weight_before_its_route_and_the_active_artifact_answers_until_then(tmp_path) -> None:
     async def run() -> None:
         value, _, _, newest, older = two_artifacts(tmp_path)
         wait_for_serving(value)
-        client = TestClient(TestServer(create_app(value, inference_handler=ArtifactEcho())))
+        handler = ArtifactEcho()
+        client = TestClient(TestServer(create_app(value, inference_handler=handler)))
         await client.start_server()
+        table = value.coordination.served_models
+
+        async def answered_by() -> set[str]:
+            handler.artifact_ids.clear()
+            for n in range(20):
+                answer = await client.post("/v1/chat/completions", json=chat(f"user {n}"), headers=HEADERS)
+                assert answer.status == 200
+            return set(handler.artifact_ids)
+
         try:
-            for weights in ({newest["artifact_id"]: 50}, {newest["artifact_id"]: 50, older["artifact_id"]: 50}):
-                refused = await client.post("/reef/scenarios/math/update", json={"traffic_weights": weights})
-                assert refused.status == 400
-            assert value.scenario_settings("math")["traffic_weights"] == {}
-            # A split does not start or stop an artifact.
+            # The state while an artifact starts: the split names it, and it has no route. No request fails.
+            waiting = {newest["artifact_id"]: 0, older["artifact_id"]: 100}
+            value.publisher.write_traffic_weights("math", waiting)
+            assert table.read_traffic_weights("math") == waiting
+            assert older["artifact_id"] not in table.read_scenario("math")
+            assert await answered_by() == {newest["artifact_id"]}
+
+            # Weights that do not sum to 100 are refused, and the split stays.
+            refused = await client.post("/reef/scenarios/math/update", json={"served": {newest["artifact_id"]: 50}})
+            assert refused.status == 400
+            assert table.read_traffic_weights("math") == waiting
             assert not value.get_or_create_scenario("math").served_beside()
-            unknown = await client.post("/reef/scenarios/other/update", json={"traffic_weights": None})
-            assert unknown.status == 404
+
+            # A mapping gives an artifact without a route its weight, and starts the artifact.
+            weights = {newest["artifact_id"]: 50, older["artifact_id"]: 50}
+            accepted = await client.post("/reef/scenarios/math/update", json={"served": weights})
+            assert accepted.status == 200, await accepted.text()
+            assert table.read_traffic_weights("math") == weights
+            assert value.scenario_settings("math")["served"] == {"weights": weights}
+            assert set(value.get_or_create_scenario("math").served_beside()) == set(weights) - {min(weights)}
+            wait_for_serving(value)
+            assert await answered_by() == set(weights)
         finally:
             await client.close()
             value.close()
@@ -232,17 +264,25 @@ def test_an_artifact_without_a_route_cannot_get_a_weight_over_http(tmp_path) -> 
 def test_an_artifact_that_stops_serving_sends_its_requests_to_the_active_artifact(tmp_path) -> None:
     async def run() -> None:
         value, _, _, newest, older = two_artifacts(tmp_path)
-        serving_both(value, older["artifact_id"])
-        value.set_traffic_weights("math", {newest["artifact_id"]: 0, older["artifact_id"]: 100})
-        value.stop_serving("math", older["artifact_id"])
+        weights = {newest["artifact_id"]: 90, older["artifact_id"]: 10}
+        value.set_served("math", weights)
+        # An activation moves the active artifact alone: the newest artifact stops serving, and the split stays.
+        value.activate("math", older["artifact_id"])
         wait_for_serving(value)
+        table = value.coordination.served_models
+        assert table.read_traffic_weights("math") == weights
+        assert newest["artifact_id"] not in table.read_scenario("math")
         handler = ArtifactEcho()
         client = TestClient(TestServer(create_app(value, inference_handler=handler)))
         await client.start_server()
         try:
-            answer = await client.post("/v1/chat/completions", json=chat(), headers=HEADERS)
-            assert answer.status == 200
-            assert handler.artifact_ids == [newest["artifact_id"]]
+            for n in range(20):
+                answer = await client.post("/v1/chat/completions", json=chat(f"user {n}"), headers=HEADERS)
+                assert answer.status == 200
+            assert set(handler.artifact_ids) == {older["artifact_id"]}
+            # The settings show the stopped artifact's weight on the active artifact, which answers its requests.
+            settings = await (await client.get("/reef/scenarios/math/settings")).json()
+            assert settings["served"] == {"weights": {older["artifact_id"]: 100}}
         finally:
             await client.close()
             value.close()
@@ -254,13 +294,15 @@ def test_an_artifact_that_stops_serving_sends_its_requests_to_the_active_artifac
 def test_an_activation_keeps_the_split_and_a_deletion_removes_it(tmp_path) -> None:
     value, _, _, newest, older = two_artifacts(tmp_path)
     try:
-        serving_both(value, older["artifact_id"])
-        weights = {newest["artifact_id"]: 90, older["artifact_id"]: 10}
-        value.set_traffic_weights("math", weights)
-        value.activate("math", older["artifact_id"])
+        weights = {newest["artifact_id"]: 10, older["artifact_id"]: 90}
+        value.set_served("math", weights)
+        wait_for_serving(value)
+        # The newest artifact is served beside the active one, so it keeps its route and its weight.
+        value.activate("math", newest["artifact_id"])
         wait_for_serving(value)
         table = value.coordination.served_models
         assert table.read_traffic_weights("math") == weights
+        assert value.scenario_settings("math")["served"] == {"weights": {newest["artifact_id"]: 100}}
         value.delete_scenario("math")
         assert table.read_traffic_weights("math") == {}
     finally:
@@ -268,22 +310,10 @@ def test_an_activation_keeps_the_split_and_a_deletion_removes_it(tmp_path) -> No
 
 
 @pytest.mark.unit
-def test_a_scenario_without_routes_cannot_split(tmp_path) -> None:
-    value = routing_dispatcher(tmp_path)
-    try:
-        value.get_or_create_scenario("math")
-        with pytest.raises(ValueError, match="serve these artifacts"):
-            value.set_traffic_weights("math", {"artifact": 100})
-        assert value.set_traffic_weights("math", {}) == {"traffic_weights": {}}
-    finally:
-        value.close()
-
-
-@pytest.mark.unit
 def test_the_trainer_learns_which_artifacts_serve_beside_from_the_commit_history(tmp_path) -> None:
-    value, _, _, _, older = two_artifacts(tmp_path)
+    value, _, _, newest, older = two_artifacts(tmp_path)
     try:
-        serving_both(value, older["artifact_id"])
+        serving_both(value, newest["artifact_id"], older["artifact_id"])
         scenario = value.get_or_create_scenario("math")
         assert older["artifact_id"] in scenario.served_beside()
         scenario.prepare_job(None, scenario.serving_artifact_id())

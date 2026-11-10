@@ -19,9 +19,8 @@ declares four things and, optionally, the checks of the agent's config files:
 - ``run``: ``task``, the headless invocation (``{task}`` substituted
   per run), the variables beside the relocation ones, and optionally
   ``skills``, the directory under the root where the agent reads the skills
-  that a Harbor task gives it, and ``mcp``, how the agent reads the MCP
-  servers that a Harbor task gives it (``TaskMcpServers``); and ``layer``,
-  how a person's machine runs the agent (``AdapterLayer``).
+  that a Harbor task gives it; and ``layer``, how a person's machine runs
+  the agent (``AdapterLayer``).
 - ``config`` (optional checks): named JSON config files with their enforced
   defaults (a ``primary`` target is required) and their checks (a key of the
   merged config and the matcher every value there must match; see
@@ -58,7 +57,7 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -309,50 +308,6 @@ class AdapterLayer:
                 )
 
 
-#: The transports of an MCP server that a Harbor task can name.
-MCP_TRANSPORTS = ("stdio", "sse", "streamable-http")
-
-
-@dataclass(frozen=True)
-class TaskMcpServers:
-    """How an agent reads the MCP servers that a Harbor task gives it (``environment.mcp_servers``).
-
-    Values: ``target`` names a config target of the adapter. ``key`` is the key of that config file that maps the
-    name of each server to its entry. ``entries`` maps a transport of ``MCP_TRANSPORTS`` to the entry of a server
-    of that transport, and holds at least one. A value of an entry that is exactly ``{command}``, ``{args}``,
-    ``{argv}`` or ``{url}`` stands for the server's command, the list of its arguments, the list of its command
-    and its arguments, or its URL; every other value is literal. The agent cannot use a server whose transport has
-    no entry.
-    Purpose: ``load_descriptor`` parses ``run.task.mcp``; ``reef.harness.harbor.agent.task_mcp_overlays`` makes the
-    config data of a task's servers from it.
-    """
-
-    target: str
-    key: str
-    entries: Mapping[str, Mapping[str, Any]]
-
-    def __post_init__(self) -> None:
-        if not self.target or not self.key:
-            raise DescriptorError("run task 'mcp' requires a target and a key")
-        if not self.entries or not set(self.entries) <= set(MCP_TRANSPORTS):
-            raise DescriptorError(f"run task 'mcp' requires an entry for one or more of {', '.join(MCP_TRANSPORTS)}")
-        if not all(isinstance(entry, Mapping) for entry in self.entries.values()):
-            raise DescriptorError("each transport of run task 'mcp' must map to an object")
-
-    def entry(self, transport: str, *, command: str, args: Sequence[str], url: str) -> dict[str, Any]:
-        """The entry of a server of ``transport`` with these values. ``KeyError`` for a transport with no entry."""
-        values: dict[str, Any] = {
-            "{command}": command,
-            "{args}": list(args),
-            "{argv}": [command, *args],
-            "{url}": url,
-        }
-        return {
-            name: values.get(value, value) if isinstance(value, str) else value
-            for name, value in self.entries[transport].items()
-        }
-
-
 @dataclass(frozen=True)
 class AdapterDescriptor:
     """Everything the shared render and run engines know about one harness."""
@@ -379,8 +334,6 @@ class AdapterDescriptor:
     #: The directory under the run root where the agent reads the skills that a Harbor task gives it
     #: (``environment.skills_dir``), each as ``<name>/SKILL.md``; ``None`` when the agent reads no such directory.
     task_skills_path: str | None = None
-    #: How the agent reads the MCP servers that a Harbor task gives it; ``None`` when the agent reads none.
-    task_mcp: TaskMcpServers | None = None
     #: Config templates (``target`` and ``data``) that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -465,8 +418,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     if not isinstance(run, Mapping) or not set(run) <= {"task", "layer"}:
         raise DescriptorError(f"{where} requires 'run': its task command, and optionally its layer")
     task_run = run.get("task")
-    if not isinstance(task_run, Mapping) or not set(task_run) <= {"argv", "env", "skills", "mcp"}:
-        raise DescriptorError(f"{where} run 'task' must be an object of argv, env, skills and mcp")
+    if not isinstance(task_run, Mapping) or not set(task_run) <= {"argv", "env", "skills"}:
+        raise DescriptorError(f"{where} run 'task' must be an object of argv, env and skills")
     task_skills_path = None
     if task_run.get("skills") is not None:
         (task_skills_path,) = relative_paths([task_run["skills"]], f"{where} run task 'skills'")
@@ -527,30 +480,12 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         self_isolating=self_isolating,
         takes_task_directory=takes_task_directory,
         task_skills_path=task_skills_path,
-        task_mcp=parse_task_mcp(task_run.get("mcp"), config_targets, where),
         host_env=dict(host_env),
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,
         execution_validator=execution_validator,
         layer=layer,
     )
-
-
-def parse_task_mcp(raw: Any, config_targets: Mapping[str, ConfigTarget], where: str) -> TaskMcpServers | None:
-    """``run.task.mcp``, or ``None`` without one; DescriptorError names the first malformed field."""
-    if raw is None:
-        return None
-    label = f"{where} run task 'mcp'"
-    if not isinstance(raw, Mapping):
-        raise DescriptorError(f"{label} must be an object of target, key and an entry for each transport")
-    target = require_str(raw, "target", label)
-    if target not in config_targets:
-        raise DescriptorError(f"{label} names unknown config target {target!r}")
-    entries = {str(name): value for name, value in raw.items() if name not in ("target", "key")}
-    try:
-        return TaskMcpServers(target=target, key=require_str(raw, "key", label), entries=entries)
-    except DescriptorError as exc:
-        raise DescriptorError(f"{where}: {exc}") from exc
 
 
 def parse_layer(raw: Any, where: str) -> AdapterLayer | None:

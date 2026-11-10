@@ -1100,13 +1100,16 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
                 listed = await client.get("/reef/scenarios/review/artifacts")
                 assert listed.status == 200
                 assert (await listed.json())["artifacts"][0]["active"] is False
+                missing = await client.post("/reef/scenarios/review/update", json={"served": {"missing": 100}})
+                assert missing.status == 404
+                assert (await (await client.get("/reef/scenarios/review/artifacts")).json())["artifacts"][0][
+                    "active"
+                ] is False
                 activated = await client.post(
-                    "/reef/scenarios/review/activate", json={"artifact_id": row["artifact_id"]}
+                    "/reef/scenarios/review/update", json={"served": {row["artifact_id"]: 100}}
                 )
                 assert activated.status == 200
-                assert (await activated.json())["artifact_id"] == row["artifact_id"]
-                missing = await client.post("/reef/scenarios/review/activate", json={"artifact_id": "missing"})
-                assert missing.status == 404
+                assert (await activated.json())["served"] == {row["artifact_id"]: 100}
                 listed = await client.get("/reef/scenarios/review/artifacts")
                 assert (await listed.json())["artifacts"][0]["active"] is True
             finally:

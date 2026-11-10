@@ -102,8 +102,8 @@ class ServedModelsWriter(ServedModels):
     def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
         """Make ``weights`` the traffic split of ``scenario``. Empty ``weights`` remove the split.
 
-        Raise ``ValueError`` without a change when an artifact with a weight above 0 has no route. A withdrawal of the
-        scenario also removes the split.
+        An artifact can have a weight before it has a route: inference then gives its requests to the active
+        artifact (``InferenceReplica.route``). A withdrawal of the scenario also removes the split.
         """
 
     @abstractmethod

@@ -108,11 +108,13 @@ Active selection
 A scenario's serving selection: a mapping from each
 component name to its selected ``artifact_id``. Inference answers from the
 selection that completed startup; harness routes read the selected tree.
-``POST /reef/scenarios/{scenario}/activate`` updates one component in the
-mapping and records the complete selection atomically. By default Reef activates each new artifact that passes its checks.
+The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` names the
+artifacts that the scenario serves of one component. The artifact with the
+largest weight is the active artifact of that component, and Reef records the
+complete selection atomically. By default Reef activates each new artifact that passes its checks.
 Every other artifact is inactive. An artifact that a training step made and
 that was never active waits for activation. See `Operate a deployment
-<../user-guide/operate.rst#activate-an-artifact>`__.
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__.
 
 Chain tip
 ---------

@@ -135,9 +135,9 @@ def next_action(scenario: str, artifact_id: str, selection_result: str, requires
     """
     if selection_result == "inactive":
         return NextAction(
-            "Read this page, then activate it",
-            (f'POST /reef/scenarios/{scenario}/activate {{"artifact_id": "{artifact_id}"}}',),
-            "The scenario's activation rule did not make this snapshot active; activating it serves it.",
+            "Read this page, then serve it",
+            (f'POST /reef/scenarios/{scenario}/update {{"served": {{"{artifact_id}": 100}}}}',),
+            "The scenario's activation rule did not make this snapshot active; serving it alone makes it active.",
         )
     if selection_result != "selected":
         return None
