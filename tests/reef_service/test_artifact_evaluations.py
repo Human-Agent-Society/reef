@@ -592,6 +592,26 @@ def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_bench
     asyncio.run(run())
 
 
+def test_an_evaluation_with_a_harbor_agent_starts_without_reading_a_task_file(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+
+    def refuse(item) -> Path:
+        raise AssertionError(f"the start read the files of {item.item_id}")
+
+    async def run() -> None:
+        # No worker runs, so only the start can read a task file.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            monkeypatch.setattr(DataAccess.of(dispatcher).require_store(), "task_path", refuse)
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "task_names": ["sort"]}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            assert (await response.json())["request"]["task_names"] == ["sort"]
+
+    asyncio.run(run())
+
+
 def test_a_cancelled_evaluation_fails_with_its_rollouts_and_starts_no_waiting_rollout(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
