@@ -34,6 +34,7 @@ from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
 from reef.storage.segments import LocalSegmentStore, SegmentStore
+from reef.storage.task_collections import TaskCollection, check_names
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
@@ -97,6 +98,17 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
             raise ValueError(f"a {kind} is always train, so metadata.scenarios.{scenario} must be train")
         scenarios[scenario] = split
     return scenarios
+
+
+def check_benchmarks(metadata: Mapping[str, Any]) -> None:
+    """Raise ``ValueError`` unless ``benchmarks``, when ``metadata`` has it, is a list of distinct non-empty strings
+    on a task item: the benchmarks that the task is in (RFC #1312)."""
+    if "benchmarks" in metadata:
+        if metadata["kind"] != "task":
+            raise ValueError("only a task item has metadata.benchmarks")
+        if not isinstance(metadata["benchmarks"], list):
+            raise ValueError("metadata.benchmarks must be a list of distinct non-empty strings")
+        check_names(metadata["benchmarks"], "metadata.benchmarks")
 
 
 def check_origin(value: object) -> dict[str, str | None]:
@@ -187,7 +199,8 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
     when a trainer's stage made it (``check_stage_origin``). A trajectory that an evaluation's verifier wrote has
     empty ``scenarios``, an ``evaluation_id`` and ``evaluation`` (``check_evaluation_trajectory``), and no origin; no
-    other item but an evaluation call has ``evaluation_id``. Other keys are kept as they are. Raise ``ValueError``
+    other item but an evaluation call has ``evaluation_id``. A task may have ``benchmarks`` (``check_benchmarks``).
+    Other keys are kept as they are. Raise ``ValueError``
     for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
@@ -200,6 +213,7 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     created = copy.deepcopy(dict(metadata))
     created["owner"] = owner
     created["scenarios"] = check_scenarios(metadata.get("scenarios", {}), kind)
+    check_benchmarks(created)
     if kind == "record":
         created["origin"] = check_record_origin(metadata.get("origin"))
         evaluation = created["origin"].get("evaluation")
@@ -277,6 +291,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
     The patch may not change a key of ``FIXED_KEYS``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
     that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.remove_scenario`` removes that use.
+    The patched ``benchmarks`` must pass ``check_benchmarks``.
     """
     if not isinstance(patch, Mapping):
         raise ValueError("a metadata patch must be an object")
@@ -287,6 +302,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
     if metadata.get("artifact_id") not in (None, patched.get("artifact_id")):
         raise ValueError("metadata.artifact_id is set once and never changes")
     patched["scenarios"] = check_scenarios(patched.get("scenarios", {}), metadata["kind"])
+    check_benchmarks(patched)
     if metadata["kind"] == "record":
         origin = metadata["origin"]["scenario"]
         if origin in metadata["scenarios"] and origin not in patched["scenarios"]:
@@ -424,13 +440,13 @@ class DataStore(Plugin, ABC):
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group)`` returns the items of
-      ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
+    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark)`` returns the
+      items of ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
       when those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
       of ``request_type``; they need ``kind="record"``. ``group``, a pair ``(key, value)``, keeps only the items of
       that group of ``groups``: the items with the string ``value`` under ``key`` in their metadata, or with no
-      string there when ``value`` is None. Without ``content``, each item's ``content`` is None, and the store does
-      not read it.
+      string there when ``value`` is None. ``benchmark`` keeps only the task items whose ``benchmarks`` metadata has
+      that name. Without ``content``, each item's ``content`` is None, and the store does not read it.
     * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
       with these filters and no limit gives.
     * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,
@@ -469,6 +485,11 @@ class DataStore(Plugin, ABC):
     * ``groups(owner, kind, key, before, limit)`` groups the items of ``owner`` and ``kind`` by the string under
       ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
       when given, newest first, at most ``limit``.
+    * ``collections(owner)`` returns the ``TaskCollection`` values of ``owner``, in name order.
+      ``put_collection(owner, collection)`` stores ``collection``, in place of the one with its name if there is one.
+      ``remove_collection(owner, name)`` removes it and returns True, or returns False for an unknown name. No
+      collection operation changes an item. The store keeps each collection as it is given; the service checks that
+      the collections of an owner name each other without a cycle (``reef.service.collections``).
     * ``maintain()`` does the store's periodic work: it deletes the job data directories that no job used for
       ``job_directory_ttl_seconds``, and a subclass can do more, such as moving content into segments. It changes
       no item. The data service calls it every few minutes.
@@ -553,6 +574,7 @@ class DataStore(Plugin, ABC):
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
         group: tuple[str, str | None] | None = None,
+        benchmark: str | None = None,
     ) -> tuple[StoredItem, ...]: ...
 
     @abstractmethod
@@ -611,6 +633,15 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]: ...
+
+    @abstractmethod
+    def collections(self, owner: str) -> tuple[TaskCollection, ...]: ...
+
+    @abstractmethod
+    def put_collection(self, owner: str, collection: TaskCollection) -> None: ...
+
+    @abstractmethod
+    def remove_collection(self, owner: str, name: str) -> bool: ...
 
     def groups(
         self,
@@ -725,9 +756,12 @@ def check_query(
     origin: object = None,
     request_type: object = None,
     group: object = None,
+    benchmark: object = None,
 ) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
     check_filters(owner, kind, scenario, origin, request_type, after)
+    if benchmark is not None and (not isinstance(benchmark, str) or not benchmark):
+        raise ValueError("benchmark must be a non-empty benchmark name")
     if group is not None:
         if not isinstance(group, tuple) or len(group) != 2:
             raise ValueError("group must be a pair (key, value)")
@@ -827,6 +861,7 @@ class MemoryDataStore(DataStore):
         self.uses: dict[tuple[str, str, str], tuple[str, int]] = {}
         self.generations: dict[tuple[str, str], str] = {}
         self.losses: dict[tuple[str, str], RecordLoss] = {}
+        self.stored_collections: dict[str, dict[str, TaskCollection]] = {}
         self.next_sequence = 1
 
     def take_sequence(self) -> int:
@@ -922,13 +957,25 @@ class MemoryDataStore(DataStore):
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
         group: tuple[str, str | None] | None = None,
+        benchmark: str | None = None,
     ) -> tuple[StoredItem, ...]:
-        check_query(owner, kind, scenario, after, limit, origin=origin, request_type=request_type, group=group)
+        check_query(
+            owner,
+            kind,
+            scenario,
+            after,
+            limit,
+            origin=origin,
+            request_type=request_type,
+            group=group,
+            benchmark=benchmark,
+        )
         matched = sorted(
             (
                 item
                 for item in self.matching(owner, kind, scenario, origin, request_type, after)
-                if group is None or group_value(item.metadata, group[0]) == group[1]
+                if (group is None or group_value(item.metadata, group[0]) == group[1])
+                and (benchmark is None or (item.kind == "task" and benchmark in item.metadata.get("benchmarks", ())))
             ),
             key=lambda item: item.sequence,
         )
@@ -1129,6 +1176,19 @@ class MemoryDataStore(DataStore):
                 parent = index.calls[parent].parent
             links[item_id] = RecordLink(parent, call.entry_count)
         return links
+
+    def collections(self, owner: str) -> tuple[TaskCollection, ...]:
+        check_owner(owner)
+        stored = self.stored_collections.get(owner, {})
+        return tuple(stored[name] for name in sorted(stored))
+
+    def put_collection(self, owner: str, collection: TaskCollection) -> None:
+        check_owner(owner)
+        self.stored_collections.setdefault(owner, {})[collection.name] = collection
+
+    def remove_collection(self, owner: str, name: str) -> bool:
+        check_owner(owner)
+        return self.stored_collections.get(owner, {}).pop(name, None) is not None
 
     def close(self) -> None:
         return None

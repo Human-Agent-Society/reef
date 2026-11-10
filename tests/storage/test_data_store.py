@@ -36,6 +36,7 @@ from reef.storage.record_items import (
 )
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
+from reef.storage.task_collections import TaskCollection, collection_benchmarks
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
@@ -293,6 +294,78 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
     assert [found.item_id for found in store.query("acme", kind="task", scenario="coding")] == ["fix-bug"]
     with pytest.raises(ValueError, match="not a task"):
         store.task_path(store.create("acme", [trajectory("t1")])[0])
+
+
+def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, tmp_path):
+    def task(name: str, **metadata) -> NewItem:
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "instruction.md").write_text(f"Do {name}.\n")
+        return NewItem(name, tmp_path / name, {"kind": "task", **metadata})
+
+    store.create(
+        "acme",
+        [task("add", benchmarks=["lite", "full"]), task("sort", benchmarks=["full"]), task("plain"), trajectory("t1")],
+    )
+    store.create("globex", [task("other", benchmarks=["full"])])
+    assert [item.item_id for item in store.query("acme", benchmark="full")] == ["add", "sort"]
+    assert [item.item_id for item in store.query("acme", kind="task", benchmark="lite")] == ["add"]
+    assert store.query("acme", benchmark="unknown") == ()
+    assert store.query("acme", kind="trajectory", benchmark="full") == ()
+    # A patch replaces the list, and null removes it.
+    store.update("acme", ["sort"], {"benchmarks": ["lite"]})
+    store.update("acme", ["add"], {"benchmarks": None})
+    assert [item.item_id for item in store.query("acme", benchmark="lite")] == ["sort"]
+    assert store.query("acme", benchmark="full") == ()
+    for benchmarks in ("lite", ["lite", "lite"], [""], [1]):
+        with pytest.raises(ValueError, match="benchmarks"):
+            store.update("acme", ["sort"], {"benchmarks": benchmarks})
+    with pytest.raises(ValueError, match="benchmarks"):
+        store.create("acme", [trajectory("t2", benchmarks=["lite"])])
+    with pytest.raises(ValueError, match="benchmark"):
+        store.query("acme", benchmark="")
+
+
+def test_an_owner_stores_replaces_and_removes_its_collections(store):
+    coding = TaskCollection("coding", benchmarks=("lite", "full"))
+    store.put_collection("acme", coding)
+    store.put_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
+    assert store.collections("acme") == (TaskCollection("all", (), ("coding",), "benchmark"), coding)
+    assert store.collections("globex") == ()
+    store.put_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
+    assert [collection.benchmarks for collection in store.collections("acme")] == [(), ("lite",)]
+    assert store.remove_collection("acme", "coding") and not store.remove_collection("acme", "coding")
+    assert [collection.name for collection in store.collections("acme")] == ["all"]
+
+
+def test_a_collection_has_its_benchmarks_and_those_of_the_collections_it_names():
+    stored = {
+        collection.name: collection
+        for collection in (
+            TaskCollection("coding", benchmarks=("lite", "full")),
+            TaskCollection("math", benchmarks=("algebra", "lite")),
+            TaskCollection("all", benchmarks=("extra",), collections=("coding", "math")),
+            TaskCollection("first", collections=("second",)),
+            TaskCollection("second", collections=("first",)),
+            TaskCollection("open", collections=("missing",)),
+        )
+    }
+    assert collection_benchmarks(stored, "all") == ("extra", "lite", "full", "algebra")
+    with pytest.raises(ValueError, match="first -> second -> first make a cycle"):
+        collection_benchmarks(stored, "first")
+    with pytest.raises(ValueError, match="no collection 'missing'"):
+        collection_benchmarks(stored, "open")
+    assert TaskCollection.from_json(stored["all"].to_json()) == stored["all"]
+    for value in (
+        {"name": "empty"},
+        {"name": "a/b", "benchmarks": ["lite"]},
+        {"name": "self", "collections": ["self"]},
+        {"name": "twice", "benchmarks": ["lite", "lite"]},
+        {"name": "mean", "benchmarks": ["lite"], "average": "macro"},
+        {"name": "more", "benchmarks": ["lite"], "tasks": []},
+        {"benchmarks": ["lite"]},
+    ):
+        with pytest.raises(ValueError):
+            TaskCollection.from_json(value)
 
 
 def test_groups_count_the_items_of_each_metadata_value_newest_first(store):

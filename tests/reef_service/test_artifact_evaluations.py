@@ -546,6 +546,52 @@ def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tm
     asyncio.run(run())
 
 
+def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_benchmark(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        # No worker runs: the test takes and ends each rollout itself.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort", "sum")
+            for item_id, benchmarks in (("add", ["lite", "full"]), ("sort", ["full"])):
+                patch = {"ids": [item_id], "patch": {"benchmarks": benchmarks}}
+                assert (await client.post("/reef/namespaces/s/data/metadata", headers=AUTH, json=patch)).status == 200
+            # The benchmark "other" has no task in the eval split, so the evaluation leaves it out.
+            collection = {"benchmarks": ["lite", "full", "other"], "average": "benchmark"}
+            stored = "/reef/namespaces/s/collections/coding"
+            assert (await client.put(stored, headers=AUTH, json=collection)).status == 200
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "collection": "coding"}
+            for refused in ({**body, "task_names": ["add"]}, {**body, "collection": "missing"}):
+                response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=refused)
+                assert response.status == 400, await response.text()
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            accepted = await response.json()
+            assert accepted["request"]["task_names"] == ["add", "sort"]
+            assert accepted["request"]["collection"] == {
+                "name": "coding",
+                "average": "benchmark",
+                "benchmarks": [
+                    {"benchmark": "lite", "task_names": ["add"]},
+                    {"benchmark": "full", "task_names": ["add", "sort"]},
+                ],
+            }
+            for value in (1.0, 0.0):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
+            answer = await finished(client, accepted["evaluation_id"])
+            assert answer["state"] == "finished", answer
+            assert answer["benchmark_scores"] == [
+                {"benchmark": "lite", "task_count": 1, "mean_score": 1.0},
+                {"benchmark": "full", "task_count": 2, "mean_score": 0.5},
+            ]
+            assert answer["mean_score"] == 0.75
+
+    asyncio.run(run())
+
+
 def test_a_cancelled_evaluation_fails_with_its_rollouts_and_starts_no_waiting_rollout(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
