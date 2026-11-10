@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import io
 import json
+import logging
 import math
 import tarfile
 import time
@@ -1128,6 +1129,18 @@ def test_a_request_that_the_scenario_cannot_run_is_refused_before_any_rollout(tm
             assert (await client.post("/reef/scenarios/s/evaluations", json={})).status == 401
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_changed_rollout_of_a_deleted_scenario_is_no_failure(tmp_path: Path, caplog) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    try:
+        evaluations = ArtifactEvaluations(dispatcher)
+        with caplog.at_level(logging.ERROR, logger="reef.service.artifact_evaluations"):
+            evaluations.results.settle_changed("deleted-scenario", "evaluation-1")
+        assert caplog.records == []
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.integration
