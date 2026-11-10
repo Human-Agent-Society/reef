@@ -119,7 +119,10 @@ class CommitRecord:
       high-water values, ``consumed_ids``, ``metrics`` and
       ``training_job_id`` are the
       trainer's state and the step's outcome. ``component`` names the
-      trainer in a scenario of several components.
+      trainer in a scenario of several components. ``train_from`` is
+      ``None``, or the ID of the artifact that the step's job named as its
+      start, on a step that made an artifact: that artifact then does not
+      become the trainer's training start (RFC #1324).
     - ``"activate"``: ``snapshot`` is the active view after selecting
       an existing artifact. One component uses its stored artifact directly,
       with ``component`` and ``components`` both None. Several components
@@ -192,6 +195,8 @@ class CommitRecord:
     activated: bool = False
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
+    #: The artifact that the job of this training step named as its start, or None.
+    train_from: str | None = None
     #: The component of the trainer that committed this step or takes this training start, or the activated
     #: component; ``None`` in a scenario of one component.
     component: str | None = None
@@ -243,6 +248,10 @@ class CommitRecord:
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
             raise CommitHistoryError("commit record training_job_id must be a non-empty string or null")
+        if self.train_from is not None and not (
+            isinstance(self.train_from, str) and self.train_from and self.operation == "training" and self.checkpoint
+        ):
+            raise CommitHistoryError("only a training commit that made an artifact names train_from, an artifact ID")
         if self.operation != "training":
             publishes = self.operation in ("import", "sync")
             if self.checkpoint != publishes:
@@ -322,15 +331,14 @@ class CommitRecord:
 
     @property
     def trained_artifact(self) -> bool:
-        """Whether a training step saved this record's artifact: its snapshot is the new chain tip, and the
-        training start moves to it."""
+        """Whether a training step saved this record's artifact: its snapshot is the new chain tip."""
         return self.operation == "training" and self.checkpoint
 
     @property
     def sets_training_start(self) -> bool:
         """Whether ``snapshot`` becomes the training start of the record's trainer: a new training start, a
-        sync, or a training step that saved an artifact."""
-        return self.operation in ("train_from", "sync") or self.trained_artifact
+        sync, or a training step that saved an artifact and whose job named no start of its own."""
+        return self.operation in ("train_from", "sync") or (self.trained_artifact and self.train_from is None)
 
     @property
     def activates(self) -> bool:
@@ -363,6 +371,8 @@ class CommitRecord:
             value["metrics"] = deepcopy(self.metrics)
         if self.training_job_id is not None:
             value["training_job_id"] = self.training_job_id
+        if self.train_from is not None:
+            value["train_from"] = self.train_from
         if self.component is not None:
             value["component"] = self.component
         if self.components is not None:
@@ -426,6 +436,7 @@ class CommitRecord:
             operation_verified=operation_verified,
             metrics=value.get("metrics"),
             training_job_id=value.get("training_job_id"),
+            train_from=value.get("train_from"),
             component=value.get("component"),
             components=value.get("components"),
             selection=selection,

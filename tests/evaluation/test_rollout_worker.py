@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import Iterator
+import urllib.request
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 import pytest
 from reef_client.serve import CapturedTurn
 
 from reef.core.errors import ReefError
-from reef.core.evaluation import EvaluationCall, EvaluationTrajectory, PolicyModel
+from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -84,7 +88,14 @@ class UnreachableEndpoints(CandidateEndpoints):
 
 
 class OpenEndpoints(UnreachableEndpoints):
-    """Endpoints that open an address that no agent calls, for tasks under ``root``."""
+    """Task-root endpoints for worker tests, with an address supplied by ``open``.
+
+    Values have a ``Path`` root and the inherited call and trajectory lists, initially empty, with no refused call index.
+    ``task_directory`` creates ``root / rollout.task_name``, writes an empty ``task.toml``, and returns that directory.
+    File errors propagate. Call and trajectory recording follow ``UnreachableEndpoints``.
+    The default ``open`` ignores its inputs and yields ``http://127.0.0.1:9`` with no token or server.
+    Subclasses can supply a live address for tests whose agents make calls.
+    """
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -148,6 +159,91 @@ def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing
     assert exception == "SandboxError: the image did not build"
     failed = "the trial observer failed on rollout evaluation_rollout:e1:00002:00000"
     assert (failed in caplog.text) == failing
+
+
+class AnsweringEndpoints(OpenEndpoints):
+    """Endpoints for the failed-score test's model call, with the state and task operations of ``OpenEndpoints``.
+
+    Values add no instance state. ``open`` ignores its inputs and starts an HTTP server on an unused loopback port.
+    It yields that server's URL with no token; ``Handler`` defines its responses.
+    Context exit stops and closes the server, including when the caller raises. Server setup errors propagate.
+    """
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        class Handler(BaseHTTPRequestHandler):
+            """One request handler, constructed by this endpoint's server with only ``BaseHTTPRequestHandler`` state.
+
+            ``do_POST`` accepts a body with a nonnegative integer ``Content-Length``, or an empty body without that header.
+            It reads that many bytes and returns HTTP 200 with JSON body ``{"choices": []}``.
+            The response has ``Content-Type: application/json`` and the body's byte length as ``Content-Length``.
+            Invalid length conversion and I/O errors propagate. ``log_message`` ignores its arguments and writes nothing.
+            Other request handling follows ``BaseHTTPRequestHandler``.
+            """
+
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = b'{"choices": []}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            yield CandidateEndpoint(f"http://127.0.0.1:{server.server_port}", None)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class CalledThenFailedLab(TaskLab):
+    """A stateless ``TaskLab`` for the worker test of a failure after a model call.
+
+    ``run`` requires ``agent["kwargs"]`` to be a mapping with an ``api_base`` string naming a reachable HTTP base URL.
+    It ignores ``task_path``, ``key``, ``tags``, ``overrides``, and all other agent entries.
+    It POSTs ``{"model": "m", "messages": []}`` as JSON to ``{api_base}/chat/completions``, with a 10-second timeout.
+    After reading the response, it returns a ``RolloutRow`` with empty rewards and no trial URI.
+    Its error is ``VerifierTimeoutError: the verifier ran past 600 s``.
+    Input and request errors propagate; the lab keeps no state or trial files.
+    ``build_environment`` ignores both inputs and returns ``""`` to simulate a successful build without starting an environment.
+    """
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        api_base = cast(Mapping[str, str], agent["kwargs"])["api_base"]
+        request = urllib.request.Request(
+            f"{api_base}/chat/completions",
+            data=b'{"model": "m", "messages": []}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+        return RolloutRow(rewards={}, error="VerifierTimeoutError: the verifier ran past 600 s", trial_uri=None)
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+@pytest.mark.unit
+def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp_path):
+    queue = memory_coordination().work_queue
+    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=CalledThenFailedLab())
+    assert worker.run_once() is True
+    item = queue.get(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == ("finished", None)
+    assert item.result == {
+        "score": FAILED,
+        "rewards": None,
+        "error": "VerifierTimeoutError: the verifier ran past 600 s",
+    }
 
 
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:

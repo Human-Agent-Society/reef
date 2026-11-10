@@ -152,6 +152,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel``                                                              | cancel one training job of the scenario           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel``                                                      | cancel one training request of the scenario       |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                                                            | the scenario's training samples, in use order     |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/sample-processing``                                                                  | the scenario's sample processing tasks and counts |
@@ -926,8 +928,8 @@ them (`Evaluate an artifact`_).
 - ``PUT /reef/namespaces/{owner}/collections/{name}`` creates the collection,
   or replaces the one with the name. The body takes ``benchmarks``,
   ``collections`` and ``average``. ``collections`` names other collections of
-  the owner: the collection also has their benchmarks. One of the two lists
-  or both are non-empty. ``average`` is ``task`` (the default) or
+  the owner: the collection also has their benchmarks. Each list is empty
+  by default, so ``{}`` creates an empty collection. ``average`` is ``task`` (the default) or
   ``benchmark``: how an evaluation on the collection computes its
   ``mean_score``. The response is ``{"owner", "name", "benchmarks",
   "collections", "average"}``. Reef returns 400 for a name in ``collections``
@@ -1456,7 +1458,19 @@ and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
 requires no inference receipts or score. ``samples`` names the samples that
 the request's job trains (see `Choose the samples that train
-<#choose-the-samples-that-train>`__).
+<#choose-the-samples-that-train>`__). ``train_from`` names the artifact that
+the job starts from, by artifact ID; without it the job starts from the
+scenario's training start. A ``train_from`` that names no artifact of the
+scenario is HTTP 400.
+
+A job without ``train_from`` continues the training start and moves it to
+each checkpoint that it saves, so the next such job begins where it ended;
+Reef runs one such job at a time. A job with ``train_from`` never moves the
+training start, and Reef does not wait for another job before it submits it.
+It runs beside the other jobs when the training component allows it and a
+training worker is free (``training.max-jobs``); the Tinker component allows
+it. Requests start in the order they came, so a request that waits for the
+running job also holds the requests after it.
 
 A request may also carry ``requires``: what the change needs where the
 harness runs, at most 8 ``{name, kind, check, prompt}`` items, default none.
@@ -1494,7 +1508,7 @@ client runs the checks where the harness runs, after the person read them.
 
 The two modes differ in what starts a step and what it trains. ``auto``, the
 default, trains on traffic when ``job_samples`` samples wait, and refuses a
-request with HTTP 400. ``manual`` starts a step only for a request,
+request with HTTP 400. ``manual`` starts a job only for a request,
 oldest first, one per step. The step trains the samples that the request
 names, whatever ``job_samples``:
 
@@ -1793,6 +1807,25 @@ job of the scenario. It answers ``{scenario, job}``, with the job as ``GET
 The trainer reads the failed job and records its end. An unknown scenario, or
 a job that the scenario does not have, returns 404. Control answers this
 route.
+
+``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel`` cancels one
+training request of the scenario (``POST /reef/train``), so that it trains no
+job, or no further. ``request_id`` is the ``agent_record_id`` of the request.
+It answers ``{scenario, request_id, queued, job}``:
+
+- A request that waits in the queue fails with the error ``cancelled by
+  request``. The trainer consumes it with a commit that has ``skipped:
+  "request failed"`` and that error, reads none of its samples, and submits no
+  job. ``queued`` is ``true``.
+- Each job of the request that has not ended is cancelled, as ``POST
+  /reef/scenarios/{scenario}/jobs/{job_id}/cancel`` does. ``job`` is the newest
+  job of the request after the cancel, or ``null`` for a request with no job.
+- A job that control adds for the request after the cancel, because it was
+  building the job's data, is cancelled when it enters the queue.
+- A request whose job ended stays as it is, so a second cancel changes nothing.
+
+An unknown scenario, or a request that the scenario does not have, returns
+404. Control answers this route.
 
 Deleting a scenario
 -------------------
@@ -2999,7 +3032,8 @@ a training job runs or an update is being published.
          "processor": {"...": "..."},
          "inference_admission": {"...": "..."},
          "artifacts": {"weights": {"active": "5e1c...", "training_start": "5e1c..."}},
-         "training_job": {"job_id": "9c41...", "backend": "slime", "checkpoints_handled": 0},
+         "training_jobs": [{"job_id": "9c41...", "start": "/checkpoints/iter_0000004", "checkpoints_handled": 0,
+                            "train_from": null, "backend": "slime"}],
          "finished_jobs": 2
        }
      },
@@ -3023,12 +3057,15 @@ automatic job takes, from recorded traffic and uploaded trajectories;
 (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most
 samples that one automatic job takes, beside the rest of a group.
 
-A scenario that trains weights also reports its training job.
-``training_job`` is the job that the scenario's training component runs. It
-holds the ``job_id``, the ``backend`` that runs the job, and
-``checkpoints_handled``. ``checkpoints_handled`` is the number of the job's
-saved checkpoints that Reef has evaluated and committed. ``training_job`` is
-``null`` while no job runs. ``finished_jobs`` counts the jobs of the scenario
+A scenario that trains weights also reports its training jobs.
+``training_jobs`` lists the jobs that the scenario's training component runs,
+in the order of their submission. Each holds the ``job_id``, the ``backend``
+that runs the job, the ``start`` that the job trains from as the component
+reads it, ``checkpoints_handled`` and ``train_from``. ``checkpoints_handled``
+is the number of the job's saved checkpoints that Reef has committed.
+``train_from`` is the artifact that the job's request named as its start, or
+``null`` for a job that continues the training start. The list is empty while
+no job runs. ``finished_jobs`` counts the jobs of the scenario
 that ended, finished or failed. A runtime that serves each scenario its own
 adapter adds ``adapter_runtime_load_id``. It is the runtime load ID of the
 scenario's served adapter, or ``null`` while the scenario samples the base

@@ -202,6 +202,12 @@ class ServiceConfig:
     train_timeout_s: float | None = config_option(
         None, public_path=("training", "timeout_s"), help="Training request timeout in seconds."
     )
+    #: The jobs of one training component that one process of the training service runs at the same time.
+    training_max_jobs: int = config_option(
+        1,
+        public_path=("training", "max_jobs"),
+        help="The training jobs that one process of the training service runs at once for each training component.",
+    )
     inference_handler_factory: str | None = config_option(
         None, public_path=("inference", "handler_factory"), help="Dotted InferenceHandler subclass with from_config()."
     )
@@ -476,6 +482,9 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        max_jobs = self.training_max_jobs
+        if isinstance(max_jobs, bool) or not isinstance(max_jobs, int) or max_jobs < 1:
+            raise ValueError("training.max_jobs must be a positive integer")
         sandboxes = self.evaluation_max_sandboxes
         if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
             raise ValueError("evaluation.max_sandboxes must be a positive integer")

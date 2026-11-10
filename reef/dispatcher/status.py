@@ -90,12 +90,10 @@ class TrainingStatus:
             "artifacts": current.artifact_status(),
         }
         if stepping_trainer.job_loop is not None:
-            # The job the trainer waits on, and where its next job starts.
+            # The jobs the trainer waits on.
             state = JobLoopState.from_dict(stepping_trainer.state)
-            job = state.to_dict()["job"]
-            block["training_job"] = (
-                None if job is None else {**job, "backend": stepping_trainer.job_loop.component.name}
-            )
+            backend = stepping_trainer.job_loop.component.name
+            block["training_jobs"] = [{**job.to_dict(), "backend": backend} for job in state.jobs]
             block["finished_jobs"] = state.finished_jobs
         if runtime is not None and runtime.per_scenario_adapters:
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(current.name)

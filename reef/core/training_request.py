@@ -23,6 +23,7 @@ class TrainingRequestPayload(TypedDict):
     client: NotRequired[ClientReport]
     parameters: NotRequired[dict[str, Any]]
     samples: NotRequired[list[str]]
+    train_from: NotRequired[str]
 
 
 #: At most this many commands in one report.
@@ -67,6 +68,7 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     parameters of the request's training job, merged into the recipe's (``Sample2Job.job_parameters``).
     ``samples`` is a non-empty list of distinct non-empty sample IDs: the samples that the request's job trains. The
     service's request size limit bounds its length.
+    ``train_from`` is a non-empty artifact ID: the artifact that the request's job starts from.
     """
     fields: dict[str, str] = {}
     for key in ("text", "session", "artifact_id"):
@@ -109,6 +111,11 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
         ):
             raise ValueError("samples must be a non-empty list of distinct non-empty sample IDs")
         normalized["samples"] = list(samples)
+    if "train_from" in payload:
+        train_from = payload["train_from"]
+        if not isinstance(train_from, str) or not train_from:
+            raise ValueError("train_from must be a non-empty artifact ID")
+        normalized["train_from"] = train_from
     return normalized
 
 
@@ -143,6 +150,8 @@ class TrainingRequest:
     :func:`reef.core.training_request.parse_client`); empty when it sent none.
     ``parameters`` are the parameters of the request's training job, merged into the recipe's; empty when it sent none.
     ``samples`` are the IDs of the samples that the request's job trains; empty when it named none.
+    ``train_from`` is the ID of the artifact that the request's job starts from, or None: the job then starts from
+    the scenario's training start.
 
     :meth:`from_dict` validates a payload with
     :func:`normalize_training_request_payload`; the constructor takes values
@@ -158,6 +167,7 @@ class TrainingRequest:
     client: Mapping[str, str | dict[str, bool]] = field(default_factory=dict, hash=False)
     parameters: Mapping[str, Any] = field(default_factory=dict, hash=False)
     samples: tuple[str, ...] = ()
+    train_from: str | None = None
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object], *, request_id: str = "") -> TrainingRequest:
@@ -172,6 +182,7 @@ class TrainingRequest:
             client=normalized.get("client", {}),
             parameters=normalized.get("parameters", {}),
             samples=tuple(normalized.get("samples", ())),
+            train_from=normalized.get("train_from"),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -184,4 +195,5 @@ class TrainingRequest:
             **({"client": dict(self.client)} if self.client else {}),
             **({"parameters": dict(self.parameters)} if self.parameters else {}),
             **({"samples": list(self.samples)} if self.samples else {}),
+            **({"train_from": self.train_from} if self.train_from else {}),
         }

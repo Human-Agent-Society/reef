@@ -9,7 +9,7 @@ A jobs-queue item:
 
 - ``id`` is the job ID, which ``JobLoop.job_id`` makes from the job's inputs;
 - ``kind`` is ``training_job:<component name>``, so a worker takes only the jobs of its component;
-- ``scenario`` and ``serial_key`` are the job's scenario, so the jobs of one scenario run one at a time, in the order control added them;
+- ``scenario`` is the job's scenario; the item has no ``serial_key``, so a free worker takes it at once;
 - ``payload`` is the job (``job_payload``): its backend, start, parameters, component and previous job, the reference of its job data
   directory (``JobDataRef.to_dict``), and the summary of its training request for the job listing;
 - each ``progress`` entry is one ``SavedCheckpoint``, in step order;
@@ -53,7 +53,7 @@ from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
-from reef.train.training_requests import TRAINING_REQUESTS_QUEUE
+from reef.train.training_requests import REQUEST_FAILURE_KEY, TRAINING_REQUESTS_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -265,13 +265,24 @@ def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[st
     return job_json(item if cancelled is None else cancelled)
 
 
+def cancel_request_jobs(queue: WorkQueue, scenario: str, request_id: str) -> dict[str, JsonValue] | None:
+    """Cancel each training job of ``scenario`` that trains the request ``request_id``, as ``cancel_scenario_job``
+    does; return the newest of them after the cancel, or None when the request has no job."""
+    newest: dict[str, JsonValue] | None = None
+    for item in queue.items(JOBS_QUEUE, scenario=scenario):
+        request = request_summary(item)
+        if request is not None and request["id"] == request_id:
+            newest = cancel_scenario_job(queue, scenario, item.id)
+    return newest
+
+
 class JobQueueComponent(TrainingComponent):
     """The training component that control uses: it adds jobs to the jobs queue instead of running them.
 
     Values: ``component`` is the training component whose jobs the queue carries; its name, release format, base
     artifact and starts describe the jobs. ``queue`` is the work queue. ``owns_component`` is whether ``close``
-    closes ``component``; a training worker owns it otherwise. A job goes to the queue under its scenario, which is
-    also its serial key, so the jobs of one scenario run one at a time, in the order of their submission.
+    closes ``component``; a training worker owns it otherwise. A job goes to the queue under its scenario, with no
+    serial key: the trainer decides which jobs of a scenario run at the same time (``JobLoop.accepts_job``).
 
     Purpose: control's trainers submit jobs and read their status through it (``JobLoop``); the training service
     runs the jobs with ``TrainingJobWorker``.
@@ -309,6 +320,10 @@ class JobQueueComponent(TrainingComponent):
     def shares_scenarios(self) -> bool:
         return self.component.shares_scenarios
 
+    @property
+    def concurrent_jobs(self) -> bool:
+        return self.component.concurrent_jobs
+
     def check_job(self, job: TrainingJob) -> None:
         self.component.check_job(job)
 
@@ -332,7 +347,11 @@ class JobQueueComponent(TrainingComponent):
 
     def submit(self, job: TrainingJob) -> None:
         """Check ``job`` and add it to the jobs queue, with the summary of its training request, which the queue
-        of training requests still holds, for the job listing."""
+        of training requests still holds, for the job listing.
+
+        A job of a request that failed meanwhile, such as one that a client cancelled while control built the job's
+        data, is cancelled as soon as it is in the queue. A cancel marks the request first and cancels its jobs
+        second, so one of the two finds the job."""
         if job.backend != self.name:
             raise ValueError(f"the job is for {job.backend!r}, not the {self.name!r} training component")
         if self.queue.get(JOBS_QUEUE, job.job_id) is not None:
@@ -345,9 +364,11 @@ class JobQueueComponent(TrainingComponent):
             text, parameters = given.get("text", ""), given.get("parameters", {})
             request = {"id": job.request_id, "text": text, "parameters": parameters}
         payload = job_payload(job, request)
-        self.queue.add(
-            NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload, serial_key=job.scenario)
-        )
+        self.queue.add(NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload))
+        if job.request_id is not None:
+            held = self.queue.get(TRAINING_REQUESTS_QUEUE, job.request_id)
+            if held is not None and REQUEST_FAILURE_KEY in held.metadata:
+                self.queue.cancel(JOBS_QUEUE, job.job_id, JOB_CANCELLED_ERROR)
 
     def status(self, job_id: str) -> JobStatus:
         item = self.queue.get(JOBS_QUEUE, job_id)
@@ -428,7 +449,7 @@ class TrainingJobWorker(QueueWorker):
 
     Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``data_store`` is the data store,
     which keeps the data directory of each job; ``poll_seconds`` is also the wait between two looks at a
-    running job.
+    running job; ``slots`` is the number of jobs that the worker runs at the same time.
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
     closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses
@@ -444,10 +465,13 @@ class TrainingJobWorker(QueueWorker):
         *,
         worker_id: str,
         poll_seconds: float = 0.5,
+        slots: int = 1,
     ) -> None:
         if isinstance(component, JobQueueComponent):
             raise TypeError("a training worker runs jobs on the component itself, not on a jobs-queue component")
-        super().__init__(queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds)
+        super().__init__(
+            queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds, slots=slots
+        )
         self.component = component
         self.data_store = data_store
 
@@ -514,6 +538,7 @@ __all__ = [
     "JobExperimentRecorder",
     "JobQueueComponent",
     "TrainingJobWorker",
+    "cancel_request_jobs",
     "cancel_scenario_job",
     "job_from_item",
     "job_json",

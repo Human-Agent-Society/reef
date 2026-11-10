@@ -165,7 +165,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
     scenario = dispatcher.get_or_create_scenario("math")
     assert component.train_calls == total
     assert len({job.job_id for job in component.submitted}) == total
-    assert scenario.trainer.state["job"] is None
+    assert scenario.trainer.state["jobs"] == []
     assert scenario.scenario_step == COMMITS_PER_JOB * total
     # Each job published one saved checkpoint; the head is the last one.
     head = Path(dispatcher.current_artifact("math").materialize().local_path)

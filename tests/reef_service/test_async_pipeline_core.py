@@ -191,7 +191,7 @@ def _wait_for_jobs(dispatcher: Dispatcher, finished_jobs: int) -> None:
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
     while time.monotonic() < deadline:
         status = dispatcher.build_training_status()["scenarios"]["math"]
-        if status["finished_jobs"] == finished_jobs and status["training_job"] is None:
+        if status["finished_jobs"] == finished_jobs and not status["training_jobs"]:
             return
         time.sleep(_ASYNC_WAIT_POLL_S)
     pytest.fail(f"scenario did not finish {finished_jobs} jobs: {dispatcher.build_training_status()}")

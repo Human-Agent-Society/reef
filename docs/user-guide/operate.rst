@@ -29,7 +29,7 @@ It reports these values for every scenario:
 - the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
 - whether inference is admitted or paused while a snapshot loads
-- for a weight-training scenario, its running training job (``training_job``) and the number of jobs that ended, finished or failed (``finished_jobs``)
+- for a weight-training scenario, its running training jobs (``training_jobs``) and the number of jobs that ended, finished or failed (``finished_jobs``)
 
 The committed outcome includes the recipe-owned metrics. You can therefore tell a skipped or rejected update from one that is still running. Look here first when requests keep being served by an old version.
 
@@ -152,7 +152,7 @@ An artifact that the rule does not activate still becomes the start of the next 
 Train from an artifact
 ----------------------
 
-Each trainer continues from its own newest output: a weight trainer from its newest saved checkpoint, a harness trainer from the tree it kept. That artifact is the trainer's training start. To make a trainer continue from another artifact, set its training start:
+Each trainer continues from its own newest output: a weight trainer from its newest saved checkpoint, a harness trainer from the tree it kept. That artifact is the trainer's training start. A job whose request names its own start with ``train_from`` is the exception: it does not move the training start. To make a trainer continue from another artifact, set its training start:
 
 .. code:: bash
 
@@ -161,7 +161,7 @@ Each trainer continues from its own newest output: a weight trainer from its new
      -d '{"artifact_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/train-from"
 
-Reef cancels the running job. The next training job, or the next evolve step, starts from the artifact. Train-from never changes the active selection. Leave out ``"component"`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` in the body, and an unknown component is HTTP 400. A weight artifact without optimizer state, such as a starting artifact made from the default configuration, starts training with a new optimizer state. Each train-from also starts a new run in experiment tracking.
+Reef cancels the running job that continues the training start; a job with its own start keeps running. The next training job that names no start, or the next evolve step, starts from the artifact. One training request can also name its own start with ``train_from`` (see `Manual training <../reference/http-api.rst#manual-training>`__). Train-from never changes the active selection. Leave out ``"component"`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` in the body, and an unknown component is HTTP 400. A weight artifact without optimizer state, such as a starting artifact made from the default configuration, starts training with a new optimizer state. Each train-from also starts a new run in experiment tracking.
 
 Whether a trainer can start from an artifact depends on the backend:
 

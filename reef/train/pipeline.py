@@ -295,6 +295,13 @@ class TrainingPipeline:
         held = {**self.failed_requests, **(failures or {})}
         self.failed_requests = {key: value for key, value in held.items() if key in queued}
 
+    def next_request(self) -> TrainingRequest | None:
+        """The request whose job data ``build_job_data`` builds next: the oldest queued one in ``manual``, and None
+        in ``auto`` or without a queued request."""
+        if self.training_mode != "manual":
+            return None
+        return next(iter(self.training_requests.values()), None)
+
     def request_failure(self, request_id: str) -> str | None:
         """What the request's failed step said, when it failed at all."""
         return self.failed_requests.get(request_id)
@@ -644,15 +651,17 @@ class TrainingPipeline:
         Handed out job data holds. Else ``auto`` needs ``sample_count`` samples for the next job (``auto_entries``).
         ``manual`` needs a queued request whose samples this trainer trains (``request_entries``), one or
         more, whatever ``sample_count``. A stage that reads requests (``Sample2Job.reads_requests``) runs a
-        request with no sample too.
+        request with no sample too. A failed request (``request_failure``) holds: its data is a skip row.
         """
         if self.pending is not None:
             return True
         if self.training_mode == "auto":
             return sample_count is not None and len(self.auto_entries()) >= sample_count
-        request = next(iter(self.training_requests.values()), None)
+        request = self.next_request()
         if request is None:
             return False
+        if request.id in self.failed_requests:
+            return True
         if not request.samples:
             return self.sample2job.reads_requests
         if request.id not in self.takes_request:
@@ -664,13 +673,21 @@ class TrainingPipeline:
         return self.takes_request[request.id]
 
     def build_job_data(self, sample_count: int | None) -> JobData:
-        """Return the handed out job data, or build the next job's data when ``ready`` for ``sample_count``."""
+        """Return the handed out job data, or build the next job's data when ``ready`` for ``sample_count``.
+
+        The data of a failed request (``request_failure``) holds no sample: the trainer consumes the request with a
+        skip row and trains nothing, so the pipeline does not read the samples that the request names.
+        """
         if self.pending is None:
             if not self.ready(sample_count):
                 raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
             self.data_number += 1
             # Manual runs the oldest queued request with the samples that it names; auto leaves the queue to manual.
-            request = next(iter(self.training_requests.values())) if self.training_mode == "manual" else None
+            request = self.next_request()
+            if request is not None and request.id in self.failed_requests:
+                self.reserved_sample_ids = ()
+                self.pending = JobData(f"{self.scenario}:request:{request.id}", (), request=request)
+                return self.pending
             entries = self.auto_entries() if request is None else self.request_entries(request)
             self.reserved_sample_ids = tuple(stored.sample_id for stored, _ in entries)
             samples = tuple(grouped(stored, sample) for stored, sample in entries)

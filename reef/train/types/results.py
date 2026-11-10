@@ -42,7 +42,9 @@ class TrainingCommit:
     training step's result needs a mapping (``Trainer.prepare_commit``
     refuses ``None``). ``metrics`` is a mapping. ``artifact`` holds the bytes to publish, or ``None`` for a
     commit that publishes nothing, such as a job submission or a job's end.
-    ``training_job_id`` names the training job the commit is about, if any.
+    ``training_job_id`` names the training job the commit is about, if any. ``train_from`` is the ID of the artifact
+    that the job's request named as its start, or ``None``: with it, ``artifact`` does not become the trainer's
+    training start (``JobLoop.publish``). Only a commit that publishes an artifact has it.
 
     The commit does not decide whether ``artifact`` serves; the scenario's
     activation rule does. ``changed_kinds`` holds the harness node kinds that
@@ -59,6 +61,7 @@ class TrainingCommit:
     metrics: Mapping[str, Any] = field(default_factory=dict)
     artifact: Artifact | None = None
     training_job_id: str | None = None
+    train_from: str | None = None
     changed_kinds: frozenset[str] = frozenset()
     component: str | None = None
 
@@ -76,6 +79,12 @@ class TrainingCommit:
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
             raise ValueError("training_job_id must be a non-empty string or None")
+        if self.train_from is not None and (
+            not isinstance(self.train_from, str) or not self.train_from or self.artifact is None
+        ):
+            raise ValueError(
+                "train_from must be a non-empty artifact ID on a commit that publishes an artifact, or None"
+            )
         if not isinstance(self.changed_kinds, frozenset) or any(
             not isinstance(kind, str) or not kind for kind in self.changed_kinds
         ):

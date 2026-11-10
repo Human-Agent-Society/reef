@@ -58,9 +58,9 @@ from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import WorkItem
-from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
+from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker, cancel_request_jobs
 from reef.train.trainer import Trainer
-from reef.train.training_requests import TrainingRequestQueue
+from reef.train.training_requests import RequestCancel, TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         workers: ServiceWorkers | None = None,
         components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
         work_retention_seconds: float = 7 * 24 * 3600.0,
+        training_max_jobs: int = 1,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -184,6 +185,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                             self.queue,
                             self.job_directory_store,
                             worker_id=instance_id(f"training-{component.name}"),
+                            slots=training_max_jobs,
                         )
                     )
             recipe = recipe.with_job_components(
@@ -702,6 +704,21 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.local_workers.wake(current)
             return item
 
+    def cancel_request(self, scenario: str, request_id: str) -> RequestCancel | None:
+        """Cancel the training request ``request_id`` of ``scenario``, so that it trains no job, or no further.
+
+        A queued request fails with ``REQUEST_CANCELLED_ERROR`` (``ScenarioTrainingRequests.cancel``), and the
+        scenario's workers wake to consume it with a skip row. Each job of the request that has not ended is
+        cancelled (``cancel_request_jobs``). Return None when the scenario has no such request. The scenario must
+        exist.
+        """
+        with self.locked_scenario(scenario) as current:
+            item = None if current.training_requests is None else current.training_requests.cancel(request_id)
+            if item is None:
+                return None
+            self.local_workers.wake(current)
+            return RequestCancel(not item.final, cancel_request_jobs(self.queue, scenario, request_id))
+
     def accept_records(self, items: Sequence[AgentRecord]) -> tuple[AgentRecord, ...]:
         """Validate an ordered import batch, commit it, then wake its consumer."""
         if not items:
@@ -887,11 +904,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 
-    def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
-        """The scenario's imported tasks in the order they arrived, each with its train counts."""
+    def listed_imported_tasks(self, scenario: str) -> tuple[ListedSample, ...]:
+        """The listing of the scenario's imported tasks in the order they arrived, each with its train counts."""
         with self.locked_scenario(scenario) as current:
             samples = self.storage.sample_store(scenario, current.store)
-            return () if samples is None else samples.imported_tasks()
+            return () if samples is None else samples.listed_imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""
