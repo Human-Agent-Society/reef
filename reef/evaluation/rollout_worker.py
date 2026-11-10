@@ -603,8 +603,8 @@ class EvaluationRolloutWorker(QueueWorker):
         self.agent_host = agent_host
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
-        score, rewards = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
-        return {"score": score.to_json(), "rewards": rewards}
+        score, rewards, error = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
+        return {"score": score.to_json(), "rewards": rewards, "error": error}
 
     def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
         """Ask inference to serve the candidate of ``rollout``, wait until it is ready, and return the value that
@@ -630,10 +630,10 @@ class EvaluationRolloutWorker(QueueWorker):
 
     def score(
         self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int
-    ) -> tuple[RolloutScore, dict[str, JsonValue] | None]:
-        """Run ``rollout`` once, when its candidate is ready, and return its score and the rewards of its verifier
-        (``verifier_rewards``). ``attempt`` is the 1-based attempt of the rollout's work item; the rollout's calls are
-        kept under it (``RolloutCalls``)."""
+    ) -> tuple[RolloutScore, dict[str, JsonValue] | None, str | None]:
+        """Run ``rollout`` once, when its candidate is ready, and return its score, the rewards of its verifier
+        (``verifier_rewards``), and the reason of a failed score (None for a scored rollout). ``attempt`` is the
+        1-based attempt of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``)."""
         task_directory = self.endpoints.task_directory(rollout)
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
@@ -687,7 +687,10 @@ class EvaluationRolloutWorker(QueueWorker):
                 # the rollout is retried as any other failed attempt.
                 raise ReefError(f"the rollout reached no model: {result.error or 'the agent made no model call'}")
             score = runner.rollout_score(result)
-            return score, None if score.is_failed else verifier_rewards(result.rewards)
+            if score.is_failed:
+                # The rollout's item finishes with this score, so the item has no error; keep the reason in the result.
+                return score, None, result.error
+            return score, verifier_rewards(result.rewards), None
 
     def observe_trial(self, rollout: EvaluationRollout, trial: EvaluationTrial) -> None:
         """Give ``trial`` of ``rollout`` to the trial observer, when there is one. Its failure is logged, and the
