@@ -530,6 +530,7 @@ def build_dispatcher(
             ),
             components=components,
             work_retention_seconds=settings.work_retention_s,
+            training_max_jobs=settings.training_max_jobs,
         )
         if dispatcher.services.runs_evaluation:
             # The worker serves each rollout's candidate itself, from the scenario's repository.

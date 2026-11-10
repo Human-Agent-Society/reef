@@ -112,6 +112,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         workers: ServiceWorkers | None = None,
         components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
         work_retention_seconds: float = 7 * 24 * 3600.0,
+        training_max_jobs: int = 1,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -184,6 +185,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                             self.queue,
                             self.job_directory_store,
                             worker_id=instance_id(f"training-{component.name}"),
+                            slots=training_max_jobs,
                         )
                     )
             recipe = recipe.with_job_components(

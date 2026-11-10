@@ -564,7 +564,7 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
         recovered = second.get_or_create_scenario("math")
 
         state = JobLoopState.from_dict(recovered.trainer.state)
-        assert (state.finished_jobs, state.job) == (1, None)  # from the commit history
+        assert (state.finished_jobs, state.jobs) == (1, ())  # from the commit history
         assert state.start == str(tmp_path / "checkpoints" / "1")
         assert recovered.store.durable
         # SAO's async telemetry is carried opaquely on the durable record, so a

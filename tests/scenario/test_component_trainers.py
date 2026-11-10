@@ -254,13 +254,15 @@ def _wait_for_jobs(dispatcher: Dispatcher, training: WeightsJobComponent, count:
 
 def _settle_weights_job(scenario: Scenario) -> None:
     """Commit the running weights job's checkpoint decisions and its end, as the weights worker does once the training
-    worker reported them in the jobs queue."""
+    worker reported them in the jobs queue. Then wait until the selected artifact serves: the next automatic job
+    waits for it."""
     while scenario.trainer_for(WEIGHTS).job_running:
         deadline = time.monotonic() + 10
         while (result := scenario.next_commit(WEIGHTS)) is None:
             assert time.monotonic() < deadline, "the training worker did not report the running job"
             time.sleep(0.02)
         scenario.commit(result, component=WEIGHTS)
+    assert _wait_for(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
 
 
 @pytest.mark.unit
@@ -295,7 +297,7 @@ def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispat
     reloaded = _reload(dispatcher)
     for component in (WEIGHTS, HARNESS):
         recovered = JobLoopState.from_dict(reloaded.trainer_for(component).state)
-        assert recovered.finished_jobs == 1 and recovered.job is None
+        assert recovered.finished_jobs == 1 and recovered.jobs == ()
     assert reloaded.scenario_step == 6
     _append_records(reloaded, 2)
     make_samples(reloaded)
@@ -365,7 +367,7 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
 
     reloaded = _reload(dispatcher)
     state = JobLoopState.from_dict(reloaded.trainer_for(WEIGHTS).state)
-    assert (state.job, state.finished_jobs, state.start) == (None, 1, str(tmp_path / "checkpoints" / "1"))
+    assert (state.jobs, state.finished_jobs, state.start) == ((), 1, str(tmp_path / "checkpoints" / "1"))
     assert JobLoopState.from_dict(reloaded.trainer_for(HARNESS).state).finished_jobs == 1
     _append_records(reloaded, 2)
     assert _commit_step(reloaded, WEIGHTS) == [("i2", "r2")]
@@ -1494,7 +1496,7 @@ def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
     # The checkpoint restores the running job; its worker must commit the end before inspecting final state.
     assert _wait_for(lambda: scenario.scenario_step == 3)
     harness = JobLoopState.from_dict(scenario.trainer_for(HARNESS).state)
-    assert harness.finished_jobs == 1 and harness.job is None
+    assert harness.finished_jobs == 1 and harness.jobs == ()
     assert JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).finished_jobs == 0
     last = scenario.last_commit_for(HARNESS)
     assert last is not None and last.step == 3 and last.component == HARNESS
@@ -1761,7 +1763,7 @@ def test_a_restarted_training_worker_runs_again_the_job_that_the_stopped_one_gav
     assert _wait_for(lambda: len(other.submitted) == 1)
     assert _job_events(scenario) == ["submitted"]
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert state.job is not None and state.job.job_id == other.submitted[0].job_id
+    assert [job.job_id for job in state.jobs] == [other.submitted[0].job_id]
 
 
 @pytest.mark.unit
@@ -1791,7 +1793,7 @@ def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     # The harness trainer's start is its own: it does not move.
     assert scenario.store.history()[-1].component == WEIGHTS
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert (state.job, state.start) == (None, str(imported))
+    assert (state.jobs, state.start) == ((), str(imported))
     _append_records(scenario, 3)
     assert _commit_step(scenario, WEIGHTS) == [("i3", "r3")]
     assert _submitted(training, 3)[-1].start == str(imported)

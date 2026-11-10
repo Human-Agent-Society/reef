@@ -475,6 +475,13 @@ starts serving engines before it answers, as with Slime and whenever Reef's
 engines serve, Reef raises ``reef.ready-timeout`` to at least
 ``training.ready-timeout``.
 
+``training.max-jobs`` (default 1) is the number of training jobs that one
+process of the training service runs at the same time for each training
+component. Several jobs of one scenario run at the same time only when the
+component allows it; the Tinker component does (see `Executors
+<../developer-guide/executors.rst>`__). Each running job needs its own
+compute, so set the value to what the machines hold.
+
 ``training.timeout-s`` bounds each call to the training workers, in seconds.
 With Slime, it bounds each worker call of a job, such as training and
 checkpoint saves; when omitted, the bound is four hours. With Tinker, it

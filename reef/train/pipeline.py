@@ -291,6 +291,13 @@ class TrainingPipeline:
         held = {**self.failed_requests, **(failures or {})}
         self.failed_requests = {key: value for key, value in held.items() if key in queued}
 
+    def next_request(self) -> TrainingRequest | None:
+        """The request whose job data ``build_job_data`` builds next: the oldest queued one in ``manual``, and None
+        in ``auto`` or without a queued request."""
+        if self.training_mode != "manual":
+            return None
+        return next(iter(self.training_requests.values()), None)
+
     def request_failure(self, request_id: str) -> str | None:
         """What the request's failed step said, when it failed at all."""
         return self.failed_requests.get(request_id)
@@ -646,7 +653,7 @@ class TrainingPipeline:
             return True
         if self.training_mode == "auto":
             return sample_count is not None and len(self.auto_entries()) >= sample_count
-        request = next(iter(self.training_requests.values()), None)
+        request = self.next_request()
         if request is None:
             return False
         if request.id in self.failed_requests:
@@ -672,7 +679,7 @@ class TrainingPipeline:
                 raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
             self.data_number += 1
             # Manual runs the oldest queued request with the samples that it names; auto leaves the queue to manual.
-            request = next(iter(self.training_requests.values())) if self.training_mode == "manual" else None
+            request = self.next_request()
             if request is not None and request.id in self.failed_requests:
                 self.reserved_sample_ids = ()
                 self.pending = JobData(f"{self.scenario}:request:{request.id}", (), request=request)

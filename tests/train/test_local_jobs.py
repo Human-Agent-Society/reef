@@ -1,4 +1,5 @@
-"""LocalJobComponent: durable submission, one job at a time, cancellation, close and resume after a restart."""
+"""LocalJobComponent: durable submission, one job at a time or concurrent jobs, cancellation, close and resume after a
+restart."""
 
 from __future__ import annotations
 
@@ -32,8 +33,11 @@ class GatedComponent(LocalJobComponent):
     the run job IDs in order, and ``resumed_from`` the checkpoints each run found.
     """
 
-    def __init__(self, jobs_root: Path, *, checkpoint_count: int = 1, gated: bool = False) -> None:
+    def __init__(
+        self, jobs_root: Path, *, checkpoint_count: int = 1, gated: bool = False, concurrent: bool = False
+    ) -> None:
         super().__init__(jobs_root)
+        self.concurrent = concurrent
         self.checkpoint_count = checkpoint_count
         self.gate = threading.Event()
         if not gated:
@@ -49,6 +53,10 @@ class GatedComponent(LocalJobComponent):
     @property
     def artifact_format(self) -> ArtifactFormat:
         return ArtifactFormat("full")
+
+    @property
+    def concurrent_jobs(self) -> bool:
+        return self.concurrent
 
     def default_start(self) -> DefaultStart:
         return DefaultStart()
@@ -218,20 +226,33 @@ def test_cancelled_queued_job_never_runs(tmp_path, make_component):
 
 
 @pytest.mark.unit
-def test_a_job_cancelled_at_the_head_of_the_queue_never_runs(tmp_path, make_component):
+def test_a_job_cancelled_while_it_waits_never_runs(tmp_path, make_component):
     component = make_component(tmp_path)
     component.submit(training_job("a"))
     component.submit(training_job("b"))
     component.cancel("a")
-    assert list(component.queue) == ["a", "b"]
-    # Run the job thread on the queue as it is, with the cancelled job at its head.
-    component.job_thread = threading.Thread(target=component.run_jobs, daemon=True)
-    component.job_thread.start()
+    assert list(component.queue) == ["b"]
+    component.start_jobs()
     wait_ended(component, "b")
 
     assert component.runs == ["b"]
     status = component.status("a")
     assert (status.state, status.error, status.checkpoints) == ("failed", "cancelled", ())
+
+
+@pytest.mark.unit
+def test_a_component_with_concurrent_jobs_runs_its_jobs_at_the_same_time(tmp_path, make_component):
+    component = make_component(tmp_path, gated=True, concurrent=True)
+    component.start_jobs()
+    component.submit(training_job("a"))
+    component.submit(training_job("b"))
+    # Both runs begin while the gate holds each before its first checkpoint.
+    wait_until(lambda: sorted(component.runs) == ["a", "b"])
+    assert (component.status("a").state, component.status("b").state) == ("running", "running")
+    component.gate.set()
+    wait_ended(component, "a")
+    wait_ended(component, "b")
+    assert (component.status("a").state, component.status("b").state) == ("finished", "finished")
 
 
 @pytest.mark.unit
