@@ -37,7 +37,7 @@ from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
-from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
+from reef.storage.sql_samples import SQLTrainingState, stage_record_table
 from reef.storage.sql_setup import enable_wal
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
@@ -54,7 +54,6 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
-SAMPLE_TRAIN_COUNT_TABLE = ScopedTable(sample_train_count_table(_METADATA))
 STAGE_RECORD_TABLE = ScopedTable(stage_record_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
@@ -140,7 +139,7 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
                 # SQLite transaction, serialized across concurrent openers.
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 _METADATA.create_all(self._connection)
-                migrate_training_samples(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
+                migrate_training_samples(self._connection, None)
                 migrate_scenario_settings(self._connection, _SCENARIO_SETTING)
                 migrate_manual_buffers(self._connection, None)
                 migrate_published_tasks(self._connection, None)
@@ -167,7 +166,7 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
 
     def training_state(self) -> SQLTrainingState:
         """Open the training state of the scenario in this database."""
-        return SQLTrainingState(self, SAMPLE_TRAIN_COUNT_TABLE, STAGE_RECORD_TABLE)
+        return SQLTrainingState(self, COMMIT_TABLE, STAGE_RECORD_TABLE)
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
@@ -178,7 +177,6 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
         return SQLCommitHistory(
             self,
             COMMIT_TABLE,
-            SAMPLE_TRAIN_COUNT_TABLE,
             label=f"{self._database}#scenario_commit",
             durable=self._database != ":memory:",
         )
