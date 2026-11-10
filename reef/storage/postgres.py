@@ -55,7 +55,7 @@ from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import PostgresDataStore
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase, batches
-from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
+from reef.storage.sql_samples import SQLTrainingState, stage_record_table
 from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
@@ -64,7 +64,7 @@ from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 MAX_PARAMETERS = 65535
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 20
+POSTGRES_SCHEMA_VERSION = 21
 #: The record tables of a version before the record items (RFC #1219), in the order that a drop removes them.
 OLD_RECORD_TABLES = ("record_node", "consumed_agent_record", "record_consumption", "record_eviction", "agent_record")
 logger = logging.getLogger(__name__)
@@ -101,7 +101,6 @@ class PostgresRecordDatabase:
         )
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
         self.stage_record_table = stage_record_table(metadata, foreign_key="record_store.storage_id")
-        self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
@@ -142,9 +141,10 @@ class PostgresRecordDatabase:
                 # item, and the scenario keeps only its training state (RFC #1140). Version 19 drops published_task
                 # (migrate_published_tasks): a published task is a candidate with a split. Version 20 has no
                 # record tables: a scenario's records are record items (RFC #1219), and
-                # PostgresScenarioStorage drops the OLD_RECORD_TABLES once their records are record items.
+                # PostgresScenarioStorage drops the OLD_RECORD_TABLES once their records are record items. Version 21
+                # drops sample_train_count (migrate_training_samples): the train counts are a count over the commits.
                 metadata.create_all(connection)
-                migrate_training_samples(connection, self.sample_train_count_table)
+                migrate_training_samples(connection, schema)
                 migrate_scenario_settings(connection, self.settings_table)
                 migrate_manual_buffers(connection, schema)
                 migrate_published_tasks(connection, schema)
@@ -315,7 +315,7 @@ class PostgresScenarioDatabase(SQLScenarioDatabase):
         scope = {"storage_id": self.storage_id}
         return SQLTrainingState(
             self,
-            ScopedTable(self._database.sample_train_count_table, scope=scope),
+            ScopedTable(self._database.commit_table, scope=scope),
             ScopedTable(self._database.stage_record_table, scope=scope),
         )
 
@@ -330,7 +330,6 @@ class PostgresScenarioDatabase(SQLScenarioDatabase):
         return SQLCommitHistory(
             self,
             ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
-            ScopedTable(self._database.sample_train_count_table, scope={"storage_id": self.storage_id}),
             label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
             durable=True,
         )

@@ -7,7 +7,7 @@ import logging
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Column, MetaData, Table, Text, bindparam, delete, func, inspect, literal, select, tuple_, update
+from sqlalchemy import Column, MetaData, Table, Text, bindparam, delete, func, inspect, literal, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.schema import CreateIndex
 
@@ -233,31 +233,18 @@ def migrate_scenario_settings(connection: Connection, settings: Table) -> None:
     connection.execute(settings.delete().where(settings.c.name == "model_config"))
 
 
-def migrate_training_samples(connection: Connection, train_counts: Table) -> None:
+def migrate_training_samples(connection: Connection, schema: str | None) -> None:
     """Drop the sample store of RFC #1009 (``training_sample``) and the records that its samples held
     (``sample_record``): every training sample is a data item (RFC #1140).
 
-    Run in the caller's schema transaction. Delete the train counts of the samples that a trainer's stage made: the
-    stage makes them again, as items, from the records that no commit consumed. The counts of uploads and imported
-    tasks name their items, and stay. A schema without the old tables is left unchanged.
+    Drop ``sample_train_count`` too: the train counts are a count over the commits (``SQLTrainingState``), which
+    list the samples that each one consumed. Run in the caller's schema transaction. A schema without the old tables
+    is left unchanged.
     """
-    schema = train_counts.schema
     inspector = inspect(connection)
-    if inspector.has_table("training_sample", schema=schema):
-        legacy = Table("training_sample", MetaData(), schema=schema, autoload_with=connection)
-        made = legacy.c.component.is_not(None)
-        if "storage_id" in legacy.c:
-            key = tuple_(train_counts.c.storage_id, train_counts.c.sample_id)
-            connection.execute(
-                train_counts.delete().where(key.in_(select(legacy.c.storage_id, legacy.c.sample_id).where(made)))
-            )
-        else:
-            connection.execute(
-                train_counts.delete().where(train_counts.c.sample_id.in_(select(legacy.c.sample_id).where(made)))
-            )
-        legacy.drop(connection)
-    if inspector.has_table("sample_record", schema=schema):
-        Table("sample_record", MetaData(), schema=schema, autoload_with=connection).drop(connection)
+    for name in ("training_sample", "sample_record", "sample_train_count"):
+        if inspector.has_table(name, schema=schema):
+            Table(name, MetaData(), schema=schema, autoload_with=connection).drop(connection)
 
 
 def migrate_manual_buffers(connection: Connection, schema: str | None) -> None:

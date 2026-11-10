@@ -355,28 +355,36 @@ def legacy_sample_tables(connection, schema: str | None, storage_id: str | None)
     connection.execute(records.insert().values(**key, sample_id="a:r1:0", agent_record_id="r1"))
 
 
-def test_a_start_drops_the_sample_store_and_the_train_counts_of_its_stage_samples(open_durable_storage):
+def test_a_start_drops_the_sample_store_and_the_train_count_table_and_counts_from_the_commits(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         consumed = (consumed_sample_id("upload"), consumed_sample_id("a:r1:0"))
         session.commit_step(expected_step=0, commit=training_commit(1, *consumed, component="a"))
         state = session.training_state
-        schema = state.counts.table.schema
+        schema = state.commits.table.schema
         with state.database._transaction(write=True) as connection:
-            storage_id = state.counts.scope.get("storage_id")
+            storage_id = state.commits.scope.get("storage_id")
             legacy_sample_tables(connection, schema, storage_id)
+            # The count table of an older schema: the counts are now a count over the commits.
+            Table("sample_train_count", MetaData(schema=schema), Column("sample_id", Text, primary_key=True)).create(
+                connection
+            )
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
-        assert state.train_counts(["upload", "a:r1:0"]) == {"upload": {"a": 1}}
+        assert state.train_counts(["upload", "a:r1:0", "untrained"]) == {"upload": {"a": 1}, "a:r1:0": {"a": 1}}
+        # A later commit of the same trainer counts again, and one of another trainer counts for that trainer.
+        session.commit_step(expected_step=1, commit=training_commit(2, consumed_sample_id("upload"), component="a"))
+        session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("upload"), component="b"))
+        assert state.train_counts(["upload"]) == {"upload": {"a": 2, "b": 1}}
         with state.database._transaction(write=False) as connection:
-            assert not inspect(connection).has_table("training_sample", schema=schema)
-            assert not inspect(connection).has_table("sample_record", schema=schema)
+            for name in ("training_sample", "sample_record", "sample_train_count"):
+                assert not inspect(connection).has_table(name, schema=schema)
 
 
 def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
-        schema = state.counts.table.schema
+        schema = state.commits.table.schema
         with state.database._transaction(write=True) as connection:
             legacy = Table(
                 "manual_buffer",
