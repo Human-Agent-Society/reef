@@ -753,15 +753,8 @@ class SQLServedModels(ServedModelsWriter):
 
     def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
         table = self.tables.traffic_weights
-        routes = self.tables.served_model
         with self.database.write(SERVED_SEQUENCE) as (connection, counter):
             self.checked(connection, control_lease_number)
-            names = connection.execute(select(routes.c.name).where(routes.c.scenario == scenario)).scalars().all()
-            missing = sorted(
-                artifact_id for artifact_id, weight in weights.items() if weight > 0 and artifact_id not in names
-            )
-            if missing:
-                raise ValueError(f"serve these artifacts before they get a traffic weight: {', '.join(missing)}")
             connection.execute(delete(table).where(table.c.scenario == scenario))
             if weights:
                 connection.execute(insert(table).values(scenario=scenario, value_json=canonical_json(dict(weights))))

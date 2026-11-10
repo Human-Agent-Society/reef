@@ -49,8 +49,9 @@ with ``artifact_id``.
 
 Serving and training use separate selections:
 
-- The active selection supplies the default routes. ``activate`` replaces
-  one selected artifact and leaves every trainer's start unchanged. Inference
+- The active selection supplies the default routes. An ``activate``
+  operation replaces one selected artifact and leaves every trainer's start
+  unchanged. Inference
   uses the selection that completed startup; a failed load remains visible
   in startup status until control retries it.
 - Each trainer has a training start: the artifact its next job or evolve
@@ -59,9 +60,17 @@ Serving and training use separate selections:
   and leaves serving unchanged. A request's ``train_from`` gives one job its
   own start: that job does not move the training start, so it can run beside
   the other jobs of the scenario.
-- ``serve`` adds an artifact beside the active selection. It records the
-  selected component mapping without publishing bytes. Later activation does
-  not change that served mapping. ``stop-serving`` removes the extra route.
+- A ``serve`` operation adds an artifact beside the active selection. It
+  records the selected component mapping without publishing bytes. Later
+  activation does not change that served mapping. A ``stop_serving``
+  operation removes the extra route.
+- The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` sets
+  what a scenario serves of one component: a mapping from artifact IDs to
+  weights. The largest weight names the active artifact, and each other
+  artifact serves beside it. Reef appends the ``activate``, ``serve`` and
+  ``stop_serving`` operations that lead to the mapping. With more than one
+  weight above 0, the weights are the traffic split, which the coordination
+  store holds outside the commit history.
 - ``import`` creates an artifact from external files and records its source.
   It changes neither serving nor the trainers' starts.
 

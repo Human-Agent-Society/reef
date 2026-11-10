@@ -132,18 +132,18 @@ measurement of which requests passed the checks.
    (`GET /reef/harness/artifacts/<step>/page`) give the result: published
    as a snapshot, inactive because it changes an extension, rejected by the
    evaluation, or skipped with the reason, followed by the step's summary.
-   The request page also gives the next action: the activate route for an
-   inactive artifact, `GET /reef/harness` for an active one.
+   The request page also gives the next action: the update call that serves
+   an inactive artifact, `GET /reef/harness` for an active one.
 4. Activate. A snapshot that touches an `extension` file is inactive: Reef
    does not serve it, so it reaches no client on its own. Read its step page,
    which carries the step's summary (the design, how to use the change and
-   the review) and the numbers, then activate it with the artifact id the
-   page names:
+   the review) and the numbers. Then activate it: set `served` to the
+   artifact id the page names, with weight 100:
 
    ```bash
    curl -sS -X POST -H "Content-Type: application/json" \
-     -d '{"artifact_id": "<the artifact id the page names>"}' \
-     http://127.0.0.1:8901/reef/scenarios/my-harness/activate
+     -d '{"served": {"<the artifact id the page names>": 100}}' \
+     http://127.0.0.1:8901/reef/scenarios/my-harness/update
    ```
 
 5. Use. `GET /reef/harness` serves the active selection rendered for the

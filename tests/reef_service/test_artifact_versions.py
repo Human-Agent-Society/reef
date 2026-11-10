@@ -360,7 +360,7 @@ def test_request_records_the_artifact_id_captured_before_inference(tmp_path) -> 
 
 
 @pytest.mark.unit
-def test_activate_and_train_from_http_api(tmp_path, monkeypatch) -> None:
+def test_served_and_train_from_http_api(tmp_path, monkeypatch) -> None:
     async def run() -> None:
         value, runtime, _ = dispatcher(tmp_path)
         train(value, 1)
@@ -375,13 +375,12 @@ def test_activate_and_train_from_http_api(tmp_path, monkeypatch) -> None:
             target = artifacts[-2]
             component = target["component"]
 
-            activated = await client.post("/reef/scenarios/math/activate", json={"artifact_id": target["artifact_id"]})
+            served = {"served": {target["artifact_id"]: 100}}
+            activated = await client.post("/reef/scenarios/math/update", json=served)
             assert activated.status == 200
-            assert await activated.json() == {
-                "scenario": "math",
-                "component": component,
-                "artifact_id": target["artifact_id"],
-            }
+            assert await activated.json() == {"scenario": "math", **served}
+            listed = await (await client.get("/reef/scenarios/math/artifacts")).json()
+            assert [row["artifact_id"] for row in listed["artifacts"] if row["active"]] == [target["artifact_id"]]
             body = {"artifact_id": target["artifact_id"], "component": component}
             started = await client.post("/reef/scenarios/math/train-from", json=body)
             assert started.status == 200
@@ -391,17 +390,25 @@ def test_activate_and_train_from_http_api(tmp_path, monkeypatch) -> None:
                 "artifact_id": target["artifact_id"],
             }
 
-            for path in ("activate", "train-from"):
-                missing = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": "missing"})
-                assert missing.status == 404
-                unknown = await client.post(f"/reef/scenarios/other/{path}", json={"artifact_id": "missing"})
-                assert unknown.status == 404
-                empty = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": " "})
-                assert empty.status == 400
-                other = await client.post(
-                    f"/reef/scenarios/math/{path}", json={"artifact_id": target["artifact_id"], "component": "other"}
-                )
-                assert other.status == 400
+            missing = await client.post("/reef/scenarios/math/train-from", json={"artifact_id": "missing"})
+            assert missing.status == 404
+            unknown = await client.post("/reef/scenarios/other/train-from", json={"artifact_id": "missing"})
+            assert unknown.status == 404
+            empty = await client.post("/reef/scenarios/math/train-from", json={"artifact_id": " "})
+            assert empty.status == 400
+            other = await client.post(
+                "/reef/scenarios/math/train-from", json={"artifact_id": target["artifact_id"], "component": "other"}
+            )
+            assert other.status == 400
+
+            missing = await client.post("/reef/scenarios/math/update", json={"served": {"missing": 100}})
+            assert missing.status == 404
+            unknown = await client.post("/reef/scenarios/other/update", json=served)
+            assert unknown.status == 404
+            empty = await client.post("/reef/scenarios/math/update", json={"served": {"": 100}})
+            assert empty.status == 400
+            other = await client.post("/reef/scenarios/math/update", json={**served, "component": "other"})
+            assert other.status == 400
 
             def refuse(release):
                 raise ValueError("these weights cannot train")
@@ -413,9 +420,10 @@ def test_activate_and_train_from_http_api(tmp_path, monkeypatch) -> None:
 
             monkeypatch.setattr(Trainer, "has_pending_commit", property(lambda self: True))
             created = artifacts[-1]["artifact_id"]
-            for path in ("activate", "train-from"):
-                waiting = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": created})
-                assert waiting.status == 409
+            waiting = await client.post("/reef/scenarios/math/train-from", json={"artifact_id": created})
+            assert waiting.status == 409
+            waiting = await client.post("/reef/scenarios/math/update", json={"served": {created: 100}})
+            assert waiting.status == 409
         finally:
             await client.close()
             value.close()
