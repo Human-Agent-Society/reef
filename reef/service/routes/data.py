@@ -146,7 +146,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         return web.json_response(receipt, status=201)
 
     async def replace_task(request: web.Request) -> web.Response:
-        """Replace a task item's files with the task directory of a tar.gz body (RFC #TBD)."""
+        """Replace a task item's files with the task directory of a tar.gz body (RFC #1359)."""
         if request.content_type not in TASK_ARCHIVE_TYPES:
             raise web.HTTPUnsupportedMediaType(
                 text="a task's files come as a tar.gz archive with Content-Type application/gzip"
