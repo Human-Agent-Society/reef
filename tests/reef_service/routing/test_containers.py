@@ -453,10 +453,11 @@ time.sleep(30)
 """
     controller = subprocess.Popen([sys.executable, "-c", program])
     try:
+        # The file exists from the command's open, before its write: wait for the PID, not for the file.
         deadline = time.monotonic() + 5
-        while not command_pid.exists() and time.monotonic() < deadline:
+        while not (command_pid.exists() and command_pid.read_text()) and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert command_pid.exists()
+        assert command_pid.read_text()
         controller.kill()
         controller.wait(timeout=3)
         with DeploymentRegistry("killed", root=tmp_path):
@@ -553,10 +554,11 @@ DockerComposeRuntime(sys.executable).mutate(["-c", "import os,time; open({str(co
 """
     controller = subprocess.Popen([sys.executable, "-c", program])
     try:
+        # The file exists from the command's open, before its write: wait for the PID, not for the file.
         deadline = time.monotonic() + 5
-        while not command_pid.exists() and time.monotonic() < deadline:
+        while not (command_pid.exists() and command_pid.read_text()) and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert command_pid.exists()
+        assert command_pid.read_text()
         controller.kill()
         controller.wait(timeout=3)
         runtime = FakeDocker(ownership)
