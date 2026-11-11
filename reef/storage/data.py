@@ -13,7 +13,6 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
-import json
 import re
 import tempfile
 import time
@@ -32,7 +31,15 @@ from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
-from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
+from reef.storage.job_data import (
+    JOB_DATA_PREFIX,
+    JobDataRef,
+    StoredJobDirectory,
+    job_data_key,
+    job_data_key_of,
+    job_data_kind,
+    write_job_data,
+)
 from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.task_collections import TaskCollection, check_names
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
@@ -499,8 +506,9 @@ class DataStore(Plugin, ABC):
 
     * ``write_job_directory(data)`` writes the directory of ``data`` if the store does not hold it, records its use,
       and returns its reference.
-    * ``open_job_directory(value)`` gives the reference that ``JobDataRef.to_dict`` wrote, with a local copy of the
-      directory, and records its use.
+    * ``open_job_directory(value)`` gives the reference that ``JobDataRef.to_dict`` wrote, and records its use.
+
+    Neither copies the directory to the local disk: the reference does when a reader asks for its ``path``.
     * ``delete_unused_job_directories(time)`` deletes each directory that no job used since ``time``, and returns
       their number.
 
@@ -700,17 +708,15 @@ class DataStore(Plugin, ABC):
                 uri = self.job_directories.put_directory(name, directory)
         self.record_job_directory_use(key, time.time())
         return JobDataRef(
-            uri, self.job_directories.open_directory(uri), data.data_id, len(data.samples), job_data_kind(data)
+            uri, StoredJobDirectory(self.job_directories, uri), data.data_id, len(data.samples), job_data_kind(data)
         )
 
     def open_job_directory(self, value: Mapping[str, Any]) -> JobDataRef:
         uri = value.get("uri")
         if not isinstance(uri, str) or not uri:
             raise ValueError("a job data reference has a uri")
-        path = self.job_directories.open_directory(uri)
-        header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
-        self.record_job_directory_use(header["key"], time.time())
-        return JobDataRef.from_dict(value, path)
+        self.record_job_directory_use(job_data_key_of(uri), time.time())
+        return JobDataRef.from_dict(value, StoredJobDirectory(self.job_directories, uri))
 
     def delete_unused_job_directories(self, time: float) -> int:
         unused = self.job_directories_unused_since(time)

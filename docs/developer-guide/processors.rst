@@ -331,6 +331,10 @@ it, so a component must not write in it. A component reads it with
 component that runs the job elsewhere, such as in a container, gives that
 place ``job.data_uri`` and mounts or copies the directory there.
 
+With a remote segment store, the first read of ``job.data_dir`` copies the
+directory to the local disk. A component that only mounts ``job.data_uri``
+must not read ``job.data_dir``: Reef then copies nothing.
+
 The data store keeps the directories (``DataStore.write_job_directory``,
 ``open_job_directory`` and ``delete_unused_job_directories``) in its segment
 store (``storage.segment_backend``), or in

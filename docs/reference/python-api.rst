@@ -2118,7 +2118,8 @@ these fields:
 - ``job_id`` and ``backend``, the name of the training component.
 - ``data``, a ``JobDataRef``: the job data directory that the job trains.
   ``data_dir`` is its local path, which ``read_job_data`` reads, and
-  ``data_uri`` its URI. ``data_id``, ``sample_count`` and ``kind`` describe
+  ``data_uri`` its URI. The first read of ``data_dir`` copies a directory of
+  a remote segment store to the local disk. ``data_id``, ``sample_count`` and ``kind`` describe
   the data.
 - ``request_id``: the ID of the training request that the job trains, or
   ``None``.

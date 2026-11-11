@@ -92,7 +92,8 @@ class TrainingJob:
 
     @property
     def data_dir(self) -> Path:
-        """The local job data directory: read it with ``read_job_data``."""
+        """The local job data directory: read it with ``read_job_data``. The first read copies a directory of a
+        remote store to the local disk, so a component that mounts ``data_uri`` does not read it."""
         return self.data.path
 
     @property

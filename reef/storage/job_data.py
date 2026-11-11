@@ -2,8 +2,10 @@
 
 Reef selects the samples of a job, writes them as a job data directory, and gives the training component the
 directory (``TrainingJob.data_dir``) and its URI (``TrainingJob.data_uri``). A component that runs the job elsewhere,
-such as in a container, mounts or copies the URI there. The directory holds no training request: Reef keeps the
-request for its own accounting, and a component reads only the data and the job's parameters.
+such as in a container, mounts or copies the URI there. Reef copies a directory of a remote store to the local disk
+only when a component reads ``TrainingJob.data_dir``, so a component that mounts the URI copies nothing. The
+directory holds no training request: Reef keeps the request for its own accounting, and a component reads only the
+data and the job's parameters.
 
 Format 1 of a directory:
 
@@ -24,12 +26,14 @@ import json
 import os
 import shutil
 import tempfile
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
 
 from reef.core.job_data import JobData, TaskSample
+from reef.storage.segments import SegmentStore
 
 #: The format of the directories that ``write_job_data`` writes.
 JOB_DATA_FORMAT = 1
@@ -114,18 +118,80 @@ def read_job_data(directory: Path, data_id: str | None = None) -> JobData:
     return JobData.from_dict({"data_id": data_id or header["key"], "samples": samples, "request": None})
 
 
+def job_data_key_of(uri: str) -> str:
+    """The key of the job data directory at ``uri``: the last name of the URI, which a segment store ends the URI of
+    a directory with (``SegmentStore.find_directory``). Raise ``ValueError`` for a URI without a name."""
+    key = uri.rstrip("/").rpartition("/")[2] if isinstance(uri, str) else ""
+    if not key or ":" in key:
+        raise ValueError("a job data reference has the uri of a job data directory")
+    return key
+
+
+class JobDirectory(ABC):
+    """Gives the local copy of one job data directory.
+
+    Purpose: ``JobDataRef.directory`` holds it, and ``JobDataRef.path`` asks it for the copy.
+    """
+
+    @abstractmethod
+    def path(self) -> Path:
+        """A local directory with the content of the job data directory. Each call gives the same content. Raise
+        ``FileNotFoundError`` when the directory no longer exists."""
+
+
+@dataclass(frozen=True)
+class LocalJobDirectory(JobDirectory):
+    """A job data directory that is on the local disk at ``local``.
+
+    Purpose: a process that got the directory's path from the process that opened it, such as the child process of a
+    local job, makes it.
+    """
+
+    local: Path
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.local, Path):
+            raise TypeError("LocalJobDirectory.local must be a Path")
+
+    def path(self) -> Path:
+        if not self.local.is_dir():
+            raise FileNotFoundError(f"no job data directory at {self.local}")
+        return self.local
+
+
+@dataclass(frozen=True)
+class StoredJobDirectory(JobDirectory):
+    """The job data directory that the segment store ``store`` keeps at the non-empty ``uri``.
+
+    ``path`` is ``store.open_directory(uri)``: a remote store copies the directory at the first call and gives the
+    copy again at each later one. Purpose: the data store makes it for the references that it gives.
+    """
+
+    store: SegmentStore
+    uri: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.store, SegmentStore):
+            raise TypeError("StoredJobDirectory.store must be a SegmentStore")
+        if not isinstance(self.uri, str) or not self.uri:
+            raise ValueError("StoredJobDirectory.uri must be a non-empty string")
+
+    def path(self) -> Path:
+        return self.store.open_directory(self.uri)
+
+
 @dataclass(frozen=True)
 class JobDataRef:
     """The job data directory of one training job.
 
-    Values: ``uri`` is the URI that the store gives the directory. ``path`` is a local directory with its content,
-    which ``DataStore.open_job_directory`` gives. ``data_id`` is the ``JobData.data_id`` of the job's data,
-    ``sample_count`` its number of samples, and ``kind`` the kind of its samples, or None without samples.
-    Purpose: ``TrainingJob.data`` holds it. The jobs queue keeps it without ``path``, as ``to_dict`` gives it.
+    Values: ``uri`` is the URI that the store gives the directory. ``directory`` gives the local copy of the
+    directory. ``data_id`` is the ``JobData.data_id`` of the job's data, ``sample_count`` its number of samples, and
+    ``kind`` the kind of its samples, or None without samples.
+    Purpose: ``TrainingJob.data`` holds it. The jobs queue keeps it without ``directory``, as ``to_dict`` gives it.
     """
 
     uri: str
-    path: Path
+    directory: JobDirectory
     data_id: str
     sample_count: int
     kind: JobDataKind | None
@@ -133,8 +199,8 @@ class JobDataRef:
     def __post_init__(self) -> None:
         if not isinstance(self.uri, str) or not self.uri:
             raise ValueError("JobDataRef.uri must be a non-empty string")
-        if not isinstance(self.path, Path):
-            raise TypeError("JobDataRef.path must be a Path")
+        if not isinstance(self.directory, JobDirectory):
+            raise TypeError("JobDataRef.directory must be a JobDirectory")
         if not isinstance(self.data_id, str) or not self.data_id:
             raise ValueError("JobDataRef.data_id must be a non-empty string")
         if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int) or self.sample_count < 0:
@@ -142,16 +208,22 @@ class JobDataRef:
         if self.kind is not None and self.kind not in get_args(JobDataKind):
             raise ValueError("JobDataRef.kind must be trajectory, task or None")
 
+    @property
+    def path(self) -> Path:
+        """The local directory with the content: ``directory.path()``. A reference of a remote store copies the
+        directory at the first read. Raise ``FileNotFoundError`` when the directory no longer exists."""
+        return self.directory.path()
+
     def to_dict(self) -> dict[str, Any]:
-        """``{data_id, uri, sample_count, kind}``: the reference without its local path."""
+        """``{data_id, uri, sample_count, kind}``: the reference without its local copy."""
         return {"data_id": self.data_id, "uri": self.uri, "sample_count": self.sample_count, "kind": self.kind}
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any], path: Path) -> JobDataRef:
-        """The reference that ``to_dict`` wrote, with the local directory ``path``; ``ValueError`` for another
-        value."""
+    def from_dict(cls, value: Mapping[str, Any], directory: JobDirectory) -> JobDataRef:
+        """The reference that ``to_dict`` wrote, with the local copy that ``directory`` gives; ``ValueError`` for
+        another value."""
         try:
-            return cls(value["uri"], path, value["data_id"], value["sample_count"], value["kind"])
+            return cls(value["uri"], directory, value["data_id"], value["sample_count"], value["kind"])
         except (KeyError, TypeError) as exc:
             raise ValueError(f"malformed job data reference: {exc!r}") from exc
 
@@ -164,7 +236,11 @@ __all__ = [
     "TASKS_DIR",
     "JobDataKind",
     "JobDataRef",
+    "JobDirectory",
+    "LocalJobDirectory",
+    "StoredJobDirectory",
     "job_data_key",
+    "job_data_key_of",
     "job_data_kind",
     "read_job_data",
     "write_job_data",

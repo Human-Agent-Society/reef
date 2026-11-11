@@ -10,6 +10,8 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import closing
 from dataclasses import replace
 
+from pathlib import Path
+
 import pytest
 import sqlalchemy
 import sqlalchemy.event
@@ -26,7 +28,7 @@ from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
 from reef.storage.item_kinds import json_digest
-from reef.storage.job_data import job_data_key, read_job_data
+from reef.storage.job_data import job_data_key, job_data_key_of, read_job_data
 from reef.storage.record_items import (
     evaluation_call_item,
     evaluation_trajectory_item,
@@ -34,6 +36,7 @@ from reef.storage.record_items import (
     record_item,
     stored_evaluation_call,
 )
+from reef.storage.segments import LocalSegmentStore
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
@@ -934,6 +937,33 @@ def test_a_record_retry_with_a_new_time_matches_also_when_the_stored_digest_has_
     assert store.read("acme", item.item_id) == legacy
 
 
+class CountingSegmentStore(LocalSegmentStore):
+    """A local segment store that counts the directories that it opened, as a remote store counts its copies."""
+
+    opened = 0
+
+    def open_directory(self, uri: str) -> Path:
+        self.opened += 1
+        return super().open_directory(uri)
+
+
+def test_a_job_data_reference_copies_its_directory_only_when_its_path_is_read(tmp_path):
+    store = MemoryDataStore(LocalTaskFileStore())
+    store.job_directories = CountingSegmentStore(tmp_path)
+    sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
+    written = store.write_job_directory(JobData("s:data:1", (sample,)))
+    opened = store.open_job_directory(written.to_dict())
+    # A component that mounts the URI reads no path, so the store copies nothing.
+    assert (opened.uri, store.job_directories.opened) == (written.uri, 0)
+    assert job_data_key_of(written.uri) == job_data_key(JobData("x", (sample,)))
+    assert read_job_data(opened.path).samples == (sample,)
+    assert store.job_directories.opened == 1
+    # The use of a directory is recorded without its content: the directory stays while a job opened it.
+    assert store.delete_unused_job_directories(0.0) == 0
+    with pytest.raises(ValueError, match="uri of a job data directory"):
+        store.open_job_directory({**written.to_dict(), "uri": "s3://"})
+
+
 def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):
     sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
     first = store.write_job_directory(JobData("s:data:1", (sample,)))
@@ -947,7 +977,7 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     store.record_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
     assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
-        store.open_job_directory(first.to_dict())
+        read_job_data(store.open_job_directory(first.to_dict()).path)
     assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
     # The periodic work keeps a directory that a job used within the time to live.
     store.maintain()

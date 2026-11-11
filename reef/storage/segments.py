@@ -85,6 +85,7 @@ class SegmentStore(Plugin, ABC):
     (``reef.storage.job_data``). A key names each directory; it is ``/``-separated words, with no ``.`` or ``..``:
 
     * ``find_directory(key)`` is the URI of the directory ``key``, or None when the store does not hold all of it.
+      The URI ends with ``key``, or with ``key`` and one ``/``.
     * ``put_directory(key, source)`` keeps a copy of the files under ``source`` as the directory ``key`` and returns
       its URI. A put of a key that the store holds keeps the first copy.
     * ``open_directory(uri)`` returns a local directory with the files of the directory at ``uri``. A remote store
