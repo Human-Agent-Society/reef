@@ -1424,6 +1424,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "serving_config": {},
                 "effective_serving_config": {"weights": {}},
                 "served": {"weights": {active: 100}},
+                "record2sample_config": {},
                 "job_parameters": {"trajectory": {}, "task": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}

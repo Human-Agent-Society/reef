@@ -35,6 +35,7 @@ from reef.evaluation.activation import EvaluatedActivation, activation_setting, 
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
+from reef.recipe.errors import RecipeConfigError
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ItemStart, ScenarioFactory
 from reef.scenario.scenario import Scenario
@@ -361,6 +362,38 @@ class ScenarioRegistry:
             self._storage.write_settings(scenario, replace(settings, serving_config=config))
             current.set_serving_config(config)
             return current
+
+    def set_record2sample_config(self, scenario: str, config: Mapping[str, Mapping[str, Any]]) -> Scenario:
+        """Store ``config`` as the ``ScenarioSettings.record2sample_config`` of an existing scenario, and load the
+        scenario again, so that its trainers build their record-to-sample stages with it.
+
+        The new instance recovers as a restart does: each trainer reads the records after its committed progress
+        again. ``config`` replaces the stored mapping as a whole; an empty mapping goes back to the deployment's
+        config. Raise ``ValueError`` when ``config`` names a component that has no trainer, or when a stage refuses
+        its config; then the stored setting and the loaded instance stay as they were.
+        """
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            settings = self._storage.read_settings(scenario)
+            changed = replace(settings, record2sample_config=config)
+            trainers = {component_trainer.component for component_trainer in current.trainers}
+            unknown = sorted(set(changed.record2sample_config) - trainers)
+            if unknown:
+                raise ValueError(
+                    f"record2sample_config names {unknown}; scenario {scenario!r} has trainers for {sorted(trainers)}"
+                )
+            if changed.record2sample_config == current.record2sample_config:
+                return current
+            self._storage.write_settings(scenario, changed)
+            try:
+                return self.reload(scenario)
+            except BaseException as exc:
+                # The new instance failed before it replaced ``current``, which keeps serving with its own config.
+                # A stored config that no instance builds with would fail every later load.
+                self._storage.write_settings(scenario, settings)
+                if isinstance(exc, RecipeConfigError):
+                    raise ValueError(f"scenario {scenario!r} refused record2sample_config: {exc}") from exc
+                raise
 
     def set_serves(self, scenario: str, serves: bool) -> Scenario:
         """Store ``serves`` for an existing scenario (``ScenarioSettings.serves``) and apply it to the loaded

@@ -481,7 +481,10 @@ class ScenarioFactory:
                 source_artifacts=training_artifacts,
                 run_segment=store.training_run_position()[0] if store.durable else 0,
             )
-            trainers = self._recipe.build_trainers(
+            # The scenario's own record-to-sample keys (RFC #1362). The instance keeps them, so that a process that
+            # loaded the scenario can see that control changed them (``Scenario.record2sample_config``).
+            record2sample_config = self._storage.read_settings(name).record2sample_config
+            trainers = self._recipe.for_record2sample_configs(components, record2sample_config).build_trainers(
                 name,
                 store.records,
                 components=components,
@@ -536,6 +539,7 @@ class ScenarioFactory:
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,
                 training_requests=None if self._training_requests is None else self._training_requests.of(name),
+                record2sample_config=record2sample_config,
             )
             # Each trainer reads its records from the start again and skips the consumed ones. A commit's record
             # progress is not a cursor here: it can name a sequence of a record store that came before the record

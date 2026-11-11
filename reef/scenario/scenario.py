@@ -56,10 +56,15 @@ class Scenario:
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
         training_requests: ScenarioTrainingRequests | None = None,
+        record2sample_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         #: The scenario's training requests; None for a scenario built without a training request queue, which takes
         #: no request.
         self.training_requests = training_requests
+        #: The scenario's ``ScenarioSettings.record2sample_config`` that its trainers were built with.
+        self.record2sample_config: Mapping[str, Mapping[str, Any]] = (
+            {} if record2sample_config is None else record2sample_config
+        )
         self.operations = OperationMetrics(
             ("ingest/write", "serve/request"),
             counters=(

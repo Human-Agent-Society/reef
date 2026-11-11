@@ -1908,6 +1908,8 @@ body holds one or more of these settings. Reef rejects other fields:
 - ``served``: the artifacts that the scenario serves of one component, each
   with its weight (`Set what a scenario serves`_). ``component`` names that
   component, and is valid only together with ``served``.
+- ``record2sample_config``: the record-to-sample config keys that the scenario
+  sets over the deployment's (`Record-to-sample config`_).
 
 The response holds the scenario name and each setting that the request
 changed. To change the data processor's mode:
@@ -2006,6 +2008,31 @@ the scenario's settings, so a reload and a restart keep it. A stored field that
 the deployment no longer accepts is ignored with a warning, and the scenario
 serves with the deployment's values until a person changes the config.
 
+Record-to-sample config
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``record2sample_config`` setting gives one scenario its own config for the
+record-to-sample stage of each trainer. It maps a component name to config
+keys. Each key replaces the same key of the deployment's
+`pipeline.record2sample.config <configuration.rst#the-pipeline-section>`__ for
+the trainer of that component. The stage class stays the deployment's:
+
+.. code:: json
+
+   {"record2sample_config": {"weights": {"max_staleness": 2}}}
+
+The request replaces the stored mapping as a whole. Send ``{}`` to use the
+deployment's config again. The response holds the stored
+``record2sample_config``.
+
+Reef applies a change by loading the scenario again, as a restart does. Each
+trainer then builds its stage with the new config and reads the records after
+its committed progress again. A samples service in another process loads the
+scenario again before its next selection. Reef answers HTTP 400 and keeps the
+stored setting and the loaded scenario when the mapping names a component that
+has no trainer, or when a stage refuses its config. Reef stores the setting
+with the scenario's settings, so a restart keeps it.
+
 Traffic split
 ~~~~~~~~~~~~~
 
@@ -2082,6 +2109,7 @@ scenario:
      "serving_config": {"weights": {"temperature": 0.6}},
      "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
      "served": {"weights": {"artifact:a": 95, "artifact:b": 5}},
+     "record2sample_config": {"weights": {"max_staleness": 2}},
      "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
@@ -2100,6 +2128,8 @@ scenario:
   because it answers their requests.
 - ``effective_serving_config`` maps the served component to each of its serving
   fields that has a value: the scenario's value, else the deployment's.
+- ``record2sample_config`` is the stored `record-to-sample config
+  <#record-to-sample-config>`__, ``{}`` when the scenario sets no key.
 - ``job_parameters`` maps a sample kind (``trajectory`` or ``task``) to the
   recipe's parameters of a job of that kind. A training request's
   ``parameters`` merge into them. A kind that the recipe gives no parameters is
