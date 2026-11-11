@@ -1922,6 +1922,10 @@ under ``pipeline`` fails the startup. Each recipe's page
 lists the keys of its stages. Keys are written as the stage reads them; a
 hyphen spelling is also accepted.
 
+A scenario can replace keys of ``pipeline.record2sample.config`` for itself
+with its ``record2sample_config`` setting (`Record-to-sample config
+<http-api.rst#record-to-sample-config>`__).
+
 Every built-in record-to-sample stage that holds units reads
 ``max_staleness``, Reef's staleness filter. Reef drops held training data
 whose producing artifact is more than this many served artifacts behind the

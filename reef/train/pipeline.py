@@ -117,6 +117,10 @@ class PipelineConfig:
             environ=dict(environ),
         )
 
+    def with_record2sample_config(self, config: Mapping[str, Any]) -> PipelineConfig:
+        """The same stages, with each key of ``config`` in place of that key of the record-to-sample stage's config."""
+        return replace(self, record2sample=replace(self.record2sample, config={**self.record2sample.config, **config}))
+
     def build(self, context: PipelineContext) -> TrainingPipeline:
         """Build the pipeline of one scenario: each stage from its config, the job stage with the sample stage."""
         record2sample = Record2Sample.referenced_class(self.record2sample).from_config(
