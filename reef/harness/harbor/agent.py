@@ -34,7 +34,6 @@ from typing import Any, override
 
 import aiohttp
 from harbor.agents.installed.base import BaseInstalledAgent
-from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import MCPServerConfig, TaskConfig
@@ -47,6 +46,7 @@ from reef.execution.sandbox.remote import HOP_BY_HOP
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor import bridge_client
+from reef.harness.harbor.node_runtime import PLATFORM_COMMAND, node_archive, node_build_name, node_cache_directory
 from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
@@ -73,11 +73,15 @@ CONTAINER_NPM_PREFIX = "$HOME/.reef-npm"
 #: The shell test that passes on a musl image, such as Alpine, as Harbor's own npm agents test it. musl's ldd
 #: prints its version and exits 1, so its exit code is dropped: with pipefail it would fail the pipe.
 MUSL_CHECK = "{ ldd --version 2>&1 || true; } | grep -qi musl || [ -f /etc/alpine-release ]"
+#: Where a glibc image gets the Node that Reef uploads, under the agent user's own home, and where the uploaded
+#: archive waits for its unpacking.
+CONTAINER_NODE = "$HOME/.reef-node"
+CONTAINER_NODE_ARCHIVE = "/tmp/reef-node.tar.gz"
 #: The shell command that puts an npm agent on the PATH, by what the install wrote: the prefix of a musl image when
-#: it exists, else nvm's Node. A musl image can hold an nvm of its own, so the prefix is the test.
+#: it exists, else the uploaded Node, whose global prefix holds the agent.
 NPM_AGENT_PATH = (
     f'if [ -d "{CONTAINER_NPM_PREFIX}/bin" ]; then export PATH="{CONTAINER_NPM_PREFIX}/bin:$PATH"; '
-    'else . "$HOME/.nvm/nvm.sh"; fi'
+    f'else export PATH="{CONTAINER_NODE}/bin:$PATH"; fi'
 )
 #: Where the bridge's relay lives in a task's container, and the loopback port on which it answers the bridge client.
 RELAY_DIR = "/tmp/reef-relay"
@@ -181,10 +185,12 @@ class AdapterAgent(BaseInstalledAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        # nvm and Astral's installer need curl, and a git install needs git. A task image without them gets them
-        # from its package manager, as Harbor's own npm agents do.
-        tools = ("curl", "git") if self.install_kind == "git" else ("curl",)
-        await self.ensure_system_dependencies(environment, tools)
+        # Astral's installer needs curl, and a git install needs git. A task image without them gets them from its
+        # package manager, as Harbor's own agents do. An npm install needs neither.
+        if self.install_kind == "git":
+            await self.ensure_system_dependencies(environment, ("curl", "git"))
+        elif self.install_kind == "uv":
+            await self.ensure_system_dependencies(environment, ("curl",))
         if self.install_kind == "uv":
             command = uv_install_command(str(self._version))
         elif self.install_kind == "git":
@@ -192,7 +198,7 @@ class AdapterAgent(BaseInstalledAgent):
         else:
             package = shlex.quote(f"{self.package}@{self._version}")
             if (await environment.exec(command=MUSL_CHECK)).return_code == 0:
-                # The Node that nvm downloads does not run on musl, so a musl image uses the Node of its packages.
+                # The Node builds that Reef uploads do not run on musl, so a musl image uses the Node of its packages.
                 # The agent user may not write the global prefix, so the agent goes under its own home. The image
                 # chooses the Node version: --engine-strict fails the install when the agent needs a newer one,
                 # where npm alone only warns and the agent then fails at its start.
@@ -202,9 +208,22 @@ class AdapterAgent(BaseInstalledAgent):
                     f"npm install -g --engine-strict --prefix {CONTAINER_NPM_PREFIX} {package}"
                 )
             else:
-                install = f"{nvm_node_install_snippet()} && npm install -g {package}"
+                # Reef downloads Node on its own host and uploads it. The container needs no download tool for it:
+                # a task can replace curl, or hold a glibc that is too old for the official build.
+                platform = await environment.exec(command=PLATFORM_COMMAND)
+                name = node_build_name(platform.stdout or "")
+                archive = await asyncio.to_thread(node_archive, name, node_cache_directory())
+                await environment.upload_file(archive, CONTAINER_NODE_ARCHIVE)
+                install = (
+                    f'mkdir -p "{CONTAINER_NODE}" && '
+                    f'tar -xzf {CONTAINER_NODE_ARCHIVE} -C "{CONTAINER_NODE}" --strip-components=1 && '
+                    f'export PATH="{CONTAINER_NODE}/bin:$PATH" && node --version && npm --version && '
+                    f"npm install -g --engine-strict {package}"
+                )
             command = f"set -euo pipefail; {install} && {NPM_AGENT_PATH} && command -v {shlex.quote(self.binary)}"
         await self.exec_as_agent(environment, command=command)
+        if self.install_kind == "npm":
+            await self.exec_as_root(environment, command=f"rm -f {CONTAINER_NODE_ARCHIVE}")
 
     @override
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import io
 import json
 import shutil
 import socket
 import subprocess
+import tarfile
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -33,6 +36,14 @@ from reef.harness.harbor.agent import (
     task_agent_tools,
     task_mcp_overlays,
     tree_agent,
+)
+from reef.harness.harbor.node_runtime import (
+    NODE_BUILDS,
+    PLATFORM_COMMAND,
+    NodeBuild,
+    NodeRuntimeError,
+    node_archive,
+    node_build_name,
 )
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.tasks.model_binding import ModelBinding
@@ -126,12 +137,20 @@ def test_only_an_adapter_with_an_npm_uv_or_git_install_and_a_text_prompt_plays_a
 class RecordingEnvironment:
     """A task container that keeps each command an agent runs in it and each file it uploads, and holds no session
     directory. ``events`` is both, in order. The container lacks the commands ``missing``, installs packages with
-    ``manager``, and is a musl image when ``musl``."""
+    ``manager``, and is a musl image when ``musl``. ``platform`` is what its ``PLATFORM_COMMAND`` prints."""
 
-    def __init__(self, *, missing: tuple[str, ...] = (), manager: str = "apt-get", musl: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        missing: tuple[str, ...] = (),
+        manager: str = "apt-get",
+        musl: bool = False,
+        platform: str = "x86_64\nglibc 2.39\n",
+    ) -> None:
         self.missing = missing
         self.manager = manager
         self.musl = musl
+        self.platform = platform
         self.commands: list[str] = []
         self.uploads: dict[str, str] = {}
         self.events: list[str] = []
@@ -142,6 +161,8 @@ class RecordingEnvironment:
         self.events.append(command)
         if command.startswith("for manager in "):
             return SimpleNamespace(return_code=0, stdout=self.manager, stderr="")
+        if command == PLATFORM_COMMAND:
+            return SimpleNamespace(return_code=0, stdout=self.platform, stderr="")
         absent = any(command.startswith(f"command -v {name} >/dev/null") for name in self.missing)
         failed = absent or (command == MUSL_CHECK and not self.musl)
         return SimpleNamespace(return_code=1 if failed else 0, stdout="", stderr="")
@@ -189,11 +210,19 @@ def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_b
     assert agent.get_version_command() == '"$HOME/.reef-agent/venv/bin/hermes" --version'
 
 
-def test_an_npm_agent_uses_the_node_of_nvm_on_a_glibc_image_and_of_the_packages_on_a_musl_image(
-    tmp_path: Path,
+def test_an_npm_agent_uses_an_uploaded_node_on_a_glibc_image_and_the_node_of_the_packages_on_a_musl_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pi = get_adapter("pi")
     package = f"{pi.install.package}@{pi.install.version}"
+    builds: list[str] = []
+
+    def archive(name: str, cache: Path) -> Path:
+        builds.append(name)
+        (tmp_path / f"{name}.tar.gz").write_text(f"the {name} build")
+        return tmp_path / f"{name}.tar.gz"
+
+    monkeypatch.setattr("reef.harness.harbor.agent.node_archive", archive)
 
     def installed(name: str, environment: RecordingEnvironment) -> tuple[str, str]:
         (tmp_path / name).mkdir()
@@ -203,17 +232,24 @@ def test_an_npm_agent_uses_the_node_of_nvm_on_a_glibc_image_and_of_the_packages_
         (install,) = (command for command in environment.commands if "npm install -g" in command)
         return install, environment.commands[-2]
 
-    glibc = RecordingEnvironment()
+    # Reef uploads the Node of the container's platform, and the install unpacks it: the container downloads no
+    # Node and needs no curl, so an image without curl, or with a curl that a task replaced, installs the same.
+    glibc = RecordingEnvironment(missing=("curl",), platform="x86_64\nglibc 2.27\n")
     install, run = installed("glibc", glibc)
-    assert "nvm install 22" in install and f"npm install -g {package} && " in install
-    assert not any("nodejs" in command for command in glibc.commands)
+    assert builds == ["x64-glibc-217"] and glibc.uploads == {"/tmp/reef-node.tar.gz": "the x64-glibc-217 build"}
+    unpack = 'tar -xzf /tmp/reef-node.tar.gz -C "$HOME/.reef-node" --strip-components=1'
+    assert unpack in install and f"npm install -g --engine-strict {package} && " in install
+    assert glibc.commands[glibc.commands.index(install) + 1].endswith("rm -f /tmp/reef-node.tar.gz")
+    assert not any("curl" in command or "apt-get" in command for command in glibc.commands)
+    for command in (install, run):
+        assert f"{NPM_AGENT_PATH} && " in command
 
-    # The Node that nvm downloads does not run on musl: the image's packages give Node, and the agent goes under
-    # the agent user's own home.
+    # The uploaded builds do not run on musl: the image's packages give Node, and the agent goes under the agent
+    # user's own home.
     musl = RecordingEnvironment(missing=("node", "npm"), manager="apk", musl=True)
     install, run = installed("musl", musl)
     assert any(command.endswith("apk add --no-cache nodejs npm") for command in musl.commands)
-    assert "nvm install" not in install
+    assert "tar -xzf" not in install and builds == ["x64-glibc-217"] and not musl.uploads
     # npm alone only warns when the image's Node is older than the agent needs.
     assert f"npm install -g --engine-strict --prefix $HOME/.reef-npm {package} && " in install
     for command in (install, run):
@@ -247,17 +283,62 @@ def test_the_agent_path_follows_what_the_install_wrote(tmp_path: Path) -> None:
         (directory / "agent").write_text(f"#!/bin/sh\necho {text}\n")
         (directory / "agent").chmod(0o755)
 
-    # An image with an nvm of its own: nvm.sh puts its Node, and the agent that it holds, on the PATH.
+    # After a glibc install, the global prefix of the uploaded Node holds the agent.
     home = tmp_path / "home"
-    agent(home / "nvm-node" / "bin", "from-nvm")
-    (home / ".nvm").mkdir()
-    (home / ".nvm" / "nvm.sh").write_text(f'export PATH="{home}/nvm-node/bin:$PATH"\n')
+    agent(home / ".reef-node" / "bin", "from-node")
     found = f"{NPM_AGENT_PATH} && agent"
-    assert run_bash(found, home, tmp_path).stdout == "from-nvm\n"
+    assert run_bash(found, home, tmp_path).stdout == "from-node\n"
 
-    # After a musl install, the prefix holds the agent, and it wins over the image's nvm.
+    # After a musl install, the prefix holds the agent.
     agent(home / ".reef-npm" / "bin", "from-prefix")
     assert run_bash(found, home, tmp_path).stdout == "from-prefix\n"
+
+
+def test_the_node_build_follows_the_machine_and_the_glibc_of_the_container() -> None:
+    assert node_build_name("x86_64\nglibc 2.39\n") == "x64"
+    assert node_build_name("aarch64\nglibc 2.28\n") == "arm64"
+    # The official x64 build needs glibc 2.28. ldd's first line gives the version when getconf is absent.
+    assert node_build_name("x86_64\nglibc 2.27\n") == "x64-glibc-217"
+    assert node_build_name("x86_64\nldd (GNU libc) 2.17\n") == "x64-glibc-217"
+    for platform, reason in (
+        ("x86_64\nglibc 2.12\n", "x64 with glibc 2.12"),
+        ("aarch64\nglibc 2.27\n", "arm64 with glibc 2.27"),
+        ("riscv64\nglibc 2.39\n", "reports"),
+        ("x86_64\n", "reports"),
+    ):
+        with pytest.raises(NodeRuntimeError, match=reason):
+            node_build_name(platform)
+
+
+def test_a_node_archive_is_the_checked_download_as_gzip_and_is_downloaded_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = tmp_path / "node.tar.xz"
+    with tarfile.open(published, "w:xz") as tar:
+        content = b"#!/bin/sh\n"
+        info = tarfile.TarInfo("node-v0/bin/node")
+        info.size, info.mode = len(content), 0o755
+        tar.addfile(info, io.BytesIO(content))
+    build = NodeBuild(published.as_uri(), hashlib.sha256(published.read_bytes()).hexdigest())
+    monkeypatch.setitem(NODE_BUILDS, "x64", build)
+
+    archive = node_archive("x64", tmp_path / "cache")
+    with tarfile.open(archive, "r:gz") as tar:
+        (member,) = tar.getmembers()
+        assert (member.name, member.mode) == ("node-v0/bin/node", 0o755)
+    published.unlink()
+    assert node_archive("x64", tmp_path / "cache") == archive
+
+    # A download with another checksum is refused, and the cache keeps nothing of it.
+    with tarfile.open(published, "w:xz"):
+        pass
+    monkeypatch.setitem(NODE_BUILDS, "arm64", NodeBuild(published.as_uri(), build.sha256))
+    with pytest.raises(NodeRuntimeError, match="does not have the SHA-256"):
+        node_archive("arm64", tmp_path / "cache")
+    assert [path.name for path in (tmp_path / "cache").iterdir()] == [archive.name]
+    monkeypatch.setitem(NODE_BUILDS, "arm64", NodeBuild((tmp_path / "missing.tar.xz").as_uri(), build.sha256))
+    with pytest.raises(NodeRuntimeError, match="cannot download"):
+        node_archive("arm64", tmp_path / "cache")
 
 
 def test_the_agent_writes_the_atif_of_its_sessions_for_the_verifier_and_drops_a_planted_one(tmp_path: Path) -> None:
