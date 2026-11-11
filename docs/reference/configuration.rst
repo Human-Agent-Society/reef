@@ -104,8 +104,10 @@ The manifest (``schema_version: 2``) has three parts:
   predicts one of its labels; it needs ``deployment.domain_classifier``, and
   within one Scenario a label may appear in only one rule, ignoring case. If
   several rules match, the first one listed is used, whatever its kind.
-* ``deployment`` pins the Semantic Router image (``semantic_router_image``) by
-  digest. Optional ``domain_classifier`` names a local pretrained domain
+* ``deployment`` may name the Semantic Router image (``semantic_router_image``)
+  by repository digest (``repository@sha256:<hex>``) or local image ID
+  (``sha256:<hex>``). Without it, a managed deployment builds the pinned image
+  (`Managed routing lifecycle`_). Optional ``domain_classifier`` names a local pretrained domain
   classifier: ``model_directory`` (an absolute path without symlinks),
   ``threshold`` (a number from 0 to 1) and ``files``, the ``sha256:`` digest
   of each of exactly ``config.json``, ``tokenizer.json``, ``model.safetensors``
@@ -129,14 +131,34 @@ Managed routing lifecycle
 Setting ``reef.routing_manifest`` makes ``reef serve`` own the SR container
 and a routed Reef child; there is no separately launched mode. This requires
 Linux, a local Docker daemon with Compose, and the local ``uni`` service
-executor. External model services remain independently managed. The SR image
-must already be available locally and pinned by digest in the manifest.
-Before starting or recreating the container, Reef checks that the image's
-``org.opencontainers.image.revision`` label matches the SR commit pinned by
-this Reef release. A missing or different label prevents container creation.
-This checks declared source metadata, not the binaries themselves. See the
-`image build instructions <../../tutorials/semantic-router/README.md#1-build-the-semantic-router-image>`__
-for the required commit and label.
+executor. External model services remain independently managed.
+
+When the manifest names no image, startup uses the image that Reef builds from
+the SR commit pinned by this release: it reuses the image tagged
+``reef-semantic-router:<commit prefix>-<recipe>`` when its labels name that
+commit and Reef's build recipe, and refuses one with other labels. Otherwise
+it builds the image with ``docker buildx build`` directly from the commit on
+GitHub, with no Git checkout and no router credentials, bounded by
+``image_build_timeout_seconds``. The first build needs network access and
+can take long; its plain progress goes to the private
+``semantic-router-build.log`` in the deployment's registry directory.
+SIGTERM or Ctrl-C ends the build command and its process group before Reef
+creates the generation's SR container; model containers, BuildKit and
+resources of an earlier generation may already exist. Docker may still keep or
+finish build cache, which Reef does not remove. The source commit is
+pinned, but the upstream build's base images and packages are resolved when it
+runs, so cold builds are not bit-reproducible. The resolved image ID is frozen
+in the generation: the ``prepared`` lifecycle event reports it with the
+generation's ``snapshot_version``, policy updates keep it, and recovery restarts
+it without rebuilding. Startup reads the manifest once, so an edit during a
+build reaches the deployment only as a later policy update. A manifest that
+names an image skips the automatic cache lookup and build; that image is still
+inspected as below. Before starting or recreating the container, Reef checks that
+the image's ``org.opencontainers.image.revision`` label matches the pinned
+commit. A missing or different label prevents container creation. This checks
+declared source metadata, not the binaries themselves. See the
+`Semantic Router image <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__
+section of the tutorial.
 
 .. code-block:: yaml
 
@@ -196,6 +218,9 @@ through ``--reef.routing-deployment``.
    * - container_stop_timeout_seconds
      - 10
      - Container stop operation timeout.
+   * - image_build_timeout_seconds
+     - 3600
+     - Longest startup build of the SR image, when the manifest names none and no built image is cached.
    * - sr_management_port
      - 50053
      - SR's authenticated HTTP API (previews and configuration), published on host loopback.
@@ -220,7 +245,8 @@ had when it started, even if no earlier target used it; Reef never adds
 credentials to a running process. The automatic model, Scenario names, the
 domain classifier, images and deployment settings must stay the same;
 otherwise the update is rejected, logged as ``policy_rejected``, and the
-current policy keeps serving. Preview settings also need a restart.
+current policy keeps serving. Preview settings also need a restart. A manifest
+that names no image keeps the generation's image; an update never builds one.
 
 Before anything closes, the Reef child checks the new manifest's providers
 (their model lists) with its own credentials. A missing credential, a provider
@@ -353,10 +379,12 @@ This lifecycle differs from ``managed``:
   60 seconds for requests. It then cancels the rest, and waits
   ``finalization_timeout_seconds`` for their records. Give the process more time
   than this before it is killed.
-* **Your responsibilities.** Reef does not start, restart or stop SR, and it does
-  not check the image's revision label. Pin an image built from this Reef release's
-  SR commit; follow the `image build instructions
-  <../../tutorials/semantic-router/README.md#1-build-the-semantic-router-image>`__.
+* **Your responsibilities.** Reef does not build, start, restart or stop SR, and it
+  does not check the image's revision label. Name an image built from this Reef
+  release's SR commit in ``deployment.semantic_router_image``, which ``render``
+  and the replica both require; one that a managed start built (see the `Semantic Router image
+  <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__)
+  qualifies.
 
 Only ``sr_management_port``, ``selection_timeout_seconds``,
 ``preview_max_concurrency`` and ``finalization_timeout_seconds`` apply. Set SR's CPU

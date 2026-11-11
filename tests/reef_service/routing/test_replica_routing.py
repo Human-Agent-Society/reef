@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import replace
@@ -34,7 +35,7 @@ from reef.service import routed_replica
 from reef.service.components import build_component_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.cli import main as routing_cli
-from reef.service.deploy.routing.renderer import MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
+from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import RoutingSnapshot
@@ -216,6 +217,24 @@ def test_a_replica_refuses_settings_that_cannot_route(tmp_path: Path) -> None:
         build_component_app("inference", settings, environ={})
     with pytest.raises(ValueError, match="service token"):
         build_component_app("inference", replace(settings, tokens=()), environ=ENVIRONMENT)
+
+
+@pytest.mark.unit
+def test_a_replica_refuses_a_manifest_without_its_router_image_before_any_routing_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As ``render`` does: Reef builds a router image only for a managed deployment, never for an external router.
+    path = tmp_path / "manifest.yaml"
+    path.write_text(json.dumps(routing_manifest("http://127.0.0.1:1", image=None)), encoding="utf-8")
+
+    def no_client(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a replica that refuses its manifest makes no routing client")
+
+    monkeypatch.setattr(routed_replica.RoutingAdapter, "from_snapshot", no_client)
+    monkeypatch.setattr(routed_replica, "RoutingPreviewClient", no_client)
+    monkeypatch.setattr(routed_replica, "RouterManagementClient", no_client)
+    with pytest.raises(ValueError, match=re.escape(EXTERNAL_IMAGE_MESSAGE)):
+        build_component_app("inference", external_settings(tmp_path, path), environ=ENVIRONMENT)
 
 
 @pytest.mark.unit

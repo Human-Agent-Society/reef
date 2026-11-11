@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 from collections.abc import Callable
@@ -268,6 +269,23 @@ def test_snapshot_digest_is_order_independent_but_tracks_manifest_changes(manife
     assert RoutingSnapshot.from_mapping(generated).version != original.version
 
 
+@pytest.mark.parametrize("image", ["example/router@sha256:" + "a" * 64, "sha256:" + "a" * 64, None])
+def test_the_router_image_may_be_named_by_digest_or_local_id_or_omitted_and_is_hashed_as_given(
+    manifest: dict[str, object], image: str | None
+) -> None:
+    deployment = manifest["deployment"]
+    assert isinstance(deployment, dict)
+    if image is None:
+        del deployment["semantic_router_image"]
+    else:
+        deployment["semantic_router_image"] = image
+    snapshot = RoutingSnapshot.from_mapping(manifest)
+    assert snapshot.semantic_router_image == image
+    # The version hashes the manifest as given: nothing fills in, rewrites or normalizes the image.
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    assert snapshot.version == "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def test_snapshot_and_handlers_are_immutable_and_do_not_reload(adapter: RoutingAdapter, manifest_path: Path) -> None:
     decision = automatic_decision(adapter, "code-opd", "default", "code-student")
     with pytest.raises(FrozenInstanceError):
@@ -314,6 +332,13 @@ def test_handler_lookup_rejects_foreign_decision(adapter: RoutingAdapter) -> Non
         (("scenarios", "math-opd", "rules"), [{"name": "old", "keywords": ["x"], "target": "retired-teacher"}]),
         (("deployment", "envoy_image"), "envoy:latest"),
         (("deployment", "configuration_digest"), "not-a-digest"),
+        # The router image may be omitted, but a given one is a digest reference or a full local image ID.
+        (("deployment", "semantic_router_image"), None),
+        (("deployment", "semantic_router_image"), "example/router:latest"),
+        (("deployment", "semantic_router_image"), "example/router@sha256:" + "a" * 63),
+        (("deployment", "semantic_router_image"), "sha256:" + "A" * 64),
+        (("deployment", "semantic_router_image"), "a" * 64),
+        (("deployment", "semantic_router_image"), "router:sha256:" + "a" * 64),
         (("targets", "code-teacher", "revision"), 1),
         (("targets", "code-teacher", "url"), "file:///tmp/provider"),
         (("targets", "code-teacher", "url"), "http://user:secret@localhost"),
@@ -411,6 +436,7 @@ def replaced_scenario(snapshot: RoutingSnapshot, scenario: RoutingScenario, vers
         ),
         lambda snapshot: replaced_scenario(snapshot, snapshot.scenarios["code-opd"], "old-snapshot"),
         lambda snapshot: RoutingSnapshot("code-student", snapshot.targets, snapshot.scenarios, snapshot.version),
+        lambda snapshot: replace(snapshot, semantic_router_image="example/router:latest"),
         # The three decision reasons and what each one implies.
         lambda snapshot: automatic(snapshot, reason="explicit_pin", original_selector="code-student"),
         lambda snapshot: automatic(snapshot, router_config_hash=None),

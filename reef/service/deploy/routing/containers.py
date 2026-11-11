@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -12,11 +13,12 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,55 @@ from reef.storage.durable_files import fsync_dir
 
 # Supported upstream source revision, shipped in wheels without requiring a Git checkout.
 SEMANTIC_ROUTER_REVISION = "c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59"
+#: The build context of the router image: Docker fetches this exact commit itself, so no checkout is needed.
+SEMANTIC_ROUTER_BUILD_CONTEXT = f"https://github.com/vllm-project/semantic-router.git#{SEMANTIC_ROUTER_REVISION}"
+SEMANTIC_ROUTER_DOCKERFILE = "src/vllm-sr/Dockerfile"
+REVISION_LABEL = "org.opencontainers.image.revision"
+#: The label of an image that Reef built: the build recipe it was built with.
+BUILD_RECIPE_LABEL = "io.reef.semantic-router.build"
+IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+#: One image inspection returns the image's ID and labels together, as one JSON object.
+IMAGE_IDENTITY_FORMAT = '{"id": {{json .Id}}, "labels": {{json .Config.Labels}}}'
+#: The build metadata's digests of the built image: Docker's classic image store names a local image by its config
+#: digest, the containerd image store by its image (manifest) digest.
+BUILD_CONFIG_DIGEST_KEY = "containerimage.config.digest"
+BUILD_IMAGE_DIGEST_KEY = "containerimage.digest"
+
+
+def image_build_arguments(metadata_file: str, recipe: str, tag: str) -> list[str]:
+    """The ``docker`` arguments that build the router image from the pinned commit and load it into the daemon.
+
+    The build writes its result metadata, with the image's config and image digests, to ``metadata_file`` and
+    labels the image with the pinned revision and ``recipe``; ``tag`` names it. No build argument, secret or
+    registry push is part of it.
+    """
+    return [
+        "buildx",
+        "build",
+        "--load",
+        "--progress",
+        "plain",
+        "--metadata-file",
+        metadata_file,
+        "-f",
+        SEMANTIC_ROUTER_DOCKERFILE,
+        "--label",
+        f"{REVISION_LABEL}={SEMANTIC_ROUTER_REVISION}",
+        "--label",
+        f"{BUILD_RECIPE_LABEL}={recipe}",
+        "-t",
+        tag,
+        SEMANTIC_ROUTER_BUILD_CONTEXT,
+    ]
+
+
+#: Names how Reef builds the image: the hash of the build's arguments, source included, with placeholders for the
+#: per-build metadata file, the recipe and the tag. A changed build gets another recipe and cache tag.
+IMAGE_BUILD_RECIPE = hashlib.sha256(
+    json.dumps(image_build_arguments("{metadata_file}", "{recipe}", "{tag}")).encode()
+).hexdigest()[:16]
+#: The tag of the image that Reef built with this recipe, which later startups reuse.
+IMAGE_CACHE_TAG = f"reef-semantic-router:{SEMANTIC_ROUTER_REVISION[:12]}-{IMAGE_BUILD_RECIPE}"
 
 
 class ContainerCommandError(RuntimeError):
@@ -132,10 +183,11 @@ class ContainerRuntime(ABC):
     """Local container operations for one deployment owner, each limited to resources it owns.
 
     ``compose_environment`` holds the private values later Compose commands receive; ``use_environment``
-    replaces it with a copy. Its values never appear in arguments or files. ``inspect`` returns every
-    resource the ownership labels match and refuses a foreign one; ``start`` and ``remove`` change only
-    owned resources; ``events`` returns a new stream that the caller owns. One runtime serves one owner,
-    because its environment is mutable.
+    replaces it with a copy. Its values never appear in arguments or files, and an image build never gets
+    them. ``inspect`` returns every resource the ownership labels match and refuses a foreign one; ``start``
+    and ``remove`` change only owned resources; ``events`` returns a new stream that the caller owns.
+    ``resolve_image`` creates no container or network. One runtime serves one owner, because its environment
+    is mutable.
     """
 
     #: Variables Compose substitutes into containers, such as the router management token.
@@ -148,6 +200,20 @@ class ContainerRuntime(ABC):
     @abstractmethod
     def ensure_available(self) -> None:
         """Validate local daemon access and Compose availability."""
+
+    @abstractmethod
+    def resolve_image(self, build_log: Path, timeout_seconds: float, stop_requested: Callable[[], bool]) -> str:
+        """The local ID (``sha256:<hex>``) of the router image that this Reef version builds.
+
+        A cached image is reused when its labels name the pinned revision and ``IMAGE_BUILD_RECIPE``. Without
+        one, the image is built, for at most ``timeout_seconds``, with its progress in the private file
+        ``build_log``; ``stop_requested`` is polled meanwhile and stops the build when it returns true.
+
+        Raises:
+            ContainerCommandError: Docker failed, the cached image has other labels, or the build failed or
+                timed out. The message never holds build output.
+            InterruptedError: ``stop_requested`` stopped the build.
+        """
 
     @abstractmethod
     def start(self, compose_file: Path, ownership: DeploymentOwnership, timeout_seconds: float) -> None:
@@ -172,12 +238,13 @@ class GuardedCommand:
     Values: ``command`` is a non-empty sequence of strings, not itself a string or bytes, whose first item
     (the executable) is non-empty; later arguments may be empty. ``timeout_seconds`` is a finite positive
     number. Both are checked before any pipe or process exists. If the guard cannot be spawned, both ends
-    of the owner pipe are closed before the error propagates.
+    of the owner pipe are closed before the error propagates. ``output`` is None, or an open file descriptor
+    that receives the CLI's stdout and stderr instead of pipes; the caller keeps and closes it.
     State: ``process`` is the guard (``command_runner.py``), leader of a new process group that also holds
     the CLI and its descendants. ``owner_descriptor`` is the write end of the guard's owner pipe while this
     object holds it, and None once released. ``release_owner`` closes it at most once, from any thread, and
     makes the guard stop the group; ``close`` also waits for the guard and kills the group if the guard does
-    not exit. The caller reads and closes the guard's stdout and stderr.
+    not exit. Without ``output``, the caller reads and closes the guard's stdout and stderr.
     """
 
     def __init__(
@@ -187,6 +254,7 @@ class GuardedCommand:
         *,
         discard_stderr: bool = False,
         environment: Mapping[str, str] | None = None,
+        output: int | None = None,
     ) -> None:
         if (
             isinstance(command, (str, bytes))
@@ -203,6 +271,13 @@ class GuardedCommand:
             or timeout_seconds <= 0
         ):
             raise ValueError("a guarded command needs a finite positive timeout")
+        if output is not None and (isinstance(output, bool) or not isinstance(output, int) or output < 0):
+            raise ValueError("a guarded command's output must be an open file descriptor")
+        if output is None:
+            stdout: int = subprocess.PIPE
+            stderr: int = subprocess.DEVNULL if discard_stderr else subprocess.PIPE
+        else:
+            stdout, stderr = output, subprocess.STDOUT
         self.owner_lock = threading.Lock()
         read_descriptor, write_descriptor = os.pipe()
         self.owner_descriptor: int | None = write_descriptor
@@ -216,8 +291,8 @@ class GuardedCommand:
                     *command,
                 ],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL if discard_stderr else subprocess.PIPE,
+                stdout=stdout,
+                stderr=stderr,
                 pass_fds=(read_descriptor,),
                 start_new_session=True,
                 # Secret values reach Compose through its environment, never its arguments.
@@ -328,7 +403,9 @@ class DockerComposeRuntime(ContainerRuntime):
     ``docker_command`` is a non-empty executable name or path. Making the runtime starts nothing.
     ``run(arguments)`` returns the CLI's UTF-8 stdout or raises ``ContainerCommandError``, whose outcome is
     unknown for a mutation. ``mutate`` writes a marker file before a mutation and removes it only after the
-    mutation succeeds; while it exists, ``start`` refuses, until ``acknowledge_unknown`` clears it.
+    mutation succeeds; while it exists, ``start`` refuses, until ``acknowledge_unknown`` clears it. An image
+    build is no mutation of owned resources: it writes no marker, and stopping it can leave at most a built,
+    labeled image that a later startup checks before it reuses it.
     """
 
     def __init__(self, docker_command: str = "docker") -> None:
@@ -377,6 +454,142 @@ class DockerComposeRuntime(ContainerRuntime):
             raise ContainerCommandError("managed routing requires a local unix:// Docker daemon")
         self.run(["info", "--format", "{{.ServerVersion}}"])
         self.run(["compose", "version", "--short"])
+
+    def resolve_image(self, build_log: Path, timeout_seconds: float, stop_requested: Callable[[], bool]) -> str:
+        # A successful listing, not a failed inspection, shows that no image has the tag: an inspection fails
+        # for daemon and permission errors too.
+        listed = self.run(["image", "ls", "--quiet", "--no-trunc", "--filter", f"reference={IMAGE_CACHE_TAG}"])
+        if listed.strip():
+            return self.checked_image(IMAGE_CACHE_TAG, None)
+        try:
+            self.run(["buildx", "version"])
+        except ContainerCommandError as exc:
+            raise ContainerCommandError(
+                "building the Semantic Router image needs Docker Buildx, and `docker buildx version` failed"
+            ) from exc
+        image_id = self.built_image_id(self.build_image(build_log, timeout_seconds, stop_requested), build_log)
+        return self.checked_image(image_id, image_id)
+
+    def built_image_id(self, digests: frozenset[str], build_log: Path) -> str:
+        """The local ID of the image that a build loaded: the one of its ``digests`` that names a local image.
+
+        A complete listing of local image IDs separates an absent image from a failed daemon. The shared cache tag
+        is never read, since another startup's build may have moved it.
+
+        Raises:
+            ContainerCommandError: The listing failed or is malformed, or none or more than one of ``digests``
+                names a local image.
+        """
+        local_ids = set(self.run(["image", "ls", "--all", "--quiet", "--no-trunc"]).split())
+        if not all(IMAGE_ID.fullmatch(local_id) for local_id in local_ids):
+            raise ContainerCommandError("invalid Docker image listing")
+        found = sorted(digests & local_ids)
+        if not found:
+            raise ContainerCommandError(
+                f"the Semantic Router image build succeeded, but no local image has its digests; see {build_log}"
+            )
+        if len(found) > 1:
+            raise ContainerCommandError(
+                "both the config digest and the image digest of the Semantic Router image build name local "
+                f"images, so Reef cannot tell which one the build loaded; see {build_log}"
+            )
+        return found[0]
+
+    def checked_image(self, reference: str, built_id: str | None) -> str:
+        """The ID of image ``reference`` once one inspection shows the pinned revision and this build recipe.
+
+        ``built_id`` is None for a cached image, else the local ID of this build's image, which it must have.
+
+        Raises:
+            ContainerCommandError: The inspection failed or is malformed, or the image has another ID or labels.
+        """
+        try:
+            identity = json.loads(self.run(["image", "inspect", "--format", IMAGE_IDENTITY_FORMAT, reference]))
+        except json.JSONDecodeError:
+            raise ContainerCommandError("invalid Docker image identity") from None
+        image_id = identity.get("id") if isinstance(identity, dict) else None
+        labels = identity.get("labels") if isinstance(identity, dict) else None
+        if not isinstance(image_id, str) or not IMAGE_ID.fullmatch(image_id) or not isinstance(labels, dict | None):
+            raise ContainerCommandError("invalid Docker image identity")
+        if built_id is not None and image_id != built_id:
+            raise ContainerCommandError("the built Semantic Router image does not have the ID that its build reported")
+        labels = labels or {}
+        if (
+            labels.get(REVISION_LABEL) != SEMANTIC_ROUTER_REVISION
+            or labels.get(BUILD_RECIPE_LABEL) != IMAGE_BUILD_RECIPE
+        ):
+            raise ContainerCommandError(
+                f"image {reference} does not carry this Reef version's source revision and build recipe labels; "
+                f"Reef does not replace it. Remove it with `docker image rm {reference}` and start again"
+            )
+        return image_id
+
+    def build_image(
+        self, build_log: Path, timeout_seconds: float, stop_requested: Callable[[], bool]
+    ) -> frozenset[str]:
+        """Build the router image and return the digests that its private metadata file holds.
+
+        The image digest is required; the config digest is optional for older Docker exporters. Each present
+        digest is ``sha256:<64 hex>``; one is the image's local ID (``built_image_id``). The build gets the owner's
+        environment, never ``compose_environment``. Its plain progress goes to ``build_log``, created with mode
+        0600 (it can still show Docker or proxy details); errors name the file.
+
+        Raises:
+            ContainerCommandError: The build could not start, failed, timed out or wrote no valid digests.
+            InterruptedError: ``stop_requested`` returned true; the build's process group was stopped.
+        """
+        # A private directory (mode 0700) for the metadata file, which the build itself writes.
+        with tempfile.TemporaryDirectory(prefix="reef-sr-build-") as temporary:
+            metadata_file = Path(temporary) / "metadata.json"
+            arguments = image_build_arguments(str(metadata_file), IMAGE_BUILD_RECIPE, IMAGE_CACHE_TAG)
+            try:
+                log = os.open(build_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            except OSError as exc:
+                raise ContainerCommandError(f"cannot write the image build log {build_log}: {exc.strerror}") from None
+            try:
+                os.fchmod(log, 0o600)
+                command = GuardedCommand([self.docker_command, *arguments], timeout_seconds, output=log)
+            except OSError as exc:
+                raise ContainerCommandError("could not start the Docker image build") from exc
+            finally:
+                os.close(log)
+            started = time.monotonic()
+            try:
+                deadline = started + timeout_seconds + 5
+                while command.process.poll() is None:
+                    if stop_requested():
+                        raise InterruptedError("the Semantic Router image build was stopped")
+                    if time.monotonic() >= deadline:
+                        raise ContainerCommandError(f"the Semantic Router image build did not end; see {build_log}")
+                    time.sleep(0.2)
+            finally:
+                # Ends the build's whole process group unless it already exited.
+                command.close()
+            if command.process.returncode != 0:
+                # At its timeout the guard kills the build's process group, itself included.
+                if time.monotonic() - started >= timeout_seconds:
+                    raise ContainerCommandError(
+                        f"the Semantic Router image build did not finish within {timeout_seconds} seconds "
+                        f"(reef.routing_deployment.image_build_timeout_seconds); see {build_log}"
+                    )
+                raise ContainerCommandError(
+                    f"the Semantic Router image build failed with status {command.process.returncode}; see {build_log}"
+                )
+            try:
+                metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError, RecursionError):
+                metadata = None
+        values = [metadata.get(BUILD_IMAGE_DIGEST_KEY)] if isinstance(metadata, dict) else [None]
+        if isinstance(metadata, dict) and BUILD_CONFIG_DIGEST_KEY in metadata:
+            values.append(metadata[BUILD_CONFIG_DIGEST_KEY])
+        digests: set[str] = set()
+        for value in values:
+            if not isinstance(value, str) or not IMAGE_ID.fullmatch(value):
+                raise ContainerCommandError(
+                    f"the Semantic Router image build wrote no valid image digests to its metadata; see {build_log}"
+                )
+            digests.add(value)
+        return frozenset(digests)
 
     def inspect(self, ownership: DeploymentOwnership, timeout_seconds: float = 5) -> ContainerInventory:
         deadline = time.monotonic() + timeout_seconds

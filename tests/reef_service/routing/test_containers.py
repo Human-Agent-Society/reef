@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -19,6 +21,12 @@ import yaml
 from tests.reef_service.routing.routing_fakes import routing_manifest
 
 from reef.service.deploy.routing.containers import (
+    BUILD_RECIPE_LABEL,
+    IMAGE_BUILD_RECIPE,
+    IMAGE_CACHE_TAG,
+    IMAGE_IDENTITY_FORMAT,
+    REVISION_LABEL,
+    SEMANTIC_ROUTER_BUILD_CONTEXT,
     SEMANTIC_ROUTER_REVISION,
     ContainerCommandError,
     ContainerEvent,
@@ -27,9 +35,15 @@ from reef.service.deploy.routing.containers import (
     DockerComposeRuntime,
     DockerEventStream,
     GuardedCommand,
+    image_build_arguments,
 )
 from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
-from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
+from reef.service.deploy.routing.renderer import (
+    MANAGEMENT_TOKEN_ENV,
+    SELECTION_TOKEN_ENV,
+    ManagedRoutingRender,
+    generate,
+)
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 
 pytestmark = pytest.mark.unit
@@ -268,6 +282,341 @@ def test_image_inspection_failure_never_submits_container_creation(
     assert "secret-marker" not in str(error.value)
     assert not any(command[0] == "compose" for command in runtime.commands)
     assert not runtime.mutation_pending(ownership)
+
+
+#: A ``docker`` for the image tests. It answers from ``docker-state.json`` beside it and logs each call, with the
+#: names of the router token variables it received, to ``docker-calls.jsonl``. ``image ls`` lists ``listed`` for a
+#: tag lookup and ``inventory`` for ``--all``; either fails as the daemon would when ``listing_fails`` or
+#: ``inventory_fails`` says. A build records its PID and the mode of its metadata file's directory, prints progress
+#: to stdout and stderr, then hangs, fails or writes ``metadata`` (a JSON object, raw text, or nothing for None) as
+#: ``build`` says.
+FAKE_DOCKER_PROGRAM = """
+import json, os, sys, time
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+state = json.loads((here / "docker-state.json").read_text())
+arguments = sys.argv[1:]
+tokens = sorted(name for name in os.environ if name.startswith("REEF_SR_"))
+with (here / "docker-calls.jsonl").open("a") as calls:
+    calls.write(json.dumps({"arguments": arguments, "tokens": tokens}) + "\\n")
+if arguments[:2] == ["image", "ls"]:
+    inventory = "--all" in arguments
+    if state["inventory_fails" if inventory else "listing_fails"]:
+        print("Cannot connect to the Docker daemon", file=sys.stderr)
+        sys.exit(1)
+    print("\\n".join(state["inventory" if inventory else "listed"]))
+elif arguments[:2] == ["image", "inspect"]:
+    identity = state["images"].get(arguments[-1])
+    if identity is None:
+        print("Error: No such image", file=sys.stderr)
+        sys.exit(1)
+    print(identity if isinstance(identity, str) else json.dumps(identity))
+elif arguments[:2] == ["buildx", "version"]:
+    sys.exit(state["buildx_status"])
+elif arguments[:2] == ["buildx", "build"]:
+    (here / "build.pid").write_text(str(os.getpid()))
+    metadata_file = Path(arguments[arguments.index("--metadata-file") + 1])
+    (here / "metadata-directory-mode").write_text(oct(metadata_file.parent.stat().st_mode & 0o777))
+    print("#1 [internal] load build definition secret-marker", flush=True)
+    print("#1 DONE 0.1s", file=sys.stderr, flush=True)
+    if state["build"] == "hang":
+        time.sleep(60)
+    if state["build"] == "fail":
+        sys.exit(3)
+    metadata = state["metadata"]
+    if metadata is not None:
+        metadata_file.write_text(metadata if isinstance(metadata, str) else json.dumps(metadata))
+else:
+    sys.exit(64)
+"""
+CACHED_ID = "sha256:" + "c" * 64
+#: The digests in a build's metadata. Docker's classic image store names the image by its config digest, the
+#: containerd image store by its manifest digest.
+CONFIG_ID = "sha256:" + "b" * 64
+MANIFEST_ID = "sha256:" + "d" * 64
+#: An image of another startup's build, which the shared cache tag may name meanwhile.
+OTHER_ID = "sha256:" + "9" * 64
+BUILD_METADATA = {
+    "containerimage.config.digest": CONFIG_ID,
+    "containerimage.digest": MANIFEST_ID,
+    "image.name": "secret-marker other metadata is ignored",
+}
+RECIPE_LABELS = {REVISION_LABEL: SEMANTIC_ROUTER_REVISION, BUILD_RECIPE_LABEL: IMAGE_BUILD_RECIPE}
+
+
+def fake_docker(directory: Path, **state: object) -> DockerComposeRuntime:
+    """The real runtime over ``FAKE_DOCKER_PROGRAM`` in ``directory``, with ``state`` over a missing image that a
+    build loads into a classic image store."""
+    directory.mkdir(exist_ok=True)
+    defaults = {
+        "listing_fails": False,
+        "listed": [],
+        "inventory_fails": False,
+        "inventory": [CACHED_ID, CONFIG_ID],
+        "images": {CONFIG_ID: {"id": CONFIG_ID, "labels": RECIPE_LABELS}},
+        "buildx_status": 0,
+        "build": "ok",
+        "metadata": BUILD_METADATA,
+    }
+    (directory / "docker-state.json").write_text(json.dumps({**defaults, **state}))
+    executable = directory / "docker"
+    executable.write_text(f"#!{sys.executable}\n{FAKE_DOCKER_PROGRAM}")
+    executable.chmod(0o700)
+    return DockerComposeRuntime(str(executable))
+
+
+def docker_calls(directory: Path) -> list[dict[str, list[str]]]:
+    path = directory / "docker-calls.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def never_stop() -> bool:
+    return False
+
+
+def wait_until_gone(pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
+    pytest.fail("the image build outlived its command")
+
+
+def test_the_build_recipe_and_cache_tag_name_the_pinned_source_and_every_build_option() -> None:
+    assert SEMANTIC_ROUTER_BUILD_CONTEXT == (
+        "https://github.com/vllm-project/semantic-router.git#" + SEMANTIC_ROUTER_REVISION
+    )
+    assert re.fullmatch(r"[0-9a-f]{16}", IMAGE_BUILD_RECIPE)
+    tag = IMAGE_CACHE_TAG
+    assert tag == f"reef-semantic-router:{SEMANTIC_ROUTER_REVISION[:12]}-{IMAGE_BUILD_RECIPE}"
+    # The recipe hashes the build's own arguments, so changing any build option changes the recipe and the tag.
+    template = json.dumps(image_build_arguments("{metadata_file}", "{recipe}", "{tag}")).encode()
+    recipe = IMAGE_BUILD_RECIPE
+    assert recipe == hashlib.sha256(template).hexdigest()[:16]
+
+
+def test_a_cached_image_with_this_recipes_labels_is_used_without_a_build(tmp_path: Path) -> None:
+    docker = tmp_path / "docker"
+    identity = {"id": CACHED_ID, "labels": {**RECIPE_LABELS, "maintainer": "other labels stay allowed"}}
+    runtime = fake_docker(docker, listed=[CACHED_ID], images={IMAGE_CACHE_TAG: identity})
+    log = tmp_path / "build.log"
+    assert runtime.resolve_image(log, 30, never_stop) == CACHED_ID
+    # One listing and one inspection that returns the ID and labels together; no Buildx, Git or network.
+    assert [call["arguments"] for call in docker_calls(docker)] == [
+        ["image", "ls", "--quiet", "--no-trunc", "--filter", f"reference={IMAGE_CACHE_TAG}"],
+        ["image", "inspect", "--format", IMAGE_IDENTITY_FORMAT, IMAGE_CACHE_TAG],
+    ]
+    assert not log.exists()
+
+
+@pytest.mark.parametrize(
+    ("store", "metadata"),
+    [
+        ("classic", BUILD_METADATA),
+        ("containerd", BUILD_METADATA),
+        ("legacy_classic", {"containerimage.digest": CONFIG_ID}),
+    ],
+    ids=["classic", "containerd", "legacy_classic"],
+)
+def test_a_missing_image_is_built_from_the_pinned_commit_and_bound_to_its_own_local_id(
+    tmp_path: Path, store: str, metadata: dict[str, str]
+) -> None:
+    docker = tmp_path / "docker"
+    # The classic image store names the built image by its config digest; the containerd image store by its
+    # manifest digest, and there the config digest names no image. Meanwhile another startup's build moved the
+    # shared cache tag to its own image, which stays local: this build never reads the tag.
+    # Older classic exporters emit only containerimage.digest, containing the config ID.
+    built = MANIFEST_ID if store == "containerd" else CONFIG_ID
+    images = {
+        built: {"id": built, "labels": RECIPE_LABELS},
+        OTHER_ID: {"id": OTHER_ID, "labels": RECIPE_LABELS},
+        IMAGE_CACHE_TAG: {"id": OTHER_ID, "labels": RECIPE_LABELS},
+    }
+    runtime = fake_docker(docker, inventory=[CACHED_ID, OTHER_ID, built, built], images=images, metadata=metadata)
+    runtime.use_environment({MANAGEMENT_TOKEN_ENV: "management-secret", SELECTION_TOKEN_ENV: "selection-secret"})
+    log = tmp_path / "build.log"
+    assert runtime.resolve_image(log, 30, never_stop) == built
+    calls = docker_calls(docker)
+    assert [call["arguments"][:2] for call in calls] == [
+        ["image", "ls"],
+        ["buildx", "version"],
+        ["buildx", "build"],
+        ["image", "ls"],
+        ["image", "inspect"],
+    ]
+    build = calls[2]["arguments"]
+    metadata_file = build[build.index("--metadata-file") + 1]
+    assert build == [
+        "buildx",
+        "build",
+        "--load",
+        "--progress",
+        "plain",
+        "--metadata-file",
+        metadata_file,
+        "-f",
+        "src/vllm-sr/Dockerfile",
+        "--label",
+        f"org.opencontainers.image.revision={SEMANTIC_ROUTER_REVISION}",
+        "--label",
+        f"io.reef.semantic-router.build={IMAGE_BUILD_RECIPE}",
+        "-t",
+        IMAGE_CACHE_TAG,
+        f"https://github.com/vllm-project/semantic-router.git#{SEMANTIC_ROUTER_REVISION}",
+    ]
+    # The router tokens never reach the build, and its metadata file was private and is gone.
+    assert calls[2]["tokens"] == []
+    assert (docker / "metadata-directory-mode").read_text() == "0o700"
+    assert not Path(metadata_file).parent.exists()
+    # A complete listing of local image IDs finds the build's own ID, which one inspection then checks.
+    assert calls[3]["arguments"] == ["image", "ls", "--all", "--quiet", "--no-trunc"]
+    assert calls[4]["arguments"] == ["image", "inspect", "--format", IMAGE_IDENTITY_FORMAT, built]
+    # Plain progress from both streams, in a log only its owner can read.
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    assert "load build definition" in log.read_text() and "#1 DONE" in log.read_text()
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        (
+            {
+                "listed": [CACHED_ID],
+                "images": {IMAGE_CACHE_TAG: {"id": CACHED_ID, "labels": {**RECIPE_LABELS, REVISION_LABEL: "f" * 40}}},
+            },
+            "does not carry",
+        ),
+        (
+            {
+                "listed": [CACHED_ID],
+                "images": {
+                    IMAGE_CACHE_TAG: {"id": CACHED_ID, "labels": {**RECIPE_LABELS, BUILD_RECIPE_LABEL: "0" * 16}}
+                },
+            },
+            "does not carry",
+        ),
+        ({"listed": [CACHED_ID], "images": {IMAGE_CACHE_TAG: {"id": CACHED_ID, "labels": None}}}, "does not carry"),
+        (
+            {"listed": [CACHED_ID], "images": {IMAGE_CACHE_TAG: "secret-marker not JSON"}},
+            "invalid Docker image identity",
+        ),
+        ({"listed": [CACHED_ID], "images": {IMAGE_CACHE_TAG: {"id": "abc", "labels": RECIPE_LABELS}}}, "invalid"),
+        ({"images": {CONFIG_ID: {"id": OTHER_ID, "labels": RECIPE_LABELS}}}, "does not have the ID"),
+        ({"images": {CONFIG_ID: {"id": CONFIG_ID, "labels": {}}}}, "does not carry"),
+        ({"metadata": None}, "no valid image digests"),
+        ({"metadata": "secret-marker {"}, "no valid image digests"),
+        ({"metadata": "[]"}, "no valid image digests"),
+        ({"metadata": {"containerimage.config.digest": CONFIG_ID}}, "no valid image digests"),
+        ({"metadata": {**BUILD_METADATA, "containerimage.config.digest": "sha256:abc"}}, "no valid image digests"),
+        ({"metadata": {**BUILD_METADATA, "containerimage.digest": None}}, "no valid image digests"),
+        ({"inventory": [CACHED_ID, OTHER_ID]}, "no local image has its digests"),
+        ({"inventory": []}, "no local image has its digests"),
+        ({"inventory": [CONFIG_ID, MANIFEST_ID]}, "cannot tell which one"),
+        ({"inventory": [CONFIG_ID, "secret-marker"]}, "invalid Docker image listing"),
+    ],
+    ids=[
+        "cached_other_revision",
+        "cached_other_recipe",
+        "cached_without_labels",
+        "cached_malformed_inspection",
+        "cached_malformed_id",
+        "built_other_id",
+        "built_without_labels",
+        "metadata_missing",
+        "metadata_not_json",
+        "metadata_not_an_object",
+        "metadata_without_image_digest",
+        "metadata_with_malformed_config_digest",
+        "metadata_with_null_image_digest",
+        "built_but_no_local_image_has_its_digests",
+        "built_but_no_local_images",
+        "both_digests_name_local_images",
+        "malformed_inventory",
+    ],
+)
+def test_an_image_without_this_recipes_identity_is_refused_and_never_replaced(
+    tmp_path: Path, state: dict[str, object], message: str
+) -> None:
+    docker = tmp_path / "docker"
+    runtime = fake_docker(docker, **state)
+    with pytest.raises(ContainerCommandError, match=message) as error:
+        runtime.resolve_image(tmp_path / "build.log", 30, never_stop)
+    assert "secret-marker" not in str(error.value)
+    calls = [call["arguments"] for call in docker_calls(docker)]
+    builds = [arguments for arguments in calls if arguments[:2] == ["buildx", "build"]]
+    # A cached image that does not match is refused, not rebuilt over.
+    assert len(builds) == (0 if state.get("listed") else 1)
+    if builds:
+        # A build's image is found by its own digests only, never by the shared cache tag.
+        assert ["image", "inspect", "--format", IMAGE_IDENTITY_FORMAT, IMAGE_CACHE_TAG] not in calls
+
+
+def test_a_failed_inventory_after_a_build_is_a_daemon_failure_not_a_missing_image(tmp_path: Path) -> None:
+    docker = tmp_path / "docker"
+    runtime = fake_docker(docker, inventory_fails=True)
+    with pytest.raises(ContainerCommandError, match="Docker image failed with status 1") as error:
+        runtime.resolve_image(tmp_path / "build.log", 30, never_stop)
+    assert "no local image" not in str(error.value)
+    # Nothing is inspected, by digest or tag, and nothing is built again.
+    calls = [call["arguments"][:2] for call in docker_calls(docker)]
+    assert calls == [["image", "ls"], ["buildx", "version"], ["buildx", "build"], ["image", "ls"]]
+
+
+@pytest.mark.parametrize(
+    ("state", "message"), [({"listing_fails": True}, "Docker image failed"), ({"buildx_status": 1}, "Buildx")]
+)
+def test_a_failed_listing_is_not_a_missing_image_and_a_build_needs_buildx(
+    tmp_path: Path, state: dict[str, object], message: str
+) -> None:
+    docker = tmp_path / "docker"
+    runtime = fake_docker(docker, **state)
+    with pytest.raises(ContainerCommandError, match=message):
+        runtime.resolve_image(tmp_path / "build.log", 30, never_stop)
+    assert not any(call["arguments"][:2] == ["buildx", "build"] for call in docker_calls(docker))
+    assert not (tmp_path / "build.log").exists()
+
+
+@pytest.mark.parametrize(
+    ("build", "timeout_seconds", "outcome"),
+    [("fail", 30, "failed with status 3"), ("hang", 1.5, "did not finish within 1.5 seconds")],
+)
+def test_a_failed_or_timed_out_build_names_its_log_and_never_echoes_its_output(
+    tmp_path: Path, build: str, timeout_seconds: float, outcome: str
+) -> None:
+    docker = tmp_path / "docker"
+    runtime = fake_docker(docker, build=build)
+    log = tmp_path / "build.log"
+    started = time.monotonic()
+    with pytest.raises(ContainerCommandError) as error:
+        runtime.resolve_image(log, timeout_seconds, never_stop)
+    assert time.monotonic() - started < 15
+    assert outcome in str(error.value) and str(log) in str(error.value)
+    assert "secret-marker" not in str(error.value) and "secret-marker" in log.read_text()
+    wait_until_gone(int((docker / "build.pid").read_text()))
+    # No image was inspected or Compose command run after the failed build.
+    assert [call["arguments"][:2] for call in docker_calls(docker)][-1] == ["buildx", "build"]
+
+
+def test_a_stop_request_ends_the_build_and_its_process_group(tmp_path: Path) -> None:
+    docker = tmp_path / "docker"
+    runtime = fake_docker(docker, build="hang")
+    started = time.monotonic()
+    with pytest.raises(InterruptedError):
+        runtime.resolve_image(tmp_path / "build.log", 60, lambda: (docker / "build.pid").exists())
+    assert time.monotonic() - started < 15
+    wait_until_gone(int((docker / "build.pid").read_text()))
+    assert [call["arguments"][:2] for call in docker_calls(docker)][-1] == ["buildx", "build"]
+
+
+@pytest.mark.parametrize("output", [-1, True, 1.5])
+def test_a_command_output_must_be_an_open_descriptor(monkeypatch: pytest.MonkeyPatch, output: object) -> None:
+    monkeypatch.setattr(os, "pipe", lambda: pytest.fail("a malformed output allocated a pipe"))
+    with pytest.raises(ValueError, match="descriptor"):
+        GuardedCommand([sys.executable], 1, output=output)  # type: ignore[arg-type]
 
 
 def test_unknown_mutation_never_echoes_command_output() -> None:

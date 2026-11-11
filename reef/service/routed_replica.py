@@ -20,13 +20,13 @@ from reef.core.records_types import AgentRecord
 from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
 from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError
-from reef.service.deploy.routing.renderer import MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
+from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.inference_service import ServedModelsCache
 from reef.service.lifecycle import PendingWrites
 from reef.service.routed_inference import InferenceRetryPolicy, RoutedInference, RoutedRecords, RoutedScenario
 from reef.service.routes.routed_chat import serve_routed_chat
-from reef.service.routing import RoutingAdapter, RoutingRequestError, is_router_config_hash
+from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, is_router_config_hash
 from reef.service.routing_preview import PreviewSettings, RoutingPreviewClient
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.scenario import ScenarioStorage
@@ -132,7 +132,8 @@ def add_replica_routing(
     """Serve the Scenarios of ``settings.routing_manifest`` through their router on ``app``, and add ``/readyz``.
 
     Raise ``ValueError`` when the deployment cannot route: no service token, a recipe other than the base record-only
-    Recipe, an invalid manifest, or a missing router token or provider credential.
+    Recipe, an invalid manifest or one that does not name its router image (Reef builds an image only for a managed
+    deployment), or a missing router token or provider credential.
     """
     if settings.routing_manifest is None:
         raise ValueError("replica routing requires reef.routing_manifest")
@@ -147,8 +148,11 @@ def add_replica_routing(
     policy = settings.routing_deployment
     if settings.port == policy.sr_management_port:
         raise ValueError("reef.port must differ from routing sr_management_port")
-    routing = RoutingAdapter.from_manifest(
-        settings.routing_manifest, router_config_hash=None, environ=environment, timeout_s=settings.inference_timeout_s
+    snapshot = RoutingSnapshot.load(settings.routing_manifest)
+    if snapshot.semantic_router_image is None:
+        raise ValueError(EXTERNAL_IMAGE_MESSAGE)
+    routing = RoutingAdapter.from_snapshot(
+        snapshot, router_config_hash=None, credential_environment=environment, timeout_s=settings.inference_timeout_s
     )
     preview = RoutingPreviewClient(
         PreviewSettings(

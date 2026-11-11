@@ -93,6 +93,16 @@ def test_semantic_router_runtime_revision_imports_without_git(tmp_path: Path) ->
     assert re.fullmatch(r"[0-9a-f]{40}", SEMANTIC_ROUTER_REVISION)
 
 
+def test_the_router_image_builds_from_the_pinned_remote_commit_without_a_local_source_tree() -> None:
+    from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_BUILD_CONTEXT, SEMANTIC_ROUTER_REVISION
+
+    # Docker fetches the exact commit itself; no branch, tag or checkout in this repository stands in for it.
+    assert SEMANTIC_ROUTER_BUILD_CONTEXT == "https://github.com/vllm-project/semantic-router.git#" + (
+        SEMANTIC_ROUTER_REVISION
+    )
+    assert "semantic-router" not in (REPO_ROOT / ".gitmodules").read_text(encoding="utf-8")
+
+
 def test_infra_never_imports_a_method_package() -> None:
     # The whole of reef is the machinery the method packages build on,
     # never the reverse. Dotted recipe references import cookbook code only

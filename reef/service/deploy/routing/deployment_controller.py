@@ -56,7 +56,10 @@ from reef.service.deploy.routing.renderer import (
     MANAGEMENT_TOKEN_ENV,
     SELECTION_TOKEN_ENV,
     ManagedRoutingRender,
+    check_domain_classifier,
     generate,
+    router_configuration,
+    write_private_document,
 )
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
@@ -72,6 +75,8 @@ OPEN_REPLY_ALLOWANCE_SECONDS = 5.0
 #: The router's activation states (``pkg/apiserver/config_activation.go`` at the pinned commit).
 ACTIVATION_ACTIVE = "active"
 ACTIVATION_FAILED = "failed"
+#: The private log of the latest router image build, in the deployment's registry directory.
+IMAGE_BUILD_LOG = "semantic-router-build.log"
 
 
 class RoutingDeploymentError(RuntimeError):
@@ -93,10 +98,14 @@ class RoutingDeploymentController:
     only set stop intent. No monitor thread may mutate the container deployment. The startup future is joined
     before cleanup.
 
-    A new controller is not prepared: ``ownership``, ``control``, ``management`` and ``event_stream`` are
-    None, ``snapshot_version`` is empty and ``directory`` is a placeholder. ``prepare`` fills all but
-    ``event_stream`` for one new generation. ``begin_start`` subscribes ``event_stream``. Restoring lost
-    observation and recovery replace it, and shutdown closes it.
+    A new controller is not prepared: ``ownership``, ``control``, ``management``, ``event_stream`` and
+    ``semantic_router_image`` are None, ``snapshot_version`` is empty and ``directory`` is a placeholder.
+    ``prepare`` fills all but ``event_stream`` for one new generation. ``semantic_router_image`` is the image
+    the generation runs: the startup manifest's, or the one ``prepare`` resolved, under the registry lock and
+    before any token or resource exists, when that manifest omits it. Every render of the generation uses it
+    for a source that omits the image, so a policy update never resolves or builds one, and recovery reuses
+    the frozen Compose file. ``begin_start`` subscribes ``event_stream``. Restoring lost observation and
+    recovery replace it, and shutdown closes it.
 
     ``state`` is ``"new"`` or the last state given to ``event``, except the diagnostics ``policy_rejected``,
     ``policy_unchanged`` and ``status_timeout``, which leave it unchanged. The other states are ``prepared``,
@@ -120,6 +129,7 @@ class RoutingDeploymentController:
         self.runtime = runtime
         self.registry = DeploymentRegistry(policy.require_identity(), root=registry_root)
         self.ownership: DeploymentOwnership | None = None
+        self.semantic_router_image: str | None = None
         self.snapshot_version = ""
         self.directory = Path()
         #: Short private directory holding the child's control socket, outside long state paths.
@@ -180,24 +190,60 @@ class RoutingDeploymentController:
         return generate(
             source,
             output,
-            ManagedRoutingRender(self.policy, ownership.deployment_id, ownership.owner_id, ownership.generation),
+            ManagedRoutingRender(
+                self.policy,
+                ownership.deployment_id,
+                ownership.owner_id,
+                ownership.generation,
+                self.semantic_router_image,
+            ),
         )
 
     def prepare(self) -> None:
+        """Make one new generation ready to start.
+
+        The startup manifest is read once, under the registry lock, and that document is both the one whose
+        image is decided and the one the generation renders: a change to the file during a long build reaches
+        the deployment only as a later policy update. A manifest that omits the router image gets the image
+        ``ContainerRuntime.resolve_image`` resolves, building it if no cached one exists. That happens before
+        the previous generation's resources are removed and before any router token exists, so the build never
+        receives one. A stop requested by then makes ``prepare`` return at once, before it creates or removes
+        anything; the caller checks ``stop_requested`` and does not start.
+        """
         if sys.platform != "linux":
             raise ValueError("managed routing requires a local Linux Docker host")
         self.validate_candidate()
         self.registry.acquire()
         try:
             self.runtime.ensure_available()
+            # Decided under the lock: an interrupted update restarts from its committed pair.
+            source = self.startup_source()
+            try:
+                startup = yaml.safe_load(source.read_text(encoding="utf-8"))
+            except yaml.YAMLError as exc:
+                raise ValueError(f"invalid routing manifest YAML in {source}") from exc
+            image = RoutingSnapshot.from_mapping(startup).semantic_router_image
+            if image is None:
+                try:
+                    image = self.runtime.resolve_image(
+                        self.registry.directory / IMAGE_BUILD_LOG,
+                        self.policy.image_build_timeout_seconds,
+                        lambda: self.stop_requested,
+                    )
+                except InterruptedError:
+                    if not self.stop_requested:
+                        raise
+                    return
+            if self.stop_requested:
+                # The caller stops before any Compose command; no resource was created or removed.
+                return
+            self.semantic_router_image = image
             previous = self.registry.load()
             if previous is not None:
                 self.runtime.remove(previous, self.policy.container_stop_timeout_seconds)
                 remaining = self.runtime.inspect(previous)
                 if remaining.containers or remaining.network_ids:
                     raise RoutingDeploymentError("previous routing generation did not clean up")
-            # Decided under the lock: an interrupted update restarts from its committed pair.
-            source = self.startup_source()
             generation = uuid.uuid4().hex
             self.directory = self.registry.directory / "generations" / generation
             self.directory.mkdir(mode=0o700, parents=True)
@@ -215,7 +261,11 @@ class RoutingDeploymentController:
                 {MANAGEMENT_TOKEN_ENV: management_token, SELECTION_TOKEN_ENV: selection_token}
             )
             self.management = RouterManagementClient(self.policy.sr_management_port, management_token)
-            rendered = self.render(source, self.directory, self.ownership)
+            # The generation renders the document read above, never the file again.
+            with tempfile.TemporaryDirectory(prefix="startup-", dir=self.registry.directory) as temporary:
+                frozen = Path(temporary) / "manifest.yaml"
+                write_private_document(frozen, startup)
+                rendered = self.render(frozen, self.directory, self.ownership)
             self.snapshot_version = rendered.version
             control_token = secrets.token_urlsafe(48)
             control_data = {
@@ -237,7 +287,8 @@ class RoutingDeploymentController:
                 control_token,
                 open_timeout_seconds=self.open_timeout_seconds(rendered),
             )
-            self.event("prepared")
+            # The resolved image and the version it gives the generation; neither is a secret.
+            self.event("prepared", semantic_router_image=image, snapshot_version=rendered.version)
         except BaseException:
             # The caller's finally invokes shutdown while this owner still
             # holds the lock, including partially rendered generations.
@@ -260,18 +311,28 @@ class RoutingDeploymentController:
             + OPEN_REPLY_ALLOWANCE_SECONDS
         )
 
-    def validate_candidate(self) -> str:
-        """Render a candidate privately before any ownership or Docker mutation."""
+    def validate_candidate(self) -> str | None:
+        """Check the candidate privately, without Docker or any ownership change, and return its snapshot version.
+
+        The version is None when the source omits the router image: the version names the image, which only
+        startup resolves. The source, the settings and a domain classifier are checked as a render checks them.
+        """
         settings = self.service_settings
         if settings.routing_manifest is None or not settings.tokens or settings.host != "127.0.0.1":
             raise ValueError("managed routing requires routing_manifest, tokens and reef.host=127.0.0.1")
         if settings.port == self.policy.sr_management_port:
             raise ValueError("reef.port must differ from routing sr_management_port")
+        source = self.startup_source()
+        snapshot = RoutingSnapshot.load(source)
+        if snapshot.semantic_router_image is None:
+            check_domain_classifier(snapshot)
+            router_configuration(snapshot, self.policy)
+            return None
         with tempfile.TemporaryDirectory(prefix="reef-routing-validate-") as temporary:
             directory = Path(temporary)
             directory.chmod(0o700)
             candidate = generate(
-                self.startup_source(),
+                source,
                 directory / "candidate",
                 ManagedRoutingRender(self.policy, self.registry.deployment_id, "validation", "validation"),
             )
