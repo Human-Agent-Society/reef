@@ -7,6 +7,7 @@ implementations may use a database transaction or a recoverable journal.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -45,7 +46,10 @@ class ScenarioSettings:
     the deployment's values (RFC #1097); the scenario registry checks it with the runtime before it stores it.
     ``serves`` is a boolean. When it is true, control asks inference to serve the scenario's active selection and
     the artifacts beside it. When it is false, the scenario serves nothing: control withdraws its routes, and no
-    artifact answers its inference requests. Construction checks these types.
+    artifact answers its inference requests. ``record2sample_config`` maps the name of a component of the scenario
+    to a JSON object. Each key of that object replaces the same key of the deployment's
+    ``pipeline.record2sample.config`` for the trainer of that component. An empty mapping changes no trainer.
+    Construction checks these types, and keeps its own copies of ``record2sample_config``.
 
     Purpose: the scenario registry and the dispatcher write the settings
     through ``ScenarioStorage.write_settings`` and read them back when a
@@ -58,6 +62,7 @@ class ScenarioSettings:
     owner: str | None = None
     serving_config: ServingConfig = field(default_factory=ServingConfig)
     serves: bool = True
+    record2sample_config: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.training_mode is not None and not isinstance(self.training_mode, str):
@@ -72,6 +77,17 @@ class ScenarioSettings:
             raise ValueError("scenario settings serving_config must be a ServingConfig")
         if not isinstance(self.serves, bool):
             raise ValueError("scenario settings serves must be a boolean")
+        configs = self.record2sample_config
+        if not isinstance(configs, Mapping) or not all(
+            isinstance(component, str) and component and isinstance(config, Mapping)
+            for component, config in configs.items()
+        ):
+            raise ValueError("scenario settings record2sample_config maps component names to objects")
+        try:
+            copied = json.loads(json.dumps(configs, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"scenario settings record2sample_config must encode as JSON: {exc}") from exc
+        object.__setattr__(self, "record2sample_config", copied)
 
 
 class ScenarioStore(ABC):
