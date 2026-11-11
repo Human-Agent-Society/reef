@@ -110,6 +110,23 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
         assert finished.to_json()["mean_score"] == 1.0 and failed.to_json()["policy_evaluation"] is None
 
 
+def test_an_ended_evaluation_reopens_and_ends_again(storage):
+    with closing(storage.open("math")) as session:
+        evaluations = session.evaluations
+        evaluations.create(evaluation_id="e1", owner="service-a", request=REQUEST, created_at=10.0)
+        with pytest.raises(EvaluationStateConflict):
+            evaluations.reopen("e1")
+        evaluations.finish("e1", result=RESULT, finished_at=15.0)
+        reopened = evaluations.reopen("e1")
+        assert reopened == StoredEvaluation("e1", "service-a", REQUEST, "running", 10.0)
+        assert evaluations.get("e1") == reopened
+        assert evaluations.fail("e1", error="too many rollouts failed", finished_at=20.0).state == "failed"
+        assert evaluations.reopen("e1").error is None
+        assert evaluations.finish("e1", result=RESULT, finished_at=30.0).finished_at == 30.0
+        with pytest.raises(EvaluationStateConflict):
+            evaluations.reopen("missing")
+
+
 def test_evaluations_survive_a_restart(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         session.evaluations.create(evaluation_id="e1", owner="service-a", request=REQUEST, created_at=10.0)
