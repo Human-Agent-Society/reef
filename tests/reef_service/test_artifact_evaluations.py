@@ -587,11 +587,21 @@ def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_bench
                     {"benchmark": "full", "task_names": ["add", "sort"]},
                 ],
             }
-            for value in (1.0, 0.0):
-                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
-                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            # The progress counts the rollouts of each benchmark while the evaluation runs: "add" ended, "sort" waits.
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            running = (await (await client.get(route, headers=AUTH)).json())["progress"]
+            ended = {"ended": 1, "scored": 1, "failed": 0, "cancelled": 0, "running": 0, "mean_score": 1.0}
+            assert running["benchmarks"] == [
+                {"benchmark": "lite", "total": 1, **ended},
+                {"benchmark": "full", "total": 2, **ended},
+            ]
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(0.0).to_json()})
             answer = await finished(client, accepted["evaluation_id"])
             assert answer["state"] == "finished", answer
+            assert [entry["mean_score"] for entry in answer["progress"]["benchmarks"]] == [1.0, 0.5]
             assert answer["benchmark_scores"] == [
                 {"benchmark": "lite", "task_count": 1, "mean_score": 1.0},
                 {"benchmark": "full", "task_count": 2, "mean_score": 0.5},
@@ -1139,6 +1149,7 @@ def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_report
             # The mean leaves out the failed rollouts.
             assert progress["mean_score"] == 0.5
             assert progress["eta_seconds"] is not None and progress["eta_seconds"] > 0
+            assert progress["benchmarks"] == []
             listed = (await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json())["evaluations"]
             assert listed[0]["progress"] == progress | {"eta_seconds": listed[0]["progress"]["eta_seconds"]}
 
