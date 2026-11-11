@@ -22,7 +22,7 @@ from reef.inference.startup import StartupFailed, StartupStopped, redeploying, r
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app
 from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
-from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import WorkLeaseLost
 
@@ -496,3 +496,114 @@ def test_the_status_gives_the_message_of_a_startup_failure(stoppable, tmp_path):
             )
 
     asyncio.run(run())
+
+
+def stop_all_serving(control, worker, runtime):
+    """Serve scenario ``math``, then stop all its serving; return the artifact and the endpoint that served it."""
+    control.create_scenario("math")
+    runtime.release.set()
+    assert worker.run_once()
+    artifact_id = control.get_or_create_scenario("math").serving_artifact_id()
+    [served] = set(control.coordination.served_models.read_scenario("math").values())
+    assert control.set_served("math", {}) == {"served": {}}
+    return artifact_id, served
+
+
+@pytest.mark.unit
+def test_a_redeploy_of_a_scenario_that_serves_nothing_starts_no_engine(startup):
+    control, worker, runtime, _ = startup
+    stop_all_serving(control, worker, runtime)
+    routes = control.coordination.served_models
+    withdrawn = routes.current_request("math")
+    assert withdrawn.state == "finished" and not withdrawn.payload
+
+    control.redeploy("math")
+    control.publisher.run_once()
+    assert routes.current_request("math").id == withdrawn.id
+    # The worker has no serving work, and the runtime activated only the first start.
+    assert not worker.run_once()
+    assert len(runtime.activated) == 1 and runtime.opens == 1
+    assert routes.read_scenario("math") == {}
+    assert control.scenario_settings("math")["served"] == {"weights": {}}
+
+
+def deployment(tmp_path, runtime):
+    """Control and an inference worker on the record and coordination files of ``tmp_path``, as one start of the
+    service has them."""
+    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    coordination = open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None)
+    control = Dispatcher(
+        recipe,
+        backends,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=coordination,
+        components=frozenset({"control"}),
+        local_artifact_dir=tmp_path / "control",
+    )
+    worker = ServingWorker(
+        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+    )
+    return control, worker
+
+
+@pytest.mark.unit
+def test_a_restart_of_a_scenario_that_serves_nothing_starts_no_engine(tmp_path):
+    runtime = PausedRuntime()
+    control, worker = deployment(tmp_path, runtime)
+    try:
+        _, served = stop_all_serving(control, worker, runtime)
+        withdrawn = control.coordination.served_models.current_request("math")
+    finally:
+        worker.stop()
+        control.close()
+
+    restarted_runtime = PausedRuntime()
+    restarted_runtime.release.set()
+    restarted, restarted_worker = deployment(tmp_path, restarted_runtime)
+    try:
+        routes = restarted.coordination.served_models
+        assert not restarted.get_or_create_scenario("math").serves
+        restarted.publisher.run_once()
+        assert not restarted_worker.run_once()
+        restarted.redeploy("math")
+        assert not restarted_worker.run_once()
+        assert routes.current_request("math").id == withdrawn.id
+        assert restarted_runtime.opens == 0 and restarted_runtime.activated == []
+
+        # The stop of the endpoint from before the restart comes due: the new runtime stops it and starts nothing.
+        routes.schedule_stop(ScheduledStop(served, 0), control_lease_number=restarted.publisher.lease_number)
+        assert restarted_worker.run_once()
+        assert restarted_runtime.stops == [served] and restarted_runtime.activated == []
+        assert routes.due_stops(time.time()) == ()
+        restarted.publisher.run_once()
+        assert not restarted_worker.run_once()
+        assert routes.current_request("math").id == withdrawn.id
+        assert routes.read_scenario("math") == {}
+    finally:
+        restarted_worker.stop()
+        restarted.close()
+
+
+@pytest.mark.unit
+def test_a_scenario_that_stopped_all_serving_activates_the_same_artifact_again(startup):
+    control, worker, runtime, _ = startup
+    artifact_id, served = stop_all_serving(control, worker, runtime)
+    routes = control.coordination.served_models
+
+    # Before the stop of its endpoint is due, the engine still serves the artifact: the route comes back, and the
+    # runtime loads nothing.
+    assert control.set_served("math", {artifact_id: 100}) == {"served": {artifact_id: 100}}
+    assert worker.run_once()
+    assert routes.read_scenario("math")["active"] == served
+    assert len(runtime.activated) == 1 and runtime.stops == []
+
+    # After the runtime stopped the endpoint, the same artifact needs a new activation.
+    control.set_served("math", {})
+    routes.schedule_stop(ScheduledStop(served, 0), control_lease_number=control.publisher.lease_number)
+    assert worker.run_once()
+    assert runtime.stops == [served]
+    control.set_served("math", {artifact_id: 100})
+    assert worker.run_once()
+    assert len(runtime.activated) == 2
+    assert routes.read_scenario("math")["active"] == served
