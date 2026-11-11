@@ -49,9 +49,8 @@ def engine_input(
 
 @pytest.fixture
 def lora_receiver(monkeypatch):
-    """An SGLang whose LoRA request schema Reef accepts, without importing SGLang."""
+    """An SGLang with a colocated LoRA request schema, without importing SGLang."""
     monkeypatch.setattr(sglang_deployment, "require_lora_tensor_request_schema", lambda: None)
-    monkeypatch.setattr(sglang_deployment, "require_lora_distributed_request_schema", lambda: None)
 
 
 def test_sglang_input_loads_the_model_with_the_flags_reef_serving_relies_on(monkeypatch):

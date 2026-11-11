@@ -57,7 +57,6 @@ class ReefSGLangEngine(InferenceEngine):
         self.sglang_overrides = {key.replace("-", "_"): value for key, value in (sglang_overrides or {}).items()}
         if config.options.get("enable_lora"):
             require_lora_tensor_request_schema()
-            require_lora_distributed_request_schema()
             self._check_lora_overrides()
         self.num_gpus_per_engine = num_gpus_per_engine or config.gpus_per_engine
         self.external_url = external_url
@@ -408,6 +407,7 @@ class ReefSGLangEngine(InferenceEngine):
         pinned: bool = False,
         upsert: bool = True,
     ):
+        require_lora_distributed_request_schema()
         return self._make_request(
             "load_lora_adapter_from_distributed",
             {

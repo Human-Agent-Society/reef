@@ -76,25 +76,21 @@ def test_only_regular_engines_retract_their_requests_at_a_load(pause_mode):
         deployment.create_inference(values)
 
 
-def test_native_factory_validates_lora_receiver_schema_before_allocation(monkeypatch):
+def test_native_factory_only_requires_the_colocated_lora_schema(monkeypatch):
     checks = []
     monkeypatch.setattr(deployment, "require_lora_tensor_request_schema", lambda: checks.append("tensor"))
 
-    def incompatible_schema():
-        raise RuntimeError("receiver cannot load distributed LoRA")
-
-    monkeypatch.setattr(deployment, "require_lora_distributed_request_schema", incompatible_schema)
-    with pytest.raises(RuntimeError, match="cannot load distributed LoRA"):
-        deployment.create_inference(
-            {
-                "model_path": "model",
-                "num_gpus": 1,
-                "gpus_per_engine": 1,
-                "gpus_per_node": 1,
-                "options": {"enable_lora": True},
-            }
-        )
+    service = deployment.create_inference(
+        {
+            "model_path": "model",
+            "num_gpus": 1,
+            "gpus_per_engine": 1,
+            "gpus_per_node": 1,
+            "options": {"enable_lora": True},
+        }
+    )
     assert checks == ["tensor"]
+    service.close()
 
 
 def test_native_factory_imports_and_builds_with_training_stack_blocked():
