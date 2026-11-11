@@ -34,6 +34,7 @@ from reef.evaluation.rollout_worker import (
     verifier_output,
 )
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
+from reef.execution.workers import WorkerStopped
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 from reef.storage.work_queue import NewWork, WorkLeaseLost
@@ -427,7 +428,8 @@ def test_a_verifier_output_that_cannot_be_kept_is_logged_and_changes_nothing(tmp
 
 
 @pytest.mark.unit
-def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout(monkeypatch):
+@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLost), ("stopped", WorkerStopped)])
+def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops(monkeypatch, event, error):
     monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
     cancelled = threading.Event()
 
@@ -439,8 +441,8 @@ def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout(monkeypa
                 cancelled.set()
                 raise
 
-    lease_lost = threading.Event()
-    threading.Timer(0.1, lease_lost.set).start()
-    with pytest.raises(WorkLeaseLost):
-        asyncio.run(run_while_held(EndlessRunner(), "request", lease_lost))
+    events = {"lease_lost": threading.Event(), "stopped": threading.Event()}
+    threading.Timer(0.1, events[event].set).start()
+    with pytest.raises(error):
+        asyncio.run(run_while_held(EndlessRunner(), "request", events["lease_lost"], events["stopped"]))
     assert cancelled.is_set()

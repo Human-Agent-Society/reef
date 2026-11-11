@@ -1230,7 +1230,7 @@ it runs and after it ends:
                           "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
     "mean_score": 0.5, "benchmark_scores": [], "error": null,
     "progress": {"total": 2, "ended": 2, "scored": 2, "failed": 0, "cancelled": 0, "running": 0,
-                 "mean_score": 0.5, "eta_seconds": null}}
+                 "mean_score": 0.5, "eta_seconds": null, "benchmarks": []}}
 
 ``state`` is ``queued``, ``running``, ``finished`` or ``failed``. A finished
 evaluation holds its ``policy_evaluation``: the harness and the model that its
@@ -1266,6 +1266,11 @@ null when the evaluations queue no longer holds them:
 - ``eta_seconds`` estimates the seconds until every rollout ends: the
   rollouts left at the rate at which rollouts ended in the last 20 minutes. It
   is null when no rollout ended in that time, or when the evaluation ended.
+- ``benchmarks`` gives the progress of each benchmark of an evaluation on a
+  collection, in the collection's order: ``{"benchmark", "total", "ended",
+  "scored", "failed", "cancelled", "running", "mean_score"}``, with the same
+  meaning for the rollouts of the benchmark's tasks. A task in two benchmarks
+  counts in both. It is empty for another evaluation.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
 shows the progress of an evaluation while it runs. It answers ``{scenario,
