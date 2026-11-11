@@ -30,9 +30,10 @@ import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, override
+from typing import Any, ClassVar, override
 
 import aiohttp
+from harbor.agents.capabilities import AgentCapabilities
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
@@ -48,6 +49,7 @@ from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor import bridge_client
 from reef.harness.harbor.node_runtime import PLATFORM_COMMAND, node_archive, node_build_name, node_cache_directory
 from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
+from reef.harness.harbor.uv_runtime import uv_archive, uv_build_name, uv_cache_directory
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
 from reef.harness.tasks.trajectory import reader_for
@@ -64,7 +66,7 @@ TRAJECTORY_FILE = "trajectory.json"
 TRAJECTORY_FILES = "trajectory*.json"
 #: The install kinds an agent can have in a task's container.
 CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv", "git"})
-#: Where Astral's installer puts uv in a task's container, under the agent user's own home.
+#: Where Reef puts uv in a task's container, under the agent user's own home.
 CONTAINER_UV = "$HOME/.local/bin/uv"
 #: Where a git install keeps its checkout (``src``) and its venv (``venv``) in a task's container.
 CONTAINER_GIT_AGENT = "$HOME/.reef-agent"
@@ -77,6 +79,10 @@ MUSL_CHECK = "{ ldd --version 2>&1 || true; } | grep -qi musl || [ -f /etc/alpin
 #: archive waits for its unpacking.
 CONTAINER_NODE = "$HOME/.reef-node"
 CONTAINER_NODE_ARCHIVE = "/tmp/reef-node.tar.gz"
+#: The shell command that succeeds when the container's ``python3`` can run the bridge's relay and its client.
+RELAY_PYTHON_CHECK = "python3 -c 'import sys; sys.exit(sys.version_info < (3, 7))'"
+#: Where Reef uploads the uv archive in a task's container, until uv is installed.
+CONTAINER_UV_ARCHIVE = "/tmp/reef-uv.tar.gz"
 #: The shell command that puts an npm agent on the PATH, by what the install wrote: the prefix of a musl image when
 #: it exists, else the uploaded Node, whose global prefix holds the agent.
 NPM_AGENT_PATH = (
@@ -128,6 +134,10 @@ class AdapterAgent(BaseInstalledAgent):
     Purpose: :func:`run_harbor_task` names this class in the agent spec of a
     Harbor trial; Harbor builds it with these keyword arguments.
     """
+
+    #: Harbor refuses a task with a ``skills_dir`` for an agent that does not declare this. ``run`` copies the
+    #: task's skills for an adapter with ``task_skills``; ``task_agent_tools`` names the task for another adapter.
+    capabilities: ClassVar[AgentCapabilities] = AgentCapabilities(skills=True)
 
     def __init__(
         self,
@@ -185,15 +195,17 @@ class AdapterAgent(BaseInstalledAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        # Astral's installer needs curl, and a git install needs git. A task image without them gets them from its
-        # package manager, as Harbor's own agents do. An npm install needs neither.
-        if self.install_kind == "git":
-            await self.ensure_system_dependencies(environment, ("curl", "git"))
-        elif self.install_kind == "uv":
-            await self.ensure_system_dependencies(environment, ("curl",))
         if self.install_kind == "uv":
-            command = uv_install_command(str(self._version))
-        elif self.install_kind == "git":
+            await self.install_uv(environment, str(self._version))
+            return
+        if self.install_kind == "git":
+            # A git install needs git. A task image without it gets it from its package manager, as Harbor's own
+            # agents do.
+            await self.ensure_system_dependencies(environment, ("git",))
+            uv = get_adapter("python").install
+            if uv is None:
+                raise ProgramLaunchError("the python adapter declares no uv install for a git install")
+            await self.install_uv(environment, uv.version)
             command = self.git_install_command()
         else:
             package = shlex.quote(f"{self.package}@{self._version}")
@@ -224,6 +236,26 @@ class AdapterAgent(BaseInstalledAgent):
         await self.exec_as_agent(environment, command=command)
         if self.install_kind == "npm":
             await self.exec_as_root(environment, command=f"rm -f {CONTAINER_NODE_ARCHIVE}")
+
+    async def install_uv(self, environment: BaseEnvironment, version: str) -> None:
+        """Put uv ``version`` at ``CONTAINER_UV`` in the container.
+
+        Reef downloads the build of the container's machine on its own host and uploads it, so the container needs
+        no download tool. The build is static: it runs on a glibc image and on a musl image.
+        """
+        machine = await environment.exec(command="uname -m")
+        name = uv_build_name(version, machine.stdout or "")
+        archive = await asyncio.to_thread(uv_archive, name, uv_cache_directory())
+        await environment.upload_file(archive, CONTAINER_UV_ARCHIVE)
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f'set -euo pipefail; mkdir -p "$HOME/.local/bin" && '
+                f'tar -xzf {CONTAINER_UV_ARCHIVE} -C "$HOME/.local/bin" --strip-components=1 && '
+                f'"{CONTAINER_UV}" --version'
+            ),
+        )
+        await self.exec_as_root(environment, command=f"rm -f {CONTAINER_UV_ARCHIVE}")
 
     @override
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
@@ -362,27 +394,25 @@ class AdapterAgent(BaseInstalledAgent):
         return {**answer, "data": base64.b64encode(data).decode(), "end": True, "sequence": 0}
 
     async def relay_python(self, environment: BaseEnvironment) -> str:
-        """The command that runs the relay: the container's ``python3``, else a Python from uv, which the agent
-        installs at the python adapter's pin unless it is the agent's own install."""
-        if (await environment.exec(command="command -v python3")).return_code == 0:
+        """The command that runs the relay: the container's ``python3`` when it is Python 3.7 or later, which the
+        relay needs, else a Python from uv, which the agent installs at the python adapter's pin unless it is the
+        agent's own install."""
+        if (await environment.exec(command=RELAY_PYTHON_CHECK)).return_code == 0:
             return "python3"
         if self.install_kind not in ("uv", "git"):
             install = get_adapter("python").install
             if install is None:
                 raise ProgramLaunchError("the python adapter declares no uv install for the bridge's relay")
-            await self.exec_as_agent(environment, command=uv_install_command(install.version))
+            await self.install_uv(environment, install.version)
         return f'"{CONTAINER_UV}" run --no-project --python 3.12'
 
     def git_install_command(self) -> str:
         """The shell command that installs the agent from a checkout at the pinned ref, as Reef does on a person's
         machine (``reef.harness.tasks.vendor_install``): editable into a venv, without the checkout's ``.git``. uv
-        is at the python adapter's pin, and builds the venv with Python 3.12."""
-        install = get_adapter("python").install
-        if install is None:
-            raise ProgramLaunchError("the python adapter declares no uv install for a git install")
+        that ``install`` put in the container builds the venv with Python 3.12."""
         source, venv = f"{CONTAINER_GIT_AGENT}/src", f"{CONTAINER_GIT_AGENT}/venv"
         return (
-            f'{uv_install_command(install.version)} && rm -rf "{CONTAINER_GIT_AGENT}" && '
+            f'set -euo pipefail; rm -rf "{CONTAINER_GIT_AGENT}" && '
             f"git clone --quiet --depth 1 --branch {shlex.quote(self.ref)} {shlex.quote(self.repository)} "
             f'"{source}" && rm -rf "{source}/.git" && "{CONTAINER_UV}" venv --quiet --python 3.12 "{venv}" && '
             f'"{CONTAINER_UV}" pip install --quiet --python "{venv}/bin/python" -e "{source}" && '
@@ -411,15 +441,6 @@ class AdapterAgent(BaseInstalledAgent):
             (self.logs_dir / names[index]).write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
 
-def uv_install_command(version: str) -> str:
-    """The shell command that installs uv ``version`` with Astral's installer under the user's own home."""
-    installer = f"https://astral.sh/uv/{shlex.quote(version)}/install.sh"
-    return (
-        f'set -euo pipefail; curl -LsSf {installer} | env UV_INSTALL_DIR="$HOME/.local/bin" '
-        f'UV_NO_MODIFY_PATH=1 sh && "{CONTAINER_UV}" --version'
-    )
-
-
 class TreeAgent(AdapterAgent):
     """An ``AdapterAgent`` that renders one harness tree for its model when Harbor builds it.
 
@@ -432,6 +453,11 @@ class TreeAgent(AdapterAgent):
     Purpose: ``tree_agent`` names this class. The runner fills the placeholders of the binding in the agent's
     configuration, and the tree stays in a directory so that the runner does not fill them in the tree's own text.
     """
+
+    #: Harbor refuses a task with MCP servers for an agent that does not declare ``mcp_servers``. The render writes
+    #: them for an adapter with ``task_mcp``; ``task_agent_tools`` names the task for another adapter. No adapter's
+    #: agent gets a server's HTTP headers, so ``mcp_http_headers`` stays false.
+    capabilities: ClassVar[AgentCapabilities] = AgentCapabilities(skills=True, mcp_servers=True)
 
     def __init__(
         self,

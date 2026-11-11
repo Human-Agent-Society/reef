@@ -229,6 +229,101 @@ def test_a_mapping_that_names_an_unknown_artifact_changes_nothing(tmp_path) -> N
 
 
 @pytest.mark.unit
+def test_an_empty_mapping_makes_the_scenario_serve_nothing_until_a_mapping_names_an_artifact(tmp_path) -> None:
+    async def run() -> None:
+        value, _, _, newest, older = two_artifacts(tmp_path)
+        new_id, old_id = newest["artifact_id"], older["artifact_id"]
+        value.set_served("math", {new_id: 60, old_id: 40})
+        wait_for_serving(value)
+        client = TestClient(TestServer(create_app(value, inference_handler=ArtifactEcho())))
+        await client.start_server()
+        headers = {"x-reef-scenario": "math"}
+        try:
+            assert (await client.post("/v1/chat/completions", json=CHAT, headers=headers)).status == 200
+            with pytest.raises(ValueError, match="leave component out"):
+                value.set_served("math", {}, older["component"])
+
+            stopped = await client.post("/reef/scenarios/math/update", json={"served": {}})
+            assert (stopped.status, await stopped.json()) == (200, {"scenario": "math", "served": {}})
+            scenario = value.get_or_create_scenario("math")
+            # The routes, the artifacts beside and the split go; the active selection stays.
+            assert value.coordination.served_models.read_scenario("math") == {}
+            assert value.coordination.served_models.read_traffic_weights("math") == {}
+            assert not scenario.served_beside()
+            assert scenario.serving_artifact_id() == new_id
+            assert value.scenario_settings("math")["served"] == {"weights": {}}
+            assert (await client.post("/v1/chat/completions", json=CHAT, headers=headers)).status == 404
+            beside = await client.post(f"/reef/scenarios/math/artifacts/{new_id}/v1/chat/completions", json=CHAT)
+            assert beside.status == 404
+            # Training still commits, and its activation starts no route.
+            train(value, 3)
+            assert value.publisher.desired("math") == {}
+
+            assert value.set_served("math", {old_id: 100}) == {"served": {old_id: 100}}
+            wait_for_serving(value)
+            assert value.coordination.served_models.read_scenario("math")["active"].artifact_id == old_id
+            assert (await client.post("/v1/chat/completions", json=CHAT, headers=headers)).status == 200
+        finally:
+            await client.close()
+            value.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_scenario_that_serves_nothing_serves_nothing_after_a_restart(tmp_path) -> None:
+    value, _, backend_factory, _, _ = two_artifacts(tmp_path)
+    value.set_served("math", {})
+    value.close()
+
+    component = NamedComponent(tmp_path / "restarted-export")
+    restarted = Dispatcher(
+        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        backend_factory,
+        local_artifact_dir=tmp_path / "restarted-staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
+    )
+    assert not restarted.get_or_create_scenario("math").serves
+    assert restarted.publisher.desired("math") == {}
+    assert restarted.scenario_settings("math")["served"] == {"weights": {}}
+    restarted.close()
+
+
+@pytest.mark.unit
+def test_a_scenario_created_with_serves_false_serves_nothing_until_an_update_names_an_artifact(tmp_path) -> None:
+    async def run() -> None:
+        value, _, _ = serving_dispatcher(tmp_path)
+        client = TestClient(TestServer(create_app(value, inference_handler=ArtifactEcho())))
+        await client.start_server()
+        headers = {"x-reef-scenario": "math"}
+        try:
+            refused = await client.post("/reef/scenarios", json={"name": "math", "serves": "no"})
+            assert refused.status == 400
+            created = await client.post("/reef/scenarios", json={"name": "math", "serves": False})
+            assert created.status == 201
+            start = (await created.json())["artifact_id"]
+            settings = await (await client.get("/reef/scenarios/math/settings")).json()
+            assert settings["served"] == {"weights": {}}
+            assert value.coordination.served_models.current_request("math").payload == {}
+            assert value.coordination.served_models.read_scenario("math") == {}
+            assert (await client.post("/v1/chat/completions", json=CHAT, headers=headers)).status == 404
+            # A second create changes nothing.
+            assert (await client.post("/reef/scenarios", json={"name": "math", "serves": True})).status == 200
+            assert value.publisher.desired("math") == {}
+
+            served = await client.post("/reef/scenarios/math/update", json={"served": {start: 100}})
+            assert (served.status, await served.json()) == (200, {"scenario": "math", "served": {start: 100}})
+            wait_for_serving(value)
+            assert (await client.post("/v1/chat/completions", json=CHAT, headers=headers)).status == 200
+        finally:
+            await client.close()
+            value.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
     value, _, backend_factory, newest, older = two_artifacts(tmp_path)
     value.set_served("math", {newest["artifact_id"]: 100, older["artifact_id"]: 0})
@@ -298,7 +393,7 @@ def test_served_http_api(tmp_path, monkeypatch) -> None:
                 {"served": beside, "component": ""},
                 {"served": beside, "component": 1},
                 {"served": beside, "component": "other"},
-                {"served": {}},
+                {"served": {}, "component": older["component"]},
                 {"served": None},
                 {"served": [new_id]},
                 {"served": {new_id: 90}},
