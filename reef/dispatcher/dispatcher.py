@@ -333,18 +333,22 @@ class Dispatcher(
     def get_or_create_scenario(self, scenario: str, *, allow_implicit_creation: bool | None = None) -> Scenario | None:
         return self.registry.get_or_create(scenario, allow_implicit_creation=allow_implicit_creation)
 
-    def create_scenario(self, scenario: str, start: ItemStart | None = None) -> tuple[Scenario, bool]:
+    def create_scenario(
+        self, scenario: str, start: ItemStart | None = None, *, serves: bool = True
+    ) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it.
 
         A new scenario's root snapshot holds the artifact item ``start``, or the recipe's default start when
-        ``start`` is ``None`` (``ScenarioFactory.load_or_create``); an existing scenario ignores ``start``. The check
+        ``start`` is ``None`` (``ScenarioFactory.load_or_create``); an existing scenario ignores ``start``. A new
+        scenario serves its start when ``serves`` is true, and nothing when it is false, until ``set_served``
+        changes that; an existing scenario ignores ``serves``. The check
         and the creation hold the scenario's lock, so of several calls for one new name only one gets True. Raise as
         ``get_or_create_scenario`` does when the creation is refused, and ``ValueError`` when the item's layout or
         admission check refuses it; no scenario is registered then.
         """
         with self.registry.lock_for(scenario):
             created = not self.registry.has(scenario)
-            current = self.registry.get_or_create(scenario, start, allow_implicit_creation=True)
+            current = self.registry.get_or_create(scenario, start, allow_implicit_creation=True, serves=serves)
         if current is None:
             raise RuntimeError("scenario creation returned no scenario")
         return current, created
@@ -618,7 +622,15 @@ class Dispatcher(
         """Make ``served`` what ``scenario`` serves of ``component``, and return the mapping (RFC #1325).
 
         ``served`` maps the artifact IDs of one component to traffic weights: integers from 0 to 100 that sum to
-        100, one or more. Afterwards the scenario serves exactly these artifacts of the component. The artifact with
+        100, or it is empty.
+
+        An empty ``served`` makes the scenario serve nothing, of every component, so ``component`` must be None.
+        The scenario stops serving the artifacts beside its active selection, its traffic split goes, and control
+        withdraws its routes: no artifact answers its inference requests. The active selection and every training
+        start stay, and the scenario still trains. The result is ``{"served": {}}``.
+
+        With one or more artifacts, the scenario serves again if it served nothing, and it serves exactly these
+        artifacts of the component; the other components serve the artifacts of the active selection. The artifact with
         the largest weight, the first in sorted order among equals, is the active one: it answers every request
         that names no artifact and gets no bucket. With more than one weight above 0, the weights are the traffic
         split, and an artifact whose route does not exist yet leaves its requests to the active artifact. An
@@ -627,10 +639,23 @@ class Dispatcher(
 
         Raise ``UnknownScenario`` for an unknown scenario, the errors of ``Scenario.resolve_artifact`` for an
         artifact that is not one of the component, ``ReefError`` when the runtime serves one artifact and
-        ``served`` names more, and ``ValueError`` when this service does not run control.
+        ``served`` names more, and ``ValueError`` when this service does not run control or when an empty
+        ``served`` comes with a ``component``.
         """
         if self.publisher is None:
             raise ValueError("this service does not run control, so it cannot change what a scenario serves")
+        if not served:
+            if component is not None:
+                raise ValueError("an empty served mapping stops the whole scenario: leave component out")
+            with self.registry.lock_for(scenario):
+                current = self.registry.require(scenario)
+                for artifact_id in sorted(current.served_beside()):
+                    current.stop_serving(artifact_id)
+                self.registry.set_serves(scenario, False)
+                self.publisher.publish(current)
+                self.publisher.write_traffic_weights(scenario, {})
+                self.scenario_committed(current)
+                return {"served": {}}
         active_id = min(served, key=lambda artifact_id: (-served[artifact_id], artifact_id))
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
@@ -646,6 +671,7 @@ class Dispatcher(
             for artifact_id in sorted(beside - others):
                 current.stop_serving(artifact_id)
             split = dict(served) if sum(weight > 0 for weight in served.values()) > 1 else {}
+            self.registry.set_serves(scenario, True)
             self.publisher.publish(current, retry_failed=True)
             self.publisher.write_traffic_weights(scenario, split)
             self.scenario_committed(current)
@@ -657,8 +683,11 @@ class Dispatcher(
         The served artifacts are the active one and those that the scenario serves beside it. Without a traffic
         split the active artifact has 100 and the others 0. With a split, each has its weight, and the active
         artifact also has the weights of the artifacts that the scenario does not serve, since it answers their
-        requests.
+        requests. A scenario that serves nothing (``ScenarioSettings.serves`` is false) has an empty mapping for
+        each component.
         """
+        if not self.registry.stored_settings(current.name).serves:
+            return {name: {} for name, status in current.artifact_status().items() if status["active"] is not None}
         weights = dict(self.coordination.served_models.read_traffic_weights(current.name))
         beside = current.served_beside()
         mapping: dict[str, dict[str, int]] = {}
