@@ -28,6 +28,7 @@ from reef.harness.harbor.rollouts import (
     TaskRolloutError,
     TaskRolloutRunner,
     bound_agent,
+    environment_config,
     main,
     rewards_of,
     rollout_reward,
@@ -454,6 +455,26 @@ def test_only_a_modal_compose_task_with_no_gpu_runs_on_the_vm_runtime(
     running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task_path))] * 2)
     assert [build["overrides"] for build in lab.builds] == [{"environment": config}]
     assert [call["overrides"]["environment"] for call in lab.calls] == [config, config]
+
+
+@pytest.mark.parametrize(
+    ("task_toml", "kwargs"),
+    [
+        ("[agent]\ntimeout_sec = 28800.0\n", {"sandbox_timeout_secs": 600 + 28800 + 600 + 3600}),
+        (
+            "[agent]\ntimeout_sec = 900\n[verifier]\ntimeout_sec = 1200\n[environment]\nbuild_timeout_sec = 300\n",
+            {"sandbox_timeout_secs": 300 + 900 + 1200 + 3600},
+        ),
+        ("[agent]\ntimeout_sec = 86400\n", {"sandbox_timeout_secs": 86400}),
+        ("[verifier]\ntimeout_sec = 1200\n", None),
+    ],
+    ids=["agent-limit", "all-limits", "one-day-at-most", "no-agent-limit"],
+)
+def test_a_modal_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, task_toml: str, kwargs) -> None:
+    (tmp_path / "task.toml").write_text(task_toml)
+    expected = {"type": "modal"} if kwargs is None else {"type": "modal", "kwargs": kwargs}
+    assert environment_config("modal", tmp_path) == expected
+    assert environment_config("e2b", tmp_path) == {"type": "e2b"}
 
 
 def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None:
