@@ -79,6 +79,9 @@ CONTAINER_NODE = "$HOME/.reef-node"
 CONTAINER_NODE_ARCHIVE = "/tmp/reef-node.tar.gz"
 #: The shell command that succeeds when the container's ``python3`` can run the bridge's relay and its client.
 RELAY_PYTHON_CHECK = "python3 -c 'import sys; sys.exit(sys.version_info < (3, 7))'"
+#: The shell command that drops ``SSL_CERT_DIR`` when it names no directory. uv trusts no certificate then, and it
+#: uses its own certificates without the variable. Modal sets the variable also for an image with no certificates.
+UV_CERTIFICATES = '{ [ -d "${SSL_CERT_DIR:-/}" ] || unset SSL_CERT_DIR; }'
 #: Where Reef uploads the uv archive in a task's container, until uv is installed.
 CONTAINER_UV_ARCHIVE = "/tmp/reef-uv.tar.gz"
 #: The shell command that puts an npm agent on the PATH, by what the install wrote: the prefix of a musl image when
@@ -278,7 +281,7 @@ class AdapterAgent(BaseInstalledAgent):
             find_agent = f'agent="{CONTAINER_GIT_AGENT}/venv/bin/{self.binary}"'
         elif self.install_kind == "uv":
             find_agent = (
-                f'agent="{CONTAINER_UV}" && export UV_CACHE_DIR="$HOME/.cache/uv" '
+                f'{UV_CERTIFICATES} && agent="{CONTAINER_UV}" && export UV_CACHE_DIR="$HOME/.cache/uv" '
                 'UV_PYTHON_INSTALL_DIR="$HOME/.local/share/uv/python"'
             )
         else:
@@ -393,8 +396,8 @@ class AdapterAgent(BaseInstalledAgent):
 
     async def relay_python(self, environment: BaseEnvironment) -> str:
         """The command that runs the relay: the container's ``python3`` when it is Python 3.7 or later, which the
-        relay needs, else a Python from uv, which the agent installs at the python adapter's pin unless it is the
-        agent's own install."""
+        relay needs, else the path of a Python 3.12 that uv installs. The agent installs uv at the python adapter's
+        pin unless it is the agent's own install. ``RuntimeError`` when uv cannot install the Python."""
         if (await environment.exec(command=RELAY_PYTHON_CHECK)).return_code == 0:
             return "python3"
         if self.install_kind not in ("uv", "git"):
@@ -402,7 +405,15 @@ class AdapterAgent(BaseInstalledAgent):
             if install is None:
                 raise ProgramLaunchError("the python adapter declares no uv install for the bridge's relay")
             await self.install_uv(environment, install.version)
-        return f'"{CONTAINER_UV}" run --no-project --python 3.12'
+        # One install, with its error, in place of a download at each call of the relay and of its client.
+        found = await self.exec_as_agent(
+            environment,
+            command=(
+                f'set -euo pipefail; {UV_CERTIFICATES}; "{CONTAINER_UV}" python install --quiet 3.12 && '
+                f'"{CONTAINER_UV}" python find --no-project 3.12'
+            ),
+        )
+        return shlex.quote((found.stdout or "").strip().splitlines()[-1])
 
     def git_install_command(self) -> str:
         """The shell command that installs the agent from a checkout at the pinned ref, as Reef does on a person's
@@ -410,7 +421,7 @@ class AdapterAgent(BaseInstalledAgent):
         that ``install`` put in the container builds the venv with Python 3.12."""
         source, venv = f"{CONTAINER_GIT_AGENT}/src", f"{CONTAINER_GIT_AGENT}/venv"
         return (
-            f'set -euo pipefail; rm -rf "{CONTAINER_GIT_AGENT}" && '
+            f'set -euo pipefail; {UV_CERTIFICATES}; rm -rf "{CONTAINER_GIT_AGENT}" && '
             f"git clone --quiet --depth 1 --branch {shlex.quote(self.ref)} {shlex.quote(self.repository)} "
             f'"{source}" && rm -rf "{source}/.git" && "{CONTAINER_UV}" venv --quiet --python 3.12 "{venv}" && '
             f'"{CONTAINER_UV}" pip install --quiet --python "{venv}/bin/python" -e "{source}" && '
