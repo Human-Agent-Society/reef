@@ -96,9 +96,10 @@ Two other extension points have separate names and purposes:
   The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
-  ``artifact_id``, an optional ``local_path``, and the route's optional
-  ``served_model`` selection. Native handlers use the last field for receiver
-  pinning; it is not proof of resident weights by itself.
+  ``artifact_id``, an optional ``local_path``, and ``served_model``, the model
+  name of the selected route or None. Native handlers send that name to the
+  component, which pins the request to it; the name alone does not show which
+  weights an engine holds.
   Handlers receive no repository or snapshot locator. Runtime and recipe objects
   expose the handler as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -153,6 +154,8 @@ It reads an artifact's training starts with
 ``reef.artifact.artifact.training_starts_of``, nearest first, so that a training
 artifact can use the setting of its start.
 
+By default, ``InferenceHandler.inference_stream`` wraps the buffered
+``inference`` answer as one JSON chunk; override it for incremental streaming.
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.
 Implementations and test doubles must initialize these fields through the
@@ -164,12 +167,13 @@ its end and finalized its capture. A terminal frame alone is not a successful
 completion, and it does not identify the weights that answered. `Request
 <http-api.rst#request>`__ describes the receipts that clients get.
 
-``InferenceRuntime.set_owner_sequence(sequence)`` defaults to a no-op. The
-serving worker calls it before opening its runtime, using the durable ownership
-take sequence. The inference component uses it to reject superseded control
-calls. Without a sequence, a ``remote_serving`` runtime starts no engine.
-``InferenceOwnerLostError`` signals a receiver fence; the worker treats it as
-lease loss rather than a failed artifact selection.
+The serving worker calls ``InferenceRuntime.set_owner_sequence(sequence)``
+before it opens its runtime, with the stored sequence number of its
+ownership. The inference component then refuses the control calls of an
+earlier owner, whose runtime raises ``InferenceOwnerLostError``. The worker
+treats that error as a lost lease, not as a failed artifact selection. The
+default does nothing. Without a sequence, a ``remote_serving`` runtime starts
+no engine.
 
 Python extension contracts use abstract base classes and explicit inheritance.
 This also applies to repository factories, candidate evaluation plugins, harness
@@ -2239,54 +2243,7 @@ Neither inherits from the other, and no trainer holds a serving engine.
 * An ``InferenceRuntime`` executes requests, manages admission, and loads
   published snapshots. It loads a snapshot when a
   scenario starts, when a committed snapshot is activated, and when a person
-  activates one.
-  Its ``model_path`` property supplies the default model name for harness
-  bindings; the base implementation returns an empty string for runtimes whose
-  requests select the model. ``per_scenario_adapters`` is true for a runtime
-  that serves each scenario its own adapter. ``served_weight_kind`` is the
-  kind of the weights that the runtime serves from a snapshot: ``model``, the
-  default, for full weights, or ``model_adapter`` for a LoRA adapter on its
-  base model. A runtime that serves adapters must override it.
-  Every runtime implements ``served_artifact(artifact_id, scenario)``; it has
-  no default. For a weight binding that already holds, it gives the engine's
-  HTTP(S) URL and the model name that inference writes to ``served_models``.
-  It establishes no binding and loads nothing. It returns None when the
-  runtime does not know the artifact, when the binding is unavailable or
-  uncertain, or when the engine has no such URL; startup then fails without
-  publishing a route. A snapshot without a weight component gets no
-  activation. Its route, and the route of each artifact that the scenario
-  serves beside it, names the model that the optional
-  ``endpoint_model_name(scenario)`` gives. The default ``None`` refuses such
-  a snapshot, and its startup fails. See the `production inference contract
-  <../developer-guide/executors.rst#production-inference-contract>`__ for
-  the requirements of an integration.
-  ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
-  for an artifact on request, without a load. A runtime whose handler answers
-  each call from the artifact that the call names overrides it, as the Tinker
-  runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
-  of a model artifact needs it. Such a runtime also returns True from
-  ``serves_any_artifact``.
-  ``serve_artifact(artifact, scenario=...)`` deploys an artifact beside the
-  scenario's active one: it makes an engine answer for the artifact and
-  returns the engine's URL and model name. The base implementations of
-  ``artifact_model`` and ``serve_artifact`` raise ``ReefError``, because a
-  runtime serves only its loaded artifact by default.
-  ``served_artifact_capacity`` is the number of weight artifacts of one
-  scenario that the runtime keeps bound at once. It is 1 by default, and
-  ``None``, without limit, when ``serves_any_artifact`` is True. A runtime
-  with a higher capacity overrides ``serve_artifact`` and can leave
-  ``serves_any_artifact`` False: it serves deployed artifacts, but the
-  capacity alone does not enable the evaluation of a model artifact. An
-  artifact keeps its place until ``stop_serving(served)`` releases its
-  binding; the engines can stay allocated. The optional
-  ``release_unreferenced_artifacts(retained)`` releases each binding that no
-  value of ``retained`` uses, such as one that a failed startup left.
-  ``retained`` holds every published route and every pending stop, also one
-  that is not due yet. A value keeps the binding at its URL under its model
-  name, whatever artifact ID names it. The inference worker calls it between
-  two serving works, and only when ``serving_slots`` is 1.
-  ``shared_by_training_scenarios`` is true for a runtime that serves each
-  training scenario its own weights.
+  activates one. The tables after this list give its members.
 * ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
   A dispatcher queues each selection for the inference worker. The worker
   opens the runtime, loads the published snapshot, and publishes routes when
@@ -2294,6 +2251,120 @@ Neither inherits from the other, and no trainer holds a serving engine.
   transaction. A superseded request cannot publish routes.
   ``train-from`` still imports the artifact into the trainer before it writes
   a ``train_from`` record.
+
+An ``InferenceRuntime`` implements ``inference_handler`` and the two members
+marked *required*. It overrides another member only when it has the
+capability. The `production inference contract
+<../developer-guide/executors.rst#production-inference-contract>`__ gives
+the requirements of an integration.
+
+These members bind weights and name routes:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 18 52
+
+   * - Member
+     - Default
+     - Result and errors
+   * - ``activate_checkpoint`` ``(artifact, *, scenario=None)``
+     - required
+     - Serves the weight component of a published snapshot. Returns its
+       runtime load ID (``str``). Gets ``scenario`` only when
+       ``per_scenario_adapters`` is true. Raises on failure, and promises
+       no rollback.
+   * - ``served_artifact`` ``(artifact_id, scenario)``
+     - required
+     - Returns ``ServedArtifact | None``: the engine's HTTP(S) URL and
+       model name of a weight binding that already holds. Loads nothing.
+       ``None`` for an unknown artifact, an unavailable or uncertain
+       binding, or an engine without such a URL; the startup then fails.
+   * - ``endpoint_model_name(scenario)``
+     - ``None``
+     - Returns the model name (``str``) for the routes of a snapshot
+       without a weight component, and of each artifact served beside it.
+       These routes identify no weights. ``None`` refuses such a snapshot:
+       its startup fails.
+   * - ``handler_for(url)``
+     - ``inference_handler`` for ``base_url``, else ``None``
+     - Returns the handler of the engine at ``url``, for a service that
+       did not open the runtime. After ``None``, that service uses a plain
+       proxy.
+   * - ``open()``, ``shutdown()``
+     - do nothing
+     - ``open`` starts the engines before the inference worker adopts or
+       activates artifacts; no other process opens the runtime.
+       ``shutdown`` releases what the runtime owns.
+   * - ``adopt(served)``
+     - ``False``
+     - Returns whether the engine still serves ``served``, a route from
+       before the inference worker restarted. After ``True``, the route
+       stays, and the next activation of that artifact loads nothing.
+       ``False`` removes the route until serving resumes.
+   * - ``stop_serving(served)``
+     - does nothing
+     - Releases the binding of ``served``, which no route names any more.
+       The engines can stay allocated. An unknown value is no error.
+   * - ``release_unreferenced_artifacts`` ``(retained)``
+     - does nothing
+     - Releases each binding whose URL and model name no value of
+       ``retained`` has, such as one that a failed startup left.
+       ``retained`` holds every published route and every pending stop.
+       The inference worker calls it between two serving works, only when
+       ``serving_slots`` is 1. Raises on a failed release; the next call
+       tries again.
+
+These members state what the runtime serves:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 18 52
+
+   * - Member
+     - Default
+     - Result and errors
+   * - ``model_path``
+     - ``""``
+     - The default model name for harness bindings. Empty for a runtime
+       whose requests select the model.
+   * - ``served_weight_kind``
+     - ``model``
+     - The kind of the weights that the runtime serves: ``model`` for full
+       weights, or ``model_adapter`` for a LoRA adapter on its base model.
+       A runtime that serves adapters must override it.
+   * - ``per_scenario_adapters``
+     - ``False``
+     - True for a runtime that serves each scenario its own adapter.
+   * - ``shared_by_training_scenarios``
+     - ``False``
+     - True for a runtime that serves each training scenario its own
+       weights.
+   * - ``serves_any_artifact``
+     - ``False``
+     - True for a runtime whose handler answers each call from the
+       artifact that the call names, without a load, as the Tinker runtime
+       does. Such a runtime overrides ``artifact_model`` and
+       ``serve_artifact``.
+   * - ``artifact_model(artifact)``
+     - raises ``ReefError``
+     - Returns the ``PolicyModel`` that samples an artifact on request,
+       without a load, for the `artifact evaluation
+       <http-api.rst#evaluate-an-artifact>`__ of a model artifact.
+       ``ValueError`` for an artifact that the runtime cannot serve.
+   * - ``serve_artifact(artifact, *, scenario)``
+     - raises ``ReefError``
+     - Deploys an artifact beside the scenario's active one. Returns
+       ``ServedArtifact | None`` when the engine is ready: ``None`` when
+       no other process can call the engine. Consumes one artifact slot
+       until ``stop_serving``. ``ReefError`` when every slot holds another
+       artifact, ``ValueError`` for an artifact that the runtime cannot
+       serve.
+   * - ``served_artifact_capacity``
+     - ``None`` when ``serves_any_artifact`` is true, else 1
+     - The artifact slots: how many weight artifacts of one scenario the
+       runtime keeps bound at once. A positive integer, or ``None`` for
+       no limit. A capacity above 1 needs ``serve_artifact``. It does not
+       enable the evaluation of a model artifact.
 
 ``Scenario.serving_artifact_id()`` names the selected artifact.
 ``Scenario.served_artifact_id()`` reads the published route when a dispatcher
@@ -2304,19 +2375,12 @@ Deployments without inference keep their existing training behavior.
 Startup status is available through the inference service's
 ``GET /reef/scenarios/{scenario}/inference/status`` route.
 
-``reef.inference.serving`` holds the two runtimes for saved weights, both over an
-``InferenceBackend``:
-
-* ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
-  base model. A snapshot holds the adapter in ``adapter/``. At most
-  ``adapter_capacity`` adapters stay resident.
-  ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
-  adapter first, then the oldest-activated adapter that is no scenario's
-  current one.
-* ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. The engines start with the base model, and they stay paused until
-  the first activation succeeds. Each snapshot loads its files, a root
-  snapshot's included, unless the engines serve its content already.
+``reef.inference.serving`` holds the two runtimes for saved weights, both
+over an ``InferenceBackend``: ``AdapterServingRuntime``, whose snapshots
+hold the adapter in ``adapter/``, and ``FullWeightServingRuntime``.
+`Serving saved weights
+<../developer-guide/executors.rst#serving-saved-weights>`__ describes what
+each one serves and how it recovers its engines.
 
 Both runtimes replace weights in engines that keep running. They take the
 engines as a ``ServingEngines`` value, and its ``request_pinning`` property
@@ -2358,18 +2422,15 @@ engine then reports. The runtime kind ``remote_serving``
 inference component, as the artifact format says: ``AdapterServingRuntime``
 for ``adapter`` snapshots, ``FullWeightServingRuntime`` for ``full`` ones.
 With ``inference.remote.slot-urls``, it builds a ``CheckpointSlotsRuntime``
-over one ``FullWeightServingRuntime`` for each component (`Serving saved
-weights <../developer-guide/executors.rst#serving-saved-weights>`__).
+over one ``FullWeightServingRuntime`` for each component.
 ``serving_engine_config`` builds the engines' input from the ``inference``
-settings and the artifact format. Each runtime checks the health of its
-engines every ``health_interval_s`` seconds (default 30). After a
-failed check it calls ``recover_engines``: it pauses generation and lets the
-backend replace lost or dead engines (``InferenceBackend.recover``). An
-inference component then replaces its whole engine stack, also after the
-component restarted. The runtime loads what it serves again, and resumes.
+settings and the artifact format.
+
+Each runtime checks the health of its engines every ``health_interval_s``
+seconds (default 30), and calls ``recover_engines`` after a failed check.
 Before its first successful activation, a ``FullWeightServingRuntime`` has
-nothing to load: a failed check only replaces the engines, which stay
-paused, and a call of ``recover_engines`` raises ``ReefError``.
+nothing to restore: a failed check only replaces the engines, and a call of
+``recover_engines`` replaces them and then raises ``ReefError``.
 
 A weight recipe holds neither the ``TrainingComponent`` nor the
 ``InferenceRuntime``. The process holds both beside the recipe, with the

@@ -1871,15 +1871,24 @@ further checkpoint:
        slot-urls:
          - https://gpu-b.example.com
 
-Start every component as the setup above shows, with the same ``--engine``
-and the same two tokens. Reef starts the same model and engine options on
-each one, and ``inference.num-gpus`` then counts the GPUs of one component.
-Give each component GPUs that no other component uses: its own host or
-visible GPUs, or one Ray cluster that all of them join (``--ray-address``).
-Different URLs alone do not separate the GPUs. Reef refuses ``slot-urls``
-for adapter artifacts and for a trainer's rollout engines. `Set what a
-scenario serves <../user-guide/operate.rst#set-what-a-scenario-serves>`__
-describes how a scenario uses the components.
+The one training scenario then serves as many checkpoints together as there
+are components. A further component does not add a training scenario. These
+rules apply:
+
+- Start each further component in the same way as the first one, with the
+  same ``--engine`` and the same two tokens. Reef starts the same model and
+  engine options on each one, and ``inference.num-gpus`` counts the GPUs of
+  one component.
+- Give each component GPUs that no other component uses: its own host or
+  visible GPUs, or one Ray cluster that all of them join
+  (``--ray-address``). Different URLs alone do not separate the GPUs.
+- Use ``slot-urls`` with full-weight artifacts only. Reef refuses it for
+  adapter artifacts and for a trainer's rollout engines.
+
+`Set what a scenario serves
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ describes how a
+scenario uses the components, and how to replace a checkpoint when every
+component holds one.
 
 The ``training`` section
 ------------------------

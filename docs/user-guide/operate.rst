@@ -162,7 +162,7 @@ Each ID is any row of the artifact list. Leave out ``component`` when the scenar
 
 An empty mapping, ``{"served": {}}`` without ``component``, makes the whole scenario serve nothing. Reef then starts no engine for it, and training still runs. ``POST /reef/scenarios`` with ``"serves": false`` creates a scenario in this state. The scenario serves again when ``served`` names an artifact (`Serve nothing <../reference/http-api.rst#serve-nothing>`__).
 
-The response accepts the mapping. Inference then loads the artifacts in the background. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using a new active artifact. Repeating the request retries a failed startup at once.
+The response accepts the mapping. Inference then loads the artifacts in the background. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using a new active artifact. For an artifact that serves beside the active one, add ``?model=<artifact-id>``. Repeating the request retries a failed startup at once.
 
 Reef appends an ``activate``, ``serve`` or ``stop_serving`` operation for each artifact that changes. It creates no artifact or repository revision. For example, changing the active ``harness`` from artifact B to C changes ``{weights: A, harness: B}`` to ``{weights: A, harness: C}``. The weights keep artifact A and its identity. Each operation stores the complete selection, so recovery restores the same combination. History is not rewritten, and the step counter keeps increasing. The request never changes a trainer's training start.
 
@@ -179,11 +179,26 @@ Reef appends an ``activate``, ``serve`` or ``stop_serving`` operation for each a
 
 A call to the artifact's URL is recorded with the ``artifact_id`` that answered. Choose which clients call each URL, for example with a gateway. The served artifacts survive a restart.
 
-**Runtime limits.** To serve several artifacts, the runtime must answer each call from the artifact that the call names. A Tinker scenario can serve any of its artifacts together. Reef's own engines load the weights that they serve. Its adapter serving keeps one weight artifact of a scenario loaded. Its full-weight serving keeps one checkpoint of a scenario loaded on each inference component. A deployment has one component by default, and ``inference.remote.slot-urls`` names further components (`The inference section <../reference/configuration.rst#the-inference-section>`__). Reef refuses a mapping of more weight artifacts than the engines keep loaded, and changes nothing. With several components:
+**Runtime limits.** To serve several artifacts, the runtime must answer each call from the artifact that the call names. The runtime sets how many weight artifacts a scenario serves together:
 
-- **A change of traffic weights alone loads nothing.** A split, a promotion and a rollback keep each checkpoint that the scenario serves already on its component. A checkpoint at weight 0 still answers the requests that name it. A checkpoint that the mapping adds still loads.
+- A Tinker scenario can serve any of its artifacts together.
+- Reef's adapter serving keeps one weight artifact of a scenario loaded.
+- Reef's full-weight serving keeps one checkpoint of a scenario loaded on each inference component. A deployment has one component by default, and ``inference.remote.slot-urls`` names further components (`The inference section <../reference/configuration.rst#the-inference-section>`__).
+
+Reef refuses a mapping that names more weight artifacts than that number with HTTP 400, and changes nothing.
+
+**Several checkpoints on several components.** Each checkpoint of the mapping has its own component:
+
+- **A change of traffic weights alone loads nothing.** A split, a promotion and a rollback keep each checkpoint that the scenario serves already on its component.
 - **A stopped checkpoint keeps its component for a while.** It takes no new requests, and the admitted requests can finish. Reef schedules its retirement ``inference.timeout-s`` plus 5 seconds after it publishes the new routes, which is 305 seconds by default. A busy serving worker or a failed release makes the retirement later. No API reports its end. The component then keeps its engines and their GPU memory for the next checkpoint.
-- **Replace a checkpoint in two requests when every component holds one.** First send a mapping that names neither the old checkpoint nor the new one. Wait for the old checkpoint's retirement, and then send the mapping that adds the new checkpoint. A second mapping that arrives before the retirement finds no free component, and its startup fails. Repeat that request after the retirement. One mapping that removes the old checkpoint and adds the new one works only when another component is free. Otherwise Reef accepts it, but its startup fails before Reef publishes new routes. The old checkpoint then keeps its route and its component, so each retry of that mapping fails in the same way. Send the two requests to recover.
+
+**Replace a checkpoint when every component holds one.** A new checkpoint needs a free component. In this example, ``a``, ``b`` and ``c`` stand for artifact IDs. Two components serve ``a`` and ``b``, and ``c`` must replace ``a``:
+
+#. Send a mapping that names neither ``a`` nor ``c``: ``{"b": 100}``.
+#. Wait about ``inference.timeout-s`` plus 5 seconds. This is an estimate: the time starts when Reef publishes the new routes, not at the HTTP 200, and a ``ready`` status of ``b`` shows neither that publication nor a free component.
+#. Try to add ``c`` with a mapping such as ``{"b": 100, "c": 0}``, and poll the status of ``c`` itself: ``GET /reef/scenarios/{scenario}/inference/status?model=<id-of-c>``. Without ``model``, the status describes the active ``b``, which stays ``ready`` when ``c`` fails. If ``c`` fails because no component is free yet, wait and send the mapping again.
+
+One mapping that removes ``a`` and adds ``c``, such as ``{"b": 50, "c": 50}``, works only when another component is free. Otherwise Reef accepts it, but its startup fails before Reef publishes new routes. ``a`` then keeps its route and its component, so each retry of that mapping fails in the same way. Use the three steps to recover.
 
 A full-weight serving runtime that makes its starting artifact active after a checkpoint loads the starting artifact's files from the artifact repository. `Set what a scenario serves <../reference/http-api.rst#set-what-a-scenario-serves>`__ in the HTTP API lists the answers and status codes.
 
@@ -542,10 +557,9 @@ inference service never creates a scenario: create it first with
   the last 300 seconds, or when the record store does not take the record. The
   service never returns a buffered answer without its record. A stream goes
   out as the engine sends it, and its record is appended when it ends.
-* A stream that fails after its headers closes the connection without its
-  terminal event and without a receipt, so a client SDK reports a transport
-  error. `Request <../reference/http-api.rst#request>`__ gives the retry
-  rules and the other stream cases.
+* A stream that fails after its headers gets no receipt. `Request
+  <../reference/http-api.rst#request>`__ gives the stream cases and the
+  retry rules.
 
 **Control restarts.** While control is down, the inference service continues to
 answer from ``served_models`` and to record. Training jobs, sample requests and
@@ -598,13 +612,27 @@ candidate from the artifact repository and answers its rollouts with the
 scenario's runtime, so it needs no other service. Inference records name the
 answering artifact with ``artifact_id``, including the starting artifact.
 
-Reef's engines keep each request on the weights that it selected. Before an
-activation changes the weights, the inference component waits for the requests
-in flight, for at most ``inference.timeout-s``. It then interrupts the
-remaining requests, and they fail; none continues on the next weights.
-`Request pinning <../developer-guide/executors.rst#request-pinning>`__ lists
-the rules and their limits. A serving runtime of your own
-(``inference.serving: module:Factory``) must give the same guarantee itself.
+**Request pinning.** Reef's engines keep each request on the weights that it
+selected, and no setting turns this protection off. A change of weights
+waits for the requests in flight, for at most ``inference.timeout-s``, and
+then interrupts them: none continues on the next weights. `Request pinning
+<../developer-guide/executors.rst#request-pinning>`__ lists the guarantees
+and their limits. Operate the inference component as follows:
+
+* Run control, the inference replicas and the component on the same Reef
+  version. The component must confirm the protection at each engine start
+  and at each health check, and the engine startup fails without it.
+* Keep the native engine addresses private. Clients use Reef's public
+  inference API.
+* Restart the component after a reset of the coordination store, because
+  owner sequences can otherwise move backwards.
+* An adapter that never loads keeps its engine stack unavailable, and the
+  stack retries at each health check. Correct the artifact, or restart the
+  serving worker, before you select a replacement.
+* A control call waits at most 30 seconds for an earlier one, and then gets
+  a retryable HTTP 503. A native call that never returns needs operator
+  recovery of the component; Reef never runs a second weight change beside
+  it.
 
 Choose the storage backend
 --------------------------

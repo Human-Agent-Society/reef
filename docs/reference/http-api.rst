@@ -1139,9 +1139,10 @@ artifact with (`Automatic evaluation`_).
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter``
 component) with a Harbor agent, on a runtime that serves any artifact on
-request: the Tinker runtime. Reef refuses a harness artifact, a model artifact
-on another runtime, and a scenario whose artifacts also hold a harness, with
-400.
+request (``InferenceRuntime.serves_any_artifact``). The Tinker runtime is the
+built-in runtime that does. Reef refuses a harness artifact, a model artifact
+on a runtime without that capability, and a scenario whose artifacts also hold
+a harness, with 400.
 
 First create the tasks as task items in the scenario's ``eval`` split
 (`Create task items <#create-task-items>`__). Then start the evaluation:
@@ -2056,10 +2057,11 @@ to a new artifact:
    {"served": {"artifact:a": 95, "artifact:b": 5}}
 
 Reef starts each artifact of the mapping that does not serve yet. Until an
-artifact has started, the active artifact answers its requests, so no request
-fails. Inference replicas use new weights within a few seconds, without a
-restart. A mapping with one weight above 0 ends the split, so the active
-artifact answers again.
+artifact has started, the active artifact answers its requests. Without a
+ready active route, as at the first startup or when the scenario serves again
+after serving nothing, they get HTTP 503 until a route is ready. Inference
+replicas use new weights within a few seconds, without a restart. A mapping
+with one weight above 0 ends the split, so the active artifact answers again.
 
 The activation rule can make a newer artifact active during a split. The split
 keeps its weights. The new active artifact then answers the requests of each
@@ -2099,11 +2101,11 @@ The weights select the artifact. The engine of the artifact selects its own
 replica.
 
 The record names the artifact that answered in ``artifact_id``, and holds the
-bucket and the weights in ``metadata.traffic``. These records train like other
-records, because the staleness check accepts an artifact that the scenario serves
-beside its active artifact. That check does not read the weights. A job can then
-hold samples of several artifacts. Each sample keeps its own ``artifact_id`` and
-recorded log probabilities.
+bucket and the weights in ``metadata.traffic``. While the scenario serves an
+artifact, the staleness check does not refuse its records, whatever its weight
+(`Call one served artifact`_). A job can then hold samples of several
+artifacts. Each sample keeps its own ``artifact_id`` and recorded log
+probabilities.
 
 Read the settings
 ~~~~~~~~~~~~~~~~~
@@ -2174,12 +2176,18 @@ route after startup succeeds. Read its state with:
                            "detail": "Waiting for a GPU"}],
                 "estimate_seconds": null}}
 
-``model`` defaults to ``active``. It can also name an active artifact alias
-or an artifact selected for serving beside the active one. An unknown name
-returns 404. One request serves the active artifact and each artifact beside
-it. An artifact that a published route of ``model`` serves already is
-``ready``, whatever the state of the request: the start of another artifact,
-or its failure, does not change it.
+The query parameter ``model`` defaults to ``active``. It can also name an
+active artifact alias or an artifact selected for serving beside the active
+one. An unknown name returns 404. One startup covers the active artifact and
+each artifact beside it, but an artifact with a published route stays
+``ready`` while another artifact starts or fails. To read the state of an
+artifact beside the active one, name it:
+
+.. code:: text
+
+   GET /reef/scenarios/{scenario}/inference/status?model=<artifact-id>
+
+``state`` is one of:
 
 * ``pending``: no worker has taken the startup work.
 * ``starting``: inference has taken it. Downloads, conversion, loading, and
@@ -2190,8 +2198,8 @@ or its failure, does not change it.
   argument that the model refuses, else a fixed text. The service logs hold the
   diagnostic details. Control retries a failed startup by itself: 60 seconds
   after the failure, and then after a wait that doubles at each failed retry,
-  up to one hour. A retry returns the state to ``pending``. Activate the active
-  artifact again to retry at once.
+  up to one hour. A retry returns the state to ``pending``. Resend the complete
+  accepted ``served`` mapping to retry at once.
 
 A newer request, such as one for a changed serving config, replaces the
 current one at once. The work of the replaced request stops within seconds
@@ -2271,7 +2279,6 @@ status codes of an inference request.
 
 To require a specific artifact, use
 ``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/chat/completions``.
-A body ``model`` that names no served artifact selects the active row instead.
 
 Reef retries a request once when the engine aborts a non-streaming answer, or
 refuses the row's model name before any output. It reads the row again for the
@@ -2314,18 +2321,25 @@ The receipt identifies the stored record:
 
 Streams carry it only after the record is stored, so an incomplete stream
 carries no receipt. A stream that fails after its response headers also
-carries no terminal event. Failures include an engine or transport error, a
-missing terminal event, an answer from weights other than the selected ones,
-and the inference timeout. Reef then closes the connection, so a client SDK
-reports a transport error instead of a complete answer. A stream from Reef's
-SGLang or vLLM backend that the engine aborts keeps its terminal event. It is
-still incomplete, because Reef cannot restart a stream after it sent frames.
-A harness that reports by receipt does not reference these records. Reef
-stores each as an incomplete delivery record and preserves the provider
-response. It excludes incomplete records from sample creation and training,
-also when a report references their IDs directly or retained records are
-replayed after a restart. A routed stream follows `Routed external-model
-requests`_ instead.
+carries no terminal event: Reef closes the connection, so a client SDK
+reports a transport error instead of a complete answer. These failures end
+a stream in this way:
+
+- an engine or transport error;
+- a missing terminal event;
+- a handler's report that the engine does not serve the selected weights;
+- the inference timeout.
+
+A stream from Reef's SGLang or vLLM backend that the engine aborts keeps its
+terminal event. It is still incomplete, because Reef cannot restart a stream
+after it sent frames.
+
+Reef stores each incomplete stream as an incomplete delivery record and
+preserves the provider response. A harness that reports by receipt does not
+reference these records. Reef excludes them from sample creation and
+training, also when a report references their IDs directly or retained
+records are replayed after a restart. A routed stream follows `Routed
+external-model requests`_ instead.
 
 An inference response from a served Reef artifact carries ``x-reef-artifact-id``,
 the ID of the artifact that answered. Routed external models have no such header.
@@ -2873,19 +2887,22 @@ Reef reads the mapping as follows:
   name it (`Call one served artifact`_).
 - **An artifact that the mapping leaves out stops serving.**
 
-The answer is ``{"scenario": "<name>", "served": {...}}`` with the mapping
-that the scenario now serves of the component. Reef checks the mapping before
-it changes anything: a mapping that names an unknown artifact, an artifact of
-another component, or more weight artifacts than the runtime keeps loaded at
-once, changes nothing. `Runtime limits
+Reef checks the mapping before it changes anything. A mapping that names an
+unknown artifact, an artifact of another component, or more weight artifacts
+than the runtime keeps loaded at once, changes nothing. `Runtime limits
 <../user-guide/operate.rst#set-what-a-scenario-serves>`__ gives that number,
 and the wait before a stopped checkpoint frees its place.
 
-The response accepts the mapping, and inference loads the artifacts in the
-background. Poll `Startup status`_ before sending requests that require the
-new active artifact. A repeated request retries a failed startup at once
-without writing another operation, and sets the wait of the automatic retries
-back to 60 seconds.
+The answer is ``{"scenario": "<name>", "served": {...}}`` with the mapping
+that Reef accepted for the component. The answer does not show that the
+artifacts serve: inference loads them in the background, and publishes the
+new routes when the startup completes. Poll `Startup status`_ for ``ready``
+or ``failed`` before sending requests that require a new artifact; name an
+artifact that serves beside the active one with ``?model=<artifact-id>``. A
+startup can fail after Reef accepted the mapping, for example when a new
+checkpoint finds no free inference component. A repeated request retries a
+failed startup at once without writing another operation, and sets the wait
+of the automatic retries back to 60 seconds.
 
 Reef appends one operation for each artifact that changes: ``activate`` for a
 new active artifact, ``serve`` for an artifact that starts to serve beside it,
@@ -2899,7 +2916,7 @@ served a checkpoint loads the root's files.
 +--------+--------------------------------------------------------------------+
 | Status | Cause                                                              |
 +========+====================================================================+
-| 200    | the scenario serves the mapping                                    |
+| 200    | Reef accepted the mapping; the artifacts load in the background    |
 +--------+--------------------------------------------------------------------+
 | 400    | a malformed body; a ``served`` that is no object, a weight that is |
 |        | not an integer from 0 to 100, or weights that do not sum to 100;   |
@@ -2959,6 +2976,12 @@ The scenario serves again when ``served`` names one or more artifacts. The
 other components then serve the artifacts of the active selection. The state
 is stored, so it holds after a restart.
 
+A nonempty mapping can follow at once: it need not wait for the delayed stop.
+The runtime can reuse a verified binding; a retired checkpoint loads again.
+Poll the `Startup status`_ of each requested artifact before calling it. A checkpoint that the scenario did not serve
+before still needs a free inference component (`Replace a checkpoint
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__).
+
 Call one served artifact
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -2993,19 +3016,18 @@ when it started to serve. A later activation does not change that binding.
 The activation rule and a restore change the active artifact alone. The
 artifacts served beside it stay served. Training continues from each
 trainer's independently selected training start.
-The staleness check of a recipe counts only the artifacts that the scenario
-served as active, so it refuses the records of a served artifact that was not
-active within ``max_staleness`` artifacts.
 
-The runtime must answer each call from the artifact that the call names.
-The Tinker runtime does, so a Tinker scenario can serve any of its
-artifacts together. A runtime that loads weights into engines answers only
-from the weight artifacts that it keeps loaded, and Reef refuses a mapping of
-more weight artifacts (`Runtime limits
-<../user-guide/operate.rst#set-what-a-scenario-serves>`__). A scenario whose
-components load nothing into a runtime, such as a harness scenario, can serve
-any of its artifacts together. A store without a durable commit history also
-refuses a mapping of several artifacts.
+The staleness check of a recipe does not refuse a sample while the scenario
+serves the artifact that produced it beside the active one. After that
+artifact stops serving, the check counts only the artifacts that the scenario
+served as active: it refuses a sample whose artifact was not active within
+``max_staleness`` artifacts.
+
+The runtime limits how many weight artifacts a scenario serves together
+(`Runtime limits <../user-guide/operate.rst#set-what-a-scenario-serves>`__).
+A scenario whose components load nothing into a runtime, such as a harness
+scenario, can serve any of its artifacts together. A store without a durable
+commit history refuses a mapping of several artifacts.
 
 Restore a scenario selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
