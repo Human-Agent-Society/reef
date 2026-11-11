@@ -70,10 +70,15 @@ CONTAINER_UV = "$HOME/.local/bin/uv"
 CONTAINER_GIT_AGENT = "$HOME/.reef-agent"
 #: Where an npm install puts the agent on a musl image, under the agent user's own home.
 CONTAINER_NPM_PREFIX = "$HOME/.reef-npm"
-#: The shell test that passes on a musl image, such as Alpine, as Harbor's own npm agents test it.
-MUSL_CHECK = "ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]"
-#: The shell command that puts an npm agent on the PATH: nvm's Node on a glibc image, the prefix of a musl image.
-NPM_AGENT_PATH = f'if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; else export PATH="{CONTAINER_NPM_PREFIX}/bin:$PATH"; fi'
+#: The shell test that passes on a musl image, such as Alpine, as Harbor's own npm agents test it. musl's ldd
+#: prints its version and exits 1, so its exit code is dropped: with pipefail it would fail the pipe.
+MUSL_CHECK = "{ ldd --version 2>&1 || true; } | grep -qi musl || [ -f /etc/alpine-release ]"
+#: The shell command that puts an npm agent on the PATH, by what the install wrote: the prefix of a musl image when
+#: it exists, else nvm's Node. A musl image can hold an nvm of its own, so the prefix is the test.
+NPM_AGENT_PATH = (
+    f'if [ -d "{CONTAINER_NPM_PREFIX}/bin" ]; then export PATH="{CONTAINER_NPM_PREFIX}/bin:$PATH"; '
+    'else . "$HOME/.nvm/nvm.sh"; fi'
+)
 #: Where the bridge's relay lives in a task's container, and the loopback port on which it answers the bridge client.
 RELAY_DIR = "/tmp/reef-relay"
 RELAY_TUNNEL_PORT = 47811
@@ -176,9 +181,9 @@ class AdapterAgent(BaseInstalledAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        # The install commands are bash. nvm and Astral's installer need curl, and a git install needs git. A task
-        # image without them gets them from its package manager, as Harbor's own npm agents do.
-        tools = ("bash", "curl", "git") if self.install_kind == "git" else ("bash", "curl")
+        # nvm and Astral's installer need curl, and a git install needs git. A task image without them gets them
+        # from its package manager, as Harbor's own npm agents do.
+        tools = ("curl", "git") if self.install_kind == "git" else ("curl",)
         await self.ensure_system_dependencies(environment, tools)
         if self.install_kind == "uv":
             command = uv_install_command(str(self._version))
@@ -188,10 +193,13 @@ class AdapterAgent(BaseInstalledAgent):
             package = shlex.quote(f"{self.package}@{self._version}")
             if (await environment.exec(command=MUSL_CHECK)).return_code == 0:
                 # The Node that nvm downloads does not run on musl, so a musl image uses the Node of its packages.
-                # The agent user may not write the global prefix, so the agent goes under its own home.
+                # The agent user may not write the global prefix, so the agent goes under its own home. The image
+                # chooses the Node version: --engine-strict fails the install when the agent needs a newer one,
+                # where npm alone only warns and the agent then fails at its start.
                 await self.ensure_system_dependencies(environment, ("nodejs", "npm"))
                 install = (
-                    f"node --version && npm --version && npm install -g --prefix {CONTAINER_NPM_PREFIX} {package}"
+                    "node --version && npm --version && "
+                    f"npm install -g --engine-strict --prefix {CONTAINER_NPM_PREFIX} {package}"
                 )
             else:
                 install = f"{nvm_node_install_snippet()} && npm install -g {package}"

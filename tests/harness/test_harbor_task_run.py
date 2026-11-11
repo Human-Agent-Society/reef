@@ -7,6 +7,7 @@ import base64
 import json
 import shutil
 import socket
+import subprocess
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import (
     CONTAINER_ROOT,
     MUSL_CHECK,
+    NPM_AGENT_PATH,
     AdapterAgent,
     TreeAgent,
     adapter_agent_kwargs,
@@ -162,7 +164,7 @@ def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instructio
     asyncio.run(agent.install(environment))
     asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
 
-    install, run = environment.commands[2], environment.commands[-2]
+    install, run = environment.commands[1], environment.commands[-2]
     assert f"curl -LsSf https://astral.sh/uv/{python.install.version}/install.sh" in install
     assert 'agent="$HOME/.local/bin/uv"' in run
     assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
@@ -177,8 +179,8 @@ def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_b
     asyncio.run(agent.install(environment))
     asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
 
-    # The image has bash, and gets curl and git from its package manager.
-    tools, install, run = environment.commands[4], environment.commands[5], environment.commands[-2]
+    # The image gets curl and git from its package manager.
+    tools, install, run = environment.commands[3], environment.commands[4], environment.commands[-2]
     assert tools.endswith("apt-get update && apt-get install -y curl git")
     clone = f"git clone --quiet --depth 1 --branch {hermes.install.ref} {hermes.install.repository}"
     assert clone in install and 'rm -rf "$HOME/.reef-agent/src/.git"' in install
@@ -212,10 +214,50 @@ def test_an_npm_agent_uses_the_node_of_nvm_on_a_glibc_image_and_of_the_packages_
     install, run = installed("musl", musl)
     assert any(command.endswith("apk add --no-cache nodejs npm") for command in musl.commands)
     assert "nvm install" not in install
-    assert f"npm install -g --prefix $HOME/.reef-npm {package} && " in install
+    # npm alone only warns when the image's Node is older than the agent needs.
+    assert f"npm install -g --engine-strict --prefix $HOME/.reef-npm {package} && " in install
     for command in (install, run):
-        assert 'else export PATH="$HOME/.reef-npm/bin:$PATH"; fi && ' in command
-    assert run.split(" && ")[1].startswith('agent="$(command -v pi)"')
+        assert f"{NPM_AGENT_PATH} && " in command
+
+
+def run_bash(script: str, home: Path, path: Path) -> subprocess.CompletedProcess[str]:
+    """Run ``script`` as Harbor runs a command: in bash with pipefail. ``path`` comes first on the PATH."""
+    env = {"HOME": str(home), "PATH": f"{path}:/usr/bin:/bin"}
+    return subprocess.run(["bash", "-c", f"set -o pipefail; {script}"], env=env, capture_output=True, text=True)
+
+
+def test_the_musl_check_passes_for_the_ldd_of_musl_alone(tmp_path: Path) -> None:
+    def ldd(name: str, text: str, exit_code: int) -> Path:
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "ldd").write_text(f"#!/bin/sh\necho '{text}' >&2\nexit {exit_code}\n")
+        (directory / "ldd").chmod(0o755)
+        return directory
+
+    # musl's ldd prints its version on stderr and exits 1; glibc's exits 0.
+    musl = ldd("musl", "musl libc (x86_64)", 1)
+    glibc = ldd("glibc", "ldd (Ubuntu GLIBC 2.39-0ubuntu8) 2.39", 0)
+    assert run_bash(MUSL_CHECK, tmp_path, musl).returncode == 0
+    assert run_bash(MUSL_CHECK, tmp_path, glibc).returncode != 0
+
+
+def test_the_agent_path_follows_what_the_install_wrote(tmp_path: Path) -> None:
+    def agent(directory: Path, text: str) -> None:
+        directory.mkdir(parents=True)
+        (directory / "agent").write_text(f"#!/bin/sh\necho {text}\n")
+        (directory / "agent").chmod(0o755)
+
+    # An image with an nvm of its own: nvm.sh puts its Node, and the agent that it holds, on the PATH.
+    home = tmp_path / "home"
+    agent(home / "nvm-node" / "bin", "from-nvm")
+    (home / ".nvm").mkdir()
+    (home / ".nvm" / "nvm.sh").write_text(f'export PATH="{home}/nvm-node/bin:$PATH"\n')
+    found = f"{NPM_AGENT_PATH} && agent"
+    assert run_bash(found, home, tmp_path).stdout == "from-nvm\n"
+
+    # After a musl install, the prefix holds the agent, and it wins over the image's nvm.
+    agent(home / ".reef-npm" / "bin", "from-prefix")
+    assert run_bash(found, home, tmp_path).stdout == "from-prefix\n"
 
 
 def test_the_agent_writes_the_atif_of_its_sessions_for_the_verifier_and_drops_a_planted_one(tmp_path: Path) -> None:
