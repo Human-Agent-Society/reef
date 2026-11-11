@@ -30,9 +30,10 @@ import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, override
+from typing import Any, ClassVar, override
 
 import aiohttp
+from harbor.agents.capabilities import AgentCapabilities
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
@@ -128,6 +129,10 @@ class AdapterAgent(BaseInstalledAgent):
     Purpose: :func:`run_harbor_task` names this class in the agent spec of a
     Harbor trial; Harbor builds it with these keyword arguments.
     """
+
+    #: Harbor refuses a task with a ``skills_dir`` for an agent that does not declare this. ``run`` copies the
+    #: task's skills for an adapter with ``task_skills``; ``task_agent_tools`` names the task for another adapter.
+    capabilities: ClassVar[AgentCapabilities] = AgentCapabilities(skills=True)
 
     def __init__(
         self,
@@ -432,6 +437,11 @@ class TreeAgent(AdapterAgent):
     Purpose: ``tree_agent`` names this class. The runner fills the placeholders of the binding in the agent's
     configuration, and the tree stays in a directory so that the runner does not fill them in the tree's own text.
     """
+
+    #: Harbor refuses a task with MCP servers for an agent that does not declare ``mcp_servers``. The render writes
+    #: them for an adapter with ``task_mcp``; ``task_agent_tools`` names the task for another adapter. No adapter's
+    #: agent gets a server's HTTP headers, so ``mcp_http_headers`` stays false.
+    capabilities: ClassVar[AgentCapabilities] = AgentCapabilities(skills=True, mcp_servers=True)
 
     def __init__(
         self,
