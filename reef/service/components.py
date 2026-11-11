@@ -31,6 +31,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from reef.dispatcher.inference_records import StoredInferenceRecords
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
@@ -134,6 +135,7 @@ class InferenceApp(ComponentApp):
                 coordination,
                 worker_id=instance_id("inference-startup"),
                 local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
+                records=StoredInferenceRecords(storage, data_store),
             )
             worker.start()
 

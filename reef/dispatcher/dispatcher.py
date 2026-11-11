@@ -28,6 +28,7 @@ from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
+from reef.dispatcher.inference_records import StoredInferenceRecords
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.manager_worker import ManagedTraining, TrainingManagerWorker
 from reef.dispatcher.samples import LocalSampleProducers
@@ -289,6 +290,7 @@ class Dispatcher(
                     coordination,
                     worker_id=instance_id("inference-startup"),
                     local_artifact_dir=local_artifact_dir,
+                    records=None if data_store is None else StoredInferenceRecords(self.record_storage, data_store),
                 )
             )
         if self.services.runs_samples:

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import threading
 import time
+from contextlib import closing
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -13,17 +14,22 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import ScheduledStop
 from reef.dispatcher import Dispatcher, serving
+from reef.dispatcher.inference_records import StoredInferenceRecords
 from reef.dispatcher.serving import ServingWorker
-from reef.inference.interfaces import FixedEngineClients, InferenceHandler
+from reef.inference.interfaces import FixedEngineClients, InferenceHandler, NoInferenceRecords
 from reef.inference.null import NullInferenceRuntime
 from reef.inference.startup import StartupFailed, StartupStopped, redeploying, report_startup, stopping
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app
+from reef.storage.data import MemoryDataStore
+from reef.storage.scenario import ScenarioSettings
 from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import WorkLeaseLost
 
 STATUS = "/reef/scenarios/math/inference/status"
@@ -41,6 +47,11 @@ class PausedRuntime(StubInferenceRuntime):
         self.opens = 0
         self.shutdowns = 0
         self.stops = []
+        self.records = None
+
+    def use_records(self, records) -> None:
+        assert self.opens == 0, "the worker gives the records before it opens the runtime"
+        self.records = records
 
     def open(self) -> None:
         self.opens += 1
@@ -285,8 +296,59 @@ def test_a_fresh_owner_opens_the_runtime_before_cleanup(startup, tmp_path):
     try:
         assert standby.run_once()
         assert replacement.opens == 1 and replacement.stops == [served]
+        assert isinstance(replacement.records, NoInferenceRecords), "a worker without records gives a reader of none"
     finally:
         standby.stop()
+
+
+@pytest.mark.unit
+def test_the_worker_gives_its_runtime_the_scenarios_inference_records(tmp_path):
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    data = MemoryDataStore(task_files)
+    runtime = PausedRuntime()
+    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    with closing(SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data)) as storage:
+        for scenario in ("math", "code"):
+            storage.write_settings(scenario, ScenarioSettings(owner="acme"))
+        # The owner's other items lie between the inference records of one scenario.
+        for scenario, record_id, request_type in [
+            ("math", "i1", RequestType.INFERENCE),
+            ("math", "r1", RequestType.REPORT),
+            ("code", "i1", RequestType.INFERENCE),
+            ("math", "i2", RequestType.INFERENCE),
+            ("math", "i3", RequestType.INFERENCE),
+        ]:
+            with closing(storage.open(scenario)) as session:
+                session.records.append(
+                    AgentRecord.create(
+                        scenario=scenario,
+                        request_type=request_type,
+                        payload={"id": record_id},
+                        agent_record_id=record_id,
+                    )
+                )
+        coordination = memory_coordination()
+        worker = ServingWorker(
+            recipe,
+            InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+            coordination,
+            worker_id="inference",
+            records=StoredInferenceRecords(storage, data),
+        )
+        try:
+            worker.open_runtime(runtime)
+            newest = runtime.records.newest("math", 2)
+            assert [(item.agent_record_id, item.request_type) for item in newest] == [
+                ("i3", RequestType.INFERENCE),
+                ("i2", RequestType.INFERENCE),
+            ]
+            assert [item.payload["id"] for item in runtime.records.newest("math", 8)] == ["i3", "i2", "i1"]
+            assert runtime.records.newest("unknown", 8) == ()
+            with pytest.raises(ValueError, match="count must be positive"):
+                runtime.records.newest("math", 0)
+        finally:
+            worker.stop()
+            coordination.close()
 
 
 @pytest.mark.unit

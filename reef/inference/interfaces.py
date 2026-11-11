@@ -27,6 +27,7 @@ from typing import Any, Literal
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.records_types import AgentRecord
 from reef.core.served_models import ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import WeightFiles
@@ -380,6 +381,28 @@ class FixedEngineClients(EngineClients):
 # -- Runtime contracts --------------------------------------------------------
 
 
+class InferenceRecords(ABC):
+    """The inference records of a deployment's scenarios, as a serving runtime reads them.
+
+    ``newest(scenario, count)`` gives at most ``count`` records of request type ``inference`` that ``scenario`` made,
+    newest first, for a positive ``count``; it gives none for a scenario without such records.
+
+    Purpose: the inference service appends these records to the deployment's store. It makes one reader over that
+    store and gives it to its runtime (``InferenceRuntime.use_records``), so that a runtime reads a scenario's own
+    requests, for example to calibrate a quantization, without opening the store itself.
+    """
+
+    @abstractmethod
+    def newest(self, scenario: str, count: int) -> tuple[AgentRecord, ...]: ...
+
+
+class NoInferenceRecords(InferenceRecords):
+    """The records of a process that keeps none: every read gives none."""
+
+    def newest(self, scenario: str, count: int) -> tuple[AgentRecord, ...]:
+        return ()
+
+
 class InferenceRuntime(ABC):
     """Own inference requests, serving weights and admission.
 
@@ -492,6 +515,11 @@ class InferenceRuntime(ABC):
         nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
         the scenario to another engine. The default has no engine field and does nothing; the handler applies
         request fields to each request."""
+        return
+
+    def use_records(self, records: InferenceRecords) -> None:
+        """Take the reader of the inference records of the scenarios that this runtime serves. The serving worker
+        calls it once, before ``open``. The default keeps nothing: most runtimes read no record."""
         return
 
     def open(self) -> None:

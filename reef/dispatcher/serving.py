@@ -19,7 +19,7 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
-from reef.inference.interfaces import InferenceRuntime
+from reef.inference.interfaces import InferenceRecords, InferenceRuntime, NoInferenceRecords
 from reef.inference.startup import (
     PROGRESS_KEY,
     STARTUP_FAILED_PREFIX,
@@ -119,7 +119,8 @@ class ServingWorker(QueueWorker):
     queues every completed selection again. ``owner`` is None before ownership. ``recovered`` becomes true after the
     recovery. ``opened`` becomes true after the runtime opens. ``activated`` maps each scenario to the artifact that
     this worker activated for it last. A route that it kept from before is activated again once, so that the runtime
-    takes over what it adopted.
+    takes over what it adopted. ``records`` reads the scenarios' inference records; the worker gives it to the runtime
+    before it opens the runtime (``InferenceRuntime.use_records``). Without it, the runtime reads none.
     """
 
     def __init__(
@@ -130,6 +131,7 @@ class ServingWorker(QueueWorker):
         *,
         worker_id: str,
         local_artifact_dir: Path | None = None,
+        records: InferenceRecords | None = None,
     ) -> None:
         runtime = recipe.runtime
         super().__init__(
@@ -143,6 +145,7 @@ class ServingWorker(QueueWorker):
         self.backends = backends
         self.routes = coordination.served_models
         self.local_artifact_dir = local_artifact_dir
+        self.records = NoInferenceRecords() if records is None else records
         self.stop_delay_seconds = CACHE_SECONDS + (300.0 if runtime is None else runtime.inference_timeout_s)
         self.opened = False
         # Slots open the runtime once.
@@ -215,6 +218,7 @@ class ServingWorker(QueueWorker):
 
     def open_runtime(self, runtime: InferenceRuntime) -> None:
         started = time.monotonic()
+        runtime.use_records(self.records)
         runtime.open()
         self.opened = True
         logger.info("opened the inference runtime in %.1f s", time.monotonic() - started)

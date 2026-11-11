@@ -144,6 +144,15 @@ serving worker adds each report to the serving work's progress for that
 artifact, and the startup status gives them as ``startup``. Report when the
 phase or its detail changes. Outside a serving work, the call does nothing.
 
+A runtime can read the inference records of the scenarios that it serves, for
+example to calibrate a quantization on a scenario's own requests. The serving
+worker calls ``InferenceRuntime.use_records(records)`` once, before ``open``.
+``records`` is a ``reef.inference.interfaces.InferenceRecords``:
+``records.newest(scenario, count)`` returns at most ``count`` inference
+records of ``scenario``, newest first, and none for a scenario without them.
+The default ``use_records`` keeps nothing. A runtime must not open the record
+store itself: the service owns the store and its settings.
+
 A runtime that serves several models declares a serving field that chooses the
 model of each artifact (`Serving settings <http-api.rst#serving-settings>`__).
 It reads an artifact's training starts with
