@@ -143,6 +143,12 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     )
     other_scenario = loop_with(component, scenario="code").submit(JobLoopState("fake:base"), batch(), PARAMETERS)
     assert other_scenario.result.training_job_id != job.job_id
+    # The key of the data directory names the rows: a loop of another process, with its own store, names the same
+    # job, and other rows are another job.
+    restarted = loop_with(component).submit(JobLoopState("fake:base"), batch(), PARAMETERS)
+    assert restarted.result.training_job_id == job.job_id
+    other_rows = loop.submit(JobLoopState("fake:base"), JobData("b", batch("c").samples), PARAMETERS)
+    assert other_rows.result.training_job_id != job.job_id
     # The next job of the same trainer is another job, even with the same data from the same start.
     later = loop.submit(JobLoopState("fake:base", finished_jobs=1, last_job=FINISHED), batch(), PARAMETERS)
     assert later.result.training_job_id != job.job_id

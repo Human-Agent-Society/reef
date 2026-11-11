@@ -114,6 +114,15 @@ def read_job_data(directory: Path, data_id: str | None = None) -> JobData:
     return JobData.from_dict({"data_id": data_id or header["key"], "samples": samples, "request": None})
 
 
+def job_data_key_of(uri: str) -> str:
+    """The key of the job data directory at ``uri``: the last name of the URI, which a segment store ends the URI of
+    a directory with (``SegmentStore.find_directory``). Raise ``ValueError`` for a URI without a name."""
+    key = uri.rstrip("/").rpartition("/")[2] if isinstance(uri, str) else ""
+    if not key or ":" in key:
+        raise ValueError("a job data reference has the uri of a job data directory")
+    return key
+
+
 @dataclass(frozen=True)
 class JobDataRef:
     """The job data directory of one training job.
@@ -165,6 +174,7 @@ __all__ = [
     "JobDataKind",
     "JobDataRef",
     "job_data_key",
+    "job_data_key_of",
     "job_data_kind",
     "read_job_data",
     "write_job_data",

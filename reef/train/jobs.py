@@ -26,7 +26,9 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.job_data import JobData, JobOutcome
+from reef.core.training_request import TrainingRequest
 from reef.storage.data import DataStore, MemoryDataStore
+from reef.storage.job_data import job_data_key_of
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainingCommit
@@ -194,21 +196,29 @@ class JobLoop:
         self.scenario_component = scenario_component
         self.data_store = MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
 
-    def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
+    def job_id(
+        self,
+        state: JobLoopState,
+        start: str,
+        data_key: str,
+        request: TrainingRequest | None,
+        parameters: Mapping[str, Any],
+    ) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
-        (``state.finished_jobs``), the component, the start, the data's rows and request, and the parameters.
+        (``state.finished_jobs``), the component, the start, the key of the data's directory (``job_data_key``),
+        the data's request, and the parameters.
 
         Two jobs of one trainer never share an ID, even with the same data from the same start: their ordinals
         differ, or they run at the same time for two requests. A resubmission after the service restarts names the
         same job, so the component does not run it twice.
         """
-        encoded = data.to_dict()
-        # The data's number is process-local, so the rows name the data.
+        # The data's number is process-local, so the key of its samples names the data. The key is a hash of the
+        # rows: the ID does not encode the rows a second time, which for a large job takes as much memory again.
         identity = {
             "scenario": self.scenario,
             "job": state.finished_jobs,
-            "samples": encoded["samples"],
-            "request": encoded["request"],
+            "data": data_key,
+            "request": None if request is None else {"id": request.id, **request.to_dict()},
         }
         return job_id_for(self.component.name, start, identity, parameters)
 
@@ -247,12 +257,13 @@ class JobLoop:
             raise ValueError("the trainer runs one such job at a time")
         backend = self.component.name
         start = state.start if start is None else start
-        job_id = self.job_id(state, start, data, parameters)
+        directory = self.data_store.write_job_directory(data)
+        job_id = self.job_id(state, start, job_data_key_of(directory.uri), data.request, parameters)
         job = TrainingJob(
             job_id,
             backend,
             start,
-            self.data_store.write_job_directory(data),
+            directory,
             parameters,
             scenario=self.scenario,
             request_id=None if data.request is None else data.request.id,
