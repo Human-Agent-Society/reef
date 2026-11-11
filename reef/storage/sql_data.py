@@ -132,7 +132,8 @@ GROUP_COMMIT_ITEMS = 200
 
 
 def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
-    """The ``evaluation_id`` of the metadata of an item row, in the form of the index ``data_item_by_evaluation``.
+    """The ``evaluation_id`` of the metadata of an item row, in the form of the index
+    ``data_item_by_evaluation_sequence``.
 
     The JSON path is a literal, not a parameter, so that a query with the same expression can use the index.
     """
@@ -240,9 +241,15 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("last_sequence", BigInteger, nullable=False),
         PrimaryKeyConstraint("owner", "scenario"),
     )
-    # The calls of one evaluation are read by their evaluation_id (``SQLDataStore.query``), so a read does not scan
-    # all the record items of an owner. ``migrate_data_indexes`` adds the index to an older table.
-    Index("data_item_by_evaluation", items.c.owner, item_evaluation_id(items, sqlite=sqlite))
+    # The calls of one evaluation are read by their evaluation_id, a page at a time in sequence order
+    # (``SQLDataStore.query``). With ``sequence`` in the index, a page reads only its own rows, not every row of the
+    # evaluation. ``migrate_data_indexes`` adds the index to an older table.
+    Index(
+        "data_item_by_evaluation_sequence",
+        items.c.owner,
+        item_evaluation_id(items, sqlite=sqlite),
+        items.c.sequence,
+    )
     collections = Table(
         "data_collection",
         metadata,
@@ -383,8 +390,8 @@ class SQLDataStore(DataStore):
 
     @abstractmethod
     def evaluation_id(self) -> ColumnElement[Any]:
-        """The ``evaluation_id`` of the metadata of an item row, as the index ``data_item_by_evaluation`` holds it
-        (``item_evaluation_id``)."""
+        """The ``evaluation_id`` of the metadata of an item row, as the index ``data_item_by_evaluation_sequence``
+        holds it (``item_evaluation_id``)."""
 
     def is_inference(self) -> ColumnElement[bool]:
         """The condition that an item row is a record item of the source ``inference``, which ``prune_records``
@@ -790,7 +797,7 @@ class SQLDataStore(DataStore):
             value = self.metadata_string(group[0])
             statement = statement.where(value.is_(None) if group[1] is None else value == group[1])
             if group[0] == "evaluation_id" and group[1] is not None:
-                # The same condition in the form of the index data_item_by_evaluation, which finds the rows.
+                # The same condition in the form of the index data_item_by_evaluation_sequence, which finds the rows.
                 statement = statement.where(self.evaluation_id() == group[1])
         if benchmark is not None:
             statement = statement.where(items.c.kind == "task", self.in_benchmark(benchmark))

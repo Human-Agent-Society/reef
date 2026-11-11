@@ -28,6 +28,7 @@ from reef.harness.harbor.agent import (
     CONTAINER_ROOT,
     MUSL_CHECK,
     NPM_AGENT_PATH,
+    RELAY_PYTHON_CHECK,
     AdapterAgent,
     TreeAgent,
     adapter_agent_kwargs,
@@ -167,6 +168,7 @@ class RecordingEnvironment:
         if command == "uname -m":
             return SimpleNamespace(return_code=0, stdout=self.platform.splitlines()[0] + "\n", stderr="")
         absent = any(command.startswith(f"command -v {name} >/dev/null") for name in self.missing)
+        absent = absent or (command == RELAY_PYTHON_CHECK and "python3" in self.missing)
         failed = absent or (command == MUSL_CHECK and not self.musl)
         return SimpleNamespace(return_code=1 if failed else 0, stdout="", stderr="")
 
@@ -215,6 +217,19 @@ def test_the_python_adapter_uploads_uv_and_runs_its_program_with_the_instruction
     assert 'agent="$HOME/.local/bin/uv"' in run
     assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
     assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
+
+
+def test_the_relay_runs_on_the_python_of_the_image_or_on_a_python_from_an_uploaded_uv(
+    tmp_path: Path, uv_builds: list[str]
+) -> None:
+    pi = get_adapter("pi")
+    agent = AdapterAgent(tmp_path, **adapter_agent_kwargs(pi, pi.install, tmp_path / "files", 60.0))
+    assert asyncio.run(agent.relay_python(RecordingEnvironment())) == "python3" and uv_builds == []
+
+    # An image with no python3, or with one before 3.7, cannot run the relay: Reef uploads uv for a Python.
+    old = RecordingEnvironment(missing=("python3", "curl"))
+    assert asyncio.run(agent.relay_python(old)) == '"$HOME/.local/bin/uv" run --no-project --python 3.12'
+    assert uv_builds == ["x86_64"] and "/tmp/reef-uv.tar.gz" in old.uploads
 
 
 def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(
@@ -527,6 +542,14 @@ MCP_SERVERS = [
     MCPServerConfig(name="search", transport="streamable-http", url="http://search:8000/mcp"),
     MCPServerConfig(name="files", transport="stdio", command="files-server", args=["--root", "/app"]),
 ]
+
+
+def test_the_agents_declare_to_harbor_the_task_settings_that_reef_gives_an_adapter() -> None:
+    # Harbor ends a trial before the container starts when its task has skills or MCP servers and the agent does
+    # not declare them. Reef refuses HTTP headers itself, so the agents do not declare them.
+    assert AdapterAgent.capabilities.skills and not AdapterAgent.capabilities.mcp_servers
+    assert TreeAgent.capabilities.skills and TreeAgent.capabilities.mcp_servers
+    assert not TreeAgent.capabilities.mcp_http_headers
 
 
 def test_each_adapter_writes_the_mcp_servers_of_a_task_as_its_agent_reads_them() -> None:
