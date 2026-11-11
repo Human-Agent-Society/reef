@@ -38,13 +38,16 @@ from reef.harness.harbor.agent import (
     task_mcp_overlays,
     tree_agent,
 )
+from reef.harness.harbor.agent_bundle import AgentBundleError, agent_bundle
 from reef.harness.harbor.node_runtime import (
     NODE_BUILDS,
     PLATFORM_COMMAND,
     NodeBuild,
     NodeRuntimeError,
+    host_node,
     node_archive,
     node_build_name,
+    node_cpu,
 )
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.harbor.uv_runtime import UV_BUILDS, UV_VERSION, UvBuild, UvRuntimeError, uv_archive, uv_build_name
@@ -276,11 +279,25 @@ def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_b
     assert agent.get_version_command() == '"$HOME/.reef-agent/venv/bin/hermes" --version'
 
 
-def test_an_npm_agent_uses_an_uploaded_node_on_a_glibc_image_and_the_node_of_the_packages_on_a_musl_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.fixture
+def agent_bundles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str, str]]:
+    """The agent bundles that an agent asked for, as ``(package, version, cpu, libc)``. Each one is a stand-in
+    archive, not an npm install."""
+    asked: list[tuple[str, str, str, str]] = []
+
+    def bundle(package: str, version: str, cpu: str, libc: str, cache: Path) -> Path:
+        asked.append((package, version, cpu, libc))
+        (tmp_path / f"agent-{cpu}-{libc}.tar.gz").write_text(f"the {cpu} {libc} bundle")
+        return tmp_path / f"agent-{cpu}-{libc}.tar.gz"
+
+    monkeypatch.setattr("reef.harness.harbor.agent.agent_bundle", bundle)
+    return asked
+
+
+def test_an_npm_agent_is_a_bundle_from_the_host_with_an_uploaded_node_on_glibc_and_the_image_node_on_musl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_bundles: list[tuple[str, str, str, str]]
 ) -> None:
     pi = get_adapter("pi")
-    package = f"{pi.install.package}@{pi.install.version}"
     builds: list[str] = []
 
     def archive(name: str, cache: Path) -> Path:
@@ -295,31 +312,107 @@ def test_an_npm_agent_uses_an_uploaded_node_on_a_glibc_image_and_the_node_of_the
         agent = AdapterAgent(tmp_path / name, **adapter_agent_kwargs(pi, pi.install, tmp_path / "files", 60.0))
         asyncio.run(agent.install(environment))
         asyncio.run(agent.run("Play.", environment, AgentContext()))
-        (install,) = (command for command in environment.commands if "npm install -g" in command)
+        (install,) = (command for command in environment.commands if "npm rebuild" in command)
         return install, environment.commands[-2]
 
-    # Reef uploads the Node of the container's platform, and the install unpacks it: the container downloads no
-    # Node and needs no curl, so an image without curl, or with a curl that a task replaced, installs the same.
+    # Reef uploads the Node of the container's platform and the agent that npm installed on the host for it. The
+    # container unpacks both outside the user's home and reaches no registry: no curl, no package manager, no
+    # npm install.
     glibc = RecordingEnvironment(missing=("curl",), platform="x86_64\nglibc 2.27\n")
     install, run = installed("glibc", glibc)
-    assert builds == ["x64-glibc-217"] and glibc.uploads == {"/tmp/reef-node.tar.gz": "the x64-glibc-217 build"}
-    unpack = 'tar -xzf /tmp/reef-node.tar.gz -C "$HOME/.reef-node" --strip-components=1'
-    assert unpack in install and f"npm install -g --engine-strict {package} && " in install
-    assert glibc.commands[glibc.commands.index(install) + 1].endswith("rm -f /tmp/reef-node.tar.gz")
-    assert not any("curl" in command or "apt-get" in command for command in glibc.commands)
-    for command in (install, run):
-        assert f"{NPM_AGENT_PATH} && " in command
+    assert builds == ["x64-glibc-217"] and agent_bundles == [(pi.install.package, pi.install.version, "x64", "glibc")]
+    assert glibc.uploads == {
+        "/tmp/reef-node.tar.gz": "the x64-glibc-217 build",
+        "/tmp/reef-agent.tar.gz": "the x64 glibc bundle",
+    }
+    assert "tar -xzf /tmp/reef-node.tar.gz -C /opt/reef/node --strip-components=1" in install
+    assert "tar -xzf /tmp/reef-agent.tar.gz -C /opt/reef && " in install
+    assert "npm rebuild --global --prefix=/opt/reef/npm --no-audit --no-fund && rm -f /tmp/reef-node" in install
+    assert not any("curl" in command or "apt-get" in command or "npm install" in command for command in glibc.commands)
+    assert f"{NPM_AGENT_PATH} && " in install and f"{NPM_AGENT_PATH} && " in run
 
-    # The uploaded builds do not run on musl: the image's packages give Node, and the agent goes under the agent
-    # user's own home.
-    musl = RecordingEnvironment(missing=("node", "npm"), manager="apk", musl=True)
+    # The Node builds for musl need libraries that a bare musl image lacks: the image's packages give Node, and the
+    # agent is still the bundle from the host, built for musl.
+    musl = RecordingEnvironment(missing=("node", "npm"), manager="apk", musl=True, platform="aarch64\n")
     install, run = installed("musl", musl)
     assert any(command.endswith("apk add --no-cache nodejs npm") for command in musl.commands)
-    assert "tar -xzf" not in install and builds == ["x64-glibc-217"] and not musl.uploads
-    # npm alone only warns when the image's Node is older than the agent needs.
-    assert f"npm install -g --engine-strict --prefix $HOME/.reef-npm {package} && " in install
-    for command in (install, run):
-        assert f"{NPM_AGENT_PATH} && " in command
+    assert builds == ["x64-glibc-217"] and agent_bundles[-1] == (
+        pi.install.package,
+        pi.install.version,
+        "arm64",
+        "musl",
+    )
+    assert musl.uploads == {"/tmp/reef-agent.tar.gz": "the arm64 musl bundle"}
+    assert "reef-node.tar.gz -C" not in install and "npm rebuild --global --prefix=/opt/reef/npm" in install
+
+
+def test_an_agent_bundle_is_one_npm_install_on_the_host_for_the_containers_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node = tmp_path / "node"
+    runs: list[list[str]] = []
+
+    def npm(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        runs.append(command)
+        if "broken@1" in command:
+            raise subprocess.CalledProcessError(1, command, stderr="npm error 404 broken@1 is not in this registry")
+        prefix = Path(next(argument for argument in command if argument.startswith("--prefix=")).split("=", 1)[1])
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "agent").write_text("#!/bin/sh\n")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("reef.harness.harbor.agent_bundle.host_node", lambda cache: node)
+    monkeypatch.setattr("reef.harness.harbor.agent_bundle.subprocess.run", npm)
+
+    bundle = agent_bundle("@scope/agent", "1.2.3", "arm64", "musl", tmp_path / "cache")
+    assert bundle.name == "scope-agent@1.2.3-linux-arm64-musl.tar.gz"
+    (command,) = runs
+    assert command[:3] == [str(node / "bin" / "node"), str(node / "lib/node_modules/npm/bin/npm-cli.js"), "install"]
+    # npm installs for the container, not for this host, and runs no script of the package here.
+    assert {"--os=linux", "--cpu=arm64", "--libc=musl", "--ignore-scripts", "@scope/agent@1.2.3"} <= set(command)
+    with tarfile.open(bundle, "r:gz") as tar:
+        assert [(member.name, member.uid) for member in tar.getmembers()] == [
+            ("npm", 0),
+            ("npm/bin", 0),
+            ("npm/bin/agent", 0),
+        ]
+    # The same four values again are the kept archive; another platform is another install.
+    assert agent_bundle("@scope/agent", "1.2.3", "arm64", "musl", tmp_path / "cache") == bundle and len(runs) == 1
+    assert agent_bundle("@scope/agent", "1.2.3", "x64", "glibc", tmp_path / "cache") != bundle and len(runs) == 2
+
+    with pytest.raises(AgentBundleError, match="npm cannot install broken@1 for linux x64 glibc: npm error 404"):
+        agent_bundle("broken", "1", "x64", "glibc", tmp_path / "cache")
+    assert sorted(path.name for path in (tmp_path / "cache").iterdir()) == [
+        "scope-agent@1.2.3-linux-arm64-musl.tar.gz",
+        "scope-agent@1.2.3-linux-x64-glibc.tar.gz",
+    ]
+
+
+def test_the_host_node_is_the_build_of_the_hosts_system_unpacked_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = tmp_path / "node.tar.xz"
+    with tarfile.open(published, "w:xz") as tar:
+        content = b"#!/bin/sh\n"
+        info = tarfile.TarInfo("node-v0-darwin-arm64/bin/node")
+        info.size, info.mode = len(content), 0o755
+        tar.addfile(info, io.BytesIO(content))
+    build = NodeBuild(published.as_uri(), hashlib.sha256(published.read_bytes()).hexdigest())
+    monkeypatch.setitem(NODE_BUILDS, "darwin-arm64", build)
+    monkeypatch.setattr("reef.harness.harbor.node_runtime.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("reef.harness.harbor.node_runtime.platform.machine", lambda: "arm64")
+
+    directory = host_node(tmp_path / "cache")
+    assert (directory / "bin" / "node").read_bytes() == b"#!/bin/sh\n"
+    published.unlink()
+    assert host_node(tmp_path / "cache") == directory
+
+    monkeypatch.setattr("reef.harness.harbor.node_runtime.platform.system", lambda: "Windows")
+    with pytest.raises(NodeRuntimeError, match="no Node build for a Windows host"):
+        host_node(tmp_path / "cache")
+    assert node_cpu("x86_64\n") == "x64" and node_cpu("aarch64") == "arm64"
+    with pytest.raises(NodeRuntimeError, match="riscv64"):
+        node_cpu("riscv64")
 
 
 def run_bash(script: str, home: Path, path: Path) -> subprocess.CompletedProcess[str]:
@@ -341,23 +434,6 @@ def test_the_musl_check_passes_for_the_ldd_of_musl_alone(tmp_path: Path) -> None
     glibc = ldd("glibc", "ldd (Ubuntu GLIBC 2.39-0ubuntu8) 2.39", 0)
     assert run_bash(MUSL_CHECK, tmp_path, musl).returncode == 0
     assert run_bash(MUSL_CHECK, tmp_path, glibc).returncode != 0
-
-
-def test_the_agent_path_follows_what_the_install_wrote(tmp_path: Path) -> None:
-    def agent(directory: Path, text: str) -> None:
-        directory.mkdir(parents=True)
-        (directory / "agent").write_text(f"#!/bin/sh\necho {text}\n")
-        (directory / "agent").chmod(0o755)
-
-    # After a glibc install, the global prefix of the uploaded Node holds the agent.
-    home = tmp_path / "home"
-    agent(home / ".reef-node" / "bin", "from-node")
-    found = f"{NPM_AGENT_PATH} && agent"
-    assert run_bash(found, home, tmp_path).stdout == "from-node\n"
-
-    # After a musl install, the prefix holds the agent.
-    agent(home / ".reef-npm" / "bin", "from-prefix")
-    assert run_bash(found, home, tmp_path).stdout == "from-prefix\n"
 
 
 def test_the_node_build_follows_the_machine_and_the_glibc_of_the_container() -> None:
