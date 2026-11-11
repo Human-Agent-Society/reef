@@ -72,6 +72,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import files_digest
 from reef.storage.work_queue import WorkItem
 from reef.train.trainer import ComponentTrainer
 
@@ -652,6 +653,41 @@ def test_a_cancelled_evaluation_fails_with_its_rollouts_and_starts_no_waiting_ro
             assert again == answer
             unknown = await client.post("/reef/scenarios/s/evaluations/unknown/cancel", headers=AUTH)
             assert unknown.status == 404
+
+    asyncio.run(run())
+
+
+def test_a_retry_after_a_task_replace_runs_the_new_files_of_the_task(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    endpoints = LocalCandidateEndpoints(dispatcher)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            first = endpoints.task_directory(EvaluationRollout.from_item(item))
+            queue.fail(
+                EVALUATIONS_QUEUE, item.id, "w", "the task's compose file reads an unset variable", retryable=False
+            )
+
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+                tar.add(write_harbor_task(task_for("add", "record-2", 9000), tmp_path / "fixed"), arcname="add")
+            gzip = {**AUTH, "Content-Type": "application/gzip"}
+            put = await client.put("/reef/namespaces/s/data/tasks/add", headers=gzip, data=buffer.getvalue())
+            assert put.status == 200, await put.text()
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+
+            # The retried attempt finds the task by name and gets the new files; the old ones stay readable.
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            second = endpoints.task_directory(EvaluationRollout.from_item(item))
+            assert item.attempt_count == 2 and second != first and first.is_dir()
+            assert files_digest(second) == dispatcher.data_store.read("s", "add").digest
 
     asyncio.run(run())
 
