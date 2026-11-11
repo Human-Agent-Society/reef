@@ -181,36 +181,54 @@ def rollout_cancelled(item: WorkItem) -> bool:
 
 def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now: float) -> dict[str, JsonValue]:
     """The progress of ``stored`` from ``items``, its rollouts in the queue (RFC #1287): ``{total, ended, scored,
-    failed, cancelled, running, mean_score, eta_seconds}``.
+    failed, cancelled, running, mean_score, eta_seconds, benchmarks}``.
 
     ``ended`` counts the final rollouts that no cancel or stop ended. ``mean_score`` is the mean of their number
     scores. ``eta_seconds`` divides the rollouts left by the rate at which rollouts ended in the last
     ``ETA_WINDOW_SECONDS``; it is None when none ended in that time, or when the evaluation ended.
+    ``benchmarks`` has one entry for each benchmark of the request's collection, in its order: ``benchmark`` and
+    the same counts and ``mean_score`` for the rollouts of the benchmark's tasks. A task in two benchmarks counts
+    in both. It is empty without a collection.
     """
     request = stored.request
-    total = len(request.task_names) * request.rollouts_per_task
-    ended = [item for item in items if item.final and not rollout_cancelled(item)]
-    scores = [
-        RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
-        for item in ended
-        if item.state == "finished"
-    ]
-    scored = sum(not score.is_failed for score in scores)
+
+    def _counts(rollouts: Sequence[WorkItem], task_count: int) -> dict[str, JsonValue]:
+        ended = [item for item in rollouts if item.final and not rollout_cancelled(item)]
+        scores = [
+            RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
+            for item in ended
+            if item.state == "finished"
+        ]
+        scored = sum(not score.is_failed for score in scores)
+        return {
+            "total": task_count * request.rollouts_per_task,
+            "ended": len(ended),
+            "scored": scored,
+            "failed": len(ended) - scored,
+            "cancelled": sum(rollout_cancelled(item) for item in rollouts),
+            "running": sum(item.state in ("assigned", "running") for item in rollouts),
+            "mean_score": mean_score(scores),
+        }
+
     window = min(ETA_WINDOW_SECONDS, now - stored.created_at)
-    recent = sum(item.ended_at is not None and item.ended_at >= now - window for item in ended)
+    recent = sum(
+        item.final and not rollout_cancelled(item) and item.ended_at is not None and item.ended_at >= now - window
+        for item in items
+    )
+    counts = _counts(items, len(request.task_names))
     eta = None
     if stored.state in ("queued", "running") and recent and window > 0:
-        eta = (total - len(ended)) * window / recent
-    return {
-        "total": total,
-        "ended": len(ended),
-        "scored": scored,
-        "failed": len(ended) - scored,
-        "cancelled": sum(rollout_cancelled(item) for item in items),
-        "running": sum(item.state in ("assigned", "running") for item in items),
-        "mean_score": mean_score(scores),
-        "eta_seconds": eta,
-    }
+        eta = (cast(int, counts["total"]) - cast(int, counts["ended"])) * window / recent
+    benchmarks: list[JsonValue] = []
+    if request.collection is not None:
+        # The payload names the rollout's task; ``EvaluationRollout`` wrote it (``to_payload``).
+        by_task: dict[str, list[WorkItem]] = {}
+        for item in items:
+            by_task.setdefault(str(item.payload["task_name"]), []).append(item)
+        for benchmark, task_names in request.collection.benchmarks:
+            rollouts = [item for name in task_names for item in by_task.get(name, ())]
+            benchmarks.append({"benchmark": benchmark, **_counts(rollouts, len(task_names))})
+    return {**counts, "eta_seconds": eta, "benchmarks": benchmarks}
 
 
 def rollout_work(rollout: EvaluationRollout) -> NewWork:
