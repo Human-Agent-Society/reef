@@ -47,8 +47,8 @@ What this covers, and what it does not:
 
 - Linux, with `docker`, `docker compose` (v2) and `docker buildx` usable by the
   user who runs `reef serve`.
-- Reef installed from this checkout in a Python 3.12 environment, with the
-  `third_party/semantic-router` submodule checked out.
+- Reef installed from this checkout in a Python 3.12 environment, and Git to
+  obtain the pinned upstream source for the image build.
 - Free loopback ports: 8900 (Reef), 50053 (SR's HTTP API) and one per model
   service (8101-8104 below).
 
@@ -56,25 +56,31 @@ Run every command from the repository root.
 
 ## 1. Build the Semantic Router image
 
-`third_party/semantic-router` pins the upstream source at commit
-`c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59`, unmodified.
+This Reef release supports upstream commit
+`c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59`, unmodified. The supported revision
+ships with Reef; the build below reads it from the installed package.
 
 The example manifest pins the local image used for the real-inference test:
 `reef-direct-sr@sha256:090b81606403497c9b3cd48eb576ad1f4406024ee0f242cb714ba8fe3962dfe1`.
 This is not a published image. On another host, build the pinned source below
 and replace the example reference with your image's repository digest.
 
-Build the pinned source into a local image and note its digest:
+Fetch that commit into a new directory outside the Reef checkout, then build
+the image and note its digest:
 
 ```bash
-PIN=c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59
-git submodule update --init third_party/semantic-router
-test "$(git -C third_party/semantic-router rev-parse HEAD)" = "$PIN"
-test -z "$(git -C third_party/semantic-router status --porcelain)"
+PIN=$(python -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
+SR_SOURCE_DIR=$(mktemp -d)
+git -C "$SR_SOURCE_DIR" init
+git -C "$SR_SOURCE_DIR" remote add origin https://github.com/vllm-project/semantic-router.git
+git -C "$SR_SOURCE_DIR" fetch --depth 1 origin "$PIN"
+git -C "$SR_SOURCE_DIR" checkout --detach FETCH_HEAD
+test "$(git -C "$SR_SOURCE_DIR" rev-parse HEAD)" = "$PIN"
+test -z "$(git -C "$SR_SOURCE_DIR" status --porcelain)"
 docker buildx build --load \
-  -f third_party/semantic-router/src/vllm-sr/Dockerfile \
+  -f "$SR_SOURCE_DIR/src/vllm-sr/Dockerfile" \
   --label org.opencontainers.image.revision="$PIN" \
-  -t reef-semantic-router:"${PIN:0:12}" third_party/semantic-router
+  -t reef-semantic-router:"${PIN:0:12}" "$SR_SOURCE_DIR"
 docker image inspect --format '{{json .RepoDigests}}' reef-semantic-router:"${PIN:0:12}"
 ```
 

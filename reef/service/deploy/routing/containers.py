@@ -25,7 +25,7 @@ import yaml
 from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
 from reef.storage.durable_files import fsync_dir
 
-# Kept in sync with the submodule gitlink by the source dependency test; wheels need no Git checkout.
+# Supported upstream source revision, shipped in wheels without requiring a Git checkout.
 SEMANTIC_ROUTER_REVISION = "c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59"
 
 
@@ -530,7 +530,7 @@ class DockerComposeRuntime(ContainerRuntime):
             raise ContainerCommandError("invalid Docker image revision metadata") from None
         if not isinstance(labels, dict) or labels.get("org.opencontainers.image.revision") != SEMANTIC_ROUTER_REVISION:
             raise ContainerCommandError(
-                f"SR image revision must match the pinned submodule commit {SEMANTIC_ROUTER_REVISION}"
+                f"SR image revision must match the pinned upstream commit {SEMANTIC_ROUTER_REVISION}"
             )
         self.mutate(
             [

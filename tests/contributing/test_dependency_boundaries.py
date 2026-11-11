@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import os
+import re
 import subprocess
 import sys
 from graphlib import CycleError, TopologicalSorter
@@ -64,17 +66,31 @@ def _imports_of(targets: list[str], forbidden_prefix: str) -> list[str]:
 METHOD_PACKAGES = ("harness_evolve", "openclawrl", "sao", "tttd")
 
 
-def test_semantic_router_runtime_revision_matches_submodule_pin() -> None:
+def test_semantic_router_runtime_revision_imports_without_git(tmp_path: Path) -> None:
+    import reef
+
     from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION
 
-    # Read the gitlink without requiring the submodule to be initialized. Wheels use the packaged constant.
-    entry = subprocess.check_output(
-        ["git", "ls-files", "--stage", "--", "third_party/semantic-router"],
-        cwd=REPO_ROOT,
+    # Import the same package from an empty working directory with no Git executable available.
+    package_parent = Path(reef.__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; "
+                "print(SEMANTIC_ROUTER_REVISION)"
+            ),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": "", "PYTHONPATH": str(package_parent)},
+        check=True,
+        capture_output=True,
         text=True,
         timeout=10,
     )
-    assert entry.split() == ["160000", SEMANTIC_ROUTER_REVISION, "0", "third_party/semantic-router"]
+    assert result.stdout.strip() == SEMANTIC_ROUTER_REVISION
+    assert re.fullmatch(r"[0-9a-f]{40}", SEMANTIC_ROUTER_REVISION)
 
 
 def test_infra_never_imports_a_method_package() -> None:

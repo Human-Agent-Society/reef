@@ -61,7 +61,7 @@ sends requests that match a keyword or domain rule to another target (usually th
 teacher), and accepts explicit pins to its own targets.
 
 Clients call Reef directly. ``reef serve`` owns one unmodified Semantic Router
-(SR) container, the upstream version pinned in ``third_party/semantic-router``.
+(SR) container built from the upstream commit pinned by this Reef release.
 For ``model: auto``, Reef sends one ``POST /api/v1/routing/preview`` for the
 client's ``x-reef-scenario`` to that Scenario's private entrypoint, then checks
 the selected rule and target against the manifest and the SR runtime it
@@ -354,8 +354,9 @@ This lifecycle differs from ``managed``:
   ``finalization_timeout_seconds`` for their records. Give the process more time
   than this before it is killed.
 * **Your responsibilities.** Reef does not start, restart or stop SR, and it does
-  not check the image's revision label. Pin an image built from the commit in
-  ``third_party/semantic-router``.
+  not check the image's revision label. Pin an image built from this Reef release's
+  SR commit; follow the `image build instructions
+  <../../tutorials/semantic-router/README.md#1-build-the-semantic-router-image>`__.
 
 Only ``sr_management_port``, ``selection_timeout_seconds``,
 ``preview_max_concurrency`` and ``finalization_timeout_seconds`` apply. Set SR's CPU
