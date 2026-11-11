@@ -151,6 +151,10 @@ jobs:
           key: bubblewrap-package-${{ runner.os }}-${{ runner.arch }}-${{ matrix.suite == 'sandbox' && 'ubuntu-24.04' || 'blacksmith-ubuntu-2404' }}
       - run: |
           if ! ls "$HOME"/bubblewrap-package/bubblewrap_*.deb >/dev/null 2>&1; then
+            # A mirror on another domain serves the same signed packages when the archive's name does not resolve.
+            if ! getent hosts azure.archive.ubuntu.com >/dev/null; then
+              printf 'http://mirrors.kernel.org/ubuntu/\tpriority:1\n' | sudo tee /etc/apt/apt-mirrors.txt
+            fi
             sudo apt-get update -q
             mkdir -p "$HOME/bubblewrap-package"
             (cd "$HOME/bubblewrap-package" && apt-get download -q bubblewrap)
