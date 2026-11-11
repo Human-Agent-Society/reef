@@ -303,6 +303,44 @@ def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store
     assert store.query("acme", scenario="coding") == ()
 
 
+def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(store, tmp_path):
+    first, second = tmp_path / "first" / "fix-bug", tmp_path / "second" / "fix-bug"
+    for directory, text in ((first, "Fix the bug.\n"), (second, "Fix the bug in parse.\n")):
+        directory.mkdir(parents=True)
+        (directory / "instruction.md").write_text(text)
+    (item,) = store.create("acme", [NewItem("fix-bug", first, {"kind": "task", "scenarios": {"coding": "train"}})])
+    old_path = store.task_path(store.read("acme", "fix-bug"))
+    ((used_before, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+
+    replaced = store.replace_task("acme", "fix-bug", second)
+    assert (replaced.sequence, replaced.metadata, replaced.digest) == (
+        item.sequence,
+        item.metadata,
+        files_digest(second),
+    )
+    assert (store.task_path(store.read("acme", "fix-bug")) / "instruction.md").read_text() == "Fix the bug in parse.\n"
+    # A reader that opened the old files can go on, and a trainer reads the task again after its cursor.
+    assert (old_path / "instruction.md").read_text() == "Fix the bug.\n"
+    assert [
+        found.item_id for _, found in store.scenario_items("acme", "coding", kinds=("task",), after=used_before)
+    ] == ["fix-bug"]
+    # The same files again change nothing, not even the use.
+    ((used_after, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+    assert store.replace_task("acme", "fix-bug", second) == replaced
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0][0] == used_after
+
+    with pytest.raises(ItemNotFound):
+        store.replace_task("acme", "missing", second)
+    with pytest.raises(ValueError, match="same name"):
+        store.replace_task("acme", "fix-bug", first.parent)
+    store.create("acme", [trajectory("t1")])
+    trajectory_task = tmp_path / "t1"
+    trajectory_task.mkdir()
+    with pytest.raises(ValueError, match="only a task's files"):
+        store.replace_task("acme", "t1", trajectory_task)
+    assert store.read("acme", "fix-bug").digest == replaced.digest
+
+
 def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path):
     task = tmp_path / "fix-bug"
     (task / "tests").mkdir(parents=True)

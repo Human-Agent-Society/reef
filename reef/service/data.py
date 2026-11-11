@@ -252,6 +252,28 @@ def create_task_items(data: DataAccess, owner: str, archive: Path, metadata: Map
         return create_task_directories(data, owner, unpack_task_archive(archive, Path(work)), metadata)
 
 
+def replace_task_item(data: DataAccess, owner: str, item_id: str, archive: Path) -> dict[str, Any]:
+    """Replace the files of the task item ``item_id`` of ``owner`` with the one task directory of the tar.gz
+    ``archive``, then sync the scenarios that use it; return ``{owner, item, synced}``, without content.
+
+    Each evaluation attempt reads the item's current files, so a retry and a new evaluation run the new ones.
+    ``ItemNotFound`` for an unknown item; ``ValueError`` for an archive of no task or of several, for a directory
+    that is not named ``item_id`` or that Harbor cannot load, and for an item of another kind. Nothing changes then.
+    """
+    with tempfile.TemporaryDirectory(prefix="reef-task-replace-") as work:
+        directories = unpack_task_archive(archive, Path(work))
+        if len(directories) != 1:
+            raise ValueError(f"a task replace holds one task directory, not {len(directories)}")
+        (directory,) = directories
+        try:
+            HarborTaskLoader(directory)
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
+        item = data.require_store().replace_task(owner, item_id, directory)
+    synced = sync_touched(data, owner, item.scenarios)
+    return {"owner": owner, "item": item_json(item, content=False), "synced": synced}
+
+
 def create_task_directories(
     data: DataAccess,
     owner: str,
