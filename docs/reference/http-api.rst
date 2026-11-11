@@ -68,6 +68,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/tasks``                                                                          | create task items from a tar.gz of Harbor tasks   |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/data/tasks/{id}``                                                                      | replace a task item's files                       |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data``                                                                                 | the owner's items, in arrival order               |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/groups/{key}``                                                                    | the owner's items grouped by a metadata value     |
@@ -699,8 +701,38 @@ returns:
   metadata that is not a JSON object of kind ``task``;
 - 413 for a body larger than 256 MiB;
 - 409, and stores nothing, for a task name that the owner holds with other
-  files. To change a task, give it a new name;
+  files. To change the files of a task, replace them (below);
 - 415 for another content type.
+
+Replace a task's files
+~~~~~~~~~~~~~~~~~~~~~~
+
+Send the task's new directory, as a gzip-compressed tar archive of that one
+directory, to ``PUT /reef/namespaces/{owner}/data/tasks/{id}`` with
+``Content-Type: application/gzip``. The directory has the item's ID as its
+name:
+
+.. code:: bash
+
+   tar -czf sum-391.tar.gz -C /data/benchmark/tasks sum-391
+   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks/sum-391" \
+     -X PUT \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/gzip' \
+     --data-binary @sum-391.tar.gz
+
+The item keeps its ID, metadata and splits. Each evaluation attempt reads
+the task's current files, so a new evaluation and a retry of a started one
+(``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``) run
+the new files. An attempt that already runs finishes with the old files, so one
+evaluation can hold scores of both. A trainer of a scenario that uses the
+task reads it again. The same files again change nothing.
+
+The response is ``{"owner", "item", "synced"}``, without content. Reef
+returns 400, and changes nothing, for an archive of no task or of several, a
+directory with another name, a directory that Harbor's task loader refuses,
+or an item that is not a task; 404 for an unknown item; 413 and 415 as for a
+create.
 
 Record items
 ~~~~~~~~~~~~
