@@ -70,7 +70,7 @@ from reef.service.collections import collection_tasks
 from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, StoredItem, record_source
-from reef.storage.evaluations import StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflict, StoredEvaluation
 from reef.storage.item_kinds import evaluation_call_id
 from reef.storage.observer import RecordObserver
 from reef.storage.record_items import (
@@ -512,7 +512,7 @@ class ArtifactEvaluations:
     scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
     end.
 
-    Purpose: the evaluation routes call ``start``, ``cancel``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
+    Purpose: the evaluation routes call ``start``, ``cancel``, ``retry``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
     ``call_json``, ``trajectories_json``, ``exported_rollouts`` and ``rollout_trajectories``, and the scenario update
     route calls ``configure``. ``open`` starts ``results`` and the reader of ``new_artifacts``; ``close`` stops them.
     Every method but ``start``, ``cancel``, ``configure``, ``open`` and ``close`` only reads.
@@ -608,6 +608,52 @@ class ArtifactEvaluations:
             for item in self.results.rollouts(evaluation_id, scenario):
                 self.queue.cancel(EVALUATIONS_QUEUE, item.id, CANCELLED_ERROR)
         return cancelled
+
+    def retry(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
+        """Run the rollouts of the ended evaluation ``evaluation_id`` of ``scenario`` that have no score once more,
+        and return the evaluation, ``running`` again (RFC #1340); None when the scenario has no such evaluation.
+
+        A rollout has no score when it failed, when a cancel or a stop of the evaluation ended it, or when it finished
+        with a failed score (``rollout_failed``). Each of them goes back to the queue with its earlier attempts kept,
+        and the rollouts that never started for ``max_concurrent_rollouts`` start as the others end. The scored
+        rollouts keep their scores. The evaluation loses its result or its error until its rollouts are final again:
+        ``EvaluationResults`` then ends it as it ends a first run, and gives a finished one to the activation rule.
+
+        ``EvaluationStateConflict`` for an evaluation that has not ended, for one with no rollout to run again, and
+        for one whose rollouts the queue no longer keeps (``WorkQueue.delete_final``).
+        """
+        with self.dispatcher.locked_scenario(scenario) as current:
+            stored = current.store.evaluations.get(evaluation_id)
+            if stored is None:
+                return None
+            if stored.state not in ("finished", "failed"):
+                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} has not ended: cancel it first")
+            request = stored.request
+            total = len(request.task_names) * request.rollouts_per_task
+            items = self.results.rollouts(evaluation_id, scenario)
+            # The queue holds a prefix of the rollouts in task and repeat order (``settle``). Anything else means that
+            # it deleted some of them after their retention.
+            expected = [
+                rollout_item_id(evaluation_id, *divmod(position, request.rollouts_per_task))
+                for position in range(len(items))
+            ]
+            if (
+                not items
+                or [item.id for item in items] != expected
+                or (stored.state == "finished" and len(items) < total)
+            ):
+                raise EvaluationStateConflict(f"evaluation {evaluation_id!r}: Reef no longer keeps its rollouts")
+            again = [item for item in items if rollout_failed(item)]
+            if not again and len(items) == total:
+                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} has no rollout without a score")
+            # The evaluation runs before its rollouts change, so the settle that follows each change sees it running.
+            reopened = current.store.evaluations.reopen(evaluation_id)
+            for item in again:
+                self.queue.retry(EVALUATIONS_QUEUE, item.id)
+        logger.info("evaluation %s of %s runs %d rollouts again", evaluation_id, scenario, len(again))
+        # With every queued rollout scored, only the rollouts that wait are left: no item changes, so settle here.
+        self.results.settle_changed(scenario, evaluation_id)
+        return reopened
 
     def configure(self, scenario: str, changes: Mapping[str, object]) -> dict[str, object]:
         """Store how Reef evaluates and activates each new artifact of ``scenario``, and return each changed

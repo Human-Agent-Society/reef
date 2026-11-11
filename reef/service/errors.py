@@ -28,6 +28,7 @@ from reef.service.routed_inference import InferenceRetryTimeout
 from reef.service.routing import RoutingRequestError
 from reef.service.routing_preview import PREVIEW_BODY_LIMIT_BYTES
 from reef.storage.data import ItemConflict, ItemNotFound
+from reef.storage.evaluations import EvaluationStateConflict
 from reef.storage.records import RecordConflict
 from reef.storage.task_collections import CollectionNotFound
 
@@ -47,6 +48,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (CommitPending, web.HTTPConflict),
     (SnapshotNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
+    (EvaluationStateConflict, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
     (InferenceUnavailable, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),

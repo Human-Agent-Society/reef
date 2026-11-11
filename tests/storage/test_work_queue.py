@@ -866,3 +866,32 @@ def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coor
     queue.finish("jobs", "a", "w", {}, now=2)
     assert queue.delete_final(finished_before=3) == 1
     assert queue.read_log("jobs", "a", 1) == ()
+
+
+def test_a_producer_queues_a_final_item_again_and_it_gets_one_more_attempt(open_coordination):
+    queue = open_coordination(max_attempts={"jobs": 1}).queue
+    queue.add(job("a"), now=0)
+    queue.add(job("b", serial_key=None), now=0)
+    queue.take("jobs", "w", ["training_job:tinker"], now=1)
+    failed = queue.fail("jobs", "a", "w", "the sandbox stopped", retryable=False, now=2)
+
+    again = queue.retry("jobs", "a", now=5)
+    assert (again.state, again.error, again.ended_at, again.attempt_count) == (
+        "queued",
+        "the sandbox stopped",
+        None,
+        1,
+    )
+    assert (again.available_at, again.started_at, again.payload) == (5, 1, failed.payload)
+    assert again.changed_sequence > failed.changed_sequence
+    # The queue allows one attempt, and the item still gets the one that its producer asked for.
+    assert queue.take("jobs", "w", ["training_job:tinker"], now=6).attempt_count == 2
+    assert queue.fail("jobs", "a", "w", "transient", retryable=True, now=7).state == "failed"
+
+    queue.take("jobs", "w", ["training_job:tinker"], now=8)
+    queue.finish("jobs", "b", "w", {"score": 1}, now=9)
+    rerun = queue.retry("jobs", "b", now=10)
+    assert (rerun.state, rerun.result, rerun.error, rerun.ended_at) == ("queued", None, None, None)
+    # An item that is not final stays as it is, and an unknown item is None.
+    assert queue.retry("jobs", "b", now=11) == rerun
+    assert queue.retry("jobs", "missing") is None
