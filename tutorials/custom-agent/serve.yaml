@@ -1,0 +1,16 @@
+# Record-only service. run.py supplies the endpoint, model, token, and state path.
+reef:
+  host: 127.0.0.1
+  port: ${CUSTOM_AGENT_PORT:?}
+  token: ${CUSTOM_AGENT_TOKEN:?}
+recipe:
+  implementation: recipe
+inference:
+  upstream-url: ${CUSTOM_AGENT_UPSTREAM_URL:?}
+  upstream-model: ${CUSTOM_AGENT_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+  timeout-s: 90
+storage:
+  agent-record-dir: ${CUSTOM_AGENT_WORK:?}/records
+  artifact-work-dir: ${CUSTOM_AGENT_WORK:?}/artifact-work
+  artifact-cache-dir: ${CUSTOM_AGENT_WORK:?}/artifact-cache
