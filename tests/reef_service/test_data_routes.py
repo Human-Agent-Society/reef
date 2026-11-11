@@ -33,6 +33,24 @@ def served(dispatcher: Dispatcher, check) -> None:
         dispatcher.close()
 
 
+def test_a_scenario_created_with_an_owner_and_serves_false_has_the_owner_and_serves_nothing(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+
+    async def check(client: TestClient) -> None:
+        body = {"name": "math", "owner": "acme", "serves": False}
+        response = await client.post("/reef/scenarios", headers=AUTH, json=body)
+        assert response.status == 201, await response.text()
+        assert (await response.json())["owner"] == "acme"
+        # The owner change loads the scenario again, and the stored state holds.
+        assert not dispatcher.registry.require("math").serves
+        settings = await (await client.get("/reef/scenarios/math/settings", headers=AUTH)).json()
+        assert all(mapping == {} for mapping in settings["served"].values())
+        created = await upload_trajectories(client, AUTH, "t1", scenario="math", base="/reef/namespaces/acme/data")
+        assert created.status == 201, await created.text()
+
+    served(dispatcher, check)
+
+
 def test_a_scenario_created_with_an_owner_uses_that_owners_items_only(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
