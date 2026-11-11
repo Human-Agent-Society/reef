@@ -52,6 +52,13 @@ PLACEHOLDER_API_KEY = "reef"
 #: A label rides every call as an ``x-reef-tag-<name>`` header; the service keeps the name in lower case.
 LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 RESERVED_LABELS = ("task", "rollout")
+#: Harbor's time limits for a task whose ``task.toml`` names none, in seconds.
+HARBOR_BUILD_TIMEOUT_S = 600
+HARBOR_VERIFIER_TIMEOUT_S = 600
+#: What a Modal sandbox lives beyond its task's time limits: the agent's install and the trial's file transfers.
+MODAL_SANDBOX_MARGIN_S = 3600
+#: Harbor's default lifetime of a Modal sandbox, in seconds.
+MODAL_SANDBOX_MAX_S = 24 * 60 * 60
 
 
 class TaskRolloutError(RuntimeError):
@@ -216,17 +223,33 @@ def task_identity(task_path: Path) -> dict[str, str]:
 def environment_config(environment: str, task_path: Path) -> dict[str, object]:
     """The Harbor environment config of a rollout of ``task_path`` in the Harbor environment type ``environment``.
 
-    It is ``{"type": environment}``. It also sets Harbor's ``modal_vm_runtime`` kwarg when ``environment`` is
-    ``modal``, the task has ``environment/docker-compose.yaml``, and its ``task.toml`` asks for no GPU. Modal's default
-    runtime puts each Compose service on the host network, and Compose refuses that for a service that names its
-    networks. The VM runtime keeps the task's networks and their DNS aliases, but it has no GPUs.
+    It is ``{"type": environment}``, plus these Harbor kwargs when ``environment`` is ``modal``:
+
+    - ``modal_vm_runtime`` is True when the task has ``environment/docker-compose.yaml`` and its ``task.toml`` asks
+      for no GPU. Modal's default runtime puts each Compose service on the host network, and Compose refuses that
+      for a service that names its networks. The VM runtime keeps the task's networks and their DNS aliases, but it
+      has no GPUs.
+    - ``sandbox_timeout_secs`` is the lifetime of the sandbox when ``task.toml`` gives the agent a time limit: the
+      task's build, agent, and verifier time limits plus ``MODAL_SANDBOX_MARGIN_S``, at most Harbor's default of one
+      day. Harbor stops the sandbox when the trial ends. This lifetime ends the sandbox of a trial whose process was
+      killed, which no one stops. A task with no agent time limit keeps Harbor's default.
     """
-    vm_runtime = (
-        environment == "modal"
-        and (task_path / "environment" / "docker-compose.yaml").is_file()
-        and tomllib.loads((task_path / "task.toml").read_text()).get("environment", {}).get("gpus", 0) == 0
-    )
-    return {"type": environment, "kwargs": {"modal_vm_runtime": True}} if vm_runtime else {"type": environment}
+    if environment != "modal":
+        return {"type": environment}
+    task = tomllib.loads((task_path / "task.toml").read_text())
+    task_environment = task.get("environment", {})
+    kwargs: dict[str, object] = {}
+    if (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
+        kwargs["modal_vm_runtime"] = True
+    agent_timeout_seconds = task.get("agent", {}).get("timeout_sec")
+    if agent_timeout_seconds is not None:
+        trial_seconds = (
+            task_environment.get("build_timeout_sec", HARBOR_BUILD_TIMEOUT_S)
+            + agent_timeout_seconds
+            + task.get("verifier", {}).get("timeout_sec", HARBOR_VERIFIER_TIMEOUT_S)
+        )
+        kwargs["sandbox_timeout_secs"] = min(math.ceil(trial_seconds) + MODAL_SANDBOX_MARGIN_S, MODAL_SANDBOX_MAX_S)
+    return {"type": environment, "kwargs": kwargs} if kwargs else {"type": environment}
 
 
 def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
