@@ -370,6 +370,8 @@ def test_an_agent_bundle_is_one_npm_install_on_the_host_for_the_containers_platf
     assert command[:3] == [str(node / "bin" / "node"), str(node / "lib/node_modules/npm/bin/npm-cli.js"), "install"]
     # npm installs for the container, not for this host, and runs no script of the package here.
     assert {"--os=linux", "--cpu=arm64", "--libc=musl", "--ignore-scripts", "@scope/agent@1.2.3"} <= set(command)
+    # The host cannot check the engines of the packages against the Node of a musl image.
+    assert "--engine-strict" not in command
     with tarfile.open(bundle, "r:gz") as tar:
         assert [(member.name, member.uid) for member in tar.getmembers()] == [
             ("npm", 0),
@@ -379,6 +381,8 @@ def test_an_agent_bundle_is_one_npm_install_on_the_host_for_the_containers_platf
     # The same four values again are the kept archive; another platform is another install.
     assert agent_bundle("@scope/agent", "1.2.3", "arm64", "musl", tmp_path / "cache") == bundle and len(runs) == 1
     assert agent_bundle("@scope/agent", "1.2.3", "x64", "glibc", tmp_path / "cache") != bundle and len(runs) == 2
+    # A glibc container gets the Node release of the host, so npm on the host refuses a package that needs another.
+    assert "--engine-strict" in runs[1]
 
     with pytest.raises(AgentBundleError, match="npm cannot install broken@1 for linux x64 glibc: npm error 404"):
         agent_bundle("broken", "1", "x64", "glibc", tmp_path / "cache")

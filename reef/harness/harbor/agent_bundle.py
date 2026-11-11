@@ -56,7 +56,9 @@ def agent_bundle(package: str, version: str, cpu: str, libc: ContainerLibc, cach
 
     The archive holds the npm global prefix as ``BUNDLE_PREFIX``: the package with its dependencies for that
     platform, and its commands under ``bin``. No install script ran. ``AgentBundleError`` when npm fails or runs past
-    ``INSTALL_TIMEOUT_SECONDS``; no archive is kept then. ``NodeRuntimeError`` when the host has no Node build.
+    ``INSTALL_TIMEOUT_SECONDS``; no archive is kept then. For ``glibc``, npm also fails when a package needs a Node
+    that the pinned release does not satisfy: the host and a glibc container run that release. ``NodeRuntimeError``
+    when the host has no Node build.
     """
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", package).strip("-")
     archive = cache / f"{name}@{version}-linux-{cpu}-{libc}.tar.gz"
@@ -78,6 +80,9 @@ def agent_bundle(package: str, version: str, cpu: str, libc: ContainerLibc, cach
                 f"--libc={libc}",
                 # A script of the package would run for the host, not for the container: the container runs them.
                 "--ignore-scripts",
+                # This npm runs on the Node release that a glibc container gets, so the check of the packages'
+                # engines is that container's. A musl container has the Node of its image, which the host cannot check.
+                *(["--engine-strict"] if libc == "glibc" else []),
                 "--no-audit",
                 "--no-fund",
                 f"--cache={cache / 'npm-cache'}",
