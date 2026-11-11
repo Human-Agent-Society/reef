@@ -237,6 +237,22 @@ def test_the_relay_runs_on_the_python_of_the_image_or_on_a_python_from_an_upload
     assert '{ [ -d "${SSL_CERT_DIR:-/}" ] || unset SSL_CERT_DIR; }; "$HOME/.local/bin/uv" python install' in install
 
 
+@pytest.mark.parametrize("name", ["opencode", "codex"])
+def test_an_instruction_that_starts_with_a_dash_reaches_the_agent_after_the_end_of_its_options(
+    tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Markdown list item is a common first line of a task. Without "--", opencode and codex read it as an option
+    # and print their usage.
+    monkeypatch.setattr("reef.harness.harbor.agent.node_archive", lambda name, cache: tmp_path / "node.tar.gz")
+    (tmp_path / "node.tar.gz").write_text("node")
+    adapter = get_adapter(name)
+    (tmp_path / "logs").mkdir()
+    agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(adapter, adapter.install, tmp_path / "files", 60.0))
+    environment = RecordingEnvironment()
+    asyncio.run(agent.run("- You are given a state dictionary.", environment, AgentContext()))
+    assert " -- '- You are given a state dictionary.' </dev/null" in environment.commands[-2]
+
+
 def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(
     tmp_path: Path, uv_builds: list[str]
 ) -> None:

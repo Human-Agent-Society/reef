@@ -84,7 +84,7 @@ import json, os, sqlite3, sys
 from pathlib import Path
 
 args = sys.argv[1:]
-assert args[:3] == ["run", "--format", "json"] and "--auto" in args, args
+assert args[:3] == ["run", "--format", "json"] and "--auto" in args and args[-2] == "--", args
 config_dir = Path(os.environ["OPENCODE_CONFIG_DIR"])
 config = json.loads((config_dir / "opencode.json").read_text())
 assert config["autoupdate"] is False and config["share"] == "disabled", config
@@ -138,11 +138,11 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
-assert args[:10] == [
+assert args[:11] == [
     "exec", "--json", "--strict-config", "--config", 'approval_policy="never"', "--config", 'web_search="disabled"',
-    "--sandbox", "workspace-write", "--skip-git-repo-check",
+    "--sandbox", "workspace-write", "--skip-git-repo-check", "--",
 ], args
-prompt = args[10]
+prompt = args[11]
 codex_home = Path(os.environ["CODEX_HOME"])
 assert Path(os.environ["HOME"]) == codex_home.parent
 config = (codex_home / "config.toml").read_text()
