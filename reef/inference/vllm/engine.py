@@ -135,6 +135,10 @@ class ReefVLLMEngine(InferenceEngine):
         result = self._post(
             "collective_rpc", body={"method": "reload_weights", "kwargs": {"weights_path": model_path}}
         )
+        # reload_weights returns None on each worker. Do not stamp a revision onto an unacknowledged reload.
+        results = result.get("results")
+        if not isinstance(results, list) or not results or any(value is not None for value in results):
+            raise RuntimeError(f"vLLM did not acknowledge the weight reload: {result!r}")
         if runtime_load_id is not None:
             self.set_runtime_load_id(runtime_load_id)
         return result

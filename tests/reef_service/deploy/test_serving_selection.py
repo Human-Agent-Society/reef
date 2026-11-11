@@ -8,7 +8,14 @@ from reef.core.errors import DeployConfigError
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.service.deploy.service_config import ServiceSettings
-from reef.service.deploy.serving import ENGINES, NONE, TRAINER, serving_mode, serving_runtime_config
+from reef.service.deploy.serving import (
+    ENGINES,
+    NONE,
+    TRAINER,
+    prepare_engine_serving,
+    serving_mode,
+    serving_runtime_config,
+)
 from reef.train.slime_backend.launch import SlimeDeployment
 from reef.train.tinker_backend.launch import TinkerDeployment
 
@@ -94,6 +101,8 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
         "tensor_parallel_size": 2,
         "options": {"context-length": 4096},
         "adapter_capacity": 3,
+        # The cache setting reaches the runtime. The config has no switch for request protection: the runtime
+        # factory always requires it.
         "prefix_sharing": True,
         # The rollout role selects the serving engines' executor.
         "executor": "ray",
@@ -103,6 +112,23 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
         "inference_handler_factory": SGLangInferenceHandler,
         "weights": None,
     }
+
+
+def test_engine_serving_refuses_an_engine_that_cannot_keep_a_request_on_its_weights():
+    config: dict = {"reef": {}}
+    # The component keeps a request on its weights only for its built-in engines.
+    with pytest.raises(DeployConfigError, match=r"my\.engines:create cannot serve published snapshots"):
+        prepare_engine_serving(config, slime(inference_backend="my.engines:create"))
+    assert config == {"reef": {}}
+
+
+@pytest.mark.parametrize("engine", ["sglang", "vllm"])
+def test_engine_serving_accepts_prefix_sharing_for_both_built_in_engines(engine):
+    config: dict = {"reef": {}}
+    prepare_engine_serving(config, slime(inference_backend=engine, inference_prefix_sharing=True))
+    assert config["reef"]["inference_backend"] == engine
+    with pytest.raises(ValueError, match=r"inference\.prefix-sharing must be true or false"):
+        slime(inference_backend=engine, inference_prefix_sharing="yes")
 
 
 def test_engines_load_tinker_releases_from_their_sampler_paths():

@@ -115,6 +115,8 @@ class TinkerInferenceRuntime(InferenceRuntime):
         #: The runtime load ID that each sampler served under last, by sampler path (None: the base model).
         self._versions: dict[str | None, str] = {}
         self._active, self._version = self._remember(None)
+        #: The artifact whose manifest established the current sampler, absent before activation.
+        self.active_artifact_id: str | None = None
         self._closed = False
 
     @property
@@ -130,6 +132,17 @@ class TinkerInferenceRuntime(InferenceRuntime):
         A request under this name reaches that sampler on the service at ``base_url``."""
         with self._lock:
             return self._active or self._model
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """The activated artifact's sampler, never the active sampler relabelled with an arbitrary artifact ID."""
+        with self._lock:
+            if self.active_artifact_id != artifact_id:
+                return None
+            try:
+                return ServedArtifact(artifact_id, self.base_url, self.served_model_name(scenario))
+            except ValueError:
+                # The service URL is no HTTP(S) URL that another process can call.
+                return None
 
     def sampler_load(self, model_name: str) -> tuple[str | None, str]:
         """The sampler that ``model_name`` names (None for the base model) and its runtime load ID."""
@@ -195,6 +208,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
                 # Even a sampler served earlier in this incarnation, as after an activation, serves under a new load.
                 self._active, self._version = self._new_load(sampler_path)
                 self._versions[sampler_path] = self._version
+            self.active_artifact_id = artifact.artifact_id
             return self._version
 
     def shutdown(self) -> None:

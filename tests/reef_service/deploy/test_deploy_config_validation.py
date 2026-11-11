@@ -166,7 +166,7 @@ def test_example_missing_environment_fails_before_launch_without_traceback(examp
     monkeypatch.setattr(orchestrator, "resolve_model_paths", must_not_run)
     monkeypatch.setattr(orchestrator, "_Stack", must_not_run)
     # The example belongs to the checkout even when Reef is imported from an installed wheel.
-    path = Path(__file__).resolve().parents[2] / example / "configs" / "deployment.yaml"
+    path = Path(__file__).resolve().parents[3] / example / "configs" / "deployment.yaml"
     with pytest.raises(SystemExit) as caught:
         cli_main(["serve", "-c", str(path)])
     assert caught.value.code == 2

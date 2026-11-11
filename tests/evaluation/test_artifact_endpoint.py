@@ -49,6 +49,10 @@ class Runtime(InferenceRuntime):
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
 
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """No route: these tests give each artifact endpoint its route themselves."""
+        return None
+
 
 def call(url: str, path: str, body: object) -> tuple[int, dict]:
     request = urllib.request.Request(f"{url}{path}", data=json.dumps(body).encode(), method="POST")

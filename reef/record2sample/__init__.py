@@ -18,8 +18,9 @@ Entry point: ``Record2Sample`` in ``base.py``.
   ``RecordSetUnit``, the record sets that train together, until the unit is ready. The pipeline takes the ready
   units (``take_ready_units``), stores each unit's samples (``unit_samples``), and the stage ends the unit
   (``consume``). The stage never calls the pipeline.
-* Before sample creation, ``form`` rejects any set containing an engine-aborted inference, including report
-  references. Replay applies the same check; stored response data stays unchanged.
+* Before sample creation, ``form`` rejects any set containing an incomplete inference
+  (``reef.core.errors.inference_incomplete``): an engine abort, or a stream whose delivery did not complete. This
+  includes report references. Replay applies the same check; stored response data stays unchanged.
 * Every stage runs the staleness check. It is the only place where Reef compares the artifact that produced
   training data with the artifact that the scenario serves, and drops data that is more than ``max_staleness``
   artifacts behind. ``max_staleness`` is the stage's setting (``Record2SampleSettings``,

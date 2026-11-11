@@ -178,6 +178,9 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     ``served`` is the last one, ``None`` before the first one. For each
     activation, ``activated_ids`` holds the artifact ID and
     ``activated_scenarios`` the scenario that the activation named, or None.
+    Unlike a real proxy, it accepts weight snapshots, and its test engine
+    answers every artifact's weights (``served_artifact``); a snapshot without
+    weights routes to its model as on a real proxy (``endpoint_model_name``).
 
     With ``answers_each_artifact``, the runtime answers each call from the artifact it names, as Tinker does: each
     artifact has its own model name, ``sampler:<artifact_id>``. ``per_scenario_adapters`` and
@@ -226,6 +229,15 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         version = self.serve(artifact)
         self.activated.append(version)
         return version
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """The test binding: the test engine at ``base_url`` answers every artifact's weights under
+        ``served_model_name``, so each weight snapshot that a test activates has a route. None without a model name or
+        an HTTP(S) ``base_url``."""
+        try:
+            return ServedArtifact(artifact_id, self.base_url, self.served_model_name(scenario))
+        except ValueError:
+            return None
 
     def serve(self, artifact: Artifact) -> str:
         path = artifact.local_path
@@ -317,7 +329,8 @@ def job_sized_stages(
 
 class RunningEngines(ServingEngines):
     """Engines that a test started behind ``backend`` and stops: opening returns them as new engines, and closing
-    stops nothing.
+    stops nothing. They declare ``request_pinning``, as a receiver that keeps each request on its weights does;
+    the fake backend admits no request, so the tests cover the runtime's own calls only.
 
     Purpose: the serving runtime tests run ``AdapterServingRuntime`` and ``FullWeightServingRuntime`` on fake engines.
     """
@@ -328,6 +341,10 @@ class RunningEngines(ServingEngines):
     @property
     def base_url(self) -> str:
         return self.backend.inference_url()
+
+    @property
+    def request_pinning(self) -> bool:
+        return True
 
     def open(self) -> OpenedEngines:
         return OpenedEngines(self.backend, attached=False)

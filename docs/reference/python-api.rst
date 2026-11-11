@@ -96,7 +96,9 @@ Two other extension points have separate names and purposes:
   The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
-  ``artifact_id`` and an optional ``local_path``.
+  ``artifact_id``, an optional ``local_path``, and the route's optional
+  ``served_model`` selection. Native handlers use the last field for receiver
+  pinning; it is not proof of resident weights by itself.
   Handlers receive no repository or snapshot locator. Runtime and recipe objects
   expose the handler as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -108,6 +110,8 @@ Custom request adapters use ``inference.handler-factory`` and
 subclass as ``package.module:ClassName``. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
 **config)`` class method; arbitrary functions are not accepted. Handlers injected
 directly into ``create_app`` or ``build_app`` need only implement the inference methods.
+Reef's engines serve published weights only with the engine's built-in handler
+(see `Request pinning <../developer-guide/executors.rst#request-pinning>`__).
 
 A scenario's `serving config <http-api.rst#serving-config>`__ reaches three
 methods. Each has a default for a handler or runtime without serving fields:
@@ -154,6 +158,18 @@ Streaming handlers return ``InferenceStream``; its ``record_response`` and
 Implementations and test doubles must initialize these fields through the
 stream constructor. SGLang handler subclasses that preserve raw reasoning tags
 can set ``SPLIT_REASONING = False`` (renamed from ``_SPLIT_REASONING``).
+
+A stream's ``chunks`` must end only after the handler has read the upstream to
+its end and finalized its capture. A terminal frame alone is not a successful
+completion, and it does not identify the weights that answered. `Request
+<http-api.rst#request>`__ describes the receipts that clients get.
+
+``InferenceRuntime.set_owner_sequence(sequence)`` defaults to a no-op. The
+serving worker calls it before opening its runtime, using the durable ownership
+take sequence. The inference component uses it to reject superseded control
+calls. Without a sequence, a ``remote_serving`` runtime starts no engine.
+``InferenceOwnerLostError`` signals a receiver fence; the worker treats it as
+lease loss rather than a failed artifact selection.
 
 Python extension contracts use abstract base classes and explicit inheritance.
 This also applies to repository factories, candidate evaluation plugins, harness
@@ -2231,17 +2247,44 @@ Neither inherits from the other, and no trainer holds a serving engine.
   kind of the weights that the runtime serves from a snapshot: ``model``, the
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
-  ``served_artifact(artifact_id, scenario)`` gives the engine's HTTP(S) URL
-  and the model name (``served_model_name(scenario)``) that inference writes to
-  ``served_models`` for the scenario. It returns None when the engine has no
-  such URL; startup then fails without publishing a route.
+  Every runtime implements ``served_artifact(artifact_id, scenario)``; it has
+  no default. For a weight binding that already holds, it gives the engine's
+  HTTP(S) URL and the model name that inference writes to ``served_models``.
+  It establishes no binding and loads nothing. It returns None when the
+  runtime does not know the artifact, when the binding is unavailable or
+  uncertain, or when the engine has no such URL; startup then fails without
+  publishing a route. A snapshot without a weight component gets no
+  activation. Its route, and the route of each artifact that the scenario
+  serves beside it, names the model that the optional
+  ``endpoint_model_name(scenario)`` gives. The default ``None`` refuses such
+  a snapshot, and its startup fails. See the `production inference contract
+  <../developer-guide/executors.rst#production-inference-contract>`__ for
+  the requirements of an integration.
   ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
-  for an artifact on request, without loading it, or None, the default, for a
-  runtime that serves only its loaded artifact. A runtime whose handler answers
+  for an artifact on request, without a load. A runtime whose handler answers
   each call from the artifact that the call names overrides it, as the Tinker
   runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
   of a model artifact needs it. Such a runtime also returns True from
   ``serves_any_artifact``.
+  ``serve_artifact(artifact, scenario=...)`` deploys an artifact beside the
+  scenario's active one: it makes an engine answer for the artifact and
+  returns the engine's URL and model name. The base implementations of
+  ``artifact_model`` and ``serve_artifact`` raise ``ReefError``, because a
+  runtime serves only its loaded artifact by default.
+  ``served_artifact_capacity`` is the number of weight artifacts of one
+  scenario that the runtime keeps bound at once. It is 1 by default, and
+  ``None``, without limit, when ``serves_any_artifact`` is True. A runtime
+  with a higher capacity overrides ``serve_artifact`` and can leave
+  ``serves_any_artifact`` False: it serves deployed artifacts, but the
+  capacity alone does not enable the evaluation of a model artifact. An
+  artifact keeps its place until ``stop_serving(served)`` releases its
+  binding; the engines can stay allocated. The optional
+  ``release_unreferenced_artifacts(retained)`` releases each binding that no
+  value of ``retained`` uses, such as one that a failed startup left.
+  ``retained`` holds every published route and every pending stop, also one
+  that is not due yet. A value keeps the binding at its URL under its model
+  name, whatever artifact ID names it. The inference worker calls it between
+  two serving works, and only when ``serving_slots`` is 1.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
@@ -2271,9 +2314,16 @@ Startup status is available through the inference service's
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. The engines start with the base model. Each snapshot loads its
-  files, a root snapshot's included, unless the engines serve its content
-  already.
+  weights. The engines start with the base model, and they stay paused until
+  the first activation succeeds. Each snapshot loads its files, a root
+  snapshot's included, unless the engines serve its content already.
+
+Both runtimes replace weights in engines that keep running. They take the
+engines as a ``ServingEngines`` value, and its ``request_pinning`` property
+must return true. The default is false, and the runtimes then raise
+``RuntimeContractError`` when they are built. Return true only for a
+receiver that enforces the rules in the property's description (see
+`Request pinning <../developer-guide/executors.rst#request-pinning>`__).
 
 A root snapshot that an earlier Reef made from the default start has the
 layout of every other snapshot of its component. An adapter runtime loads its
@@ -2282,10 +2332,12 @@ untrained adapter, and the Tinker runtime samples its untrained adapter.
 Each runtime answers a base root (``base.json``, see `Artifact imports`_)
 with the base model and asks ``ArtifactWeights`` for nothing:
 
-* ``AdapterServingRuntime`` loads nothing. The scenario serves no adapter, so
-  its requests name the base model, and ``activate_checkpoint`` returns
-  ``base_version``. The adapter that the scenario served before stays
-  resident until its route stops or another adapter needs its slot.
+* ``AdapterServingRuntime`` loads nothing. The scenario serves no adapter,
+  and ``activate_checkpoint`` returns ``base_version``. The base root's route
+  names the base model under that load ID, which the engines' receiver
+  admits. No route names the artifact of the adapter that the scenario served
+  before. That adapter stays resident until its route stops or another
+  adapter needs its slot.
 * ``FullWeightServingRuntime`` loads the directory ``model_path`` as full
   weights under a new version. It raises ``ReefError`` when ``model_path`` is
   no directory on its host.
@@ -2305,13 +2357,19 @@ engine then reports. The runtime kind ``remote_serving``
 (``reef.inference.remote.runtime``) builds one of them over the engines of an
 inference component, as the artifact format says: ``AdapterServingRuntime``
 for ``adapter`` snapshots, ``FullWeightServingRuntime`` for ``full`` ones.
+With ``inference.remote.slot-urls``, it builds a ``CheckpointSlotsRuntime``
+over one ``FullWeightServingRuntime`` for each component (`Serving saved
+weights <../developer-guide/executors.rst#serving-saved-weights>`__).
 ``serving_engine_config`` builds the engines' input from the ``inference``
-settings and the artifact format. With a ``service``, each runtime checks its
-health every ``health_interval_s`` seconds (default 30). After a failed check
-it calls ``recover_engines``: it pauses generation, lets the backend replace
-lost or dead engines (``InferenceBackend.recover``, which for an inference
-component also covers a restarted component), loads what it serves into them
-again (``reload_served``), and resumes.
+settings and the artifact format. Each runtime checks the health of its
+engines every ``health_interval_s`` seconds (default 30). After a
+failed check it calls ``recover_engines``: it pauses generation and lets the
+backend replace lost or dead engines (``InferenceBackend.recover``). An
+inference component then replaces its whole engine stack, also after the
+component restarted. The runtime loads what it serves again, and resumes.
+Before its first successful activation, a ``FullWeightServingRuntime`` has
+nothing to load: a failed check only replaces the engines, which stay
+paused, and a call of ``recover_engines`` raises ``ReefError``.
 
 A weight recipe holds neither the ``TrainingComponent`` nor the
 ``InferenceRuntime``. The process holds both beside the recipe, with the
@@ -2345,8 +2403,9 @@ facts beside the component, and control writes a new scenario's root from
 Each side owns its contracts. The inference contracts are the modules at the
 root of ``reef.inference``: ``interfaces`` (inference contracts and runtime
 load IDs), ``deployment`` (the inference service contracts), ``registry``
-(runtime factories), ``serving`` (the saved-weight serving runtimes),
-``residency`` (adapter residency) and ``recovery`` (engine supervision).
+(runtime factories), ``serving`` and ``checkpoint_slots`` (the saved-weight
+serving runtimes), ``residency`` (adapter residency) and ``recovery`` (engine
+supervision).
 ``reef.train.component`` holds the training component contract. Values that both sides read
 are in ``reef.core.weight_layout`` (``ArtifactFormat``, ``WeightFiles``,
 ``ArtifactWeights``). ``reef.execution.executor`` contains worker transports.

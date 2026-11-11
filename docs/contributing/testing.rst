@@ -53,8 +53,8 @@ Ray processes:
 .. code:: bash
 
    REEF_TEST_RAY=1 PYTHONPATH="$PWD" NO_PROXY='*' \
-     .venv/bin/python -m pytest tests/reef_service/test_service_executor_ray.py \
-       tests/inference/test_inference_control.py -q
+     .venv/bin/python -m pytest tests/reef_service/deploy/test_service_executor_ray.py \
+       tests/inference/sglang/test_inference_control.py -q
 
 Install the Python dependencies from ``.[slime]`` first. These tests use
 private local Ray clusters and CPU engines. They inject process death and
@@ -155,6 +155,56 @@ It builds an image for a small npm program and checks one jailed process: the
 tunnel to this host, the workspace copy in and back, the read-only filesystem
 outside it, and the timeout. ``tests/sandbox/test_modal_executor.py`` covers the
 settings, the sandbox lifecycle and the launch without provider access.
+
+The native inference check is a command, not a pytest test, so
+``pytest tests/`` and CI do not run it (`Integration qualification
+<../developer-guide/executors.rst#integration-qualification>`__ describes
+what it checks). It needs one unused GPU and a Reef GPU environment with
+SGLang, vLLM, Torch and Transformers installed. It writes its own small
+checkpoints, so it downloads no model. From the checkout, run one profile
+into a new directory outside it::
+
+    python -m tests.smoke.native_inference --profile features --native-engine sglang \
+      --output /scratch/native-features-sglang
+
+``--native-engine`` selects the engine behind Reef's inference component.
+``--profile`` selects what the run checks:
+
+- ``features``: traffic splits, pins, rollouts, logprobs, records and the
+  prefix cache of a published artifact.
+- ``routing``: both engines behind a Semantic Router. It also needs a
+  Semantic Router binary; ``--help`` lists its options.
+- ``recovery``: the health watcher restores the component's engines after
+  the run removes them with the component's authenticated control
+  operation, once before the first activation and once while they serve an
+  artifact. The run kills no process, restarts no component, and does not
+  check the retry of a failed weight load.
+- ``lifecycle``: changes to what a scenario serves, through Reef's public
+  API, service application and serving worker. Two inference components of
+  the native engine serve two full-weight checkpoints at the same time: by
+  name, with requests that overlap, in a 50/50 split, and through a
+  promotion and a rollback that load nothing. The run stops one checkpoint,
+  waits until its component is free and serves it again there. Reef must
+  refuse a third checkpoint. Last, the run removes the engines of one
+  component, as ``recovery`` does: the health watcher restores its
+  checkpoint while the other one answers. With two harness artifacts on one
+  provider model, the run then serves both at the same time: by name, in a
+  50/50 split, and with one at weight 0; then it stops serving one.
+
+Both components of ``lifecycle`` share the one GPU, and the small
+checkpoints ignore their context. The cached-token counts therefore show
+only that a load empties a component's prefix cache and that a kept
+checkpoint keeps it. The run measures no performance, and it shows no
+isolation between GPUs or hosts.
+
+``recovery`` starts only the native engine. Each other profile also starts
+the other engine as a plain OpenAI server; ``lifecycle`` stops its
+components first. To cover both integrations, run
+each profile with each native engine. The command exits with
+status 0 when every check passes. A run saves ``report.json``, process logs,
+requests and stored records in the output directory. Check the report for
+failures, and ``error.txt`` for a traceback when present. Invalid arguments
+are reported before engines start. The run stops only its own processes.
 
 Choose a component suite or one test module. For example, artifact contracts
 need no GPU:

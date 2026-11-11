@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from tests.support.sse_streams import OPENAI_SSE, FakeStream
 
-from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.service.streaming import (
     aggregate_sse_text,
@@ -12,21 +11,6 @@ from reef.service.streaming import (
     stream_record,
 )
 
-
-class FakeStream(InferenceStream):
-    def __init__(self) -> None:
-        super().__init__(status=200, headers={"content-type": "text/event-stream"}, chunks=self.chunks_iter())
-
-    async def chunks_iter(self) -> AsyncIterator[bytes]:
-        yield OPENAI_SSE.encode("utf-8")
-
-
-OPENAI_SSE = (
-    'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n'
-    'data: {"choices":[{"index":0,"delta":{"content":"The answer"}}]}\n\n'
-    'data: {"choices":[{"index":0,"delta":{"content":" is 7."}}]}\n\n'
-    "data: [DONE]\n\n"
-)
 ANTHROPIC_SSE = (
     'data: {"type":"message_start","message":{}}\n\n'
     'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"The answer"}}\n\n'

@@ -3,7 +3,7 @@
 ``EvaluationTasks.for_job`` takes a job's trace samples and the collection
 state the previous job committed; Reef screens, dedupes and caps what it
 collects. The end-to-end run of collection through a job is in
-``tests/reef_service/test_harness_recipe.py``.
+``tests/reef_service/harness/test_harness_recipe.py``.
 """
 
 from __future__ import annotations

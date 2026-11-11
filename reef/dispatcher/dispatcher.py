@@ -687,9 +687,11 @@ class Dispatcher(
         scenario has one component.
 
         Raise ``ScenarioNotFoundError`` for an unknown scenario, the errors of ``Scenario.resolve_artifact`` for an
-        artifact that is not one of the component, ``ReefError`` when the runtime serves one artifact and
-        ``served`` names more, and ``ValueError`` when this service does not run control or when an empty
-        ``served`` comes with a ``component``.
+        artifact that is not one of the component, and ``ValueError`` when this service does not run control or when
+        an empty ``served`` comes with a ``component``. Raise ``ReefError`` when ``served`` names more artifacts than
+        the runtime keeps loaded at once (``require_served_capacity``); that check precedes every change, so the
+        scenario then serves what it served, or still serves nothing, with the same commit history, routes and
+        traffic split.
         """
         if self.publisher is None:
             raise ValueError("this service does not run control, so it cannot change what a scenario serves")
@@ -711,6 +713,7 @@ class Dispatcher(
             name = current.artifact_snapshot(active_id, component)[0]
             for artifact_id in served:
                 current.artifact_snapshot(artifact_id, name)
+            self.require_served_capacity(current, name, sorted(served))
             beside = {artifact_id for artifact_id, entry in current.served_beside().items() if entry.component == name}
             others = set(served) - {active_id}
             # The artifact that is active now keeps its route while the new one starts.
@@ -725,6 +728,35 @@ class Dispatcher(
             self.publisher.write_traffic_weights(scenario, split)
             self.scenario_committed(current)
             return {"served": self.served_mapping(current)[name]}
+
+    def require_served_capacity(self, current: Scenario, component: str, artifact_ids: Sequence[str]) -> None:
+        """Raise ``ReefError`` when the runtime of ``current`` cannot keep ``artifact_ids`` loaded at once.
+
+        ``artifact_ids`` are all the artifacts of ``component`` that the scenario shall serve, in sorted order: one
+        or more. They are more than the runtime keeps loaded when ``component`` is the one that the runtime loads
+        (``ScenarioComponents.loaded_component``) and their count exceeds
+        ``InferenceRuntime.served_artifact_capacity``. An artifact of any other component loads nothing: the active
+        weights answer for it. The same holds for every artifact of a scenario without a runtime or without a loaded
+        component.
+
+        The count is that of the mapping alone. An artifact that the mapping stops takes no part in it, though it
+        can hold its engine for a while after the change; the runtime refuses a load that finds no free engine.
+        """
+        runtime = current.runtime
+        if runtime is None or component != current.components.loaded_component:
+            return
+        capacity = runtime.served_artifact_capacity
+        if capacity is None or len(artifact_ids) <= capacity:
+            return
+        limit = (
+            "answers only from the snapshot it has loaded"
+            if capacity == 1
+            else f"keeps at most {capacity} artifacts of component {component!r} loaded at once"
+        )
+        raise ReefError(
+            f"scenario {current.name!r}'s runtime {limit}, so it cannot serve the {len(artifact_ids)} artifacts "
+            f"that the mapping names: {', '.join(artifact_ids)}"
+        )
 
     def served_mapping(self, current: Scenario) -> dict[str, dict[str, int]]:
         """What ``current`` serves, by component: each served artifact of the component with its traffic weight.

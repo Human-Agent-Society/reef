@@ -246,7 +246,13 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. A bundled engine adds its service class and its
   request handler class to ``BUILTIN_ENGINES`` in
-  ``reef/inference/deployment.py``. Shared monitoring and engine recovery belong in
+  ``reef/inference/deployment.py``. The serving runtimes accept only engines
+  that declare and enforce ``ServingEngines.request_pinning``. The inference
+  component enforces it for the built-in SGLang and vLLM engines only.
+  Another backend needs the component's request pinning for its generation
+  route, or its own serving runtime (``inference.serving: module:Factory``);
+  see `Request pinning <../developer-guide/executors.rst#request-pinning>`__.
+  Shared monitoring and engine recovery belong in
   ``reef/inference/recovery.py``; adapter residency belongs in
   ``reef/inference/residency.py``. Shared contracts and version values belong in
   ``reef/inference/interfaces.py``.
@@ -268,8 +274,9 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - Keep provider authentication and provider-native request handling in the
   adapter. Do not import ``reef.train`` from ``reef/inference/``.
 - Test built-in name and reference resolution in
-  ``tests/reef_service/test_runtime_registry.py``. Add request, recovery, and
-  malformed-result contracts for every capability the runtime implements.
+  ``tests/reef_service/inference/test_runtime_registry.py``. Add request,
+  recovery, and malformed-result contracts for every capability the runtime
+  implements.
 - Add or update the stack that exercises the runtime under ``recipes/`` and
   document every public setting. Never commit credentials or real provider tokens.
 

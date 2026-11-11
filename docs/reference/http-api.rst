@@ -325,7 +325,9 @@ feedback.
 ``model_revision`` is declared by the deployment manifest, with
 ``identity_source: deployment_manifest``. The external model serves the request.
 Its record has no Reef ``artifact_id``. The declared revision identifies the
-configured target; it does not prove which weights the provider loaded.
+configured target; it does not prove which weights the provider loaded. Reef
+sends the target no artifact identity. It preserves the provider's returned
+log probabilities in the response and the record.
 
 ``execution_outcome`` is ``completed``, ``aborted``, ``error``, ``timeout`` or
 ``cancelled``; interrupted streams whose execution cannot be established use
@@ -2089,6 +2091,9 @@ scenario does not serve under that name:
 
 - **Reef does not move a failed request.** A request to a failed artifact fails.
   To stop new requests to an artifact, set its weight to 0.
+- **A retry keeps its artifact.** Reef does not compute the bucket again when
+  it retries a request (see `Request`_). When the artifact has no route at
+  the retry, Reef answers HTTP 503 with ``Retry-After``.
 
 The weights select the artifact. The engine of the artifact selects its own
 replica.
@@ -2264,10 +2269,35 @@ separate processes
 <../user-guide/operate.rst#run-the-services-in-separate-processes>`__ gives the
 status codes of an inference request.
 
-On a weight-serving deployment, the engine handler adds its bookkeeping keys:
-``lora_path`` to address the served adapter and ``return_meta_info`` so the
-record shows which weights answered. It replaces a ``lora_path`` that the body
-names. Set ``"stream": true`` and read the SSE response for streaming.
+To require a specific artifact, use
+``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/chat/completions``.
+A body ``model`` that names no served artifact selects the active row instead.
+
+Reef retries a request once when the engine aborts a non-streaming answer, or
+refuses the row's model name before any output. It reads the row again for the
+retry. Three kinds of request keep their artifact: a request to an artifact's
+route, a request whose ``model`` names its artifact, and a request of a
+traffic split. When no row serves that artifact at the retry, Reef answers
+HTTP 503 with ``Retry-After``. The retry of any other request can reach a new
+active artifact.
+
+On a weight-serving deployment, the engine handler selects the served adapter
+itself, and it replaces a ``lora_path`` that the body names. Set
+``"stream": true`` and read the SSE response for streaming.
+
+Log probabilities depend on what answers the request:
+
+- **A provider or routed target.** Reef forwards ``logprobs`` and
+  ``top_logprobs`` in the body. It preserves the provider's returned log
+  probabilities in the response and the record.
+- **Reef's SGLang or vLLM backend.** On ``/v1/chat/completions`` with
+  ``"logprobs": true``, ``choices[0].logprobs.content`` has one entry for each
+  sampled token, in output order. A stream sends the entries with their text,
+  and the record holds the same entries. Each entry's ``top_logprobs`` holds
+  only the sampled token. The SGLang backend returns the engine's alternatives
+  in SGLang's own format, in ``choices[0].meta_info.output_top_logprobs``; a
+  stream sends them in its last chunk. The vLLM backend returns no
+  alternatives. ``/v1/messages`` returns no log probabilities.
 
 The receipt identifies the stored record:
 
@@ -2282,15 +2312,20 @@ The receipt identifies the stored record:
 | Anthropic SSE | the same field on ``message_stop``                        |
 +---------------+-----------------------------------------------------------+
 
-Streams carry it only after the record is stored. A stream that ends without
-its terminal event carries no receipt. A stream from Reef's SGLang or vLLM
-backend that the engine aborts also carries no receipt, because Reef cannot
-restart a stream after it sent frames. In both cases a harness that reports by
-receipt does not reference the record. Reef stores it as an incomplete delivery
-record and preserves the provider response.
-The record-to-record stage excludes aborted records from sample creation and
-training, including when a report references their IDs directly or retained
-records are replayed after a restart.
+Streams carry it only after the record is stored, so an incomplete stream
+carries no receipt. A stream that fails after its response headers also
+carries no terminal event. Failures include an engine or transport error, a
+missing terminal event, an answer from weights other than the selected ones,
+and the inference timeout. Reef then closes the connection, so a client SDK
+reports a transport error instead of a complete answer. A stream from Reef's
+SGLang or vLLM backend that the engine aborts keeps its terminal event. It is
+still incomplete, because Reef cannot restart a stream after it sent frames.
+A harness that reports by receipt does not reference these records. Reef
+stores each as an incomplete delivery record and preserves the provider
+response. It excludes incomplete records from sample creation and training,
+also when a report references their IDs directly or retained records are
+replayed after a restart. A routed stream follows `Routed external-model
+requests`_ instead.
 
 An inference response from a served Reef artifact carries ``x-reef-artifact-id``,
 the ID of the artifact that answered. Routed external models have no such header.
@@ -2840,8 +2875,11 @@ Reef reads the mapping as follows:
 
 The answer is ``{"scenario": "<name>", "served": {...}}`` with the mapping
 that the scenario now serves of the component. Reef checks the mapping before
-it changes anything: a mapping that names an unknown artifact, or an artifact
-of another component, changes nothing.
+it changes anything: a mapping that names an unknown artifact, an artifact of
+another component, or more weight artifacts than the runtime keeps loaded at
+once, changes nothing. `Runtime limits
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ gives that number,
+and the wait before a stopped checkpoint frees its place.
 
 The response accepts the mapping, and inference loads the artifacts in the
 background. Poll `Startup status`_ before sending requests that require the
@@ -2869,9 +2907,11 @@ served a checkpoint loads the root's files.
 |        | ``component`` without ``served``; an unknown ``component``, or     |
 |        | ``component`` is missing in a scenario with several components;    |
 |        | an artifact has no durable bytes; the runtime cannot serve the     |
-|        | artifact; the mapping names several artifacts, and the runtime     |
-|        | answers only from the snapshot it has loaded or the store keeps    |
-|        | no durable commit history                                          |
+|        | artifact; the mapping names more weight artifacts than the         |
+|        | runtime keeps loaded at once, or several artifacts of another      |
+|        | component in a scenario whose weights the runtime loads; the       |
+|        | mapping names several artifacts, and the store keeps no durable    |
+|        | commit history                                                     |
 +--------+--------------------------------------------------------------------+
 | 404    | unknown scenario; an artifact that is not one of the component     |
 +--------+--------------------------------------------------------------------+
@@ -2960,10 +3000,12 @@ active within ``max_staleness`` artifacts.
 The runtime must answer each call from the artifact that the call names.
 The Tinker runtime does, so a Tinker scenario can serve any of its
 artifacts together. A runtime that loads weights into engines answers only
-from the snapshot it has loaded, so Reef refuses a mapping of several
-artifacts there. A scenario whose components load nothing into a runtime,
-such as a harness scenario, can serve any of its artifacts together. A store
-without a durable commit history also refuses a mapping of several artifacts.
+from the weight artifacts that it keeps loaded, and Reef refuses a mapping of
+more weight artifacts (`Runtime limits
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__). A scenario whose
+components load nothing into a runtime, such as a harness scenario, can serve
+any of its artifacts together. A store without a durable commit history also
+refuses a mapping of several artifacts.
 
 Restore a scenario selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -3282,7 +3324,8 @@ Status codes
 |        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
 | 403    | a routed request for an unconfigured Scenario or a pin to a |
-|        | target outside it (see Routed external-model requests), or  |
+|        | target outside it (see Routed external-model requests), a   |
+|        | console origin, method or headers that are not allowed, or  |
 |        | an engine's own 403; an unaccepted token is 401, and        |
 |        | per-scenario authorization belongs to the gateway in front  |
 |        | of Reef                                                     |
@@ -3295,9 +3338,8 @@ Status codes
 +--------+-------------------------------------------------------------+
 | 409    | a record id resent with different content, a ``served``     |
 |        | mapping or a train-from while a training result waits for   |
-|        | its commit,                                                 |
-|        | or an engine that answered under another model name or      |
-|        | aborted the request on both attempts                        |
+|        | its commit, or an engine that aborted the request on both   |
+|        | attempts                                                    |
 +--------+-------------------------------------------------------------+
 | 4xx    | an engine's own 4xx, with its message, such as for a prompt |
 |        | that fills the model's context window: an engine's 400,     |
@@ -3311,8 +3353,10 @@ Status codes
 +--------+-------------------------------------------------------------+
 | 503    | the artifact store is unreachable, no loaded scenario is    |
 |        | idle at ``reef.max_loaded_scenarios`` (with                 |
-|        | ``Retry-After``), ``served_models`` cannot be read, or the  |
-|        | record store does not take an inference record              |
+|        | ``Retry-After``), ``served_models`` cannot be read, the     |
+|        | record store does not take an inference record, the engine  |
+|        | did not serve the selected weights on either attempt, or a  |
+|        | retry found no row for its artifact (with ``Retry-After``)  |
 +--------+-------------------------------------------------------------+
 | 504    | the engine did not answer within ``inference.timeout-s``    |
 +--------+-------------------------------------------------------------+

@@ -8,6 +8,7 @@ from tests.support.inference import wait_for_inference
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend, SnapshotRef
 from reef.core.errors import RuntimeConfigError
+from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
@@ -136,6 +137,14 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 
             def activate_checkpoint(self, artifact, *, scenario=None) -> str:
                 return artifact.ref.revision
+
+            def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+                # It loads no weights, so it binds no artifact's weights.
+                return None
+
+            def endpoint_model_name(self, scenario: str) -> str | None:
+                # A record-only snapshot loads no weights: this runtime's model answers it.
+                return self.model_path
 
         backend_factory = InMemoryRepositoryBackend.factory()
         dispatchers = {
@@ -319,3 +328,18 @@ def test_inference_proxy_runtime_inherits_runtime_base() -> None:
             api_key="secret",
             inference_timeout_s=0,
         )
+
+
+@pytest.mark.unit
+def test_an_inference_proxy_binds_no_weights_and_names_its_configured_model(tmp_path) -> None:
+    runtime = InferenceProxyRuntime(model_path="mutable-model-alias", base_url="https://provider.invalid")
+    # Nothing ties a Reef artifact's weights to what the provider serves under its model name.
+    assert runtime.served_artifact("never-activated-artifact", "never-seen-scenario") is None
+    # The proxy loads no weights, so no activation establishes a binding either.
+    artifact = Artifact.local(tmp_path)
+    with pytest.raises(ValueError, match="loads no weights"):
+        runtime.activate_checkpoint(artifact)
+    assert runtime.served_artifact(artifact.artifact_id, "math") is None
+    # A snapshot without weights is answered by the configured model; a proxy that names no model answers none.
+    assert runtime.endpoint_model_name("math") == "mutable-model-alias"
+    assert InferenceProxyRuntime(base_url="https://provider.invalid").endpoint_model_name("math") is None

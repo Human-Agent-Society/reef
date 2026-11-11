@@ -294,6 +294,102 @@ slow decision delays only the other managed trainers. An error in
 ``actions``, or a refused action, is logged, and the next round reads the
 trainer again.
 
+Production inference contract
+-----------------------------
+
+Every runtime that serves weights must keep each admitted request on its
+selected artifact. A request admitted for artifact A must use A's model and
+adapter throughout generation. Its response and stored record must identify
+A. The receiver must refuse an unavailable or uncertain binding before
+generation.
+
+The contract applies to local engines, to hosted providers, and to a gateway
+in front of several engine replicas. Training and the trainer's own rollout
+engines have separate contracts.
+
+A route alone does not meet the contract: it describes the weight binding
+when the runtime made it, and reserves that binding for no request. Neither
+does an echoed artifact header, a health check or a load-ID check before
+the request. The runtime needs one of these:
+
+- **An immutable revision** behind the route, such as a provider deployment
+  or a Tinker sampler revision. Nothing replaces its weights, so a hosted
+  provider needs no native GPU controls.
+- **A receiver that pins each request**, for engines whose weights change
+  while they run. In one atomic step, the receiver selects the requested
+  artifact and pins it against loading, unloading and replacement.
+  Generation and prefix-cache reuse keep that binding until the last token.
+  Reef's saved-weight runtimes always use this (`Request pinning`_).
+
+Every ``InferenceRuntime`` implements these members (`Runtime
+responsibilities <../reference/python-api.rst#runtime-responsibilities>`__
+gives the full definitions):
+
+- ``inference_handler`` returns the handler whose
+  ``inference(artifact, path, payload)`` executes a request. An HTTP
+  integration can reuse Reef's HTTP handler.
+- ``activate_checkpoint(artifact, scenario=...)`` establishes the binding
+  before any route exposes it, and returns its runtime load ID.
+- ``served_artifact(artifact_id, scenario)`` is abstract. It only reports a
+  binding that already holds (a verified load or an immutable revision),
+  and it loads nothing. It returns ``None`` for an unknown artifact and for
+  an unavailable or uncertain binding, and the startup then fails.
+
+When the binding is in doubt, the runtime must fail safely:
+
+- After an ambiguous load, the affected engines stay unavailable until a
+  known binding is restored and checked.
+- On takeover, ``adopt(served)`` returns false when the retained endpoint
+  cannot establish its binding.
+- Retirement lets admitted requests finish on their pinned weights, or it
+  interrupts them explicitly.
+- A stream that has sent output never retries on another artifact. An
+  incomplete stream can keep a diagnostic record, but it gets no receipt.
+
+The other methods are optional:
+
+- ``open``, ``shutdown``, ``adopt`` and ``stop_serving``, when the
+  integration owns resources or reuses deployments.
+- ``inference_stream``, for incremental streaming. Its default returns one
+  buffered JSON chunk.
+- ``serves_any_artifact`` and ``artifact_model``, for a runtime that answers
+  from any artifact on request, without a load. The evaluation of a model
+  artifact needs them. By default, a runtime answers only from an artifact
+  that it loaded.
+- ``serve_artifact`` and ``served_artifact_capacity``, for a runtime that
+  serves several artifacts of one scenario at the same time. The capacity
+  is the number of weight artifacts that the runtime keeps bound: a
+  positive integer, or ``None`` for no limit. The default is ``None`` when
+  ``serves_any_artifact`` is true, and 1 otherwise. A higher capacity alone
+  does not enable the evaluation of a model artifact.
+  ``release_unreferenced_artifacts`` is the optional cleanup of bindings
+  that nothing uses.
+- ``handler_for(url)``, when the runtime serves several URLs, or when its
+  engines need credentials or retries that a plain proxy does not send. It
+  must select the handler by endpoint URL, also in a replica that never
+  opened the runtime. A URL without a handler gets a plain proxy. An
+  application that passes its own ``inference_handler`` uses it for every
+  ``served_models`` row.
+
+Two modes bind no weights and claim no weight identity:
+
+- **A snapshot without a weight component**, such as a record-only or
+  harness snapshot, gets no activation. Its route names the model that the
+  optional ``endpoint_model_name(scenario)`` gives. The default ``None``
+  refuses such snapshots, and their startup fails. Reef does not check what
+  the endpoint serves under that name. The built-in ``inference_proxy``
+  runtime gives its configured model and refuses weight snapshots.
+- **A routed target** of the Semantic Router (``reef.routing_manifest``) is
+  not a Reef artifact. Its requests carry no artifact identity and no
+  pinned model name, and their records name no artifact, so this contract
+  and request pinning do not apply (see `Routed external-model requests
+  <../reference/http-api.rst#routed-external-model-requests>`__). A target
+  must expose an OpenAI chat endpoint. The component's native receiver
+  (``reef.inference.remote``) is not one.
+
+`Integration qualification`_ lists the cases to test before an engine or
+provider serves weights for production requests.
+
 Serving saved weights
 ---------------------
 
@@ -301,18 +397,28 @@ Serving loads only the weights that a job saved and Reef published. It loads
 them when a scenario starts, when a committed snapshot is activated, and when
 a person activates a snapshot. No trainer holds a serving engine.
 
-``reef.inference.serving`` has two runtimes over an ``InferenceBackend``:
+These runtimes serve saved weights on inference components. The first two,
+in ``reef.inference.serving``, run over an ``InferenceBackend``:
 
 - ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
-  base model. Requests name the adapter per scenario. At most
+  base model. Requests name the adapter per scenario, and a scenario that
+  serves a base root names the base model. At most
   ``adapter_capacity`` adapters are resident.
   ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 - ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. The engines start with the base model. Activating the base
-  artifact after another snapshot loads its files from the artifact
-  repository.
+  weights. The engines start with the base model, and they stay paused
+  until the first activation succeeds. Each activation loads the artifact's
+  files from the artifact repository. A base root loads the base model's
+  directory, the runtime's ``model_path``.
+- ``CheckpointSlotsRuntime`` (``reef.inference.checkpoint_slots``) serves
+  several full-weight checkpoints of one scenario at the same time. It
+  holds one ``FullWeightServingRuntime`` for each inference component that
+  ``inference.remote`` names (``url`` and ``slot-urls``). Each one keeps
+  its own engines, load IDs, health checks and recovery. A checkpoint that
+  stops serving releases its component, which keeps its engines for the
+  next checkpoint.
 
 Each load gets a new runtime load ID, and every engine reports it afterwards.
 The IDs of one runtime belong to a fresh incarnation, so a restart never
@@ -333,8 +439,177 @@ workers reserve separate GPUs.
 The serving runtime checks the component's health every 30 seconds. The
 component names its process in each health report, so the control plane sees
 a component that restarted and runs no engines. After a failed check, the
-runtime pauses generation, starts the lost engines again (or replaces the
-dead ones), loads each scenario's active selection into them, and resumes.
+runtime pauses generation. When an engine is lost or dead, or the component
+reports an uncertain binding, the runtime replaces the whole engine stack.
+It then loads each scenario's active selection again, and resumes.
+
+Generation resumes only after a reload and its load-ID check succeed. After
+a failed activation, reload or check, ``FullWeightServingRuntime`` stays
+paused and gives no route. It restores the last artifact that it activated
+successfully. It retries the restore at each health interval, even when
+every engine is alive. Before its first successful
+activation, the runtime has nothing to restore, so it waits for the next
+activation. Until then, a failed health check only replaces the engines,
+and they stay paused. A route that is already published stays published,
+and its requests wait or fail during the pause. Adapter recovery keeps every
+scenario's previous adapter until the whole restore succeeds; a capacity
+refusal leaves the current adapters serving.
+
+A new serving owner always starts a new engine stack, because the old
+engines' load IDs cannot prove that the weights are unchanged. The owner
+changes when the owning inference worker restarts or loses its lease. The
+new stack ends the requests in flight, and the worker activates each
+completed selection again, so a takeover needs no operator action. Control
+retries a failed startup by itself, and activating the artifact again
+retries at once (see `Startup status
+<../reference/http-api.rst#startup-status>`__).
+
+Request pinning
+~~~~~~~~~~~~~~~
+
+The inference component, local or ``inference.remote``, pins every
+production request for both saved-weight runtimes. No setting turns this
+protection off. The trainer's rollout engines do not use it, because the
+trainer synchronizes its own rollouts with its weight updates.
+
+The component behaves as follows:
+
+- **Admission.** Each full-weight load serves under its own model name,
+  which the stored route names; an adapter keeps its immutable adapter
+  name. On an adapter stack, the base model serves under the load ID that
+  the owner gave the new stack, for the route of a base root. The component
+  refuses a request for a load that it no longer serves, before any output,
+  and the replica retries once (see `Request
+  <../reference/http-api.rst#request>`__).
+- **Drain.** Before it changes weights or adapters, the component stops
+  admitting requests and waits for the admitted ones to finish, for at most
+  ``inference.timeout-s``. A request whose client disconnected keeps its
+  pin until the engine finishes it. A drain that times out interrupts the
+  remaining requests and requires recovery.
+- **Prefix sharing.** With ``inference.prefix-sharing: true``, requests on
+  the same weights share the engine's prefix cache. After the drain, a
+  pause clears the cache before each change. It retracts no request, and no
+  cache entry outlives its weights.
+- **Uncertain binding.** A failed load, an ambiguous pause or a failed
+  cache clear stops admission. Admission resumes after
+  the component replaces its engine stack, and the intended artifacts are
+  loaded and checked again. An explicit refusal from the engine leaves the
+  binding in place.
+- **Ownership.** A newer serving owner fences the older one: the component
+  refuses the older owner's control calls with HTTP 412. The new owner's
+  engine stack ends the requests in flight.
+
+The protection has these limits:
+
+- **Engines.** It covers the built-in SGLang and vLLM engines with their
+  built-in request handlers. Engine serving refuses another
+  ``inference.backend`` or ``inference.handler-factory``. Another engine
+  needs its own serving runtime (``inference.serving: module:Factory``)
+  that meets the `Production inference contract`_.
+- **Topology.** The component starts its own engines and router.
+  Generation and weight changes must go through the
+  component, and the native engine addresses are private. The native
+  receiver forwards only the engine's generation route, and other
+  inference paths return HTTP 404. Clients use Reef's public inference API.
+- **Caches.** The pause clears the engine's own prefix cache, which
+  includes SGLang's host-memory tier. It cannot clear KV outside the
+  engine, so the runtime factory and the component refuse the engine
+  options that select such a store (``require_no_external_kv_cache``).
+  `Serving of a weight-training deployment
+  <../reference/configuration.rst#serving-of-a-weight-training-deployment>`__
+  lists the options. Reef checks those option names only, not plugins or
+  environment variables. Rollout engines and plain endpoints do not use the
+  protection, so they keep those options. For adapters, SGLang keeps the
+  cache only when it keys the entries by adapter. SGLang's
+  prefill/decode-disaggregated engines cannot use the clearing pause.
+- **Trust.** The component trusts the engine's acknowledgements of loads
+  and cache clears. It does not inspect the weights
+  or the cache in engine memory, so qualify the engine version that you
+  deploy (see `Integration qualification`_).
+
+Operators run it as follows:
+
+- Run control, the inference replicas and the component on the same Reef
+  version. The component must confirm the protection at each engine start
+  and at each health check, and the engine startup fails without it.
+- Restart the component after a reset of the coordination store, because
+  owner sequences can otherwise move backwards.
+- An adapter that never loads keeps its engine stack unavailable, and the
+  stack retries at each health interval. Correct the artifact, or restart
+  the serving worker, before you select a replacement.
+- A control call waits at most 30 seconds for an earlier one, then gets a
+  retryable HTTP 503. A native call that never returns needs operator
+  recovery of the component; Reef never runs a second weight change beside
+  it.
+
+Integration qualification
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+CPU tests with fake engines cannot verify which weights a real engine
+serves. Before an engine or provider serves production requests, check
+these cases on the version that you deploy:
+
+#. Delay a request or an activation across a promotion. Check the actual
+   output, the response identity and the stored identity. Include the
+   interval before the new route is published, and a late operation from a
+   former owner.
+#. Make the engines report mixed load IDs after a load, and uniformly wrong
+   ones. Neither load may give a route for the requested artifact.
+#. Interrupt a stream after its first token. It must get no receipt and no
+   retry on another artifact.
+#. Fail one replica while it loads, then recover. Requests must be refused
+   while its weights are uncertain, and succeed after a checked reload.
+#. Restart against different weights. An invalid adoption must be refused.
+#. If the integration supports adapters or prefix-cache reuse, check that
+   each preserves the selected artifact.
+
+Use two small checkpoints whose outputs differ, and identify each answer
+from its generated content, not from labels or version metadata. Record the
+engine version and the capabilities checked. These cases verify behavior.
+Use a representative concurrent workload to measure throughput,
+95th-percentile latency, drain time and unavailable time.
+
+Two commands run a real integration through the real inference HTTP app
+and record store. They are not pytest tests, so ``pytest tests/`` and CI do
+not run them.
+
+**Cutover check.** ``tests.support.inference_qualification`` runs your
+integration's two artifacts through a promotion. It keeps A's route
+published after it activates B. Each answer must then come from A and agree
+with its artifact header and stored record, or fail without a receipt.
+Write a factory that takes the output directory and returns a context
+manager. The context manager owns the run's isolated resources and yields
+an ``InferenceQualification``, whose ``OutputOracle`` names the artifact
+from the generated content alone. Run the command from the checkout, with
+the factory as ``--target`` (``module:factory``):
+
+.. code-block:: bash
+
+   python -m tests.smoke.inference_cutover --target my_qualification:target \
+     --output /scratch/cutover
+
+``--output`` must be an absolute path to a new or empty directory outside
+the checkout. The command stores the records and ``report.json`` there, and
+exits with status 0 only when every check passes. The report lists the
+checked cases and the cases that the run does not cover. The CPU suite runs
+the same check against toy SGLang and vLLM components that pin each request.
+
+**Native check.** ``tests/smoke/native_inference.py`` checks Reef's own
+SGLang and vLLM integrations with two synthetic checkpoints (`Run one area
+<../contributing/testing.rst#run-one-area>`__ gives the prerequisites and
+the command). Its ``features`` profile checks pinned requests, traffic
+splits, explicit pins, rollouts, concurrent requests of both artifacts, and
+a split change during a native stream. The native engine shares prefixes,
+and the last check loads the other checkpoint into it during a native
+stream. The stream must end on its own weights, Reef must refuse the old
+route, and the cached-token counts must show reuse within each checkpoint
+and none across the load. Its ``routing`` profile puts both engines behind
+a Semantic Router binary, as plain endpoints that pin no request. Each run
+compares the sampled log probabilities with the model's own scores.
+
+Only the native check's ``lifecycle`` profile covers control-plane
+publication and a public multi-artifact deployment. Neither command covers a
+managed router lifecycle, or validation of the router's deployment image.
 
 Engine supervision
 ------------------
@@ -843,7 +1118,7 @@ cleanup, bounded probes and owner-lease loss. To run the real Ray/HTTP tests:
 
 .. code:: bash
 
-   REEF_TEST_RAY=1 python -m pytest tests/reef_service/test_service_executor_ray.py
+   REEF_TEST_RAY=1 python -m pytest tests/reef_service/deploy/test_service_executor_ray.py
 
 These are control-plane tests, not a GPU SGLang/Megatron validation or a
 multi-machine networking benchmark.

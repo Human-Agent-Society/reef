@@ -19,7 +19,7 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
-from reef.inference.interfaces import InferenceRuntime
+from reef.inference.interfaces import InferenceOwnerLostError, InferenceRuntime
 from reef.inference.startup import (
     PROGRESS_KEY,
     STARTUP_FAILED_PREFIX,
@@ -118,9 +118,16 @@ class ServingWorker(QueueWorker):
     Other replicas only read routes. The owner recovers completed selections before it takes new work: it opens the
     runtime, offers it the routes from before (``InferenceRuntime.adopt``), keeps the routes that it took over, and
     queues every completed selection again. ``owner`` is None before ownership. ``recovered`` becomes true after the
-    recovery. ``opened`` becomes true after the runtime opens. ``activated`` maps each scenario to the artifact that
-    this worker activated for it last, until the worker stops the endpoint that serves that artifact for the scenario:
-    a serving request for the artifact in ``activated`` loads nothing. A route that it kept from before is activated
+    recovery. ``open_attempted`` becomes true before the first call that opens the runtime, and ``opened`` after a
+    call that opened it: ``stop`` also shuts down a runtime that opened in part. ``release_due`` is whether a
+    serving work ran since the runtime last released what no route uses
+    (``InferenceRuntime.release_unreferenced_artifacts``). ``activated`` maps each scenario to the artifact that
+    this worker activated for it last, until the worker stops the endpoint that serves that artifact for the scenario.
+    A serving request for the artifact in ``activated`` loads nothing while the runtime still provides its route
+    (``InferenceRuntime.served_artifact``); otherwise the worker activates the artifact again. A scenario whose
+    components load no weights gets no activation: its route names its selected artifact at the runtime's endpoint
+    model (``InferenceRuntime.endpoint_model_name``). Each artifact that such a scenario serves beside the selection
+    has a route with its own artifact ID at the same URL and model. A route that it kept from before is activated
     again once, so that the runtime takes over what it adopted.
     """
 
@@ -148,11 +155,13 @@ class ServingWorker(QueueWorker):
         self.routes = coordination.served_models
         self.local_artifact_dir = local_artifact_dir
         self.stop_delay_seconds = CACHE_SECONDS + (300.0 if runtime is None else runtime.inference_timeout_s)
+        self.open_attempted = False
         self.opened = False
         # Slots open the runtime once.
         self.open_lock = threading.Lock()
         self.owner: ServingLease | None = None
         self.recovered = False
+        self.release_due = False
         self.activated: dict[str, str] = {}
         # Engines can read selected files after startup. Keep local views alive until this worker stops.
         self.repositories: dict[str, Repository] = {}
@@ -162,7 +171,7 @@ class ServingWorker(QueueWorker):
         super().stop()
         if self.owner is not None:
             try:
-                if not self.owner.lease_lost.is_set() and self.opened:
+                if not self.owner.lease_lost.is_set() and self.open_attempted:
                     self.owner.runtime.shutdown()
             finally:
                 self.owner.stop()
@@ -215,10 +224,31 @@ class ServingWorker(QueueWorker):
                     serial_key=SERVING_QUEUE,
                 )
             )
+        # With one serving slot, each work ran to its end in this thread, so none runs now.
+        if self.release_due and self.opened and self.owner.runtime.serving_slots == 1:
+            self.release_unreferenced(self.owner.runtime)
         return super().run_once()
+
+    def release_unreferenced(self, runtime: InferenceRuntime) -> None:
+        """Make the owner's runtime release what a serving work loaded and did not publish, because the work failed
+        or stopped. Every published route and every scheduled stop, due or not, keeps what it uses. A release that
+        fails raises, and the next round tries it again before it takes work."""
+        # The published routes are read first: a route that retires between the two reads is then in one of them.
+        retained = set(self.routes.all_served())
+        retained.update(stop.served for stop in self.routes.due_stops(float("inf")))
+        try:
+            runtime.release_unreferenced_artifacts(retained)
+        except InferenceOwnerLostError as exc:
+            self.receiver_ownership_lost()
+            raise WorkLeaseLostError("the inference receiver accepted a newer owner") from exc
+        self.release_due = False
 
     def open_runtime(self, runtime: InferenceRuntime) -> None:
         started = time.monotonic()
+        if self.owner is None or self.owner.lease_lost.is_set():
+            raise WorkLeaseLostError("the serving worker has no runtime ownership")
+        runtime.set_owner_sequence(self.owner.item.changed_sequence)
+        self.open_attempted = True
         runtime.open()
         self.opened = True
         logger.info("opened the inference runtime in %.1f s", time.monotonic() - started)
@@ -231,12 +261,36 @@ class ServingWorker(QueueWorker):
         runtime = self.owner.runtime
         try:
             self.open_runtime(runtime)
+        except InferenceOwnerLostError as exc:
+            self.receiver_ownership_lost()
+            raise WorkLeaseLostError("the inference receiver accepted a newer owner") from exc
         except Exception:
             logger.exception("could not open the inference runtime; the %d routes from before go", len(previous))
             return ()
         return tuple(served for served in previous if runtime.adopt(served))
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        """Serve one work item, treating a receiver fence as ownership loss rather than a failed training selection."""
+        self.release_due = True
+        try:
+            return self.serve_item(item, lease_lost)
+        except InferenceOwnerLostError as exc:
+            self.receiver_ownership_lost()
+            raise WorkLeaseLostError("the inference receiver accepted a newer owner") from exc
+
+    def receiver_ownership_lost(self) -> None:
+        """Stop renewing a fenced owner even when cleanup is also refused by the newer owner."""
+        self.stopped.set()
+        if self.owner is not None:
+            self.owner.stop()
+            self.owner.lease_lost.set()
+            try:
+                self.owner.runtime.shutdown()
+            except Exception:
+                logger.exception("cleanup of the superseded inference owner failed")
+
+    def serve_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        """Activate, publish or retire the selection while this worker retains runtime ownership."""
         if self.stopped.is_set():
             raise WorkerStoppedError
         runtime = self.live.runtime
@@ -335,6 +389,7 @@ class ServingWorker(QueueWorker):
         reporter = QueueStartupReporter(self.queue, item, self.worker_id)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
         runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
+        has_weight_component = components.loaded_component is not None
         aliases = item.payload.get("aliases")
         beside = item.payload.get("beside")
         if not isinstance(aliases, list) or not isinstance(beside, dict):
@@ -349,7 +404,17 @@ class ServingWorker(QueueWorker):
                 beside_artifacts[name] = components.component_artifact(selected_artifact(value), component)
 
         def activate() -> None:
-            if self.activated.get(item.scenario) == artifact_id and not redeploying():
+            if not has_weight_component:
+                logger.info(
+                    "scenario %s: artifact %s loads no weights, so nothing activates", item.scenario, artifact_id
+                )
+                return
+            # An earlier activation serves only while the runtime still reports its binding.
+            if (
+                self.activated.get(item.scenario) == artifact_id
+                and not redeploying()
+                and runtime.served_artifact(artifact_id, item.scenario) is not None
+            ):
                 logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
                 return
             started = time.monotonic()
@@ -383,14 +448,23 @@ class ServingWorker(QueueWorker):
                 check_stop()
                 beside_models[name] = serve_beside(name)
         check_stop()
-        active = runtime.served_artifact(artifact_id, item.scenario)
+        if has_weight_component:
+            active = runtime.served_artifact(artifact_id, item.scenario)
+        else:
+            # The runtime's configured model answers the snapshot's requests; the route names no weights.
+            endpoint_model = runtime.endpoint_model_name(item.scenario)
+            active = None if endpoint_model is None else ServedArtifact(artifact_id, runtime.base_url, endpoint_model)
         if active is None:
             raise ValueError("the inference runtime provides no route for the selected artifact")
         models = {ACTIVE: active}
         for alias in aliases:
             models[require_text(alias, "model name")] = active
         for beside_name in beside:
-            models[beside_name] = beside_models.get(beside_name, active)
+            if has_weight_component:
+                models[beside_name] = beside_models.get(beside_name, active)
+            else:
+                # The endpoint model answers this artifact too. Its route keeps the artifact's own ID.
+                models[beside_name] = ServedArtifact(beside_name, active.url, active.model_name)
         return {name: dict(served.to_json()) for name, served in models.items()}
 
     def repository(self, scenario: str) -> Repository:

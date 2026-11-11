@@ -569,6 +569,66 @@ def test_readiness_checks_enabled_model_ids_and_reuses_endpoint_probe(
     asyncio.run(run())
 
 
+#: The provider models of the enabled targets of ``manifest``.
+ENABLED_MODELS = ("code-student", "code-teacher", "math-student", "math-teacher")
+#: A model list that names each of them.
+EVERY_MODEL = json.dumps({"object": "list", "data": [{"id": name} for name in ENABLED_MODELS]}).encode()
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "error"),
+    [
+        # SGLang's model gateway labels its JSON model list as text.
+        pytest.param("text/plain; charset=utf-8", EVERY_MODEL, None, id="text-model-list"),
+        pytest.param("application/json", EVERY_MODEL, None, id="json-model-list"),
+        pytest.param("text/plain; charset=utf-8", b"not a model list", "readiness check failed", id="not-json"),
+        pytest.param("text/plain; charset=utf-8", b"\xff\xfe", "readiness check failed", id="not-utf-8"),
+        pytest.param("text/plain; charset=utf-8", b'{"object":"list"}', "must contain a model list", id="no-list"),
+        pytest.param(
+            "text/plain; charset=utf-8",
+            b'{"object":"list","data":[{"id":"code-student"}]}',
+            "does not expose",
+            id="missing-model",
+        ),
+    ],
+)
+def test_readiness_reads_the_model_list_whatever_its_media_type(
+    tmp_path: Path, manifest: dict[str, object], content_type: str, body: bytes, error: str | None
+) -> None:
+    from aiohttp import web
+
+    async def run() -> None:
+        async def models(request: web.Request) -> web.Response:
+            return web.Response(body=body, headers={"Content-Type": content_type})
+
+        app = web.Application()
+        app.router.add_get("/v1/models", models)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, "127.0.0.1", 0).start()
+            url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+            targets = manifest["targets"]
+            assert isinstance(targets, dict)
+            for target in targets.values():
+                target["url"] = url
+            path = tmp_path / "ready.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            adapter = RoutingAdapter.from_manifest(
+                path, router_config_hash=ROUTER_HASH, environ={"STUDENT_TOKEN": "readiness-secret"}
+            )
+            if error is None:
+                await adapter.check_ready()
+            else:
+                with pytest.raises(RoutingRequestError, match=error) as captured:
+                    await adapter.check_ready()
+                assert captured.value.status == 503
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
 CLASSIFIER_FILES = {
     "config.json": "sha256:" + "1" * 64,
     "tokenizer.json": "sha256:" + "2" * 64,

@@ -396,7 +396,9 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
 
 
 @pytest.mark.unit
-def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_release(tmp_path: Path) -> None:
+def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A serve records its component selection without publishing artifacts or moving a head."""
     runtime = StubInferenceRuntime()
     dispatcher = _dispatcher(tmp_path)
@@ -409,6 +411,12 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         artifact_id = component_id(scenario, first, HARNESS)
         with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
             scenario.serve(artifact_id, HARNESS)
+        # A runtime that keeps two artifacts loaded loads weights only, so it cannot answer for the weights that the
+        # harness artifact binds once other weights are active.
+        with monkeypatch.context() as two_places:
+            two_places.setattr(StubInferenceRuntime, "served_artifact_capacity", property(lambda self: 2))
+            with pytest.raises(ReefError, match=f"only from the artifacts of component {WEIGHTS!r}"):
+                scenario.serve(artifact_id, HARNESS)
 
         runtime.answers_each_artifact = True
         served = scenario.serve(artifact_id, HARNESS)

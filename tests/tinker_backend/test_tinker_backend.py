@@ -25,8 +25,9 @@ from reef.cli import main
 from reef.core.errors import RuntimeConfigError, UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
+from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
-from reef.inference.tinker import TinkerInferenceRuntime
+from reef.inference.tinker import TINKER_URL, TinkerInferenceRuntime
 from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -838,10 +839,18 @@ def test_unsupported_chat_options_fail_explicitly(inference, client, tmp_path, e
 def test_activation_serves_the_new_sampler_and_freezes_older_releases(component, inference, objective, tmp_path):
     base = empty_artifact(tmp_path)
     first = inference.activate_checkpoint(base)
+    assert inference.served_artifact(base.artifact_id, "s") == ServedArtifact(
+        base.artifact_id, TINKER_URL, "tinker://base/sampler"
+    )
+    assert inference.served_artifact("unbound-artifact", "s") is None
     (checkpoint,) = train(component, batch(), objective.name).checkpoints
     published = Artifact.local(Path(checkpoint.artifact_path))
     selected = inference.activate_checkpoint(published)
     assert selected != first
+    assert inference.served_artifact(base.artifact_id, "s") is None
+    assert inference.served_artifact(published.artifact_id, "s") == ServedArtifact(
+        published.artifact_id, TINKER_URL, "tinker://update-1/sampler"
+    )
     # The served row names the active sampler; a request under an older sampler's name keeps that sampler's load.
     assert inference.served_model_name("s") == "tinker://update-1/sampler"
     assert inference.sampler_load("tinker://base/sampler") == ("tinker://base/sampler", first)

@@ -27,7 +27,7 @@ from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened
 from reef.core.values import JsonValue
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.inference.interfaces import InferenceArtifact, InferenceStream
+from reef.inference.interfaces import InferenceArtifact, InferenceStream, parse_full_weight_name
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -102,10 +102,11 @@ class NativeGenerateClient(ABC):
 
 
 async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
-    """Decode arbitrarily chunked SSE bytes into JSON data events, up to the ``[DONE]`` event.
+    """Decode SSE JSON events and consume the transport through EOF, including after ``[DONE]``.
 
     An event without data is skipped. An event whose data is not a JSON object,
-    or that reports an ``error``, raises :class:`ValueError`.
+    or that reports an ``error``, raises :class:`ValueError`. Data after ``[DONE]`` is invalid.
+    Exhaustion means the transport completed, so a trailing transport error cannot be hidden by the marker.
     """
 
     def decode_event(payload: str) -> dict[str, Any]:
@@ -117,15 +118,20 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
         return value
 
     decoder = SSEFrameDecoder()
+    done = False
     async for chunk in chunks:
         for frame in decoder.feed(chunk):
             payload = frame_data(frame)
+            if done and payload:
+                raise ValueError("native stream sent data after [DONE]")
             if payload == SSE_DONE:
-                return
-            if payload:
+                done = True
+            elif payload:
                 yield decode_event(payload)
 
     payload = frame_data(decoder.finish())
+    if done and payload:
+        raise ValueError("native stream sent data after [DONE]")
     if payload and payload != SSE_DONE:
         yield decode_event(payload)
 
@@ -537,6 +543,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
         """The engine serves the base model under its path and each adapter under its own name, which a native
         request names in ``lora_path``."""
+        pinned = parse_full_weight_name(model_name)
+        if pinned is not None:
+            model_name = self._model_path
         addressed = {key: value for key, value in payload.items() if key != "lora_path"}
         if model_name == self._model_path:
             return {**addressed, "model": model_name}

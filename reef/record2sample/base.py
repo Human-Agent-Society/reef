@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.errors import inference_aborted
+from reef.core.errors import inference_incomplete
 from reef.core.job_data import JobOutcome, Sample, TrajectorySample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
@@ -167,7 +167,7 @@ class Record2Sample(ABC, Plugin):
         """Make the samples of ``record_set`` and settle them. Raises ``ValueError`` if a record of it is in another
         set.
 
-        A set with the ID of an earlier set takes its records again, as a retry does. An engine-aborted inference
+        A set with the ID of an earlier set takes its records again, as a retry does. An incomplete inference
         rejects the whole set before sample creation. Replaying retained records applies the same check.
         """
         record_ids = record_set.record_ids()
@@ -183,7 +183,7 @@ class Record2Sample(ABC, Plugin):
             if record.request_type is not RequestType.INFERENCE:
                 continue
             response = record.payload.get("response")
-            if isinstance(response, Mapping) and inference_aborted(response):
+            if isinstance(response, Mapping) and inference_incomplete(response):
                 self.reject(record_set)
                 return
         self.settle(record_set, self.make_samples(record_set))

@@ -74,8 +74,12 @@ Fields and where Reef reads them
 ``activate_snapshot`` (``reef.scenario.binding``) calls the runtime's
 ``InferenceRuntime.activate_checkpoint`` for the loaded component. The inference
 worker calls it for each selection that control queues, after the commit that
-makes the snapshot active. Without a runtime or a loaded component, moving the
-head is enough.
+makes the snapshot active. It then publishes the route that the runtime's
+``served_artifact`` reports for those weights. A snapshot without a loaded
+component gets no activation: its route names the model that the runtime's
+optional ``endpoint_model_name`` gives (see `Production inference contract
+<executors.rst#production-inference-contract>`__). Without a runtime, moving
+the head is enough.
 
 The scenario owns lifecycle ordering and admission; the service owns
 transport. The components supply only the facts at these sites.
@@ -98,9 +102,9 @@ Built-in recipes
 +-------------------------------+-------------+---------------------------------+----------------------------+------------------+
 
 **Weights.** ``InferenceRuntime.activate_checkpoint`` makes the runtime serve
-a snapshot. It returns the runtime load ID that serves the snapshot: a new load
-ID for a runtime that loads weights, or the artifact ID for one that loads
-nothing, such as a proxy. The runtime loads only published weights; no trainer
+a snapshot. It returns the runtime load ID that serves the snapshot, a new one
+for each load. A generic proxy loads no weights, so it refuses the
+activation. The runtime loads only published weights; no trainer
 changes what the engines serve. The runtime load ID stays inside the runtime:
 each record names the artifact that answered by its ``artifact_id`` (see
 `HTTP API <../reference/http-api.rst#artifact-of-a-recorded-response>`__).
@@ -173,10 +177,11 @@ Remote weight snapshots
 
 An inference runtime implements ``activate_checkpoint(artifact)``. The
 saved-weight serving runtimes (``reef.inference.serving``) load the snapshot's
-files into the engines. A proxy runtime loads nothing and returns the artifact
-ID. An inference runtime that serves immutable remote snapshots validates the
-checkpoint and binds its remote sampler. Tinker's inference runtime uses this
-to serve the authoritative artifact before the scenario serves requests. The
-training component does not read the head: the next job starts from the
-trainer's committed start, and after a ``train-from`` the training service
-imports the snapshot into the component with ``import_start``.
+files into the engines. A generic proxy runtime loads nothing, so it refuses
+the activation. An inference runtime that serves immutable remote snapshots
+validates the checkpoint and binds its remote sampler. Tinker's inference
+runtime uses this to serve the authoritative artifact before the scenario
+serves requests. The training component does not read the head: the next job
+starts from the trainer's committed start, and after a ``train-from`` the
+training service imports the snapshot into the component with
+``import_start``.

@@ -485,8 +485,20 @@ class ScenarioCommitter:
         Raise as :meth:`resolve_artifact` does, and ``CommitPendingError`` while a
         training result waits for its commit. Raise ``ReefError`` when the
         scenario keeps no durable commit history. Raise it also when the
-        runtime answers only from the snapshot that it has loaded
-        (``InferenceRuntime.serves_any_artifact`` is False).
+        scenario has a loaded component and its runtime cannot answer for the
+        artifact beside the active selection. A runtime that answers each call
+        from the artifact that the call names
+        (``InferenceRuntime.serves_any_artifact``) serves every artifact. Any
+        other runtime serves only an artifact of the loaded component, which it
+        loads beside the active one, and only when it keeps more than one
+        loaded at once (``InferenceRuntime.served_artifact_capacity`` is not 1).
+
+        The call does not count the artifacts that serve already.
+        ``Dispatcher.set_served`` serves the new artifacts of a mapping before
+        it stops the old ones, so it compares the count of the whole mapping
+        with the capacity first. The runtime finds a free engine itself when
+        the inference worker loads the artifact, and that load fails while
+        every engine still holds another artifact.
         """
         with self._lock, self._publication_lock:
             if not self._store.durable:
@@ -505,12 +517,20 @@ class ScenarioCommitter:
             loaded = components.loaded_component
             runtime = self._binding.runtime
             # The calls use the artifact's own weights, or the active selection's weights for an artifact of another
-            # component. The runtime must answer each call from the snapshot that the call names.
+            # component. The runtime must answer each call from the snapshot that the call names, or load the
+            # artifact's weights beside the active ones.
             if loaded is not None and runtime is not None and not runtime.serves_any_artifact:
-                raise ReefError(
-                    f"scenario {self._name!r}'s runtime answers only from the snapshot it has loaded, so it "
-                    f"cannot serve artifact {selected.artifact_id!r} beside the active selection"
-                )
+                if runtime.served_artifact_capacity == 1:
+                    raise ReefError(
+                        f"scenario {self._name!r}'s runtime answers only from the snapshot it has loaded, so it "
+                        f"cannot serve artifact {selected.artifact_id!r} beside the active selection"
+                    )
+                if selected.component != loaded:
+                    raise ReefError(
+                        f"scenario {self._name!r}'s runtime answers only from the artifacts of component "
+                        f"{loaded!r} that it has loaded, so it cannot serve artifact {selected.artifact_id!r} of "
+                        f"component {selected.component!r} beside the active selection"
+                    )
             target = self.snapshot_with(current, selected, snapshot)
             record = self.append_operation_record(
                 "serve",

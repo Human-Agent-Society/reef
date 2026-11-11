@@ -15,6 +15,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
+from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime, InferenceStream
 from reef.inference.provider_protocol import provider_headers
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string
@@ -55,6 +56,12 @@ class RequestHeadersFactory(ABC):
 def artifact_identity_headers(artifact: InferenceArtifact) -> dict[str, str]:
     """Reef identity headers for one selected, optionally materialized artifact."""
     headers = {"x-reef-artifact-id": artifact.artifact_id}
+    if (
+        isinstance(artifact, InferenceArtifact)
+        and artifact.served_model is not None
+        and artifact.served_model.startswith("reef-")
+    ):
+        headers["x-reef-served-model"] = artifact.served_model
     if artifact.local_path is not None:
         headers["x-reef-artifact-path"] = str(artifact.local_path)
     return headers
@@ -227,8 +234,13 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
     Holds an HttpInferenceHandler with provider-native auth
-    and exposes it via inference_handler. It loads no weights: a snapshot
-    serves under its release ID, and no load names what serves.
+    and exposes it via inference_handler, which forwards each request to the
+    provider in its native format. It binds no weights: nothing ties a Reef
+    artifact to what the provider serves under ``model_path``. So
+    ``served_artifact`` gives no route for any artifact, and
+    ``activate_checkpoint`` refuses every snapshot whose weights the runtime
+    would load. A snapshot without a weight component, such as a record-only or
+    harness snapshot, routes to the provider's model (``endpoint_model_name``).
     """
 
     def __init__(
@@ -274,7 +286,21 @@ class InferenceProxyRuntime(InferenceRuntime):
         return self._inference_handler
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        return artifact.artifact_id
+        """Refuse the snapshot with ``ValueError``: the proxy loads no weights, so its provider's model would answer
+        under the snapshot's artifact ID. The refusal does not change on a retry, so a startup fails for good."""
+        raise ValueError(
+            f"an inference proxy loads no weights, so it cannot serve the weights of artifact {artifact.artifact_id}; "
+            "serve weight snapshots with a runtime that loads them"
+        )
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """None for every artifact: the proxy binds no artifact's weights to the provider's model."""
+        return None
+
+    def endpoint_model_name(self, scenario: str) -> str | None:
+        """The provider's model (``served_model_name``, by default ``model_path``) for a snapshot without weights; None
+        when the proxy names no model."""
+        return self.served_model_name(scenario) or None
 
 
 @dataclass(frozen=True)

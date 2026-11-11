@@ -50,6 +50,7 @@ def test_service_adapts_only_connections_with_a_control_executor_without_owning_
     assert operations.inference_url() == "http://inference:8000"
     assert operations.runtime_load_ids() == ("weights:1", "weights:1")
     operations.pause()
+    operations.pause()
     assert receiver.paused
     operations.resume()
     assert not receiver.paused
@@ -170,8 +171,10 @@ def test_worker_reloads_full_weights_into_every_engine_with_the_version(monkeypa
     monkeypatch.setattr(worker_module.ray, "get", lambda refs: list(refs))
     worker = worker_module.VLLMWorker.__new__(worker_module.VLLMWorker)
     worker.group = SimpleNamespace(engines=[SimpleNamespace(update_weights_from_disk=Remote())] * 2)
-    worker.load_weights_from_disk("/ckpt/hf", "inc:3")
-    assert calls == [(("/ckpt/hf",), {"runtime_load_id": "inc:3"})] * 2
+    backend = VLLMInferenceBackend(UniProcExecutor.from_workers([worker]))
+    for _ in range(2):
+        backend.load_weight_files(WeightFiles(Path("/ckpt/hf"), "full"), adapter_name=None, runtime_load_id="inc:3")
+    assert calls == [(("/ckpt/hf",), {"runtime_load_id": "inc:3"})] * 4
     worker.group = SimpleNamespace(engines=[])
     with pytest.raises(RuntimeError, match="no vLLM engines"):
         worker.load_weights_from_disk("/ckpt/hf", "inc:3")

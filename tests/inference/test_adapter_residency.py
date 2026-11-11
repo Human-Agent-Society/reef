@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from reef.core.weight_layout import WeightFiles
-from reef.inference.interfaces import AdapterEngine
+from reef.inference.interfaces import AdapterEngine, InferenceOwnerLostError
 from reef.inference.residency import (
     AdapterCapacityExhaustedError,
     AdapterEvictionFailedError,
@@ -86,6 +86,23 @@ def test_load_failure_leaves_the_incumbent_active_and_no_phantom_slot(engine: Fa
     assert current(manager, "a") == "v1"
     assert manager.status()["scenarios"]["a"]["resident"] == ["v1"]
     assert manager.status()["counters"]["load_failures"] == 1
+
+
+@pytest.mark.parametrize("operation", ["load", "evict", "cleanup"])
+def test_an_owner_fence_is_not_wrapped_as_a_retryable_residency_error(engine, monkeypatch, operation):
+    manager = AdapterResidencyManager(capacity=1 if operation == "evict" else 2)
+    manager.activate("a", "v1", engine, files=FILES)
+    fence = InferenceOwnerLostError("a newer owner controls the receiver")
+
+    def fenced(*args):
+        raise fence
+
+    if operation == "cleanup":
+        engine.fail_load.add(adapter_name("a", "v2"))
+    monkeypatch.setattr(engine, "load_adapter" if operation == "load" else "unload_adapter", fenced)
+    with pytest.raises(InferenceOwnerLostError) as caught:
+        manager.activate("a", "v2", engine, files=FILES, supersede=True)
+    assert caught.value is fence
 
 
 def test_eviction_is_oldest_unprotected_first_across_scenarios(engine: FakeEngine) -> None:
