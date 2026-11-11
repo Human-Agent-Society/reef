@@ -739,11 +739,18 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
         lambda: "finished" in [_job_event(row) for row in _scenario(dispatcher).store.history()],
         timeout_seconds=15,
     )
-    time.sleep(0.2)
-    attempts = away.attempts
-    assert attempts >= 1
-    time.sleep(0.5)
-    assert away.attempts == attempts
+    # A wake that was already due can still land after the job finishes, so the test waits for the count to hold
+    # still for a second; a harness that keeps trying never lets it.
+    assert away.attempts >= 1
+    held_since, attempts = time.monotonic(), away.attempts
+
+    def settled() -> bool:
+        nonlocal held_since, attempts
+        if away.attempts != attempts:
+            held_since, attempts = time.monotonic(), away.attempts
+        return time.monotonic() - held_since >= 1.0
+
+    assert _wait_for(settled)
 
 
 @pytest.mark.unit
