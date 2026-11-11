@@ -17,6 +17,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponse, ClientSession, UnixConnector, web
@@ -1333,28 +1334,54 @@ def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_
 
 
 @pytest.mark.parametrize("phase", ["provider_check", "preview"])
-def test_an_open_whose_deadline_passes_during_readiness_stays_closed(tmp_path: Path, phase: str) -> None:
+def test_an_open_whose_deadline_passes_during_readiness_stays_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    # Keep each timer that the lifecycle module starts, so the test fires the open's real timer once the phase runs.
+    # Only that module's ``asyncio`` name changes: ``asyncio.wait_for`` and aiohttp keep their own timers.
+    lifecycle_timers: list[asyncio.Timeout] = []
+
+    def kept_timer(delay: float | None) -> asyncio.Timeout:
+        timer = asyncio.timeout(delay)
+        lifecycle_timers.append(timer)
+        return timer
+
+    monkeypatch.setattr("reef.service.lifecycle.asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": kept_timer}))
+
     async def run() -> None:
+        # The provider check or the preview waits for this event.
+        hold = asyncio.Event()
         async with child_on_socket(
-            tmp_path, delay_seconds=0.8 if phase == "provider_check" else 0, timeout_s=6
+            tmp_path, delay_seconds=0, timeout_s=6, hold=hold if phase == "provider_check" else None
         ) as child:
             if phase == "preview":
-                child.router.hold = asyncio.Event()
-            # Deliberately shorter than readiness: the owner stops waiting, and the child must not open later.
+                child.router.hold = hold
+            # A far deadline that setup time cannot reach; it and the waits below only stop a failing test.
             client = ReefLifecycleClient(
-                child.socket_path, "deployment", "generation", "control", open_timeout_seconds=0.4
+                child.socket_path, "deployment", "generation", "control", open_timeout_seconds=30
             )
+            opening = asyncio.create_task(asyncio.to_thread(client.request, "open"))
+            # A held check or preview is recorded before it waits, so the selected phase is now in flight.
+            async with asyncio.timeout(10):
+                while not (child.router.arrived.is_set() if phase == "preview" else child.checks):
+                    await asyncio.sleep(0.01)
+            # The deadline passes now: the child's own readiness timer fires and cancels the phase.
+            [readiness_timer] = lifecycle_timers
+            readiness_timer.reschedule(asyncio.get_running_loop().time())
             with pytest.raises(RoutingControlError) as error:
-                await asyncio.to_thread(client.request, "open")
-            # The child refused the expired open, whether in the reply to the first attempt or to a retry.
-            assert error.value.status_code == 503
+                await asyncio.wait_for(opening, 10)
+            # The child refused the expired open in its reply to the only attempt.
+            assert (error.value.status_code, readiness_timer.expired()) == (503, True)
+            assert child.posts == ["/reef/lifecycle"]
             if phase == "preview":
                 # The deadline cancelled the held preview and closed its connection.
                 await asyncio.wait_for(child.router.disconnected.wait(), 5)
+            # A readiness that outlived its timer could now finish, and the far deadline would let it open.
+            hold.set()
             await asyncio.sleep(1.0)
             status = child.acceptance.status()
             assert (status["accepting"], status["control_revision"]) == (False, -1)
-            # Readiness ran once, for the first attempt only.
+            # Readiness ran once and stopped in the held phase.
             assert child.checks == (["student"] if phase == "provider_check" else ["student", "teacher"])
             assert len(child.router.previews) == (0 if phase == "provider_check" else 1)
 
