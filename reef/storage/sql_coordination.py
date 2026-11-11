@@ -1242,6 +1242,16 @@ class SQLWorkQueue(WorkQueue):
                 stopped_attempt_count=item.stopped_attempt_count + 1,
             )
 
+    def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
+        moment = clock(now)
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            item = self.row(connection, queue, item_id, lock=True)
+            if item is None or not item.final:
+                return item
+            return self.save(
+                connection, counter, item, moment, state="queued", result=None, ended_at=None, available_at=moment
+            )
+
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
         require_text(error, "error")
         moment = time.time()

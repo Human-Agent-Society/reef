@@ -135,6 +135,11 @@ class SQLEvaluationStore(EvaluationStore):
             error=error,
         )
 
+    def reopen(self, evaluation_id: str) -> StoredEvaluation:
+        return self.move(
+            evaluation_id, ("finished", "failed"), state="running", finished_at=None, result_json=None, error=None
+        )
+
     def move(
         self,
         evaluation_id: str,

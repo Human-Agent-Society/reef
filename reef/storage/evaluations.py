@@ -5,7 +5,9 @@ A client asks Reef to evaluate one artifact of a scenario
 artifact with the scenario's settings. The evaluation store keeps each request,
 its state and its result, so a client reads them after the evaluation ends and
 after a restart. Reef does not resume an evaluation that was queued or running
-when its service stopped: a later read reports it failed. Archiving the
+when its service stopped: a later read reports it failed. A client can run the
+rollouts of an ended evaluation that have no score again; the evaluation then
+runs and ends again (``reopen``). Archiving the
 scenario retires its evaluations with its records.
 """
 
@@ -112,13 +114,15 @@ class EvaluationStore(ABC):
 
     Values: the state of a store is a finite set of stored evaluations with
     distinct IDs. An evaluation is created ``queued`` or ``running``; a queued
-    one starts running once (``begin``). It ends once, as ``finished`` from
-    ``running``, or as ``failed`` from either; an ended evaluation does not
-    change.
+    one starts running once (``begin``). It ends as ``finished`` from
+    ``running``, or as ``failed`` from either. An ended evaluation does not
+    change until ``reopen`` makes it ``running`` again, after which it ends
+    again.
 
     Purpose: the evaluation service creates an evaluation when it accepts a
     request (``create``), starts a queued one when a run is free (``begin``),
-    ends it when its rollouts end (``finish``, ``fail``), and reads the store
+    ends it when its rollouts end (``finish``, ``fail``), runs an ended one
+    again when a client retries its rollouts (``reopen``), and reads the store
     for the evaluation routes (``get``, ``newest``).
     """
 
@@ -149,6 +153,11 @@ class EvaluationStore(ABC):
     def fail(self, evaluation_id: str, *, error: str, finished_at: float) -> StoredEvaluation:
         """End a queued or running evaluation with ``error`` and return it; ``EvaluationStateConflict`` for any
         other."""
+
+    @abstractmethod
+    def reopen(self, evaluation_id: str) -> StoredEvaluation:
+        """Make a finished or failed evaluation ``running`` again and return it, without its result, its error and
+        its ``finished_at``; ``EvaluationStateConflict`` for any other."""
 
     @abstractmethod
     def get(self, evaluation_id: str) -> StoredEvaluation | None:
