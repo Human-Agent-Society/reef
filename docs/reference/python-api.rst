@@ -698,14 +698,27 @@ its split. The published tasks are the candidates with a split. A
      - Return the published tasks in generation and candidate order, each
        name once. Give a ``split`` to return only the tasks of that split.
    * - ``path(files_digest)``
-     - Return the local task directory of a candidate or a published task,
-       for example for ``read_harbor_task`` or ``TaskRolloutRunner.run``. Do not
-       change it.
+     - Return the local directory of a candidate, a published task or a
+       ``save_files`` call, for example for ``read_harbor_task`` or
+       ``TaskRolloutRunner.run``. Do not change it.
    * - ``write_document(key=..., document=...)``, ``documents()``
      - Save a text document under a non-empty key, or return every document by
        key. Each key holds one document; another document under a used key
        raises ``TaskStoreError``. The store does not read a document: the stage
        that writes the store keeps its own state about its tasks here.
+   * - ``write_state_document(key=..., document=...)``,
+       ``remove_state_document(key=...)``, ``state_document(key)``,
+       ``state_document_keys(prefix="")``
+     - Save, remove or read a state document, or return the keys that start
+       with ``prefix`` in increasing string order. A state document is text
+       under a non-empty key. Unlike a document, its key can be written again
+       and removed. The two kinds of document have separate keys. The stage
+       keeps there the state that changes in place: the generated-task stage
+       gives it to its task generator as ``GeneratorState``.
+   * - ``save_files(directory)``
+     - Save a copy of a directory in the task files of the scenario and return
+       the digest of its files, which ``path`` takes. The call makes no
+       candidate and changes no generation.
 
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
@@ -1383,8 +1396,8 @@ Task generation
 ``TaskGenerator`` is the plugin base class that a deployment names in
 ``pipeline.record2sample.config.generator``. Subclasses implement:
 
-- the class method ``from_config(config, *, scenario, environ)``, which returns
-  the generator of one scenario;
+- the class method ``from_config(config, *, scenario, environ, state)``, which
+  returns the generator of one scenario;
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
@@ -1396,6 +1409,13 @@ default keeps nothing. The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls these methods.
 See `Training pipeline <../developer-guide/processors.rst#task-generation-contract>`__
 for the round and its failure behavior.
+
+``state`` is a ``GeneratorState`` (``reef.recipe.generated_tasks``): the
+durable state of the scenario's generator, kept in the scenario's task store.
+It holds text documents by key (``read``, ``write``, ``remove``, ``keys``) and
+saved directories by the digest of their files (``save_files``, ``files``). A
+generator keeps its state there and keeps no file of its own. A generator
+written for an earlier version must accept the ``state`` argument.
 
 ``TaskGenerationRequest(source_records, description, assets=(), asset_files={}, generation=0)``
 carries source records, non-empty requirements text, and the number of the generation.

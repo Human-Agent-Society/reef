@@ -142,7 +142,7 @@ def test_the_spade_example_selects_the_generated_task_recipe_and_the_spade_gener
     assert pipeline["record2sample"]["config"]["rounds"] == 20
     generator = pipeline["record2sample"]["config"]["generator"]
     assert generator["module"] == "recipes.beta.spade:SpadeTaskGenerator"
-    assert generator["config"]["state_dir"] == f"{tmp_path}/generations"
+    assert "state_dir" not in generator["config"], "the generator keeps its state in the task store"
 
 
 @pytest.mark.parametrize(

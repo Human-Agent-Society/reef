@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestServer
 from reef_client.client import ReefClientError
+from tests.support.task_service_stubs import generator_state
 
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
@@ -863,7 +864,9 @@ def source_records() -> tuple[AgentRecord, ...]:
 
 
 def spade(generator: HttpGenerator, tmp_path: Path) -> SpadeTaskGenerator:
-    return SpadeTaskGenerator(scenario="spade", service=generator, state_dir=tmp_path / "state", count=1)
+    return SpadeTaskGenerator(
+        scenario="spade", service=generator, state=generator_state(tmp_path / "state", "spade"), count=1
+    )
 
 
 def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(tmp_path: Path) -> None:
