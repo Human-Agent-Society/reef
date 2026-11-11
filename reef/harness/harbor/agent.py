@@ -68,6 +68,12 @@ CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv", "git"})
 CONTAINER_UV = "$HOME/.local/bin/uv"
 #: Where a git install keeps its checkout (``src``) and its venv (``venv``) in a task's container.
 CONTAINER_GIT_AGENT = "$HOME/.reef-agent"
+#: Where an npm install puts the agent on a musl image, under the agent user's own home.
+CONTAINER_NPM_PREFIX = "$HOME/.reef-npm"
+#: The shell test that passes on a musl image, such as Alpine, as Harbor's own npm agents test it.
+MUSL_CHECK = "ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]"
+#: The shell command that puts an npm agent on the PATH: nvm's Node on a glibc image, the prefix of a musl image.
+NPM_AGENT_PATH = f'if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; else export PATH="{CONTAINER_NPM_PREFIX}/bin:$PATH"; fi'
 #: Where the bridge's relay lives in a task's container, and the loopback port on which it answers the bridge client.
 RELAY_DIR = "/tmp/reef-relay"
 RELAY_TUNNEL_PORT = 47811
@@ -166,30 +172,30 @@ class AdapterAgent(BaseInstalledAgent):
             return f'"{CONTAINER_UV}" --version'
         if self.install_kind == "git":
             return f'"{CONTAINER_GIT_AGENT}/venv/bin/{self.binary}" --version'
-        return f". ~/.nvm/nvm.sh; {shlex.quote(self.binary)} --version"
+        return f"{NPM_AGENT_PATH}; {shlex.quote(self.binary)} --version"
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        # nvm and Astral's installer need curl, and a git install needs git; a task image without them gets them
-        # from apt, as Harbor's own npm agents do.
-        tools = ("curl", "git") if self.install_kind == "git" else ("curl",)
-        await self.exec_as_root(
-            environment,
-            command=" && ".join(
-                f"(command -v {tool} >/dev/null || (apt-get update && apt-get install -y {tool}))" for tool in tools
-            ),
-            env={"DEBIAN_FRONTEND": "noninteractive"},
-        )
+        # The install commands are bash. nvm and Astral's installer need curl, and a git install needs git. A task
+        # image without them gets them from its package manager, as Harbor's own npm agents do.
+        tools = ("bash", "curl", "git") if self.install_kind == "git" else ("bash", "curl")
+        await self.ensure_system_dependencies(environment, tools)
         if self.install_kind == "uv":
             command = uv_install_command(str(self._version))
         elif self.install_kind == "git":
             command = self.git_install_command()
         else:
-            command = (
-                f"set -euo pipefail; {nvm_node_install_snippet()} && "
-                f"npm install -g {shlex.quote(f'{self.package}@{self._version}')} && "
-                f"command -v {shlex.quote(self.binary)}"
-            )
+            package = shlex.quote(f"{self.package}@{self._version}")
+            if (await environment.exec(command=MUSL_CHECK)).return_code == 0:
+                # The Node that nvm downloads does not run on musl, so a musl image uses the Node of its packages.
+                # The agent user may not write the global prefix, so the agent goes under its own home.
+                await self.ensure_system_dependencies(environment, ("nodejs", "npm"))
+                install = (
+                    f"node --version && npm --version && npm install -g --prefix {CONTAINER_NPM_PREFIX} {package}"
+                )
+            else:
+                install = f"{nvm_node_install_snippet()} && npm install -g {package}"
+            command = f"set -euo pipefail; {install} && {NPM_AGENT_PATH} && command -v {shlex.quote(self.binary)}"
         await self.exec_as_agent(environment, command=command)
 
     @override
@@ -219,7 +225,7 @@ class AdapterAgent(BaseInstalledAgent):
                 'UV_PYTHON_INSTALL_DIR="$HOME/.local/share/uv/python"'
             )
         else:
-            find_agent = f'. "$HOME/.nvm/nvm.sh" && agent="$(command -v {shlex.quote(self.binary)})"'
+            find_agent = f'{NPM_AGENT_PATH} && agent="$(command -v {shlex.quote(self.binary)})"'
         command = f'{find_agent} && env {assignments} "$agent" {arguments} </dev/null'
         async with self.bridged(environment):
             result = await environment.exec(command=command, timeout_sec=int(self.timeout_s))
