@@ -130,6 +130,10 @@ class ReefEvalLab(TaskLab):
         return row.error
 
 
+#: The file under the agent's log directory that holds the command's exit code and output. ``AdapterAgent`` writes it.
+COMMAND_FILE = "command.json"
+
+
 def verifier_timed_out(trial_uri: str | None) -> bool:
     """Whether Harbor's result file for a local trial records that its verifier ran past its timeout."""
     if not trial_uri or not trial_uri.startswith("file://"):
@@ -141,6 +145,19 @@ def verifier_timed_out(trial_uri: str | None) -> bool:
         return False
     exception = json.loads(result_path.read_text(encoding="utf-8"))["exception_info"]
     return exception is not None and exception["exception_type"] == "VerifierTimeoutError"
+
+
+def agent_command_exit(trial_uri: str | None) -> str:
+    """How the agent's command of a local trial ended: its exit code and the end of its output, or "" for a trial
+    that is not local or whose agent wrote no ``COMMAND_FILE``."""
+    if not trial_uri or not trial_uri.startswith("file://"):
+        return ""
+    command_path = Path(urllib.request.url2pathname(urllib.parse.urlparse(trial_uri).path)) / "agent" / COMMAND_FILE
+    if not command_path.is_file():
+        return ""
+    command = json.loads(command_path.read_text(encoding="utf-8"))
+    output = str(command["stderr"] or command["stdout"]).strip()
+    return f"its command exited {command['exit_code']}: {output[-500:] or 'no output'}"
 
 
 def bound_agent(agent: Mapping[str, object], *, model: str, base_url: str, api_key: str) -> dict[str, object]:
@@ -515,6 +532,11 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             )
             failed_calls = len(turns) - len(receipts)
             error = row.error or ("" if receipts else call_failure(turns))
+        if not turns and not row.error:
+            # An agent that ends before its first call leaves the reason in its own output.
+            exited = agent_command_exit(row.trial_uri)
+            if exited:
+                error = f"the agent made no model call: {exited}"
         reward = rollout_reward(row.rewards)
         if row.rewards and primary_reward(row.rewards) is None and not error:
             error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"

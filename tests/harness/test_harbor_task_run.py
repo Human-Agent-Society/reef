@@ -165,6 +165,8 @@ class RecordingEnvironment:
             return SimpleNamespace(return_code=0, stdout=self.manager, stderr="")
         if command == PLATFORM_COMMAND:
             return SimpleNamespace(return_code=0, stdout=self.platform, stderr="")
+        if "python find" in command:
+            return SimpleNamespace(return_code=0, stdout="/home/agent/uv/cpython-3.12/bin/python3.12\n", stderr="")
         if command == "uname -m":
             return SimpleNamespace(return_code=0, stdout=self.platform.splitlines()[0] + "\n", stderr="")
         absent = any(command.startswith(f"command -v {name} >/dev/null") for name in self.missing)
@@ -228,8 +230,11 @@ def test_the_relay_runs_on_the_python_of_the_image_or_on_a_python_from_an_upload
 
     # An image with no python3, or with one before 3.7, cannot run the relay: Reef uploads uv for a Python.
     old = RecordingEnvironment(missing=("python3", "curl"))
-    assert asyncio.run(agent.relay_python(old)) == '"$HOME/.local/bin/uv" run --no-project --python 3.12'
+    assert asyncio.run(agent.relay_python(old)) == "/home/agent/uv/cpython-3.12/bin/python3.12"
     assert uv_builds == ["x86_64"] and "/tmp/reef-uv.tar.gz" in old.uploads
+    # uv installs the Python once, without a certificate directory that does not exist.
+    install = old.commands[-1]
+    assert '{ [ -d "${SSL_CERT_DIR:-/}" ] || unset SSL_CERT_DIR; }; "$HOME/.local/bin/uv" python install' in install
 
 
 def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(
