@@ -48,7 +48,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor import bridge_client
 from reef.harness.harbor.node_runtime import PLATFORM_COMMAND, node_archive, node_build_name, node_cache_directory
-from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
+from reef.harness.harbor.rollouts import COMMAND_FILE, ReefEvalLab, TaskLab, TaskRolloutError
 from reef.harness.harbor.uv_runtime import uv_archive, uv_build_name, uv_cache_directory
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
@@ -57,8 +57,6 @@ from reef.harness.tree import HarnessTree, render_tree
 
 #: Where the rendered tree goes in the task's container: the run root of ``run.task``.
 CONTAINER_ROOT = "/reef-run"
-#: The file under the agent's log directory that holds the command's exit code and output.
-COMMAND_FILE = "command.json"
 #: The directory under the agent's log directory that receives the agent's session files.
 SESSIONS_DIR = "sessions"
 #: The ATIF document of the run under the agent's log directory, and the pattern of it and its continuations.
