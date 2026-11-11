@@ -29,6 +29,7 @@ from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
 from reef.storage.record_items import (
     evaluation_call_item,
+    evaluation_call_items,
     evaluation_trajectory_item,
     evaluation_trajectory_items,
     record_item,
@@ -429,9 +430,22 @@ def test_groups_of_a_scenario_count_only_the_items_it_uses(store):
 
 
 def test_query_arguments_are_checked(store):
-    for arguments, reason in [({"kind": "dataset"}, "kind"), ({"after": -1}, "after"), ({"limit": 0}, "limit")]:
+    for arguments, reason in [
+        ({"kind": "dataset"}, "kind"),
+        ({"after": -1}, "after"),
+        ({"limit": 0}, "limit"),
+        ({"id_prefix": ""}, "id_prefix"),
+    ]:
         with pytest.raises(ValueError, match=reason):
             store.query("acme", **arguments)
+
+
+def test_a_query_keeps_the_items_whose_id_starts_with_a_prefix(store):
+    store.create("acme", [trajectory(item_id) for item_id in ("e1:1:1:0", "e1:1:10:0", "e1_1:1:0", "e1%1:1:0")])
+    assert [item.item_id for item in store.query("acme", id_prefix="e1:1:1:")] == ["e1:1:1:0"]
+    # A SQL pattern gives _ and % a meaning: the prefix matches them as characters only.
+    assert [item.item_id for item in store.query("acme", id_prefix="e1_")] == ["e1_1:1:0"]
+    assert [item.item_id for item in store.query("acme", id_prefix="e1%")] == ["e1%1:1:0"]
 
 
 def calls(*turns: int) -> list[NewItem]:
@@ -986,6 +1000,19 @@ def evaluation_call(turns: int, attempt: int, index: int, status: int = 200, res
     )
     call = EvaluationCall(summary, payload, reply if response == "reply" else response)
     return call, evaluation_call_item("coding", "a1", "e1", call)
+
+
+def test_the_calls_of_one_rollout_leave_out_the_other_rollouts_of_the_evaluation(store):
+    def call_item(task_index: int, repeat: int, caller: str = "agent") -> NewItem:
+        summary = EvaluationCallSummary(
+            task_index, repeat, 1, 0, "/v1/chat/completions", 200, 10.0, 0.5, None, None, None, 0, caller
+        )
+        return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
+
+    store.create("acme", [call_item(1, 1), call_item(1, 10), call_item(11, 1), call_item(1, 1, "verifier")])
+    kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 1))
+    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:0", "coding/e1:1:1:1:verifier:0"]
+    assert len(list(evaluation_call_items(store, "acme", "coding", "e1", content=False))) == 4
 
 
 def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_data(store):

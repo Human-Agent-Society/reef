@@ -773,6 +773,7 @@ class SQLDataStore(DataStore):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
             owner,
@@ -784,6 +785,7 @@ class SQLDataStore(DataStore):
             request_type=request_type,
             group=group,
             benchmark=benchmark,
+            id_prefix=id_prefix,
         )
         items = self.items_table
         # Without content, read only the columns of the metadata: content_json can be large.
@@ -801,6 +803,8 @@ class SQLDataStore(DataStore):
                 statement = statement.where(self.evaluation_id() == group[1])
         if benchmark is not None:
             statement = statement.where(items.c.kind == "task", self.in_benchmark(benchmark))
+        if id_prefix is not None:
+            statement = statement.where(items.c.item_id.startswith(id_prefix, autoescape=True))
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
