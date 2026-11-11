@@ -611,7 +611,7 @@ class ArtifactEvaluations:
 
     def retry(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """Run the rollouts of the ended evaluation ``evaluation_id`` of ``scenario`` that have no score once more,
-        and return the evaluation, ``running`` again; None when the scenario has no such evaluation.
+        and return the evaluation, ``running`` again (RFC #1340); None when the scenario has no such evaluation.
 
         A rollout has no score when it failed, when a cancel or a stop of the evaluation ended it, or when it finished
         with a failed score (``rollout_failed``). Each of them goes back to the queue with its earlier attempts kept,
