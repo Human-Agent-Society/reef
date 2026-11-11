@@ -893,7 +893,7 @@ class ArtifactEvaluations:
         self.results.settle(scenario, evaluation_id)
         return stored
 
-    def rollouts_json(self, scenario: str, evaluation_id: str) -> list[dict[str, Any]] | None:
+    def rollouts_json(self, scenario: str, evaluation_id: str, *, calls: bool = True) -> list[dict[str, Any]] | None:
         """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
         attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``; None when ``scenario`` has no
         evaluation ``evaluation_id``.
@@ -904,31 +904,17 @@ class ArtifactEvaluations:
         of its verifier (``verifier_rewards``, RFC #1297), and null when it has none, as for a rollout that finished
         before Reef kept them; ``error`` is the reason of a failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept agent calls as JSON,
         or null when the data store keeps no agent call of it; ``verifier_calls`` is the same for its verifier calls.
-        It reads the metadata of the evaluation's calls, not their content.
+        It reads the metadata of the evaluation's calls, not their content. With ``calls`` false, the views have no
+        ``calls`` and no ``verifier_calls``, and it reads the queue only, so the read does not grow with the calls.
         """
         stored = self.get(scenario, evaluation_id)
         if stored is None:
             return None
-        totals: dict[tuple[int, int, Caller], EvaluationCallTotals] = {}
-        place = self.call_store(scenario)
-        kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
-        for call_item in kept:
-            summary = evaluation_call_summary(call_item)
-            key = (summary.task_index, summary.repeat, summary.caller)
-            found = totals.get(key)
-            totals[key] = EvaluationCallTotals(
-                (0 if found is None else found.count) + 1,
-                (0 if found is None else found.failed) + (summary.status != 200),
-                (0 if found is None else found.prompt_tokens) + (summary.prompt_tokens or 0),
-                (0 if found is None else found.completion_tokens) + (summary.completion_tokens or 0),
-            )
-        views = []
+        views: list[dict[str, Any]] = []
         items = self.results.rollouts(evaluation_id, scenario)
         for item in items:
             rollout = EvaluationRollout.from_item(item)
             finished = item.state == "finished" and item.result is not None
-            calls = totals.get((rollout.task_index, rollout.repeat, "agent"))
-            verifier_calls = totals.get((rollout.task_index, rollout.repeat, "verifier"))
             views.append(
                 {
                     "task": rollout.task_name,
@@ -942,8 +928,6 @@ class ArtifactEvaluations:
                     "rewards": cast(Mapping[str, object], item.result).get("rewards") if finished else None,
                     # A rollout that finished with a failed score keeps its reason in its result.
                     "error": cast(Mapping[str, object], item.result).get("error") if finished else item.error,
-                    "calls": None if calls is None else calls.to_json(),
-                    "verifier_calls": None if verifier_calls is None else verifier_calls.to_json(),
                 }
             )
         request = stored.request
@@ -961,10 +945,28 @@ class ArtifactEvaluations:
                     "score": None,
                     "rewards": None,
                     "error": None,
-                    "calls": None,
-                    "verifier_calls": None,
                 }
             )
+        if not calls:
+            return views
+        totals: dict[tuple[int, int, Caller], EvaluationCallTotals] = {}
+        place = self.call_store(scenario)
+        kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
+        for call_item in kept:
+            summary = evaluation_call_summary(call_item)
+            key = (summary.task_index, summary.repeat, summary.caller)
+            found = totals.get(key)
+            totals[key] = EvaluationCallTotals(
+                (0 if found is None else found.count) + 1,
+                (0 if found is None else found.failed) + (summary.status != 200),
+                (0 if found is None else found.prompt_tokens) + (summary.prompt_tokens or 0),
+                (0 if found is None else found.completion_tokens) + (summary.completion_tokens or 0),
+            )
+        fields: tuple[tuple[Caller, str], ...] = (("agent", "calls"), ("verifier", "verifier_calls"))
+        for view in views:
+            for caller, field in fields:
+                found = totals.get((view["task_index"], view["repeat"], caller))
+                view[field] = None if found is None else found.to_json()
         return views
 
     def call_store(self, scenario: str) -> tuple[DataStore, str] | None:
