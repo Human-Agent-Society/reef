@@ -146,6 +146,40 @@ def test_task_items_join_the_split_and_a_retry_changes_nothing(tmp_path: Path) -
         dispatcher.close()
 
 
+def test_a_task_items_files_are_replaced_in_place_and_a_bad_replace_changes_nothing(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, TaskRecipe())
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await create_scenario(client)
+            assert (await client.post(tasks_url("eval"), headers=GZIP, data=archive(tmp_path, "task-a"))).status == 201
+            created = dispatcher.data_store.read("s", "task-a")
+            url = "/reef/namespaces/s/data/tasks/task-a"
+
+            response = await client.put(url, headers=GZIP, data=archive(tmp_path, "task-a", port=9200))
+            assert response.status == 200, await response.text()
+            receipt = await response.json()
+            replaced = dispatcher.data_store.read("s", "task-a")
+            assert receipt["item"]["id"] == "task-a" and receipt["item"]["digest"] == replaced.digest
+            assert replaced.digest != created.digest and replaced.metadata == created.metadata
+            assert dispatcher.data_store.task_path(replaced) != dispatcher.data_store.task_path(created)
+
+            # Another name, several tasks, an unknown item or another content type change nothing.
+            for target, body, status in (
+                (url, archive(tmp_path, "task-b"), 400),
+                (url, archive(tmp_path, "task-a", "task-b", port=9300), 400),
+                ("/reef/namespaces/s/data/tasks/missing", archive(tmp_path, "missing"), 404),
+            ):
+                assert (await client.put(target, headers=GZIP, data=body)).status == status
+            assert (await client.put(url, headers=AUTH, data=b"{}")).status == 415
+            assert dispatcher.data_store.read("s", "task-a").digest == replaced.digest
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
 def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_does_not(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, TaskRecipe(batch_stage=RecordOnlyJobData))
 

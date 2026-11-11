@@ -92,6 +92,7 @@ from reef.storage.data import (
     patched_metadata,
     prepared_items,
     record_link_scope,
+    replaced_task_digest,
 )
 from reef.storage.item_kinds import task_partition
 from reef.storage.migrations import (
@@ -1159,6 +1160,34 @@ class SQLDataStore(DataStore):
             )
             connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.scenario == scenario))
             return len(rows)
+
+    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem:
+        check_owner(owner)
+        with self.transaction() as connection:
+            row = self.rows(connection, owner, [item_id]).get(item_id)
+            if row is None:
+                raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+            metadata = json.loads(row["metadata_json"])
+            # The lock orders this write with the other writes of the item's scenarios, as an update does.
+            self.lock_scenarios(connection, owner, scenarios_of([metadata]))
+            row = self.rows(connection, owner, [item_id], lock=True)[item_id]
+            stored = StoredItem(row["sequence"], owner, item_id, metadata, row["digest"])
+            digest = replaced_task_digest(owner, stored, directory, self.task_files)
+            if digest == stored.digest:
+                return stored
+            items, uses = self.items_table, self.scenarios_table
+            connection.execute(
+                update(items).where(items.c.owner == owner, items.c.item_id == item_id).values(digest=digest)
+            )
+            # Each use begins again with a new sequence, so that a trainer that pages by use sequence reads the task.
+            connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.item_id == item_id))
+            begun = [
+                {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
+                for scenario, split in metadata["scenarios"].items()
+            ]
+            if begun:
+                connection.execute(insert(uses), begun)
+            return replace(stored, digest=digest)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
