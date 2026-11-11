@@ -101,11 +101,11 @@ class ArtifactImports:
         )
 
     def create_from_item(
-        self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str
+        self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str, *, serves: bool
     ) -> tuple[Scenario, bool]:
         """The scenario ``scenario``, and True exactly when this call created it: a new scenario's root snapshot holds
         the artifact item ``item_id`` of ``owner`` in ``component``, with the item's identity (``item_identity``,
-        ``Dispatcher.create_scenario``).
+        ``Dispatcher.create_scenario``), and the scenario serves it exactly when ``serves`` is true.
 
         The item is read and its files opened first, so an item that cannot be read registers nothing. Raise as
         ``item_source`` and ``ArtifactSources.open`` do, and as ``Dispatcher.create_scenario`` does for an item that
@@ -114,7 +114,7 @@ class ArtifactImports:
         item = artifact_item_of(dispatcher, owner, item_id)
         uri = source_uri_of(item)
         start = ItemStart(item_identity(dispatcher, item), uri, self.sources.open(uri), component)
-        return dispatcher.create_scenario(scenario, start)
+        return dispatcher.create_scenario(scenario, start, serves=serves)
 
 
 def item_source(dispatcher: Dispatcher, owner: str, item_id: str) -> str:

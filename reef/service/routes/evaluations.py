@@ -35,7 +35,11 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
     async def rollouts(request: web.Request) -> web.Response:
         scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
-        views = await asyncio.to_thread(evaluations.rollouts_json, scenario, evaluation_id)
+        # ``calls=false`` leaves out the call totals: such a read reads the queue only. A ValueError answers HTTP 400.
+        calls = request.query.get("calls", "true")
+        if calls not in ("true", "false"):
+            raise ValueError("calls is true or false")
+        views = await asyncio.to_thread(evaluations.rollouts_json, scenario, evaluation_id, calls=calls == "true")
         if views is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(

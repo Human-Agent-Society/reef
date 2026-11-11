@@ -4355,7 +4355,7 @@ requires-dist = [
     { name = "connectrpc", marker = "extra == 'e2b'", specifier = ">=0.11.1,<0.14" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },
     { name = "e2b", marker = "extra == 'slime'" },
-    { name = "harbor", specifier = ">=0.20,<0.26" },
+    { name = "harbor", specifier = ">=0.24,<0.26" },
     { name = "harbor", extras = ["e2b"], marker = "extra == 'e2b'" },
     { name = "harbor", extras = ["modal"], marker = "extra == 'modal'" },
     { name = "httpx", marker = "extra == 'sglang'" },

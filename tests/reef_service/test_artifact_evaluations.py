@@ -440,6 +440,13 @@ def test_an_evaluation_keeps_the_calls_and_trajectories_that_its_verifier_wrote(
             assert rollout["score"] == 1.0, "the score is the primary reward"
             assert rollout["rewards"] == {"reward": 1.0, "rule": 1.0, "judge": 0.5}, "only finite rewards stay"
             assert rollout["verifier_calls"] == {"count": 2, "failed": 1, "prompt_tokens": 0, "completion_tokens": 0}
+            without_calls = (await (await client.get(f"{rollouts_route}?calls=false", headers=AUTH)).json())[
+                "rollouts"
+            ]
+            assert without_calls == [
+                {key: value for key, value in rollout.items() if key not in ("calls", "verifier_calls")}
+            ], "a read without the call totals keeps every other field"
+            assert (await client.get(f"{rollouts_route}?calls=no", headers=AUTH)).status == 400
             calls_route = f"{rollouts_route}/0/0/calls"
             agent_calls = (await (await client.get(calls_route, headers=AUTH)).json())["calls"]
             assert [call["caller"] for call in agent_calls] == ["agent"]

@@ -1262,7 +1262,11 @@ score, rewards, error, calls, verifier_calls}``.
 - ``verifier_calls`` holds the same totals of the calls that the rollout's
   verifier wrote (`Calls that a verifier writes`_), or null.
 
-An unknown evaluation returns 404.
+To add up the totals, Reef reads every kept call of the evaluation. The query
+``calls=false`` leaves out ``calls`` and ``verifier_calls``. Reef then reads
+the rollouts only, so the read stays fast for an evaluation with many calls.
+``calls`` is ``true`` or ``false``, and ``true`` when absent. Another value
+returns 400. An unknown evaluation returns 404.
 
 Reef returns:
 
@@ -1673,8 +1677,8 @@ Create a scenario
 ~~~~~~~~~~~~~~~~~
 
 ``POST /reef/scenarios`` takes the object ``{"name", "owner"?,
-"artifact_id"?, "component"?}``. Any other key is HTTP 400, and the message
-names the keys that the route takes:
+"artifact_id"?, "component"?, "serves"?}``. Any other key is HTTP 400, and the
+message names the keys that the route takes:
 
 - ``name``: the scenario's name, a non-empty string.
 - ``owner``: the owner whose `data items <#data-items>`__ the scenario uses.
@@ -1687,6 +1691,10 @@ names the keys that the route takes:
   <../user-guide/operate.rst#starting-artifacts>`__).
 - ``component``: the component that holds the item. Leave it out when the
   scenario has one component. It needs ``artifact_id``.
+- ``serves``: a boolean, true by default. With ``false``, the new scenario
+  serves nothing: Reef starts no engine for it, and its inference requests
+  answer HTTP 404. It serves after an update sets ``served`` (`Serve nothing`_).
+  An existing scenario ignores ``serves``.
 
 Reef stores the starting artifacts and registers the scenario with their
 component mapping. With ``artifact_id``, Reef reads the item's files and checks
@@ -1723,7 +1731,8 @@ returns HTTP 404, and you create the scenario first:
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
 | ``POST /reef/scenarios``                    | ``{"name", "owner"?, "artifact_id"?,        |
-|                                             | "component"?}`` → ``{scenario, owner,       |
+|                                             | "component"?, "serves"?}`` → ``{scenario,   |
+|                                             | owner,                                      |
 |                                             | components, artifact_id?}``;                |
 |                                             | 201 created, 200 already existed            |
 +---------------------------------------------+---------------------------------------------+
@@ -2743,13 +2752,17 @@ the active artifact before the request:
 +--------------------------+-------------------------------------------------+
 | ``{"a": 100}``           | Reef stops serving ``b``                        |
 +--------------------------+-------------------------------------------------+
+| ``{}``                   | the scenario serves nothing (`Serve nothing`_)  |
++--------------------------+-------------------------------------------------+
 
 The body is ``{"served": {"<id>": <weight>, ...}, "component": "<name>"}``:
 
 - ``served`` holds one or more artifact IDs of one component. Each weight is
-  an integer from 0 to 100, and the weights sum to 100.
+  an integer from 0 to 100, and the weights sum to 100. An empty object makes
+  the scenario serve nothing.
 - ``component`` names the component. Leave it out when the scenario has one
-  component. A scenario with several components requires it.
+  component. A scenario with several components requires it. Leave it out with
+  an empty ``served``, which applies to the whole scenario.
 
 Reef reads the mapping as follows:
 
@@ -2788,8 +2801,9 @@ served a checkpoint loads the root's files.
 +========+====================================================================+
 | 200    | the scenario serves the mapping                                    |
 +--------+--------------------------------------------------------------------+
-| 400    | a malformed body; an empty mapping, a weight that is not an        |
-|        | integer from 0 to 100, or weights that do not sum to 100;          |
+| 400    | a malformed body; a ``served`` that is no object, a weight that is |
+|        | not an integer from 0 to 100, or weights that do not sum to 100;   |
+|        | an empty ``served`` with ``component``;                            |
 |        | ``component`` without ``served``; an unknown ``component``, or     |
 |        | ``component`` is missing in a scenario with several components;    |
 |        | an artifact has no durable bytes; the runtime cannot serve the     |
@@ -2807,6 +2821,41 @@ served a checkpoint loads the root's files.
 Reef makes a new artifact active automatically. `Go back to an older artifact
 <../user-guide/operate.rst#go-back-to-an-older-artifact>`__ explains how to
 go back to an older one for good.
+
+Serve nothing
+~~~~~~~~~~~~~
+
+A scenario can serve nothing. Use this state to train without an engine for
+the scenario, for example on uploaded trajectories. A scenario
+enters the state in two ways:
+
+- ``POST /reef/scenarios`` with ``"serves": false`` creates it in this state.
+- ``{"served": {}}`` without ``component`` puts an existing scenario in it.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"served": {}}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
+
+The state applies to the whole scenario, with every component. While the
+scenario serves nothing:
+
+- Reef withdraws the scenario's routes and its traffic split, and stops the
+  artifacts that it served beside the active one. The engines stop after the
+  delay that a replaced route gets.
+- The inference routes and `Startup status`_ answer HTTP 404 for the scenario.
+- ``GET /reef/scenarios/{scenario}/settings`` returns an empty ``served``
+  mapping for each component.
+- The scenario keeps its active selection, and the artifact list still marks
+  it ``active``. ``GET /reef/harness`` still serves the active harness tree.
+- Training and imports run as before. An activation, also an automatic one,
+  changes the active selection and starts no engine.
+
+The scenario serves again when ``served`` names one or more artifacts. The
+other components then serve the artifacts of the active selection. The state
+is stored, so it holds after a restart.
 
 Call one served artifact
 ~~~~~~~~~~~~~~~~~~~~~~~~

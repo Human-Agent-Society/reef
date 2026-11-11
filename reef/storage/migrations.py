@@ -7,7 +7,7 @@ import logging
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Column, MetaData, Table, Text, bindparam, delete, func, inspect, literal, select, update
+from sqlalchemy import Column, MetaData, Table, Text, bindparam, delete, func, inspect, literal, select, text, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.schema import CreateIndex
 
@@ -105,14 +105,20 @@ def migrate_data_uses(connection: Connection, items: Table, uses: Table) -> None
 
 
 def migrate_data_indexes(connection: Connection, items: Table) -> None:
-    """Create each index of ``items`` that the table does not have yet, such as ``data_item_by_kind``.
+    """Create each index of ``items`` that the table does not have yet, such as ``data_item_by_kind``, and drop the
+    indexes that they replace.
 
     Run in the caller's schema transaction, after ``create_all``, which makes no index for a table that exists.
     ``IF NOT EXISTS`` checks by name, because the inspector does not list an index on an expression, such as
-    ``data_item_by_evaluation``.
+    ``data_item_by_evaluation_sequence``. That index replaces ``data_item_by_evaluation``, which has no ``sequence``.
     """
     for index in items.indexes:
         connection.execute(CreateIndex(index, if_not_exists=True))
+    preparer = connection.dialect.identifier_preparer
+    replaced = preparer.quote("data_item_by_evaluation")
+    if items.schema is not None:
+        replaced = f"{preparer.quote_schema(items.schema)}.{replaced}"
+    connection.execute(text(f"DROP INDEX IF EXISTS {replaced}"))
 
 
 def migrate_data_trajectories(connection: Connection, items: Table, nodes: Table) -> None:

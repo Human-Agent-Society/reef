@@ -43,7 +43,9 @@ class ScenarioSettings:
     ``check_owner``. It is ``None`` only for a scenario that the data sync has
     not opened yet; the first open sets it. ``serving_config`` is the serving fields that the scenario sets over
     the deployment's values (RFC #1097); the scenario registry checks it with the runtime before it stores it.
-    Construction checks these types.
+    ``serves`` is a boolean. When it is true, control asks inference to serve the scenario's active selection and
+    the artifacts beside it. When it is false, the scenario serves nothing: control withdraws its routes, and no
+    artifact answers its inference requests. Construction checks these types.
 
     Purpose: the scenario registry and the dispatcher write the settings
     through ``ScenarioStorage.write_settings`` and read them back when a
@@ -55,6 +57,7 @@ class ScenarioSettings:
     activation: Mapping[str, object] | None = None
     owner: str | None = None
     serving_config: ServingConfig = field(default_factory=ServingConfig)
+    serves: bool = True
 
     def __post_init__(self) -> None:
         if self.training_mode is not None and not isinstance(self.training_mode, str):
@@ -67,6 +70,8 @@ class ScenarioSettings:
             check_owner(self.owner)
         if not isinstance(self.serving_config, ServingConfig):
             raise ValueError("scenario settings serving_config must be a ServingConfig")
+        if not isinstance(self.serves, bool):
+            raise ValueError("scenario settings serves must be a boolean")
 
 
 class ScenarioStore(ABC):
