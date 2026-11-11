@@ -46,6 +46,7 @@ from reef.harness.harbor.node_runtime import (
     node_build_name,
 )
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
+from reef.harness.harbor.uv_runtime import UV_BUILDS, UV_VERSION, UvBuild, UvRuntimeError, uv_archive, uv_build_name
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError
 from reef.harness.tasks.trajectory import failed_trial_error
@@ -163,6 +164,8 @@ class RecordingEnvironment:
             return SimpleNamespace(return_code=0, stdout=self.manager, stderr="")
         if command == PLATFORM_COMMAND:
             return SimpleNamespace(return_code=0, stdout=self.platform, stderr="")
+        if command == "uname -m":
+            return SimpleNamespace(return_code=0, stdout=self.platform.splitlines()[0] + "\n", stderr="")
         absent = any(command.startswith(f"command -v {name} >/dev/null") for name in self.missing)
         failed = absent or (command == MUSL_CHECK and not self.musl)
         return SimpleNamespace(return_code=1 if failed else 0, stdout="", stderr="")
@@ -177,22 +180,46 @@ class RecordingEnvironment:
         return False
 
 
-def test_the_python_adapter_installs_uv_and_runs_its_program_with_the_instruction(tmp_path: Path) -> None:
+@pytest.fixture
+def uv_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The names of the uv builds that an agent asked for. Each one is a stand-in archive, not a download."""
+    builds: list[str] = []
+
+    def archive(name: str, cache: Path) -> Path:
+        builds.append(name)
+        (tmp_path / f"uv-{name}.tar.gz").write_text(f"the {name} uv build")
+        return tmp_path / f"uv-{name}.tar.gz"
+
+    monkeypatch.setattr("reef.harness.harbor.agent.uv_archive", archive)
+    return builds
+
+
+def test_the_python_adapter_uploads_uv_and_runs_its_program_with_the_instruction(
+    tmp_path: Path, uv_builds: list[str]
+) -> None:
     python = get_adapter("python")
     (tmp_path / "logs").mkdir()
     agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0))
-    environment = RecordingEnvironment()
+    # The image has no curl and is an arm64 musl image: Reef uploads the static build of the machine.
+    environment = RecordingEnvironment(missing=("curl",), musl=True, platform="aarch64\n")
     asyncio.run(agent.install(environment))
     asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
 
-    install, run = environment.commands[1], environment.commands[-2]
-    assert f"curl -LsSf https://astral.sh/uv/{python.install.version}/install.sh" in install
+    (install,) = (command for command in environment.commands if "tar -xzf /tmp/reef-uv.tar.gz" in command)
+    run = environment.commands[-2]
+    assert python.install.version == UV_VERSION and uv_builds == ["aarch64"]
+    assert environment.uploads["/tmp/reef-uv.tar.gz"] == "the aarch64 uv build"
+    assert '-C "$HOME/.local/bin" --strip-components=1 && "$HOME/.local/bin/uv" --version' in install
+    assert environment.commands[environment.commands.index(install) + 1].endswith("rm -f /tmp/reef-uv.tar.gz")
+    assert not any("curl" in command or "apt-get" in command for command in environment.commands)
     assert 'agent="$HOME/.local/bin/uv"' in run
     assert f"\"$agent\" run --script {CONTAINER_ROOT}/program/main.py 'Play the scene.'" in run
     assert f"REEF_PROGRAM_SESSION_DIR={CONTAINER_ROOT}/program/sessions" in run
 
 
-def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(tmp_path: Path) -> None:
+def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(
+    tmp_path: Path, uv_builds: list[str]
+) -> None:
     hermes = get_adapter("hermes")
     (tmp_path / "logs").mkdir()
     agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(hermes, hermes.install, tmp_path / "files", 60.0))
@@ -200,9 +227,12 @@ def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_b
     asyncio.run(agent.install(environment))
     asyncio.run(agent.run("Play the scene.", environment, AgentContext()))
 
-    # The image gets curl and git from its package manager.
-    tools, install, run = environment.commands[3], environment.commands[4], environment.commands[-2]
-    assert tools.endswith("apt-get update && apt-get install -y curl git")
+    # The image gets git from its package manager, and uv from Reef: it needs no curl.
+    (tools,) = (command for command in environment.commands if "apt-get install" in command)
+    (install,) = (command for command in environment.commands if "git clone" in command)
+    run = environment.commands[-2]
+    assert uv_builds == ["x86_64"] and "/tmp/reef-uv.tar.gz" in environment.uploads
+    assert tools.endswith("apt-get update && apt-get install -y git")
     clone = f"git clone --quiet --depth 1 --branch {hermes.install.ref} {hermes.install.repository}"
     assert clone in install and 'rm -rf "$HOME/.reef-agent/src/.git"' in install
     assert '"$HOME/.local/bin/uv" pip install --quiet --python "$HOME/.reef-agent/venv/bin/python" -e' in install
@@ -339,6 +369,35 @@ def test_a_node_archive_is_the_checked_download_as_gzip_and_is_downloaded_once(
     monkeypatch.setitem(NODE_BUILDS, "arm64", NodeBuild((tmp_path / "missing.tar.xz").as_uri(), build.sha256))
     with pytest.raises(NodeRuntimeError, match="cannot download"):
         node_archive("arm64", tmp_path / "cache")
+
+
+def test_a_uv_archive_is_the_checked_download_of_the_pinned_version_and_is_downloaded_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert uv_build_name(UV_VERSION, "x86_64\n") == "x86_64" and uv_build_name(UV_VERSION, "arm64") == "aarch64"
+    with pytest.raises(UvRuntimeError, match=r"not of uv 0\.1\.0"):
+        uv_build_name("0.1.0", "x86_64")
+    with pytest.raises(UvRuntimeError, match="reports 'riscv64'"):
+        uv_build_name(UV_VERSION, "riscv64\n")
+
+    published = tmp_path / "uv.tar.gz"
+    published.write_bytes(b"the published archive")
+    build = UvBuild(published.as_uri(), hashlib.sha256(published.read_bytes()).hexdigest())
+    monkeypatch.setitem(UV_BUILDS, "x86_64", build)
+    archive = uv_archive("x86_64", tmp_path / "cache")
+    assert archive.read_bytes() == b"the published archive"
+    published.unlink()
+    assert uv_archive("x86_64", tmp_path / "cache") == archive
+
+    # A download with another checksum is refused, and the cache keeps nothing of it.
+    published.write_bytes(b"another archive")
+    monkeypatch.setitem(UV_BUILDS, "aarch64", UvBuild(published.as_uri(), build.sha256))
+    with pytest.raises(UvRuntimeError, match="does not have the SHA-256"):
+        uv_archive("aarch64", tmp_path / "cache")
+    assert [path.name for path in (tmp_path / "cache").iterdir()] == [archive.name]
+    monkeypatch.setitem(UV_BUILDS, "aarch64", UvBuild((tmp_path / "missing.tar.gz").as_uri(), build.sha256))
+    with pytest.raises(UvRuntimeError, match="cannot download"):
+        uv_archive("aarch64", tmp_path / "cache")
 
 
 def test_the_agent_writes_the_atif_of_its_sessions_for_the_verifier_and_drops_a_planted_one(tmp_path: Path) -> None:

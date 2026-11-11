@@ -118,7 +118,8 @@ How Reef runs an agent
        scores the tests' reward. For an npm agent, Reef downloads Node on its own host
        (from ``nodejs.org``) and uploads it into a glibc container, so the
        container needs no ``curl``; a musl container uses the Node of its
-       packages. A task that sets ``environment.skills_dir``
+       packages. Reef downloads uv the same way (a static build from
+       ``github.com/astral-sh/uv``) and uploads it into any container. A task that sets ``environment.skills_dir``
        needs an adapter with ``run.task.skills``: Reef copies the task's
        skills there before the tree, so the tree's file wins on one path. A
        task that sets ``environment.mcp_servers`` needs an adapter with
