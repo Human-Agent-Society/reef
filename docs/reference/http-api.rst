@@ -1276,25 +1276,27 @@ cancels one evaluation. It answers the evaluation after the cancel, as ``GET
 An unknown scenario or evaluation returns 404. Control answers this route.
 
 ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry`` runs
-the rollouts of an ended evaluation that have no score once more. It answers
-202 with the evaluation, which is ``running`` again:
+the rollouts of an evaluation that ended with no score once more. It answers
+202 with the evaluation, which runs:
 
 - A rollout has no score when it failed, when a cancel or a stop of the
   evaluation ended it, or when it finished with a failed score. Each of them
   goes back to the queue. Its earlier attempts stay, so its ``attempt_count``
   goes on and the calls of each attempt stay readable.
-- The rollouts that waited for ``max_concurrent_rollouts`` start as the
+- A rollout that has a score keeps it. A rollout that has not ended stays as
+  it is.
+- An evaluation that runs goes on, with those rollouts in the queue again.
+- An evaluation that ended is ``running`` again, with no result and no error.
+  The rollouts that waited for ``max_concurrent_rollouts`` start as the
   others end.
-- A rollout that has a score keeps it.
-- The evaluation has no result and no error while it runs. When its rollouts
-  are final again, Reef ends it as it ends a first run: it stores the new
-  scores, and it gives a finished evaluation to the scenario's activation
-  rule, which can activate the artifact.
+- When the rollouts are final, Reef ends the evaluation as it ends a first
+  run: it stores the scores, and it gives a finished evaluation to the
+  scenario's activation rule, which can activate the artifact.
 
-It returns 409 for an evaluation that has not ended, for one in which every
-rollout has a score, and for one whose rollouts Reef no longer keeps: Reef
-deletes the rollouts of an ended evaluation after their retention. An unknown
-scenario or evaluation returns 404. Control answers this route.
+It returns 409 for an evaluation with no rollout to run again, and for an
+ended one whose rollouts Reef no longer keeps: Reef deletes the rollouts of an
+ended evaluation after their retention. An unknown scenario or evaluation
+returns 404. Control answers this route.
 
 Model calls of a rollout
 ~~~~~~~~~~~~~~~~~~~~~~~~
