@@ -324,7 +324,8 @@ def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> 
     server, base_url = _server()
     try:
         descriptor = get_adapter("codex")
-        switched = replace(descriptor, argv=(*descriptor.argv, "--model", model))
+        # The option goes before the "--" that ends the options; the prompt follows it.
+        switched = replace(descriptor, argv=(*descriptor.argv[:-2], "--model", model, *descriptor.argv[-2:]))
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
         before = run_task(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         after = run_task(
