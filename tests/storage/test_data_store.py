@@ -265,6 +265,28 @@ def test_an_upgrade_gives_each_use_its_own_sequence_and_split(open_durable_store
         ]
 
 
+def index_names(store) -> set[str]:
+    """The names of the indexes of the ``data_item`` table of the SQL data store ``store``."""
+    items = store.items_table
+    with store.transaction(read_only=True) as connection:
+        if connection.dialect.name == "sqlite":
+            statement = sqlalchemy.text("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = :table")
+            return set(connection.execute(statement, {"table": items.name}).scalars())
+        statement = sqlalchemy.text(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = :schema AND tablename = :table"
+        )
+        return set(connection.execute(statement, {"schema": items.schema, "table": items.name}).scalars())
+
+
+def test_an_upgrade_replaces_the_evaluation_index_that_has_no_sequence(open_durable_store):
+    # The index of a store from before ``sequence`` was in it: a page of an evaluation's calls read every call.
+    with closing(open_durable_store()) as store, store.transaction() as connection:
+        sqlalchemy.Index("data_item_by_evaluation", store.items_table.c.owner).create(connection)
+    with closing(open_durable_store()) as store:
+        names = index_names(store)
+    assert "data_item_by_evaluation_sequence" in names and "data_item_by_evaluation" not in names
+
+
 def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store):
     store.create("acme", [trajectory("t1"), trajectory("t2")])
     for patch, reason in [

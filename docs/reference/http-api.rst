@@ -1246,7 +1246,11 @@ score, rewards, error, calls, verifier_calls}``.
 - ``verifier_calls`` holds the same totals of the calls that the rollout's
   verifier wrote (`Calls that a verifier writes`_), or null.
 
-An unknown evaluation returns 404.
+To add up the totals, Reef reads every kept call of the evaluation. The query
+``calls=false`` leaves out ``calls`` and ``verifier_calls``. Reef then reads
+the rollouts only, so the read stays fast for an evaluation with many calls.
+``calls`` is ``true`` or ``false``, and ``true`` when absent. Another value
+returns 400. An unknown evaluation returns 404.
 
 Reef returns:
 
