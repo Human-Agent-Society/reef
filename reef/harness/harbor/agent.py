@@ -47,7 +47,14 @@ from reef.execution.sandbox.remote import HOP_BY_HOP
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor import bridge_client
-from reef.harness.harbor.node_runtime import PLATFORM_COMMAND, node_archive, node_build_name, node_cache_directory
+from reef.harness.harbor.agent_bundle import BUNDLE_PREFIX, ContainerLibc, agent_bundle, agent_cache_directory
+from reef.harness.harbor.node_runtime import (
+    PLATFORM_COMMAND,
+    node_archive,
+    node_build_name,
+    node_cache_directory,
+    node_cpu,
+)
 from reef.harness.harbor.rollouts import COMMAND_FILE, ReefEvalLab, TaskLab, TaskRolloutError
 from reef.harness.harbor.uv_runtime import uv_archive, uv_build_name, uv_cache_directory
 from reef.harness.tasks.model_binding import ModelBinding
@@ -68,15 +75,17 @@ CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv", "git"})
 CONTAINER_UV = "$HOME/.local/bin/uv"
 #: Where a git install keeps its checkout (``src``) and its venv (``venv``) in a task's container.
 CONTAINER_GIT_AGENT = "$HOME/.reef-agent"
-#: Where an npm install puts the agent on a musl image, under the agent user's own home.
-CONTAINER_NPM_PREFIX = "$HOME/.reef-npm"
+#: Where an npm agent lives in a task's container: ``npm`` is the npm prefix of the bundle that Reef uploads, and
+#: ``node`` the Node that Reef uploads into a glibc image. It is outside the user's home, which a task can keep small.
+CONTAINER_NPM_ROOT = "/opt/reef"
+CONTAINER_NPM_PREFIX = f"{CONTAINER_NPM_ROOT}/{BUNDLE_PREFIX}"
 #: The shell test that passes on a musl image, such as Alpine, as Harbor's own npm agents test it. musl's ldd
 #: prints its version and exits 1, so its exit code is dropped: with pipefail it would fail the pipe.
 MUSL_CHECK = "{ ldd --version 2>&1 || true; } | grep -qi musl || [ -f /etc/alpine-release ]"
-#: Where a glibc image gets the Node that Reef uploads, under the agent user's own home, and where the uploaded
-#: archive waits for its unpacking.
-CONTAINER_NODE = "$HOME/.reef-node"
+#: Where a glibc image gets the Node that Reef uploads, and where the uploaded archives wait for their unpacking.
+CONTAINER_NODE = f"{CONTAINER_NPM_ROOT}/node"
 CONTAINER_NODE_ARCHIVE = "/tmp/reef-node.tar.gz"
+CONTAINER_AGENT_ARCHIVE = "/tmp/reef-agent.tar.gz"
 #: The shell command that succeeds when the container's ``python3`` can run the bridge's relay and its client.
 RELAY_PYTHON_CHECK = "python3 -c 'import sys; sys.exit(sys.version_info < (3, 7))'"
 #: The shell command that drops ``SSL_CERT_DIR`` when it names no directory. uv trusts no certificate then, and it
@@ -84,12 +93,9 @@ RELAY_PYTHON_CHECK = "python3 -c 'import sys; sys.exit(sys.version_info < (3, 7)
 UV_CERTIFICATES = '{ [ -d "${SSL_CERT_DIR:-/}" ] || unset SSL_CERT_DIR; }'
 #: Where Reef uploads the uv archive in a task's container, until uv is installed.
 CONTAINER_UV_ARCHIVE = "/tmp/reef-uv.tar.gz"
-#: The shell command that puts an npm agent on the PATH, by what the install wrote: the prefix of a musl image when
-#: it exists, else the uploaded Node, whose global prefix holds the agent.
-NPM_AGENT_PATH = (
-    f'if [ -d "{CONTAINER_NPM_PREFIX}/bin" ]; then export PATH="{CONTAINER_NPM_PREFIX}/bin:$PATH"; '
-    f'else export PATH="{CONTAINER_NODE}/bin:$PATH"; fi'
-)
+#: The shell command that puts an npm agent on the PATH: the agent's commands, then the uploaded Node. A musl image
+#: has no uploaded Node, and the Node of its packages is on the PATH already.
+NPM_AGENT_PATH = f'export PATH="{CONTAINER_NPM_PREFIX}/bin:{CONTAINER_NODE}/bin:$PATH"'
 #: Where the bridge's relay lives in a task's container, and the loopback port on which it answers the bridge client.
 RELAY_DIR = "/tmp/reef-relay"
 RELAY_TUNNEL_PORT = 47811
@@ -198,8 +204,7 @@ class AdapterAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         if self.install_kind == "uv":
             await self.install_uv(environment, str(self._version))
-            return
-        if self.install_kind == "git":
+        elif self.install_kind == "git":
             # A git install needs git. A task image without it gets it from its package manager, as Harbor's own
             # agents do.
             await self.ensure_system_dependencies(environment, ("git",))
@@ -207,36 +212,55 @@ class AdapterAgent(BaseInstalledAgent):
             if uv is None:
                 raise ProgramLaunchError("the python adapter declares no uv install for a git install")
             await self.install_uv(environment, uv.version)
-            command = self.git_install_command()
+            await self.exec_as_agent(environment, command=self.git_install_command())
         else:
-            package = shlex.quote(f"{self.package}@{self._version}")
-            if (await environment.exec(command=MUSL_CHECK)).return_code == 0:
-                # The Node builds that Reef uploads do not run on musl, so a musl image uses the Node of its packages.
-                # The agent user may not write the global prefix, so the agent goes under its own home. The image
-                # chooses the Node version: --engine-strict fails the install when the agent needs a newer one,
-                # where npm alone only warns and the agent then fails at its start.
-                await self.ensure_system_dependencies(environment, ("nodejs", "npm"))
-                install = (
-                    "node --version && npm --version && "
-                    f"npm install -g --engine-strict --prefix {CONTAINER_NPM_PREFIX} {package}"
-                )
-            else:
-                # Reef downloads Node on its own host and uploads it. The container needs no download tool for it:
-                # a task can replace curl, or hold a glibc that is too old for the official build.
-                platform = await environment.exec(command=PLATFORM_COMMAND)
-                name = node_build_name(platform.stdout or "")
-                archive = await asyncio.to_thread(node_archive, name, node_cache_directory())
-                await environment.upload_file(archive, CONTAINER_NODE_ARCHIVE)
-                install = (
-                    f'mkdir -p "{CONTAINER_NODE}" && '
-                    f'tar -xzf {CONTAINER_NODE_ARCHIVE} -C "{CONTAINER_NODE}" --strip-components=1 && '
-                    f'export PATH="{CONTAINER_NODE}/bin:$PATH" && node --version && npm --version && '
-                    f"npm install -g --engine-strict {package}"
-                )
-            command = f"set -euo pipefail; {install} && {NPM_AGENT_PATH} && command -v {shlex.quote(self.binary)}"
-        await self.exec_as_agent(environment, command=command)
-        if self.install_kind == "npm":
-            await self.exec_as_root(environment, command=f"rm -f {CONTAINER_NODE_ARCHIVE}")
+            await self.install_npm_agent(environment)
+
+    async def install_npm_agent(self, environment: BaseEnvironment) -> None:
+        """Put the npm agent under ``CONTAINER_NPM_ROOT`` in the container, from a bundle that Reef built on its host.
+
+        npm on the host installed the package for the container's CPU and C library (``agent_bundle``), so the
+        container reaches no package registry: a task can break its network. The container unpacks the bundle and
+        runs the package's install scripts offline with ``npm rebuild``. A glibc image also gets the Node that Reef
+        uploads. The Node builds for musl need libraries that a bare musl image lacks, so a musl image uses the Node
+        of its packages.
+        """
+        root = shlex.quote(CONTAINER_NPM_ROOT)
+        if (await environment.exec(command=MUSL_CHECK)).return_code == 0:
+            libc: ContainerLibc = "musl"
+            cpu = node_cpu((await environment.exec(command="uname -m")).stdout or "")
+            await self.ensure_system_dependencies(environment, ("nodejs", "npm"))
+            unpack_node = f"mkdir -p {root}"
+        else:
+            libc = "glibc"
+            platform = (await environment.exec(command=PLATFORM_COMMAND)).stdout or ""
+            # The container needs no download tool for Node: a task can replace curl, or hold a glibc that is too
+            # old for the official build.
+            name = node_build_name(platform)
+            cpu = node_cpu(platform.splitlines()[0])
+            archive = await asyncio.to_thread(node_archive, name, node_cache_directory())
+            await environment.upload_file(archive, CONTAINER_NODE_ARCHIVE)
+            unpack_node = (
+                f"mkdir -p {CONTAINER_NODE} && "
+                f"tar -xzf {CONTAINER_NODE_ARCHIVE} -C {CONTAINER_NODE} --strip-components=1"
+            )
+        bundle = await asyncio.to_thread(
+            agent_bundle, self.package, str(self._version), cpu, libc, agent_cache_directory()
+        )
+        await environment.upload_file(bundle, CONTAINER_AGENT_ARCHIVE)
+        # Root unpacks under a directory that every user reads; the agent user may have a small home or none.
+        await self.exec_as_root(
+            environment,
+            command=(
+                f"set -euo pipefail; {unpack_node} && tar -xzf {CONTAINER_AGENT_ARCHIVE} -C {root} && "
+                f"{NPM_AGENT_PATH} && node --version && "
+                f"npm rebuild --global --prefix={CONTAINER_NPM_PREFIX} --no-audit --no-fund && "
+                f"rm -f {CONTAINER_NODE_ARCHIVE} {CONTAINER_AGENT_ARCHIVE}"
+            ),
+        )
+        await self.exec_as_agent(
+            environment, command=f"set -euo pipefail; {NPM_AGENT_PATH} && command -v {shlex.quote(self.binary)}"
+        )
 
     async def install_uv(self, environment: BaseEnvironment, version: str) -> None:
         """Put uv ``version`` at ``CONTAINER_UV`` in the container.
