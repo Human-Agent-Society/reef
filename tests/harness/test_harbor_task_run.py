@@ -529,6 +529,14 @@ MCP_SERVERS = [
 ]
 
 
+def test_the_agents_declare_to_harbor_the_task_settings_that_reef_gives_an_adapter() -> None:
+    # Harbor ends a trial before the container starts when its task has skills or MCP servers and the agent does
+    # not declare them. Reef refuses HTTP headers itself, so the agents do not declare them.
+    assert AdapterAgent.capabilities.skills and not AdapterAgent.capabilities.mcp_servers
+    assert TreeAgent.capabilities.skills and TreeAgent.capabilities.mcp_servers
+    assert not TreeAgent.capabilities.mcp_http_headers
+
+
 def test_each_adapter_writes_the_mcp_servers_of_a_task_as_its_agent_reads_them() -> None:
     def overlay(adapter: str) -> tuple[str, dict]:
         ((target, data),) = task_mcp_overlays(get_adapter(adapter), MCP_SERVERS)
