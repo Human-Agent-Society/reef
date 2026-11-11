@@ -546,13 +546,15 @@ class RolloutCalls(CaptureObserver):
 
 
 async def run_while_held(
-    runner: TaskRolloutRunner, request: RolloutRequest, lease_lost: threading.Event
+    runner: TaskRolloutRunner, request: RolloutRequest, lease_lost: threading.Event, stopped: threading.Event
 ) -> TaskRollout:
-    """Run the rollout of ``request`` with ``runner`` and return it. When ``lease_lost`` is set first, cancel the run,
-    so that Harbor stops the trial and its sandbox, and raise ``WorkLeaseLost``: a client cancelled the rollout, or
-    another worker took it."""
+    """Run the rollout of ``request`` with ``runner`` and return it. When ``lease_lost`` or ``stopped`` is set first,
+    cancel the run, so that Harbor stops the trial and its sandbox. Then raise ``WorkLeaseLost`` for ``lease_lost``:
+    a client cancelled the rollout, or another worker took it. Raise ``WorkerStopped`` for ``stopped`` alone: the
+    worker stops, and the rollout goes back to the queue. A process that ends with a trial still running leaves the
+    trial's sandbox running, so a stopping worker does not wait for the trial."""
     run = asyncio.ensure_future(runner.run_rollouts_async([request], asyncio.Semaphore(1)))
-    while not lease_lost.is_set():
+    while not lease_lost.is_set() and not stopped.is_set():
         done, _ = await asyncio.wait({run}, timeout=LEASE_CHECK_S)
         if done:
             [result] = run.result()
@@ -560,7 +562,9 @@ async def run_while_held(
     run.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await run
-    raise WorkLeaseLost("the evaluation worker lost its lease")
+    if lease_lost.is_set():
+        raise WorkLeaseLost("the evaluation worker lost its lease")
+    raise WorkerStopped
 
 
 class EvaluationRolloutWorker(QueueWorker):
@@ -662,7 +666,7 @@ class EvaluationRolloutWorker(QueueWorker):
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
-                result = asyncio.run(run_while_held(runner, request, lease_lost))
+                result = asyncio.run(run_while_held(runner, request, lease_lost, self.stopped))
             finally:
                 calls.close()
             # The trial directory is under ``work``, so read it before the block removes it.
