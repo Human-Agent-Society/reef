@@ -156,9 +156,9 @@ class ServedModelsPublisher(ServiceWorker):
 
     def desired(self, scenario: str) -> dict[str, JsonValue]:
         """The selected snapshot, the route names and the serving config of the served component, without opening
-        or calling an engine."""
+        or calling an engine; empty for a scenario that serves nothing (``Scenario.serves`` is false)."""
         current = self.registry.get_loaded(scenario)
-        if current is None or current.runtime is None or not current.runtime.serves_requests:
+        if current is None or current.runtime is None or not current.runtime.serves_requests or not current.serves:
             return {}
         aliases: list[JsonValue] = [
             status["active"] for status in current.artifact_status().values() if status["active"] is not None
