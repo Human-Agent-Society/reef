@@ -79,6 +79,8 @@ MUSL_CHECK = "{ ldd --version 2>&1 || true; } | grep -qi musl || [ -f /etc/alpin
 #: archive waits for its unpacking.
 CONTAINER_NODE = "$HOME/.reef-node"
 CONTAINER_NODE_ARCHIVE = "/tmp/reef-node.tar.gz"
+#: The shell command that succeeds when the container's ``python3`` can run the bridge's relay and its client.
+RELAY_PYTHON_CHECK = "python3 -c 'import sys; sys.exit(sys.version_info < (3, 7))'"
 #: Where Reef uploads the uv archive in a task's container, until uv is installed.
 CONTAINER_UV_ARCHIVE = "/tmp/reef-uv.tar.gz"
 #: The shell command that puts an npm agent on the PATH, by what the install wrote: the prefix of a musl image when
@@ -392,9 +394,10 @@ class AdapterAgent(BaseInstalledAgent):
         return {**answer, "data": base64.b64encode(data).decode(), "end": True, "sequence": 0}
 
     async def relay_python(self, environment: BaseEnvironment) -> str:
-        """The command that runs the relay: the container's ``python3``, else a Python from uv, which the agent
-        installs at the python adapter's pin unless it is the agent's own install."""
-        if (await environment.exec(command="command -v python3")).return_code == 0:
+        """The command that runs the relay: the container's ``python3`` when it is Python 3.7 or later, which the
+        relay needs, else a Python from uv, which the agent installs at the python adapter's pin unless it is the
+        agent's own install."""
+        if (await environment.exec(command=RELAY_PYTHON_CHECK)).return_code == 0:
             return "python3"
         if self.install_kind not in ("uv", "git"):
             install = get_adapter("python").install
