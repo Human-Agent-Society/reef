@@ -44,19 +44,25 @@ def json_digest(content: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def evaluation_rollout_id_prefix(evaluation_id: str, task_index: int, repeat: int) -> str:
+    """``<evaluation_id>:<task_index>:<repeat>:``, the start of the ID of each call and trajectory of one rollout of an
+    evaluation, and of no other rollout's (``evaluation_call_id``, ``evaluation_trajectory_id``)."""
+    return f"{evaluation_id}:{task_index}:{repeat}:"
+
+
 def evaluation_call_id(
     evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int, caller: str = "agent"
 ) -> str:
     """The record ID of a call of an evaluation rollout: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``
     for an agent call, and ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:<index>`` for a verifier call."""
-    rollout = f"{evaluation_id}:{task_index}:{repeat}:{attempt}"
-    return f"{rollout}:{index}" if caller == "agent" else f"{rollout}:{caller}:{index}"
+    attempt_id = f"{evaluation_rollout_id_prefix(evaluation_id, task_index, repeat)}{attempt}"
+    return f"{attempt_id}:{index}" if caller == "agent" else f"{attempt_id}:{caller}:{index}"
 
 
 def evaluation_trajectory_id(evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int) -> str:
     """The ID, after ``<scenario>/``, of a trajectory that the verifier of an evaluation rollout wrote:
     ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:trajectory:<index>``."""
-    return f"{evaluation_id}:{task_index}:{repeat}:{attempt}:verifier:trajectory:{index}"
+    return f"{evaluation_rollout_id_prefix(evaluation_id, task_index, repeat)}{attempt}:verifier:trajectory:{index}"
 
 
 def task_partition(owner: str) -> str:

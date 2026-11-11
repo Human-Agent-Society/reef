@@ -440,13 +440,14 @@ class DataStore(Plugin, ABC):
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark)`` returns the
+    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark, id_prefix)`` returns the
       items of ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
       when those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
       of ``request_type``; they need ``kind="record"``. ``group``, a pair ``(key, value)``, keeps only the items of
       that group of ``groups``: the items with the string ``value`` under ``key`` in their metadata, or with no
       string there when ``value`` is None. ``benchmark`` keeps only the task items whose ``benchmarks`` metadata has
-      that name. Without ``content``, each item's ``content`` is None, and the store does not read it.
+      that name. ``id_prefix``, a non-empty string, keeps only the items whose ID starts with it. Without
+      ``content``, each item's ``content`` is None, and the store does not read it.
     * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
       with these filters and no limit gives.
     * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,
@@ -575,6 +576,7 @@ class DataStore(Plugin, ABC):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]: ...
 
     @abstractmethod
@@ -757,11 +759,14 @@ def check_query(
     request_type: object = None,
     group: object = None,
     benchmark: object = None,
+    id_prefix: object = None,
 ) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
     check_filters(owner, kind, scenario, origin, request_type, after)
     if benchmark is not None and (not isinstance(benchmark, str) or not benchmark):
         raise ValueError("benchmark must be a non-empty benchmark name")
+    if id_prefix is not None and (not isinstance(id_prefix, str) or not id_prefix):
+        raise ValueError("id_prefix must be a non-empty string")
     if group is not None:
         if not isinstance(group, tuple) or len(group) != 2:
             raise ValueError("group must be a pair (key, value)")
@@ -958,6 +963,7 @@ class MemoryDataStore(DataStore):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
             owner,
@@ -969,6 +975,7 @@ class MemoryDataStore(DataStore):
             request_type=request_type,
             group=group,
             benchmark=benchmark,
+            id_prefix=id_prefix,
         )
         matched = sorted(
             (
@@ -976,6 +983,7 @@ class MemoryDataStore(DataStore):
                 for item in self.matching(owner, kind, scenario, origin, request_type, after)
                 if (group is None or group_value(item.metadata, group[0]) == group[1])
                 and (benchmark is None or (item.kind == "task" and benchmark in item.metadata.get("benchmarks", ())))
+                and (id_prefix is None or item.item_id.startswith(id_prefix))
             ),
             key=lambda item: item.sequence,
         )

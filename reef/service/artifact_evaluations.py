@@ -980,17 +980,14 @@ class ArtifactEvaluations:
         self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller
     ) -> list[StoredItem]:
         """The items of the kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation, without
-        their content, in attempt and then index order."""
+        their content, in attempt and then index order. It reads the calls of this rollout only."""
         place = self.call_store(scenario)
-        found = [
-            item
-            for item in (
-                () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
-            )
-            if (summary := evaluation_call_summary(item)).task_index == task_index
-            and summary.repeat == repeat
-            and summary.caller == caller
-        ]
+        kept = (
+            ()
+            if place is None
+            else evaluation_call_items(*place, scenario, evaluation_id, content=False, rollout=(task_index, repeat))
+        )
+        found = [item for item in kept if evaluation_call_summary(item).caller == caller]
         return sorted(
             found,
             key=lambda item: (
