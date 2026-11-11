@@ -49,7 +49,7 @@ from reef.storage.tasks import LocalTaskFileStore
 from reef.train import Trainer, TrainingCommit
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.jobs import JobLoop
-from reef.train.pipeline import TrainingPipeline
+from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 
 
 class _FileJobs(StubTrainingComponent):
@@ -217,6 +217,26 @@ def test_composite_recipe_merges_components_seeds_and_trainers(tmp_path: Path) -
     assert [component_trainer.component for component_trainer in trainers] == ["harness", "config"]
     assert trainers[0].trainer.trains
     assert not trainers[1].trainer.trains
+
+
+@pytest.mark.unit
+def test_each_component_trainer_takes_only_its_own_record2sample_keys(tmp_path: Path) -> None:
+    trajectories = {"record2sample": {"module": "reef.record2sample.trajectories:TrajectorySamples"}}
+    stages = PipelineConfig.from_setting(trajectories, spec=PipelineSpec(), environ={})
+    harness = _composite(tmp_path).components["harness"]
+    recipe = CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe(pipeline_stages=stages)})
+    components = recipe.build_components("agent")
+    configured = recipe.for_record2sample_configs(components, {"config": {"trajectory_idle_seconds": 7}})
+    trainers = configured.build_trainers(
+        "agent",
+        SQLiteScenarioStorage().open("agent").records,
+        components=components,
+        algorithm_states={},
+        root=_root_of(recipe, tmp_path / "root"),
+    )
+    assert trainers[1].trainer.pipeline.record2sample.trajectory_idle_seconds == 7
+    # The other component's stage is its recipe's own.
+    assert not isinstance(trainers[0].trainer.pipeline.record2sample, type(trainers[1].trainer.pipeline.record2sample))
 
 
 @pytest.mark.unit
