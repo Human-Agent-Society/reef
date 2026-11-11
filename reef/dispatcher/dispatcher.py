@@ -1063,7 +1063,8 @@ class Dispatcher(
         a load does. ``served`` is what the scenario serves, by component (``served_mapping``).
         ``record2sample_config`` is the stored ``ScenarioSettings.record2sample_config``. ``job_parameters`` are the
         recipe's parameters of a training job by the kind of its samples (``PipelineContext.job_parameters``), which a
-        request's ``parameters`` merge into; a kind that the recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
+        request's ``parameters`` merge into; a kind that the recipe gives none is left out. Raise ``UnknownScenario``
+        for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
