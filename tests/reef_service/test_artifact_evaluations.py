@@ -661,7 +661,15 @@ def test_a_retry_runs_the_rollouts_without_a_score_again_and_ends_the_evaluation
             body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "rollouts_per_task": 2}
             accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
-            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 409, "it has not ended"
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 409, "no rollout ended yet"
+
+            # While the evaluation runs, a rollout that failed goes back to the queue, and the others stay.
+            first_item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.fail(EVALUATIONS_QUEUE, first_item.id, "w", "the provider answered 503", retryable=False)
+            during = await client.post(f"{route}/retry", headers=AUTH)
+            assert during.status == 202 and (await during.json())["state"] in ("queued", "running")
+            states = [(item.state, item.attempt_count) for item in queue.items(EVALUATIONS_QUEUE, scenario="s")]
+            assert states == [("queued", 1), ("queued", 0), ("queued", 0), ("queued", 0)]
 
             # One rollout scores, one fails in its sandbox, one finishes with no score, and one scores.
             for end in (1.0, "the sandbox stopped", None, 0.0):
@@ -679,7 +687,7 @@ def test_a_retry_runs_the_rollouts_without_a_score_again_and_ends_the_evaluation
             assert (answer["state"], answer["policy_evaluation"], answer["finished_at"]) == ("running", None, None)
             listed = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
             assert [(row["state"], row["attempt_count"]) for row in listed] == [
-                ("finished", 1),
+                ("finished", 2),
                 ("queued", 1),
                 ("queued", 1),
                 ("finished", 1),
