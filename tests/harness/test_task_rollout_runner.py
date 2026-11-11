@@ -617,6 +617,21 @@ def test_refused_model_calls_are_named_in_the_error_whether_or_not_the_rollout_i
     assert unrecorded_ran.error.startswith("2 model calls failed; the first answered 401")
 
 
+def test_an_agent_that_ends_before_its_first_call_is_named_with_its_exit_code_and_output(tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    trial = tmp_path / "trial"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "agent" / "command.json").write_text(json.dumps({"exit_code": 137, "stdout": "", "stderr": "Killed\n"}))
+    with contextlib.closing(StandInReef()) as reef:
+        ended = runner(reef, tmp_path, StandInLab({"reward": 0.0}, turns=0, trial_uri=trial.as_uri())).run(task_path)
+        # A trial that left no command file keeps the error it had: none.
+        silent = runner(reef, tmp_path, StandInLab({"reward": 0.0}, turns=0, trial_uri=tmp_path.as_uri())).run(
+            task_path
+        )
+    assert ended.error == "the agent made no model call: its command exited 137: Killed"
+    assert silent.error == ""
+
+
 class ObservedCalls(CaptureObserver):
     def __init__(self) -> None:
         self.turns: list[CapturedTurn] = []
