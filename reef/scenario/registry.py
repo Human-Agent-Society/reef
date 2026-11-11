@@ -35,6 +35,7 @@ from reef.evaluation.activation import EvaluatedActivation, activation_setting, 
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
+from reef.recipe.errors import RecipeConfigError
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ItemStart, ScenarioFactory
 from reef.scenario.scenario import Scenario
@@ -223,6 +224,7 @@ class ScenarioRegistry:
         start: ItemStart | None = None,
         *,
         allow_implicit_creation: bool | None = None,
+        serves: bool = True,
     ) -> Scenario | None:
         """Resolve a scenario, creating it when allowed.
 
@@ -231,14 +233,15 @@ class ScenarioRegistry:
         returned so the caller can surface an unknown-scenario error. A
         created scenario's root snapshot holds the artifact item ``start``, or
         the recipe's default start when ``start`` is ``None``
-        (``ScenarioFactory.load_or_create``).
+        (``ScenarioFactory.load_or_create``). A created scenario serves its start when ``serves`` is true, and
+        nothing when it is false (``ScenarioSettings.serves``); an existing scenario ignores ``serves``.
         """
         if allow_implicit_creation is None:
             allow_implicit_creation = self._allow_implicit_creation
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, start)
+            return self._resolve(scenario, start, serves)
 
     def get_loaded(self, scenario: str) -> Scenario | None:
         """The loaded instance, or None: nothing is created or recovered, and the scenario's lock is not taken.
@@ -257,7 +260,7 @@ class ScenarioRegistry:
         """Resolve an existing scenario; raise UnknownScenario if not found."""
         if not self.has(scenario):
             raise UnknownScenario(f"unknown scenario {scenario!r}")
-        return self._resolve(scenario, None)
+        return self._resolve(scenario, None, True)
 
     def list(self) -> tuple[dict[str, Any], ...]:
         """Known scenarios: loaded ones with their binding, durable ones by name, each with the harness adapter.
@@ -360,6 +363,49 @@ class ScenarioRegistry:
             current.set_serving_config(config)
             return current
 
+    def set_record2sample_config(self, scenario: str, config: Mapping[str, Mapping[str, Any]]) -> Scenario:
+        """Store ``config`` as the ``ScenarioSettings.record2sample_config`` of an existing scenario, and load the
+        scenario again, so that its trainers build their record-to-sample stages with it.
+
+        The new instance recovers as a restart does: each trainer reads the records after its committed progress
+        again. ``config`` replaces the stored mapping as a whole; an empty mapping goes back to the deployment's
+        config. Raise ``ValueError`` when ``config`` names a component that has no trainer, or when a stage refuses
+        its config; then the stored setting and the loaded instance stay as they were.
+        """
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            settings = self._storage.read_settings(scenario)
+            changed = replace(settings, record2sample_config=config)
+            trainers = {component_trainer.component for component_trainer in current.trainers}
+            unknown = sorted(set(changed.record2sample_config) - trainers)
+            if unknown:
+                raise ValueError(
+                    f"record2sample_config names {unknown}; scenario {scenario!r} has trainers for {sorted(trainers)}"
+                )
+            if changed.record2sample_config == current.record2sample_config:
+                return current
+            self._storage.write_settings(scenario, changed)
+            try:
+                return self.reload(scenario)
+            except BaseException as exc:
+                # The new instance failed before it replaced ``current``, which keeps serving with its own config.
+                # A stored config that no instance builds with would fail every later load.
+                self._storage.write_settings(scenario, settings)
+                if isinstance(exc, RecipeConfigError):
+                    raise ValueError(f"scenario {scenario!r} refused record2sample_config: {exc}") from exc
+                raise
+
+    def set_serves(self, scenario: str, serves: bool) -> Scenario:
+        """Store ``serves`` for an existing scenario (``ScenarioSettings.serves``) and apply it to the loaded
+        instance, so reloads and restarts apply it again."""
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            settings = self._storage.read_settings(scenario)
+            if settings.serves != serves:
+                self._storage.write_settings(scenario, replace(settings, serves=serves))
+            current.set_serves(serves)
+            return current
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self._storage.read_settings(scenario)
@@ -443,8 +489,8 @@ class ScenarioRegistry:
             return tuple(self._scenarios.values())
 
     def apply_stored_settings(self, instance: Scenario) -> None:
-        """Select the training mode, the activation rule and the serving config a person stored for the scenario
-        on a newly built instance.
+        """Select the training mode, the activation rule, the serving config and ``serves`` that are stored for
+        the scenario on a newly built instance.
 
         A mode the recipe no longer supports, or that Reef no longer has (such as
         ``hybrid``), keeps the recipe's default, so the scenario still loads and
@@ -469,6 +515,7 @@ class ScenarioRegistry:
                     )
             rule = self.activation_rule(settings)
             instance.set_activation_rule(rule)
+            instance.set_serves(settings.serves)
             try:
                 instance.set_serving_config(settings.serving_config)
             except ValueError as exc:
@@ -486,17 +533,21 @@ class ScenarioRegistry:
                 instance.name,
             )
 
-    def _resolve(self, scenario: str, start: ItemStart | None) -> Scenario:
+    def _resolve(self, scenario: str, start: ItemStart | None, serves: bool) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
             self.touch(scenario)
             return current
-        if not self._scenario_factory.has_registration(scenario):
+        created = not self._scenario_factory.has_registration(scenario)
+        if created:
             self.check_creation(scenario)
         self.take_load_slot(scenario)
         try:
             current = self._scenario_factory.load_or_create(scenario, start)
+            if created and not serves:
+                # The setting is stored before control can see the instance, so control never asks for its engine.
+                self._storage.write_settings(scenario, replace(self._storage.read_settings(scenario), serves=False))
             self.apply_stored_settings(current)
         finally:
             with self._lock:

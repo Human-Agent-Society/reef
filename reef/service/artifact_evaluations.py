@@ -70,7 +70,7 @@ from reef.service.collections import collection_tasks
 from reef.service.data import DataAccess, NoDataStore
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, StoredItem, record_source
-from reef.storage.evaluations import StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflict, StoredEvaluation
 from reef.storage.item_kinds import evaluation_call_id
 from reef.storage.observer import RecordObserver
 from reef.storage.record_items import (
@@ -181,36 +181,54 @@ def rollout_cancelled(item: WorkItem) -> bool:
 
 def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now: float) -> dict[str, JsonValue]:
     """The progress of ``stored`` from ``items``, its rollouts in the queue (RFC #1287): ``{total, ended, scored,
-    failed, cancelled, running, mean_score, eta_seconds}``.
+    failed, cancelled, running, mean_score, eta_seconds, benchmarks}``.
 
     ``ended`` counts the final rollouts that no cancel or stop ended. ``mean_score`` is the mean of their number
     scores. ``eta_seconds`` divides the rollouts left by the rate at which rollouts ended in the last
     ``ETA_WINDOW_SECONDS``; it is None when none ended in that time, or when the evaluation ended.
+    ``benchmarks`` has one entry for each benchmark of the request's collection, in its order: ``benchmark`` and
+    the same counts and ``mean_score`` for the rollouts of the benchmark's tasks. A task in two benchmarks counts
+    in both. It is empty without a collection.
     """
     request = stored.request
-    total = len(request.task_names) * request.rollouts_per_task
-    ended = [item for item in items if item.final and not rollout_cancelled(item)]
-    scores = [
-        RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
-        for item in ended
-        if item.state == "finished"
-    ]
-    scored = sum(not score.is_failed for score in scores)
+
+    def _counts(rollouts: Sequence[WorkItem], task_count: int) -> dict[str, JsonValue]:
+        ended = [item for item in rollouts if item.final and not rollout_cancelled(item)]
+        scores = [
+            RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
+            for item in ended
+            if item.state == "finished"
+        ]
+        scored = sum(not score.is_failed for score in scores)
+        return {
+            "total": task_count * request.rollouts_per_task,
+            "ended": len(ended),
+            "scored": scored,
+            "failed": len(ended) - scored,
+            "cancelled": sum(rollout_cancelled(item) for item in rollouts),
+            "running": sum(item.state in ("assigned", "running") for item in rollouts),
+            "mean_score": mean_score(scores),
+        }
+
     window = min(ETA_WINDOW_SECONDS, now - stored.created_at)
-    recent = sum(item.ended_at is not None and item.ended_at >= now - window for item in ended)
+    recent = sum(
+        item.final and not rollout_cancelled(item) and item.ended_at is not None and item.ended_at >= now - window
+        for item in items
+    )
+    counts = _counts(items, len(request.task_names))
     eta = None
     if stored.state in ("queued", "running") and recent and window > 0:
-        eta = (total - len(ended)) * window / recent
-    return {
-        "total": total,
-        "ended": len(ended),
-        "scored": scored,
-        "failed": len(ended) - scored,
-        "cancelled": sum(rollout_cancelled(item) for item in items),
-        "running": sum(item.state in ("assigned", "running") for item in items),
-        "mean_score": mean_score(scores),
-        "eta_seconds": eta,
-    }
+        eta = (cast(int, counts["total"]) - cast(int, counts["ended"])) * window / recent
+    benchmarks: list[JsonValue] = []
+    if request.collection is not None:
+        # The payload names the rollout's task; ``EvaluationRollout`` wrote it (``to_payload``).
+        by_task: dict[str, list[WorkItem]] = {}
+        for item in items:
+            by_task.setdefault(str(item.payload["task_name"]), []).append(item)
+        for benchmark, task_names in request.collection.benchmarks:
+            rollouts = [item for name in task_names for item in by_task.get(name, ())]
+            benchmarks.append({"benchmark": benchmark, **_counts(rollouts, len(task_names))})
+    return {**counts, "eta_seconds": eta, "benchmarks": benchmarks}
 
 
 def rollout_work(rollout: EvaluationRollout) -> NewWork:
@@ -512,7 +530,7 @@ class ArtifactEvaluations:
     scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
     end.
 
-    Purpose: the evaluation routes call ``start``, ``cancel``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
+    Purpose: the evaluation routes call ``start``, ``cancel``, ``retry``, ``get``, ``newest``, ``rollouts_json``, ``calls_json``,
     ``call_json``, ``trajectories_json``, ``exported_rollouts`` and ``rollout_trajectories``, and the scenario update
     route calls ``configure``. ``open`` starts ``results`` and the reader of ``new_artifacts``; ``close`` stops them.
     Every method but ``start``, ``cancel``, ``configure``, ``open`` and ``close`` only reads.
@@ -608,6 +626,56 @@ class ArtifactEvaluations:
             for item in self.results.rollouts(evaluation_id, scenario):
                 self.queue.cancel(EVALUATIONS_QUEUE, item.id, CANCELLED_ERROR)
         return cancelled
+
+    def retry(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
+        """Run the rollouts of the evaluation ``evaluation_id`` of ``scenario`` that ended with no score once more,
+        and return the evaluation, which runs (RFC #1340); None when the scenario has no such evaluation.
+
+        A rollout has no score when it failed, when a cancel or a stop of the evaluation ended it, or when it finished
+        with a failed score (``rollout_failed``). Each of them goes back to the queue with its earlier attempts kept.
+        The scored rollouts keep their scores, and a rollout that has not ended stays as it is.
+
+        An evaluation that runs goes on with those rollouts in the queue again. An evaluation that ended runs again:
+        it loses its result or its error, and the rollouts that never started for ``max_concurrent_rollouts`` start
+        as the others end. When the rollouts are final, ``EvaluationResults`` ends the evaluation as it ends a first
+        run, and gives a finished one to the activation rule.
+
+        ``EvaluationStateConflict`` for an evaluation with no rollout to run again, and for an ended one whose
+        rollouts the queue no longer keeps (``WorkQueue.delete_final``).
+        """
+        with self.dispatcher.locked_scenario(scenario) as current:
+            stored = current.store.evaluations.get(evaluation_id)
+            if stored is None:
+                return None
+            request = stored.request
+            total = len(request.task_names) * request.rollouts_per_task
+            items = self.results.rollouts(evaluation_id, scenario)
+            ended = stored.state in ("finished", "failed")
+            # The queue holds a prefix of the rollouts in task and repeat order (``settle``). Anything else means that
+            # it deleted some of them after their retention, which it does only after the evaluation ended.
+            expected = [
+                rollout_item_id(evaluation_id, *divmod(position, request.rollouts_per_task))
+                for position in range(len(items))
+            ]
+            if ended and (
+                not items
+                or [item.id for item in items] != expected
+                or (stored.state == "finished" and len(items) < total)
+            ):
+                raise EvaluationStateConflict(f"evaluation {evaluation_id!r}: Reef no longer keeps its rollouts")
+            again = [item for item in items if item.final and rollout_failed(item)]
+            # An ended evaluation with rollouts that never started has those to run, also with no failed rollout.
+            if not again and not (ended and len(items) < total):
+                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} has no ended rollout without a score")
+            # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
+            # running.
+            retried = current.store.evaluations.reopen(evaluation_id) if ended else stored
+            for item in again:
+                self.queue.retry(EVALUATIONS_QUEUE, item.id)
+        logger.info("evaluation %s of %s runs %d rollouts again", evaluation_id, scenario, len(again))
+        # With every queued rollout scored, only the rollouts that wait are left: no item changes, so settle here.
+        self.results.settle_changed(scenario, evaluation_id)
+        return retried
 
     def configure(self, scenario: str, changes: Mapping[str, object]) -> dict[str, object]:
         """Store how Reef evaluates and activates each new artifact of ``scenario``, and return each changed
@@ -843,7 +911,7 @@ class ArtifactEvaluations:
         self.results.settle(scenario, evaluation_id)
         return stored
 
-    def rollouts_json(self, scenario: str, evaluation_id: str) -> list[dict[str, Any]] | None:
+    def rollouts_json(self, scenario: str, evaluation_id: str, *, calls: bool = True) -> list[dict[str, Any]] | None:
         """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
         attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``; None when ``scenario`` has no
         evaluation ``evaluation_id``.
@@ -854,31 +922,17 @@ class ArtifactEvaluations:
         of its verifier (``verifier_rewards``, RFC #1297), and null when it has none, as for a rollout that finished
         before Reef kept them; ``error`` is the reason of a failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept agent calls as JSON,
         or null when the data store keeps no agent call of it; ``verifier_calls`` is the same for its verifier calls.
-        It reads the metadata of the evaluation's calls, not their content.
+        It reads the metadata of the evaluation's calls, not their content. With ``calls`` false, the views have no
+        ``calls`` and no ``verifier_calls``, and it reads the queue only, so the read does not grow with the calls.
         """
         stored = self.get(scenario, evaluation_id)
         if stored is None:
             return None
-        totals: dict[tuple[int, int, Caller], EvaluationCallTotals] = {}
-        place = self.call_store(scenario)
-        kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
-        for call_item in kept:
-            summary = evaluation_call_summary(call_item)
-            key = (summary.task_index, summary.repeat, summary.caller)
-            found = totals.get(key)
-            totals[key] = EvaluationCallTotals(
-                (0 if found is None else found.count) + 1,
-                (0 if found is None else found.failed) + (summary.status != 200),
-                (0 if found is None else found.prompt_tokens) + (summary.prompt_tokens or 0),
-                (0 if found is None else found.completion_tokens) + (summary.completion_tokens or 0),
-            )
-        views = []
+        views: list[dict[str, Any]] = []
         items = self.results.rollouts(evaluation_id, scenario)
         for item in items:
             rollout = EvaluationRollout.from_item(item)
             finished = item.state == "finished" and item.result is not None
-            calls = totals.get((rollout.task_index, rollout.repeat, "agent"))
-            verifier_calls = totals.get((rollout.task_index, rollout.repeat, "verifier"))
             views.append(
                 {
                     "task": rollout.task_name,
@@ -892,8 +946,6 @@ class ArtifactEvaluations:
                     "rewards": cast(Mapping[str, object], item.result).get("rewards") if finished else None,
                     # A rollout that finished with a failed score keeps its reason in its result.
                     "error": cast(Mapping[str, object], item.result).get("error") if finished else item.error,
-                    "calls": None if calls is None else calls.to_json(),
-                    "verifier_calls": None if verifier_calls is None else verifier_calls.to_json(),
                 }
             )
         request = stored.request
@@ -911,10 +963,28 @@ class ArtifactEvaluations:
                     "score": None,
                     "rewards": None,
                     "error": None,
-                    "calls": None,
-                    "verifier_calls": None,
                 }
             )
+        if not calls:
+            return views
+        totals: dict[tuple[int, int, Caller], EvaluationCallTotals] = {}
+        place = self.call_store(scenario)
+        kept = () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
+        for call_item in kept:
+            summary = evaluation_call_summary(call_item)
+            key = (summary.task_index, summary.repeat, summary.caller)
+            found = totals.get(key)
+            totals[key] = EvaluationCallTotals(
+                (0 if found is None else found.count) + 1,
+                (0 if found is None else found.failed) + (summary.status != 200),
+                (0 if found is None else found.prompt_tokens) + (summary.prompt_tokens or 0),
+                (0 if found is None else found.completion_tokens) + (summary.completion_tokens or 0),
+            )
+        fields: tuple[tuple[Caller, str], ...] = (("agent", "calls"), ("verifier", "verifier_calls"))
+        for view in views:
+            for caller, field in fields:
+                found = totals.get((view["task_index"], view["repeat"], caller))
+                view[field] = None if found is None else found.to_json()
         return views
 
     def call_store(self, scenario: str) -> tuple[DataStore, str] | None:
@@ -928,17 +998,14 @@ class ArtifactEvaluations:
         self, scenario: str, evaluation_id: str, task_index: int, repeat: int, caller: Caller
     ) -> list[StoredItem]:
         """The items of the kept calls of ``caller`` of rollout ``(task_index, repeat)`` of one evaluation, without
-        their content, in attempt and then index order."""
+        their content, in attempt and then index order. It reads the calls of this rollout only."""
         place = self.call_store(scenario)
-        found = [
-            item
-            for item in (
-                () if place is None else evaluation_call_items(*place, scenario, evaluation_id, content=False)
-            )
-            if (summary := evaluation_call_summary(item)).task_index == task_index
-            and summary.repeat == repeat
-            and summary.caller == caller
-        ]
+        kept = (
+            ()
+            if place is None
+            else evaluation_call_items(*place, scenario, evaluation_id, content=False, rollout=(task_index, repeat))
+        )
+        found = [item for item in kept if evaluation_call_summary(item).caller == caller]
         return sorted(
             found,
             key=lambda item: (

@@ -11,7 +11,7 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents
@@ -141,6 +141,33 @@ class Recipe:
             return PipelineConfig.from_setting(None, spec=type(self).pipeline_spec(), environ={})
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
+
+    def with_record2sample_config(self, config: Mapping[str, Any]) -> Self:
+        """This recipe with each key of ``config`` in place of that key of its record-to-sample stage's config
+        (``PipelineConfig.with_record2sample_config``). An empty ``config`` returns this recipe."""
+        if not config:
+            return self
+        return replace(self, pipeline_stages=Recipe.stages(self).with_record2sample_config(config))
+
+    def for_record2sample_configs(
+        self, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
+    ) -> Recipe:
+        """The recipe whose :meth:`build_trainers` builds the trainer of each component that ``configs`` names with
+        those keys over its record-to-sample config (``ScenarioSettings.record2sample_config``).
+
+        ``components`` is what the scenario serves. The default applies the config of the one component that
+        :meth:`build_trainers` binds. Empty ``configs`` return this recipe. A recipe that binds several trainers
+        overrides this method; the default raises ``RecipeConfigError`` for such a recipe.
+        """
+        if not configs:
+            return self
+        if len(components.names) > 1:
+            raise RecipeConfigError(
+                f"{type(self).__name__} serves components {list(components.names)}: override "
+                "for_record2sample_configs to give each trainer its own record2sample config"
+            )
+        component = components.names[0] if components.names else RECORDS_COMPONENT
+        return self.with_record2sample_config(configs.get(component, {}))
 
     def build_pipeline(self, context: PipelineContext) -> TrainingPipeline:
         """Build the training pipeline of one scenario from :meth:`stages`, in pipeline order."""

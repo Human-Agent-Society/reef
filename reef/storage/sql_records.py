@@ -526,10 +526,13 @@ class SQLScenarioDatabase(Closeable):
             activation=values.get("activation"),
             owner=values.get("owner"),
             serving_config=ServingConfig.from_json(values.get("serving_config", {})),
+            serves=values.get("serves", True),
+            record2sample_config=values.get("record2sample_config", {}),
         )
 
     def write_settings(self, settings: ScenarioSettings) -> None:
-        """Replace the stored settings in one transaction; a ``None`` setting is not stored."""
+        """Replace the stored settings in one transaction; a ``None`` setting, a true ``serves`` and an empty
+        ``record2sample_config`` are not stored."""
         table = self._settings.table
         values = {
             "training_mode": settings.training_mode,
@@ -539,6 +542,8 @@ class SQLScenarioDatabase(Closeable):
             "activation": None if settings.activation is None else dict(settings.activation),
             "owner": settings.owner,
             "serving_config": settings.serving_config.to_json() or None,
+            "serves": None if settings.serves else False,
+            "record2sample_config": dict(settings.record2sample_config) or None,
         }
         rows = [
             {**self._settings.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}

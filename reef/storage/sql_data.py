@@ -92,6 +92,7 @@ from reef.storage.data import (
     patched_metadata,
     prepared_items,
     record_link_scope,
+    replaced_task_digest,
 )
 from reef.storage.item_kinds import task_partition
 from reef.storage.migrations import (
@@ -132,7 +133,8 @@ GROUP_COMMIT_ITEMS = 200
 
 
 def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
-    """The ``evaluation_id`` of the metadata of an item row, in the form of the index ``data_item_by_evaluation``.
+    """The ``evaluation_id`` of the metadata of an item row, in the form of the index
+    ``data_item_by_evaluation_sequence``.
 
     The JSON path is a literal, not a parameter, so that a query with the same expression can use the index.
     """
@@ -240,9 +242,15 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("last_sequence", BigInteger, nullable=False),
         PrimaryKeyConstraint("owner", "scenario"),
     )
-    # The calls of one evaluation are read by their evaluation_id (``SQLDataStore.query``), so a read does not scan
-    # all the record items of an owner. ``migrate_data_indexes`` adds the index to an older table.
-    Index("data_item_by_evaluation", items.c.owner, item_evaluation_id(items, sqlite=sqlite))
+    # The calls of one evaluation are read by their evaluation_id, a page at a time in sequence order
+    # (``SQLDataStore.query``). With ``sequence`` in the index, a page reads only its own rows, not every row of the
+    # evaluation. ``migrate_data_indexes`` adds the index to an older table.
+    Index(
+        "data_item_by_evaluation_sequence",
+        items.c.owner,
+        item_evaluation_id(items, sqlite=sqlite),
+        items.c.sequence,
+    )
     collections = Table(
         "data_collection",
         metadata,
@@ -383,8 +391,8 @@ class SQLDataStore(DataStore):
 
     @abstractmethod
     def evaluation_id(self) -> ColumnElement[Any]:
-        """The ``evaluation_id`` of the metadata of an item row, as the index ``data_item_by_evaluation`` holds it
-        (``item_evaluation_id``)."""
+        """The ``evaluation_id`` of the metadata of an item row, as the index ``data_item_by_evaluation_sequence``
+        holds it (``item_evaluation_id``)."""
 
     def is_inference(self) -> ColumnElement[bool]:
         """The condition that an item row is a record item of the source ``inference``, which ``prune_records``
@@ -766,6 +774,7 @@ class SQLDataStore(DataStore):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
             owner,
@@ -777,6 +786,7 @@ class SQLDataStore(DataStore):
             request_type=request_type,
             group=group,
             benchmark=benchmark,
+            id_prefix=id_prefix,
         )
         items = self.items_table
         # Without content, read only the columns of the metadata: content_json can be large.
@@ -790,10 +800,12 @@ class SQLDataStore(DataStore):
             value = self.metadata_string(group[0])
             statement = statement.where(value.is_(None) if group[1] is None else value == group[1])
             if group[0] == "evaluation_id" and group[1] is not None:
-                # The same condition in the form of the index data_item_by_evaluation, which finds the rows.
+                # The same condition in the form of the index data_item_by_evaluation_sequence, which finds the rows.
                 statement = statement.where(self.evaluation_id() == group[1])
         if benchmark is not None:
             statement = statement.where(items.c.kind == "task", self.in_benchmark(benchmark))
+        if id_prefix is not None:
+            statement = statement.where(items.c.item_id.startswith(id_prefix, autoescape=True))
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
@@ -1148,6 +1160,34 @@ class SQLDataStore(DataStore):
             )
             connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.scenario == scenario))
             return len(rows)
+
+    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem:
+        check_owner(owner)
+        with self.transaction() as connection:
+            row = self.rows(connection, owner, [item_id]).get(item_id)
+            if row is None:
+                raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+            metadata = json.loads(row["metadata_json"])
+            # The lock orders this write with the other writes of the item's scenarios, as an update does.
+            self.lock_scenarios(connection, owner, scenarios_of([metadata]))
+            row = self.rows(connection, owner, [item_id], lock=True)[item_id]
+            stored = StoredItem(row["sequence"], owner, item_id, metadata, row["digest"])
+            digest = replaced_task_digest(owner, stored, directory, self.task_files)
+            if digest == stored.digest:
+                return stored
+            items, uses = self.items_table, self.scenarios_table
+            connection.execute(
+                update(items).where(items.c.owner == owner, items.c.item_id == item_id).values(digest=digest)
+            )
+            # Each use begins again with a new sequence, so that a trainer that pages by use sequence reads the task.
+            connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.item_id == item_id))
+            begun = [
+                {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
+                for scenario, split in metadata["scenarios"].items()
+            ]
+            if begun:
+                connection.execute(insert(uses), begun)
+            return replace(stored, digest=digest)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)

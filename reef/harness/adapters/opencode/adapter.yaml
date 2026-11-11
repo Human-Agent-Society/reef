@@ -80,7 +80,8 @@ model:
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
   task:
-    argv: ["run", "--format", "json", "--auto", "{task}"]
+    # "--" ends the options: an instruction that starts with "-" is the message, not an option.
+    argv: ["run", "--format", "json", "--auto", "--", "{task}"]
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
     # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.

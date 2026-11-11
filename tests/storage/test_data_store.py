@@ -29,6 +29,7 @@ from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
 from reef.storage.record_items import (
     evaluation_call_item,
+    evaluation_call_items,
     evaluation_trajectory_item,
     evaluation_trajectory_items,
     record_item,
@@ -265,6 +266,28 @@ def test_an_upgrade_gives_each_use_its_own_sequence_and_split(open_durable_store
         ]
 
 
+def index_names(store) -> set[str]:
+    """The names of the indexes of the ``data_item`` table of the SQL data store ``store``."""
+    items = store.items_table
+    with store.transaction(read_only=True) as connection:
+        if connection.dialect.name == "sqlite":
+            statement = sqlalchemy.text("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = :table")
+            return set(connection.execute(statement, {"table": items.name}).scalars())
+        statement = sqlalchemy.text(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = :schema AND tablename = :table"
+        )
+        return set(connection.execute(statement, {"schema": items.schema, "table": items.name}).scalars())
+
+
+def test_an_upgrade_replaces_the_evaluation_index_that_has_no_sequence(open_durable_store):
+    # The index of a store from before ``sequence`` was in it: a page of an evaluation's calls read every call.
+    with closing(open_durable_store()) as store, store.transaction() as connection:
+        sqlalchemy.Index("data_item_by_evaluation", store.items_table.c.owner).create(connection)
+    with closing(open_durable_store()) as store:
+        names = index_names(store)
+    assert "data_item_by_evaluation_sequence" in names and "data_item_by_evaluation" not in names
+
+
 def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store):
     store.create("acme", [trajectory("t1"), trajectory("t2")])
     for patch, reason in [
@@ -278,6 +301,44 @@ def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store
     with pytest.raises(ItemNotFound):
         store.update("acme", ["t1", "missing"], {"scenarios": {"coding": "train"}})
     assert store.query("acme", scenario="coding") == ()
+
+
+def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(store, tmp_path):
+    first, second = tmp_path / "first" / "fix-bug", tmp_path / "second" / "fix-bug"
+    for directory, text in ((first, "Fix the bug.\n"), (second, "Fix the bug in parse.\n")):
+        directory.mkdir(parents=True)
+        (directory / "instruction.md").write_text(text)
+    (item,) = store.create("acme", [NewItem("fix-bug", first, {"kind": "task", "scenarios": {"coding": "train"}})])
+    old_path = store.task_path(store.read("acme", "fix-bug"))
+    ((used_before, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+
+    replaced = store.replace_task("acme", "fix-bug", second)
+    assert (replaced.sequence, replaced.metadata, replaced.digest) == (
+        item.sequence,
+        item.metadata,
+        files_digest(second),
+    )
+    assert (store.task_path(store.read("acme", "fix-bug")) / "instruction.md").read_text() == "Fix the bug in parse.\n"
+    # A reader that opened the old files can go on, and a trainer reads the task again after its cursor.
+    assert (old_path / "instruction.md").read_text() == "Fix the bug.\n"
+    assert [
+        found.item_id for _, found in store.scenario_items("acme", "coding", kinds=("task",), after=used_before)
+    ] == ["fix-bug"]
+    # The same files again change nothing, not even the use.
+    ((used_after, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+    assert store.replace_task("acme", "fix-bug", second) == replaced
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0][0] == used_after
+
+    with pytest.raises(ItemNotFound):
+        store.replace_task("acme", "missing", second)
+    with pytest.raises(ValueError, match="same name"):
+        store.replace_task("acme", "fix-bug", first.parent)
+    store.create("acme", [trajectory("t1")])
+    trajectory_task = tmp_path / "t1"
+    trajectory_task.mkdir()
+    with pytest.raises(ValueError, match="only a task's files"):
+        store.replace_task("acme", "t1", trajectory_task)
+    assert store.read("acme", "fix-bug").digest == replaced.digest
 
 
 def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path):
@@ -407,9 +468,22 @@ def test_groups_of_a_scenario_count_only_the_items_it_uses(store):
 
 
 def test_query_arguments_are_checked(store):
-    for arguments, reason in [({"kind": "dataset"}, "kind"), ({"after": -1}, "after"), ({"limit": 0}, "limit")]:
+    for arguments, reason in [
+        ({"kind": "dataset"}, "kind"),
+        ({"after": -1}, "after"),
+        ({"limit": 0}, "limit"),
+        ({"id_prefix": ""}, "id_prefix"),
+    ]:
         with pytest.raises(ValueError, match=reason):
             store.query("acme", **arguments)
+
+
+def test_a_query_keeps_the_items_whose_id_starts_with_a_prefix(store):
+    store.create("acme", [trajectory(item_id) for item_id in ("e1:1:1:0", "e1:1:10:0", "e1_1:1:0", "e1%1:1:0")])
+    assert [item.item_id for item in store.query("acme", id_prefix="e1:1:1:")] == ["e1:1:1:0"]
+    # A SQL pattern gives _ and % a meaning: the prefix matches them as characters only.
+    assert [item.item_id for item in store.query("acme", id_prefix="e1_")] == ["e1_1:1:0"]
+    assert [item.item_id for item in store.query("acme", id_prefix="e1%")] == ["e1%1:1:0"]
 
 
 def calls(*turns: int) -> list[NewItem]:
@@ -964,6 +1038,19 @@ def evaluation_call(turns: int, attempt: int, index: int, status: int = 200, res
     )
     call = EvaluationCall(summary, payload, reply if response == "reply" else response)
     return call, evaluation_call_item("coding", "a1", "e1", call)
+
+
+def test_the_calls_of_one_rollout_leave_out_the_other_rollouts_of_the_evaluation(store):
+    def call_item(task_index: int, repeat: int, caller: str = "agent") -> NewItem:
+        summary = EvaluationCallSummary(
+            task_index, repeat, 1, 0, "/v1/chat/completions", 200, 10.0, 0.5, None, None, None, 0, caller
+        )
+        return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
+
+    store.create("acme", [call_item(1, 1), call_item(1, 10), call_item(11, 1), call_item(1, 1, "verifier")])
+    kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 1))
+    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:0", "coding/e1:1:1:1:verifier:0"]
+    assert len(list(evaluation_call_items(store, "acme", "coding", "e1", content=False))) == 4
 
 
 def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_data(store):

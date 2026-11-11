@@ -1,7 +1,7 @@
 """Storage contract for the data store of a deployment (RFC #1028).
 
 The data store keeps the data that scenarios train on, once per deployment. An item is content and metadata.
-Its content never changes; its metadata says what the item is, which owner it belongs to, and which scenarios
+Its content never changes, except that a task item's files can be replaced; its metadata says what the item is, which owner it belongs to, and which scenarios
 use it. The store has create, read, query, update and delete, and each operation reads or writes the items of
 one owner only. Training state, such as train counts, is not data and stays in the scenario
 storage.
@@ -428,7 +428,8 @@ class DataStore(Plugin, ABC):
 
     Values: the state of a store is a finite set of ``StoredItem`` values. Within one owner, no two items have
     the same ``item_id``, and ``sequence`` increases in the order the items arrived. An item's content,
-    ``digest`` and fixed metadata (``kind``, ``owner``, ``origin``) never change. Every operation names one owner
+    ``digest`` and fixed metadata (``kind``, ``owner``, ``origin``) never change, except that ``replace_task`` gives a
+    task item new files and so a new ``digest``. Every operation names one owner
     and reads or writes only the items of that owner.
 
     Operations:
@@ -440,13 +441,14 @@ class DataStore(Plugin, ABC):
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark)`` returns the
+    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark, id_prefix)`` returns the
       items of ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
       when those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
       of ``request_type``; they need ``kind="record"``. ``group``, a pair ``(key, value)``, keeps only the items of
       that group of ``groups``: the items with the string ``value`` under ``key`` in their metadata, or with no
       string there when ``value`` is None. ``benchmark`` keeps only the task items whose ``benchmarks`` metadata has
-      that name. Without ``content``, each item's ``content`` is None, and the store does not read it.
+      that name. ``id_prefix``, a non-empty string, keeps only the items whose ID starts with it. Without
+      ``content``, each item's ``content`` is None, and the store does not read it.
     * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
       with these filters and no limit gives.
     * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,
@@ -463,6 +465,12 @@ class DataStore(Plugin, ABC):
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items, without content.
+    * ``replace_task(owner, item_id, directory)`` copies the task directory ``directory``, named ``item_id``, into
+      the owner's task file partition and gives the task item ``item_id`` its digest. The item keeps its ID,
+      sequence and metadata. When the digest changes, each use of the item gets a new use sequence, so a trainer
+      reads the task again; the same files change nothing. It returns the item without content. An unknown ID is an
+      ``ItemNotFound``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
+      changes. The files of the old digest stay, so a reader that opened them can go on.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
     * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
       the record items that it made, and returns their number. It also ends the scenario's generation. The archive
@@ -575,6 +583,7 @@ class DataStore(Plugin, ABC):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]: ...
 
     @abstractmethod
@@ -621,6 +630,9 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem: ...
 
     @abstractmethod
     def delete(self, owner: str, item_id: str) -> bool: ...
@@ -757,11 +769,14 @@ def check_query(
     request_type: object = None,
     group: object = None,
     benchmark: object = None,
+    id_prefix: object = None,
 ) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
     check_filters(owner, kind, scenario, origin, request_type, after)
     if benchmark is not None and (not isinstance(benchmark, str) or not benchmark):
         raise ValueError("benchmark must be a non-empty benchmark name")
+    if id_prefix is not None and (not isinstance(id_prefix, str) or not id_prefix):
+        raise ValueError("id_prefix must be a non-empty string")
     if group is not None:
         if not isinstance(group, tuple) or len(group) != 2:
             raise ValueError("group must be a pair (key, value)")
@@ -812,6 +827,17 @@ def item_digest_matches(item: StoredItem, digest: str) -> bool:
     (``ItemKindRules.matches_stored``), so a retry never rewrites an immutable item.
     """
     return item.digest == digest or ITEM_KIND_RULES[item.metadata["kind"]].matches_stored(item.content, digest)
+
+
+def replaced_task_digest(owner: str, item: StoredItem, directory: Path, task_files: TaskFileStore) -> str:
+    """The digest of the task directory ``directory`` that ``replace_task`` gives the stored ``item``, after it copied
+    the directory into the owner's task file partition. Raise ``ValueError`` unless ``item`` is a task item and
+    ``directory`` is a directory named after it."""
+    if item.metadata["kind"] != "task":
+        raise ValueError(
+            f"item {item.item_id!r} is a {item.metadata['kind']} item; only a task's files can be replaced"
+        )
+    return ITEM_KIND_RULES["task"].stored_digest(owner, item.item_id, directory, item.metadata, task_files)
 
 
 def prepared_items(
@@ -958,6 +984,7 @@ class MemoryDataStore(DataStore):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
             owner,
@@ -969,6 +996,7 @@ class MemoryDataStore(DataStore):
             request_type=request_type,
             group=group,
             benchmark=benchmark,
+            id_prefix=id_prefix,
         )
         matched = sorted(
             (
@@ -976,6 +1004,7 @@ class MemoryDataStore(DataStore):
                 for item in self.matching(owner, kind, scenario, origin, request_type, after)
                 if (group is None or group_value(item.metadata, group[0]) == group[1])
                 and (benchmark is None or (item.kind == "task" and benchmark in item.metadata.get("benchmarks", ())))
+                and (id_prefix is None or item.item_id.startswith(id_prefix))
             ),
             key=lambda item: item.sequence,
         )
@@ -1099,6 +1128,20 @@ class MemoryDataStore(DataStore):
             stored[item.item_id] = item
             self.write_uses(owner, item.item_id, item.scenarios)
         return tuple(replace(item, content=None) for item in updated)
+
+    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        item = stored.get(item_id)
+        if item is None:
+            raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+        digest = replaced_task_digest(owner, item, directory, self.task_files)
+        if digest != item.digest:
+            item = replace(item, digest=digest)
+            stored[item_id] = item
+            for scenario, split in item.scenarios.items():
+                self.uses[(owner, item_id, scenario)] = (split, self.take_sequence())
+        return replace(item, content=None)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)

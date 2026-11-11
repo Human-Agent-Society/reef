@@ -44,7 +44,13 @@ from reef.storage.data import (
     item_digest_matches,
     record_source,
 )
-from reef.storage.item_kinds import copied_record, evaluation_call_id, evaluation_trajectory_id, record_digest
+from reef.storage.item_kinds import (
+    copied_record,
+    evaluation_call_id,
+    evaluation_rollout_id_prefix,
+    evaluation_trajectory_id,
+    record_digest,
+)
 from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
 
 #: The most record items that one ``used_records`` call reads.
@@ -170,10 +176,19 @@ def evaluation_trajectory_items(
 
 
 def evaluation_call_items(
-    data: DataStore, owner: str, scenario: str, evaluation_id: str, *, content: bool
+    data: DataStore,
+    owner: str,
+    scenario: str,
+    evaluation_id: str,
+    *,
+    content: bool,
+    rollout: tuple[int, int] | None = None,
 ) -> Iterator[StoredItem]:
     """The evaluation calls of evaluation ``evaluation_id`` of ``scenario``, in sequence order, a page at a time: one
-    query of the record items of ``scenario`` with that ``evaluation_id`` for each page."""
+    query of the record items of ``scenario`` with that ``evaluation_id`` for each page. With ``rollout``, a pair
+    ``(task_index, repeat)``, only the calls of that rollout: the query keeps only the IDs that start with the
+    rollout's (``evaluation_rollout_id_prefix``), so the store does not return the other calls of the evaluation."""
+    id_prefix = None if rollout is None else f"{scenario}/{evaluation_rollout_id_prefix(evaluation_id, *rollout)}"
     after = 0
     while page := data.query(
         owner,
@@ -182,6 +197,7 @@ def evaluation_call_items(
         group=("evaluation_id", evaluation_id),
         after=after,
         content=content,
+        id_prefix=id_prefix,
     ):
         yield from (item for item in page if record_source(item.metadata) == "evaluation")
         after = page[-1].sequence

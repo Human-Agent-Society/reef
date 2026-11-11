@@ -32,6 +32,7 @@ from reef.service.data import (
     parsed_metadata,
     query_items,
     read_item,
+    replace_task_item,
     update_items,
 )
 from reef.service.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
@@ -144,6 +145,26 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             receipt = await asyncio.to_thread(create_task_items, data, request.match_info["owner"], archive, metadata)
         return web.json_response(receipt, status=201)
 
+    async def replace_task(request: web.Request) -> web.Response:
+        """Replace a task item's files with the task directory of a tar.gz body (RFC #1359)."""
+        if request.content_type not in TASK_ARCHIVE_TYPES:
+            raise web.HTTPUnsupportedMediaType(
+                text="a task's files come as a tar.gz archive with Content-Type application/gzip"
+            )
+        with tempfile.TemporaryDirectory(prefix="reef-task-archive-") as work:
+            archive = Path(work) / "task.tar.gz"
+            size = 0
+            with archive.open("wb") as file:
+                async for chunk in request.content.iter_chunked(CHUNK_BYTES):
+                    size += len(chunk)
+                    if size > MAX_UNPACKED_BYTES:
+                        raise web.HTTPRequestEntityTooLarge(max_size=MAX_UNPACKED_BYTES, actual_size=size)
+                    file.write(chunk)
+            receipt = await asyncio.to_thread(
+                replace_task_item, data, request.match_info["owner"], request.match_info["item_id"], archive
+            )
+        return web.json_response(receipt)
+
     async def query(request: web.Request) -> web.Response:
         content = query_int(request, "content", 0)
         if content not in (0, 1):
@@ -219,6 +240,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     app.router.add_get(base, query)
     app.router.add_post(f"{base}/trajectories", create_trajectories)
     app.router.add_post(f"{base}/tasks", create_tasks)
+    app.router.add_put(f"{base}/tasks/{{item_id}}", replace_task)
     app.router.add_post(f"{base}/metadata", update)
     # These come before the item routes, whose ID takes the rest of the path.
     app.router.add_post(f"{base}/{transfers}", start)

@@ -151,8 +151,13 @@ The weights are integers from 0 to 100 that sum to 100. Afterwards the scenario 
    * - Stop an artifact
      - ``{"a": 100}``
      - Reef stops serving ``b``.
+   * - Serve nothing
+     - ``{}``
+     - Reef stops every engine route of the scenario. Its inference requests answer HTTP 404.
 
 Each ID is any row of the artifact list. Leave out ``component`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` beside ``served``, and an unknown component is HTTP 400. The answer contains ``scenario`` and the ``served`` mapping. ``GET /reef/scenarios/{scenario}/settings`` returns ``served`` for each component.
+
+An empty mapping, ``{"served": {}}`` without ``component``, makes the whole scenario serve nothing. Reef then starts no engine for it, and training still runs. ``POST /reef/scenarios`` with ``"serves": false`` creates a scenario in this state. The scenario serves again when ``served`` names an artifact (`Serve nothing <../reference/http-api.rst#serve-nothing>`__).
 
 The response accepts the mapping. Inference then loads the artifacts in the background. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using a new active artifact. Repeating the request retries a failed startup at once.
 

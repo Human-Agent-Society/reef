@@ -142,7 +142,8 @@ class WorkItem:
 
     @property
     def final(self) -> bool:
-        """Whether the item finished or failed, after which only its ``metadata`` changes."""
+        """Whether the item finished or failed. After that only its ``metadata`` changes, until its producer queues
+        it again (``WorkQueue.retry``)."""
         return self.state in FINAL_STATES
 
 
@@ -223,7 +224,8 @@ class WorkQueue(ABC):
 
     Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish,
     fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``)
-    and record facts about it (``set_metadata``); control deletes old final items (``delete_final``).
+    and record facts about it (``set_metadata``); a producer queues a final item again (``retry``); control deletes
+    old final items (``delete_final``).
     """
 
     def __init__(
@@ -356,6 +358,17 @@ class WorkQueue(ABC):
         """Make an item that is not final ``failed`` with ``error``, ended now, for the producer that added it. A
         worker that held it gets ``WorkLeaseLost`` at its next call and stops. Return the item, or None when it does
         not exist; a final item does not change."""
+
+    @abstractmethod
+    def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
+        """Make a final item ``queued`` again, for the producer that added it, so that a worker takes it once more.
+
+        The item keeps its payload, its progress, its metadata, its ``started_at`` and its attempt counts. It loses
+        its result and its ``ended_at``, keeps the error of a failed item as its last error, and is available at
+        ``now``. A worker can take it whatever its ``attempt_count`` is, so the item gets at least one more attempt;
+        a retryable failure of that attempt queues it again only while ``has_attempts_left``. Return the item, or
+        None when it does not exist; an item that is not final does not change.
+        """
 
     @abstractmethod
     def set_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:

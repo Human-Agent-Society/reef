@@ -56,10 +56,15 @@ class Scenario:
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
         training_requests: ScenarioTrainingRequests | None = None,
+        record2sample_config: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         #: The scenario's training requests; None for a scenario built without a training request queue, which takes
         #: no request.
         self.training_requests = training_requests
+        #: The scenario's ``ScenarioSettings.record2sample_config`` that its trainers were built with.
+        self.record2sample_config: Mapping[str, Mapping[str, Any]] = (
+            {} if record2sample_config is None else record2sample_config
+        )
         self.operations = OperationMetrics(
             ("ingest/write", "serve/request"),
             counters=(
@@ -74,6 +79,7 @@ class Scenario:
         self._binding = binding
         self._components = binding.components
         self._serving_config = ServingConfig()
+        self._serves = True
         self._store = store
         self._closed = False
         #: The newest step that each trainer has read (``Trainer.read_commits``), by component; the step that this
@@ -150,6 +156,16 @@ class Scenario:
         gives, and then the scenario keeps its config."""
         self.effective_serving_config(config)
         self._serving_config = config
+
+    @property
+    def serves(self) -> bool:
+        """Whether control asks inference to serve this scenario (``ScenarioSettings.serves``). When it is false,
+        the scenario serves nothing: it keeps its active selection, and no artifact answers its requests."""
+        return self._serves
+
+    def set_serves(self, serves: bool) -> None:
+        """Make ``serves`` the scenario's ``serves`` from the next serving request on."""
+        self._serves = serves
 
     def served_serving_config(self) -> dict[str, JsonValue]:
         """The override that a serving request carries to inference: the one of the served component."""
@@ -280,10 +296,12 @@ class Scenario:
 
     def selection_serves(self) -> bool:
         """Whether the artifact that the scenario selected answers its requests now. True for a scenario that loads
-        no weights, since it serves one fixed model, and for one whose runtime answers no requests."""
+        no weights, since it serves one fixed model, for one whose runtime answers no requests, and for one that
+        serves nothing (``serves``), since no artifact answers its requests then."""
         runtime = self.runtime
         return not (
-            self._binding.components.loaded_component is not None
+            self._serves
+            and self._binding.components.loaded_component is not None
             and runtime is not None
             and runtime.serves_requests
             and self._binding.served_models is not None

@@ -118,8 +118,9 @@ class ServingWorker(QueueWorker):
     runtime, offers it the routes from before (``InferenceRuntime.adopt``), keeps the routes that it took over, and
     queues every completed selection again. ``owner`` is None before ownership. ``recovered`` becomes true after the
     recovery. ``opened`` becomes true after the runtime opens. ``activated`` maps each scenario to the artifact that
-    this worker activated for it last. A route that it kept from before is activated again once, so that the runtime
-    takes over what it adopted.
+    this worker activated for it last, until the worker stops the endpoint that serves that artifact for the scenario:
+    a serving request for the artifact in ``activated`` loads nothing. A route that it kept from before is activated
+    again once, so that the runtime takes over what it adopted.
     """
 
     def __init__(
@@ -252,7 +253,15 @@ class ServingWorker(QueueWorker):
                 for stop in self.routes.due_stops(time.time())
             )
             if due and not self.routes.is_referenced(served):
+                # A scenario that this endpoint served must activate the same artifact again to serve it again.
+                stopped_scenarios = [
+                    scenario
+                    for scenario, artifact_id in list(self.activated.items())
+                    if artifact_id == served.artifact_id and runtime.served_artifact(artifact_id, scenario) == served
+                ]
                 runtime.stop_serving(served)
+                for scenario in stopped_scenarios:
+                    self.activated.pop(scenario, None)
                 logger.info("stopped serving artifact %s at %s", served.artifact_id, served.url)
             return {}
         if item.kind == SERVE_ARTIFACT_KIND:

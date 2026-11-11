@@ -28,6 +28,7 @@ from reef.harness.harbor.rollouts import (
     TaskRolloutError,
     TaskRolloutRunner,
     bound_agent,
+    environment_config,
     main,
     rewards_of,
     rollout_reward,
@@ -456,6 +457,26 @@ def test_only_a_modal_compose_task_with_no_gpu_runs_on_the_vm_runtime(
     assert [call["overrides"]["environment"] for call in lab.calls] == [config, config]
 
 
+@pytest.mark.parametrize(
+    ("task_toml", "kwargs"),
+    [
+        ("[agent]\ntimeout_sec = 28800.0\n", {"sandbox_timeout_secs": 600 + 28800 + 600 + 3600}),
+        (
+            "[agent]\ntimeout_sec = 900\n[verifier]\ntimeout_sec = 1200\n[environment]\nbuild_timeout_sec = 300\n",
+            {"sandbox_timeout_secs": 300 + 900 + 1200 + 3600},
+        ),
+        ("[agent]\ntimeout_sec = 86400\n", {"sandbox_timeout_secs": 86400}),
+        ("[verifier]\ntimeout_sec = 1200\n", None),
+    ],
+    ids=["agent-limit", "all-limits", "one-day-at-most", "no-agent-limit"],
+)
+def test_a_modal_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, task_toml: str, kwargs) -> None:
+    (tmp_path / "task.toml").write_text(task_toml)
+    expected = {"type": "modal"} if kwargs is None else {"type": "modal", "kwargs": kwargs}
+    assert environment_config("modal", tmp_path) == expected
+    assert environment_config("e2b", tmp_path) == {"type": "e2b"}
+
+
 def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None:
     paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2")]
     lab = TemplateLab()
@@ -615,6 +636,21 @@ def test_refused_model_calls_are_named_in_the_error_whether_or_not_the_rollout_i
     assert ran.as_line()["failed_calls"] == 2
     assert unrecorded_ran.turns == () and unrecorded_ran.failed_calls == 2
     assert unrecorded_ran.error.startswith("2 model calls failed; the first answered 401")
+
+
+def test_an_agent_that_ends_before_its_first_call_is_named_with_its_exit_code_and_output(tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    trial = tmp_path / "trial"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "agent" / "command.json").write_text(json.dumps({"exit_code": 137, "stdout": "", "stderr": "Killed\n"}))
+    with contextlib.closing(StandInReef()) as reef:
+        ended = runner(reef, tmp_path, StandInLab({"reward": 0.0}, turns=0, trial_uri=trial.as_uri())).run(task_path)
+        # A trial that left no command file keeps the error it had: none.
+        silent = runner(reef, tmp_path, StandInLab({"reward": 0.0}, turns=0, trial_uri=tmp_path.as_uri())).run(
+            task_path
+        )
+    assert ended.error == "the agent made no model call: its command exited 137: Killed"
+    assert silent.error == ""
 
 
 class ObservedCalls(CaptureObserver):
