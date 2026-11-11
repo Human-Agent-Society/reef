@@ -113,13 +113,17 @@ How Reef runs an agent
        session log, and removes the root.
      - ``dirs``, ``model``, ``run.task``, ``sessions``
    * - Harbor task
-     - Starts the task's container, installs the pinned agent with npm, uv,
-       or from its git checkout into a venv, copies in the tree, runs ``run.task`` with the instruction, and
-       scores the tests' reward. For an npm agent, Reef downloads Node on its own host
-       (from ``nodejs.org``) and uploads it into a glibc container, so the
-       container needs no ``curl``; a musl container uses the Node of its
-       packages. Reef downloads uv the same way (a static build from
-       ``github.com/astral-sh/uv``) and uploads it into any container. A task that sets ``environment.skills_dir``
+     - Starts the task's container, puts the pinned agent in it, copies in the
+       tree, runs ``run.task`` with the instruction, and scores the tests'
+       reward. Reef prepares an npm agent on its own host: npm installs the
+       package there for the container's CPU and C library, and Reef keeps the
+       result in ``~/.cache/reef/agents`` and uploads it. The container unpacks
+       it under ``/opt/reef`` and reaches no package registry, so a task can
+       break its network or keep the user's home small. Reef also uploads
+       Node (from ``nodejs.org``) into a glibc container; a musl container
+       uses the Node of its packages. Reef uploads uv the same way (a static
+       build from ``github.com/astral-sh/uv``); a git agent installs from its
+       checkout into a venv in the container. A task that sets ``environment.skills_dir``
        needs an adapter with ``run.task.skills``: Reef copies the task's
        skills there before the tree, so the tree's file wins on one path. A
        task that sets ``environment.mcp_servers`` needs an adapter with

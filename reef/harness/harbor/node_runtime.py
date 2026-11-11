@@ -1,10 +1,13 @@
-"""The Node.js that Reef gives an npm agent in a glibc task container.
+"""The Node.js that Reef gives an npm agent in a glibc task container, and the Node of the Reef host.
 
 Reef downloads one Node build on its own host, checks it, and uploads it into
 the container. The container then needs no download tool and no package
 manager for Node: a task can replace ``curl`` or hold an old glibc, and the
-agent still installs. A musl image takes the Node of its own packages
+agent still runs. A musl image takes the Node of its own packages
 (``reef.harness.harbor.agent``).
+
+The host's own build runs npm on the host, which installs an agent for a
+container's platform (``reef.harness.harbor.agent_bundle``).
 """
 
 from __future__ import annotations
@@ -13,8 +16,10 @@ import gzip
 import hashlib
 import lzma
 import os
+import platform
 import re
 import shutil
+import tarfile
 import tempfile
 import threading
 import urllib.error
@@ -59,9 +64,18 @@ class NodeBuild:
             raise ValueError("sha256 must be 64 lowercase hexadecimal digits")
 
 
-#: The builds by name. ``x64`` and ``arm64`` are nodejs.org's own. ``x64-glibc-217`` is the Node project's
-#: unofficial build for x64 systems with a glibc from 2.17, which the official x64 build does not run on.
+#: The builds by name. ``x64`` and ``arm64`` are nodejs.org's own for Linux. ``x64-glibc-217`` is the Node project's
+#: unofficial build for x64 Linux systems with a glibc from 2.17, which the official x64 build does not run on.
+#: ``darwin-arm64`` and ``darwin-x64`` are nodejs.org's own for a Reef host on macOS; no container gets them.
 NODE_BUILDS = {
+    "darwin-arm64": NodeBuild(
+        f"https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-darwin-arm64.tar.xz",
+        "037650d0839f457747396f052073fb48333d31bf5abd3c98b74da20d89ebb1ad",
+    ),
+    "darwin-x64": NodeBuild(
+        f"https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-darwin-x64.tar.xz",
+        "f42abca7aaac61efc57d49fb42ea84fc53bbeba9a749cb03a291ce6e4e7a69c1",
+    ),
     "x64": NodeBuild(
         f"https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-linux-x64.tar.xz",
         "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce",
@@ -102,6 +116,36 @@ def node_build_name(platform: str) -> str:
     raise NodeRuntimeError(f"Reef has no Node build for {architecture} with glibc {glibc[0]}.{glibc[1]}")
 
 
+def node_cpu(machine: str) -> str:
+    """npm's name, ``x64`` or ``arm64``, of the machine that ``uname -m`` names as ``machine``. ``NodeRuntimeError``
+    for another machine."""
+    cpu = MACHINES.get(machine.strip())
+    if cpu is None:
+        raise NodeRuntimeError(f"Reef has no Node build for a machine that reports {machine.strip()!r}")
+    return cpu
+
+
+def host_node(cache: Path) -> Path:
+    """The directory in ``cache`` with the Node of this host, unpacked on the first call: ``bin/node`` and
+    ``lib/node_modules/npm``. The official build of the host's system and machine. ``NodeRuntimeError`` for a
+    system other than Linux and macOS, another machine, or a download that fails."""
+    cpu = node_cpu(platform.machine())
+    system = platform.system()
+    if system not in ("Linux", "Darwin"):
+        raise NodeRuntimeError(f"Reef has no Node build for a {system} host")
+    name = cpu if system == "Linux" else f"darwin-{cpu}"
+    archive = node_archive(name, cache)
+    directory = cache / f"host-{NODE_VERSION}-{name}"
+    with download_lock:
+        if not directory.is_dir():
+            with tempfile.TemporaryDirectory(prefix="node-host-", dir=cache) as work:
+                with tarfile.open(archive, "r:gz") as tar:
+                    tar.extractall(work, filter="tar")
+                (unpacked,) = Path(work).iterdir()
+                unpacked.replace(directory)
+    return directory
+
+
 def node_cache_directory() -> Path:
     """The directory on this host that keeps the downloaded builds: ``reef/node`` under the user's cache."""
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "reef" / "node"
@@ -115,7 +159,8 @@ def node_archive(name: str, cache: Path) -> Path:
     no archive is kept then.
     """
     build = NODE_BUILDS[name]
-    archive = cache / f"node-{NODE_VERSION}-linux-{name}.tar.gz"
+    system = "" if name.startswith("darwin-") else "linux-"
+    archive = cache / f"node-{NODE_VERSION}-{system}{name}.tar.gz"
     with download_lock:
         if archive.is_file():
             return archive
@@ -147,7 +192,9 @@ __all__ = [
     "PLATFORM_COMMAND",
     "NodeBuild",
     "NodeRuntimeError",
+    "host_node",
     "node_archive",
     "node_build_name",
     "node_cache_directory",
+    "node_cpu",
 ]
