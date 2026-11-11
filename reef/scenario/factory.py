@@ -481,8 +481,8 @@ class ScenarioFactory:
                 source_artifacts=training_artifacts,
                 run_segment=store.training_run_position()[0] if store.durable else 0,
             )
-            # The scenario's own record-to-sample keys (RFC #1362). The instance keeps them, so that a process that loaded the
-            # scenario can see that control changed them (``Scenario.record2sample_config``).
+            # The scenario's own record-to-sample keys (RFC #1362). The instance keeps them, so that a process that
+            # loaded the scenario can see that control changed them (``Scenario.record2sample_config``).
             record2sample_config = self._storage.read_settings(name).record2sample_config
             trainers = self._recipe.for_record2sample_configs(components, record2sample_config).build_trainers(
                 name,
