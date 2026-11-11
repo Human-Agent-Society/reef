@@ -45,6 +45,7 @@ from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.scenario_files import artifact_directory
+from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
@@ -287,6 +288,7 @@ def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_th
     current = SimpleNamespace(
         trainers=(SimpleNamespace(component="weights", trainer=trainer),),
         produce_samples=lambda component, selection: made.append(component) or False,
+        record2sample_config={},
     )
     loads: list[tuple[str, object]] = []
 
@@ -294,6 +296,9 @@ def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_th
         def get_or_create(self, scenario: str, *, allow_implicit_creation: bool) -> SimpleNamespace:
             loads.append((scenario, allow_implicit_creation))
             return current
+
+        def stored_settings(self, scenario: str) -> ScenarioSettings:
+            return ScenarioSettings()
 
     assert LocalSampleProducers(Registry(), None).produce("math", "weights", Quiet("t")) is False
     assert made == ["weights"] and loads == [("math", False)]

@@ -347,6 +347,21 @@ class CompositeRecipe(Recipe):
             specs[component] = served if checks is served.validator else replace(served, validator=checks)
         return ScenarioComponents(specs)
 
+    def for_record2sample_configs(
+        self, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
+    ) -> CompositeRecipe:
+        """This composite with the recipe of each component that ``configs`` names given those keys over its
+        record-to-sample config (``Recipe.with_record2sample_config``)."""
+        if not configs:
+            return self
+        return replace(
+            self,
+            components={
+                component: recipe.with_record2sample_config(configs.get(component, {}))
+                for component, recipe in self.components.items()
+            },
+        )
+
     def build_trainers(
         self,
         scenario: str,

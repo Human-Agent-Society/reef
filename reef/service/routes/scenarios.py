@@ -158,10 +158,19 @@ def register_scenario_writes(
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        settings = {"training_mode", "artifact_evaluation", "activation", "serving_config", "served", "component"}
+        settings = {
+            "training_mode",
+            "artifact_evaluation",
+            "activation",
+            "serving_config",
+            "served",
+            "component",
+            "record2sample_config",
+        }
         if not payload or set(payload) - settings:
             raise ValueError(
-                "expected training_mode, artifact_evaluation, activation, serving_config or served settings"
+                "expected training_mode, artifact_evaluation, activation, serving_config, served or "
+                "record2sample_config settings"
             )
         component = payload.get("component")
         if "component" in payload and ("served" not in payload or not isinstance(component, str) or not component):
@@ -182,6 +191,12 @@ def register_scenario_writes(
         if "serving_config" in payload:
             result.update(
                 await asyncio.to_thread(request_service.dispatcher.set_serving_config, name, payload["serving_config"])
+            )
+        if "record2sample_config" in payload:
+            result.update(
+                await asyncio.to_thread(
+                    request_service.dispatcher.set_record2sample_config, name, payload["record2sample_config"]
+                )
             )
         if "served" in payload:
             if not isinstance(payload["served"], dict):

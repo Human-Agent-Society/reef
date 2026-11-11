@@ -535,8 +535,12 @@ class Dispatcher(
     def archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
+        configs = self.storage.read_settings(scenario).record2sample_config
+        recipe = self.recipe.for_record2sample_configs(self.recipe.scenario_components(scenario), configs)
+        directories = recipe.scenario_state_dirs(scenario)
         moved = list(self.registry.archive_store(scenario))
-        for directory in self.recipe.scenario_state_dirs(scenario):
+        for directory in directories:
             if directory.exists():
                 destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1033,6 +1037,15 @@ class Dispatcher(
                 "effective_serving_config": current.effective_serving_config(current.serving_config),
             }
 
+    def set_record2sample_config(self, scenario: str, config: object) -> dict[str, Any]:
+        """Store ``config`` as the scenario's ``record2sample_config`` and load the scenario again with it
+        (``ScenarioRegistry.set_record2sample_config``). Return the stored setting. Raise ``ValueError`` for a
+        config that is not an object of objects by component, or that the registry refuses."""
+        if not isinstance(config, Mapping):
+            raise ValueError("record2sample_config must map component names to objects")
+        current = self.registry.set_record2sample_config(scenario, config)
+        return {"record2sample_config": current.record2sample_config}
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self.registry.stored_settings(scenario)
@@ -1047,9 +1060,11 @@ class Dispatcher(
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
         with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
         after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
-        a load does. ``served`` is what the scenario serves, by component (``served_mapping``). ``job_parameters`` are the recipe's parameters of a training job by the kind of its samples
-        (``PipelineContext.job_parameters``), which a request's ``parameters`` merge into; a kind that the
-        recipe gives none is left out. Raise ``UnknownScenario`` for an unknown scenario.
+        a load does. ``served`` is what the scenario serves, by component (``served_mapping``).
+        ``record2sample_config`` is the stored ``ScenarioSettings.record2sample_config``. ``job_parameters`` are the
+        recipe's parameters of a training job by the kind of its samples (``PipelineContext.job_parameters``), which a
+        request's ``parameters`` merge into; a kind that the recipe gives none is left out. Raise ``UnknownScenario``
+        for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
@@ -1069,6 +1084,7 @@ class Dispatcher(
                 "serving_config": settings.serving_config.to_json(),
                 "effective_serving_config": effective_serving,
                 "served": self.served_mapping(current),
+                "record2sample_config": settings.record2sample_config,
                 "job_parameters": {kind: dict(parameters) for kind, parameters in job_parameters.items()},
             }
 

@@ -2,8 +2,8 @@
 
 ``LocalSampleProducers`` makes the samples of a trainer of a scenario with this process's copy of the scenario. When
 the process runs control, it uses the loaded scenario and then wakes the trainer's worker, which builds the next job
-from the sample store. When control runs in another process, it loads the scenario on demand, and control learns of
-the samples from the samples queue.
+from the sample store. When control runs in another process, it loads the scenario on demand, and loads it again when
+control changed the scenario's ``record2sample_config``. Control learns of the samples from the samples queue.
 """
 
 from __future__ import annotations
@@ -31,6 +31,11 @@ class LocalSampleProducers(SampleProducers):
             current = self.registry.get_loaded(scenario)
         else:
             current = self.registry.get_or_create(scenario, allow_implicit_creation=False)
+            if current is not None:
+                stored = self.registry.stored_settings(scenario).record2sample_config
+                if stored != current.record2sample_config:
+                    # Control changed the stages' config after this process loaded the scenario.
+                    current = self.registry.reload(scenario)
         if current is None:
             # Control asks again when the scenario loads; a scenario that does not exist has no samples.
             return ProducedSamples(changed=False, background=False)
