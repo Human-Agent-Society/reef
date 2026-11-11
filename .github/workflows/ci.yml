@@ -142,8 +142,24 @@ jobs:
       # jail's loopback setup needs; lifting it is what makes the jail nest.
       # The sandbox suite requires the preflight to succeed; local runs can
       # still skip with its reason when the host cannot provide a nested jail.
+      # Keep the package file in the cache, so that a run does not need the Ubuntu
+      # archive, whose host names sometimes do not resolve on the runner. The
+      # runner image already has the libraries that bubblewrap depends on.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/bubblewrap-package
+          key: bubblewrap-package-${{ runner.os }}-${{ runner.arch }}-${{ matrix.suite == 'sandbox' && 'ubuntu-24.04' || 'blacksmith-ubuntu-2404' }}
       - run: |
-          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          if ! ls "$HOME"/bubblewrap-package/bubblewrap_*.deb >/dev/null 2>&1; then
+            # A mirror on another domain serves the same signed packages when the archive's name does not resolve.
+            if ! getent hosts azure.archive.ubuntu.com >/dev/null; then
+              printf 'http://mirrors.kernel.org/ubuntu/\tpriority:1\n' | sudo tee /etc/apt/apt-mirrors.txt
+            fi
+            sudo apt-get update -q
+            mkdir -p "$HOME/bubblewrap-package"
+            (cd "$HOME/bubblewrap-package" && apt-get download -q bubblewrap)
+          fi
+          sudo dpkg -i "$HOME"/bubblewrap-package/bubblewrap_*.deb
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
