@@ -14,7 +14,7 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
 )
-from reef.storage.evaluations import EvaluationStateConflict, StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflictError, StoredEvaluation
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -86,9 +86,9 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
         assert [item.evaluation_id for item in evaluations.newest()] == ["e2", "e1"]
         assert [item.evaluation_id for item in evaluations.newest(limit=1)] == ["e2"]
         assert evaluations.read("missing") is None and other.evaluations.newest() == ()
-        with pytest.raises(EvaluationStateConflict):
+        with pytest.raises(EvaluationStateConflictError):
             evaluations.fail("e1", error="again", finished_at=30.0)
-        with pytest.raises(EvaluationStateConflict):
+        with pytest.raises(EvaluationStateConflictError):
             evaluations.finish("missing", result=RESULT, finished_at=30.0)
         with pytest.raises(ValueError, match="stored already"):
             evaluations.create(evaluation_id="e1", owner="service-a", request=REQUEST, created_at=40.0)
@@ -96,10 +96,10 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
             evaluation_id="q1", owner="service-a", request=REQUEST, created_at=30.0, state="queued"
         )
         assert queued.state == "queued" and queued.finished_at is None
-        with pytest.raises(EvaluationStateConflict):
+        with pytest.raises(EvaluationStateConflictError):
             evaluations.finish("q1", result=RESULT, finished_at=31.0)
         assert evaluations.begin("q1").state == "running"
-        with pytest.raises(EvaluationStateConflict):
+        with pytest.raises(EvaluationStateConflictError):
             evaluations.begin("q1")
         evaluations.create(evaluation_id="q2", owner="service-a", request=REQUEST, created_at=32.0, state="queued")
         assert evaluations.fail("q2", error="the service stopped", finished_at=33.0).state == "failed"
@@ -114,7 +114,7 @@ def test_an_ended_evaluation_reopens_and_ends_again(storage):
     with closing(storage.open("math")) as session:
         evaluations = session.evaluations
         evaluations.create(evaluation_id="e1", owner="service-a", request=REQUEST, created_at=10.0)
-        with pytest.raises(EvaluationStateConflict):
+        with pytest.raises(EvaluationStateConflictError):
             evaluations.reopen("e1")
         evaluations.finish("e1", result=RESULT, finished_at=15.0)
         reopened = evaluations.reopen("e1")
@@ -123,7 +123,7 @@ def test_an_ended_evaluation_reopens_and_ends_again(storage):
         assert evaluations.fail("e1", error="too many rollouts failed", finished_at=20.0).state == "failed"
         assert evaluations.reopen("e1").error is None
         assert evaluations.finish("e1", result=RESULT, finished_at=30.0).finished_at == 30.0
-        with pytest.raises(EvaluationStateConflict):
+        with pytest.raises(EvaluationStateConflictError):
             evaluations.reopen("missing")
 
 

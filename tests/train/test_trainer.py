@@ -29,7 +29,7 @@ from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTT
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
-from reef.core.errors import TrainingStartRefused
+from reef.core.errors import TrainingStartRefusedError
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
@@ -526,12 +526,14 @@ class _RefusingRoots(RecordingComponent):
 @pytest.mark.unit
 def test_a_new_trainer_starts_from_its_root_and_a_refused_root_refuses_the_trainer() -> None:
     """A trainer without committed state starts at the component's start of its scenario's root; it needs the root,
-    and a root that the component cannot start from is a ``TrainingStartRefused`` that names the root."""
+    and a root that the component cannot start from is a ``TrainingStartRefusedError`` that names the root."""
     trainer = preparing_trainer(memory_records("math"))
     assert JobLoopState.from_dict(trainer.state).start == "recording:base"
     with pytest.raises(ValueError, match="starts from the scenario's root: give root"):
         preparing_trainer(memory_records("math"), root=None)
-    with pytest.raises(TrainingStartRefused, match=r"from its root snapshot local:.*: the root holds other weights"):
+    with pytest.raises(
+        TrainingStartRefusedError, match=r"from its root snapshot local:.*: the root holds other weights"
+    ):
         preparing_trainer(memory_records("math"), job_loop=JobLoop(_RefusingRoots(), scenario="math"))
     # Committed state wins: the root is not read.
     committed = JobLoopState("committed").to_dict()

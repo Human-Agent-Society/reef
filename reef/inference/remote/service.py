@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import tarfile
 import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Self
 from urllib.parse import quote, urlencode
 
 from reef.core.weight_layout import WeightFiles
@@ -183,6 +184,24 @@ class RemoteInferenceService(InferenceService):
         self.started = False
         self.closed = False
         self.instance: str | None = None
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Self:
+        """Build the service from a training deployment's inference input.
+
+        ``config`` has ``remote`` (the ``inference.remote`` section), ``engine``
+        (the ``inference.backend`` name), ``engine_config`` (that backend's own
+        input) and ``num_gpus``. The control token is read from this process's
+        environment.
+        """
+        settings = RemoteInferenceSettings.from_mapping(config["remote"])
+        return cls(
+            settings,
+            engine=config["engine"],
+            engine_config=config["engine_config"],
+            num_gpus=config["num_gpus"],
+            control_token=settings.token(settings.control_token_env, os.environ),
+        )
 
     def attach(self) -> InferenceConnection | None:
         """Take over the engines that the component runs, without a restart, so requests in flight go on; None

@@ -93,7 +93,7 @@ class CommittedArtifacts(ABC):
 
     @abstractmethod
     def artifact(self, artifact_id: str, component: str) -> ArtifactTextFiles:
-        """Return a committed component artifact; raise ``ArtifactNotFound`` when its ID is unknown."""
+        """Return a committed component artifact; raise ``ArtifactNotFoundError`` when its ID is unknown."""
 
 
 @dataclass(frozen=True)

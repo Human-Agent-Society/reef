@@ -22,7 +22,7 @@ from reef.storage.tasks import (
     LocalTaskFileStore,
     StoredTask,
     TaskCandidate,
-    TaskConflict,
+    TaskConflictError,
     TaskStoreError,
     files_digest,
 )
@@ -142,7 +142,7 @@ def test_conflicting_generation_writes_are_refused(session, tmp_path):
 
     store.publish_task(generation=0, index=0, split="train")
     store.reject_task(generation=0, index=1, reason="invalid")
-    with pytest.raises(TaskConflict, match="published to train, not eval"):
+    with pytest.raises(TaskConflictError, match="published to train, not eval"):
         store.publish_task(generation=0, index=0, split="eval")
     with pytest.raises(TaskStoreError, match="is published"):
         store.reject_task(generation=0, index=0, reason="invalid")
@@ -165,10 +165,10 @@ def test_a_task_name_is_published_once(session, tmp_path):
         ),
     )
 
-    with pytest.raises(TaskConflict, match="published to eval, not train"):
+    with pytest.raises(TaskConflictError, match="published to eval, not train"):
         store.publish_task(generation=1, index=0, split="train")
     assert store.publish_task(generation=1, index=1, split="eval") == first
-    with pytest.raises(TaskConflict, match="published with other files"):
+    with pytest.raises(TaskConflictError, match="published with other files"):
         store.publish_task(generation=1, index=2, split="eval")
     assert store.tasks() == (first,)
 

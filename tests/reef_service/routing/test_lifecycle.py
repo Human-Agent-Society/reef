@@ -67,7 +67,7 @@ from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingSnapshot
 from reef.storage.record_items import ItemRecordStore
-from reef.storage.records import AppendResult, RecordConflict
+from reef.storage.records import AppendResult, RecordConflictError
 
 pytestmark = pytest.mark.unit
 
@@ -307,7 +307,7 @@ def test_unexpected_stream_error_does_not_send_a_successful_terminal_response() 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("failure", [ValueError, RecordConflict, RuntimeError])
+@pytest.mark.parametrize("failure", [ValueError, RecordConflictError, RuntimeError])
 def test_a_record_failure_after_stream_headers_never_writes_a_second_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[Exception]
 ) -> None:

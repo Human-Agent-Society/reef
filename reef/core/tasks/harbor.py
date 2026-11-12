@@ -84,7 +84,7 @@ class HarborTaskError(ReefError):
     """A task spec or task directory that Harbor could not run."""
 
 
-class HarborTaskConflict(HarborTaskError):
+class HarborTaskConflictError(HarborTaskError):
     """The target directory already holds a different task under the same name."""
 
 
@@ -512,8 +512,8 @@ def require_same_task(task: HarborTask, target: Path) -> None:
             raise HarborTaskError(f"{target} is not a directory")
         existing = read_harbor_task(target)
     except HarborTaskError as exc:
-        raise HarborTaskConflict(f"{target} exists and is not a task reef wrote: {exc}") from exc
+        raise HarborTaskConflictError(f"{target} exists and is not a task reef wrote: {exc}") from exc
     except OSError as exc:
-        raise HarborTaskConflict(f"{target} exists and cannot be read: {exc}") from exc
+        raise HarborTaskConflictError(f"{target} exists and cannot be read: {exc}") from exc
     if existing.digest != task.digest:
-        raise HarborTaskConflict(f"{target} already holds a different task with the same name")
+        raise HarborTaskConflictError(f"{target} already holds a different task with the same name")

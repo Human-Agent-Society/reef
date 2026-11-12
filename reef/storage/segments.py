@@ -23,7 +23,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings, Plugin
 
 
-class SegmentNotFound(ReefError):
+class SegmentNotFoundError(ReefError):
     """A segment that the store does not hold, or a range past its end."""
 
 
@@ -78,7 +78,7 @@ class SegmentStore(Plugin, ABC):
     * ``write(partition, segment_id, data)`` stores ``data``. The segment is durable when the method returns. The data
       store gives each segment a new ID, so it never writes one ID twice.
     * ``read(partition, lines)`` returns the bytes of each ``SegmentLine`` of ``lines``, in order, without the
-      newline. A missing segment or a line past its end is a ``SegmentNotFound``.
+      newline. A missing segment or a line past its end is a ``SegmentNotFoundError``.
     * ``delete(partition, segment_id)`` removes the segment. A missing segment is not an error.
 
     The store also keeps directories of files, such as the data directories of training jobs
@@ -198,9 +198,9 @@ class LocalSegmentStore(SegmentStore):
                     file.seek(line.offset)
                     data = file.read(line.length)
             except FileNotFoundError:
-                raise SegmentNotFound(f"no segment {line.segment_id!r} in partition {partition!r}") from None
+                raise SegmentNotFoundError(f"no segment {line.segment_id!r} in partition {partition!r}") from None
             if len(data) != line.length:
-                raise SegmentNotFound(f"segment {line.segment_id!r} ends before byte {line.offset + line.length}")
+                raise SegmentNotFoundError(f"segment {line.segment_id!r} ends before byte {line.offset + line.length}")
             found.append(data)
         return tuple(found)
 
@@ -243,7 +243,7 @@ class LocalSegmentStore(SegmentStore):
 __all__ = [
     "LocalSegmentStore",
     "SegmentLine",
-    "SegmentNotFound",
+    "SegmentNotFoundError",
     "SegmentPartition",
     "SegmentStore",
     "directory_key",

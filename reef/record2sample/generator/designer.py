@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from reef_client.client import ReefClient, ReefClientError
 
+from reef.core.errors import InternalError, ReefError
 from reef.core.prompts import untrusted_text
 from reef.core.tasks.harbor import HarborTaskError, checked_files
 from reef.record2sample.generator.inputs import (
@@ -44,11 +45,11 @@ SYSTEM_PROMPT = (
 )
 
 
-class DesignerReplyError(ValueError):
+class DesignerReplyError(ReefError, ValueError):
     """The designer's reply holds no usable task."""
 
 
-class DesignerError(RuntimeError):
+class DesignerError(InternalError, RuntimeError):
     """A designer call or report did not go through."""
 
 

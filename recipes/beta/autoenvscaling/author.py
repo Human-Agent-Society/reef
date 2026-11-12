@@ -34,7 +34,7 @@ from recipes.beta.reefine.agent import launch_pi, rendered_files
 from reef.core.prompts import untrusted_text
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import AgentGateway, AgentTool, refuse, relay
 from reef.harness.tasks.model_binding import ModelBinding
@@ -759,7 +759,7 @@ class AgentAuthor(VariantAuthor):
                 timeout=self.timeout_seconds,
             )
             ended = f"exited {outcome.exit_code}"
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             trajectory = []
         except ProgramLaunchError as exc:

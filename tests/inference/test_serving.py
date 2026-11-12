@@ -15,7 +15,12 @@ from reef.core.errors import ReefError
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.inference.deployment import InferenceService
 from reef.inference.interfaces import InferenceBackend, InferenceHandler, RuntimeContractError
-from reef.inference.residency import AdapterCapacityExhausted, AdapterResidencyError, adapter_name, parse_adapter_name
+from reef.inference.residency import (
+    AdapterCapacityExhaustedError,
+    AdapterResidencyError,
+    adapter_name,
+    parse_adapter_name,
+)
 from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime
 
 
@@ -98,6 +103,10 @@ class Service(InferenceService):
 
     def __init__(self) -> None:
         self.closed = 0
+
+    @classmethod
+    def from_config(cls, config):
+        raise AssertionError("unused")
 
     def start(self, resources):
         raise AssertionError("unused")
@@ -214,7 +223,7 @@ def test_a_scenario_replaces_its_own_adapter_but_never_evicts_another_scenarios(
     # Generation is paused during the load, so the scenario's current adapter makes room for its next one.
     second = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m2"), "m2"), scenario="math")
     assert ("unload", adapter_name("math", first)) in engines.events
-    with pytest.raises(AdapterCapacityExhausted, match="raise --max-loaded-loras"):
+    with pytest.raises(AdapterCapacityExhaustedError, match="raise --max-loaded-loras"):
         serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
     assert engines.events[-1] == "resume"
     assert serving.serving_adapter_runtime_load_id("math") == second

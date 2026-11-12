@@ -34,12 +34,12 @@ remain in this package.
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import Scenario, SnapshotNotRestorable
+from reef.scenario.scenario import Scenario, SnapshotNotRestorableError
 
 __all__ = [
     "Scenario",
     "ScenarioBinding",
     "ScenarioCommitter",
     "ScenarioRegistry",
-    "SnapshotNotRestorable",
+    "SnapshotNotRestorableError",
 ]

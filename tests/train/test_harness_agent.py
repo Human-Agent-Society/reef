@@ -23,7 +23,7 @@ from tests.support.harness_service import backend_step
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
-from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.execution.sandbox.remote import deployment_owner
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.recipe.errors import RecipeConfigError
@@ -228,7 +228,7 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     monkeypatch.undo()
 
     def unavailable(self) -> None:
-        raise SandboxUnavailable("no bwrap here")
+        raise SandboxUnavailableError("no bwrap here")
 
     monkeypatch.setattr(SandboxExecutor, "preflight", unavailable)
     # Unset on a host that cannot isolate: the agent is off and the served model answers in text.

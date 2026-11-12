@@ -57,7 +57,7 @@ from recipes.beta.reefine.trial import trial_script
 from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, ProgramTimeout
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import TreeLayout
@@ -454,7 +454,7 @@ class AgentRun:
                 return self.record_check(
                     "trial", {**result, "candidate": checksum, "seconds": round(time.monotonic() - started, 1)}
                 )
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             limit = f"the trial ran past its {timeout:g} s limit"
             self.services.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
             return self.record_check(
@@ -600,7 +600,7 @@ def answer_with_agent(
                     "maxTokens (Reef renders the model binding's max_output_tokens into it)"
                 )
             break
-    except ProgramTimeout:
+    except ProgramTimeoutError:
         record["timed_out"] = True
     except ProgramLaunchError as error:
         services.calls.note("agent", f"the coding agent run failed: {error}", failed=True)

@@ -31,12 +31,13 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from reef.core.errors import InternalError
 from reef.harness.runners.native.enforce import (
     Enforcer,
     InProcessEnforcer,
-    SandboxFailed,
+    SandboxFailedError,
     Tool,
-    ToolFailed,
+    ToolFailedError,
     select_enforcer,
 )
 from reef.harness.runners.native.graph import TurnLoop
@@ -77,7 +78,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 
-class LoadError(Exception):
+class LoadError(InternalError):
     """A rendered tool or hook module the loop cannot use; the run ends in error instead of running without it."""
 
 
@@ -782,9 +783,9 @@ def _invoke(
     started = time.monotonic()
     try:
         result = enforcer_for(tool, enforcer).run(tool, arguments, workdir)
-    except SandboxFailed as exc:
+    except SandboxFailedError as exc:
         return _error("SANDBOX_FAILED", str(exc), arguments)
-    except ToolFailed as exc:
+    except ToolFailedError as exc:
         return _error("TOOL_FAILED", str(exc), arguments)
     except Exception as exc:
         return _error("TOOL_FAILED", f"{type(exc).__name__}: {exc}", arguments)

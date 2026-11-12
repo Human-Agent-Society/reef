@@ -10,10 +10,10 @@ from tests.support.conversations import conversation
 
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.data import MemoryDataStore, ScenarioArchived
+from reef.storage.data import MemoryDataStore, ScenarioArchivedError
 from reef.storage.item_kinds import copied_record
 from reef.storage.record_items import ItemRecordStore, evaluation_call_item, record_item, used_record, used_records
-from reef.storage.records import AppendResult, RecordConflict
+from reef.storage.records import AppendResult, RecordConflictError
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -137,9 +137,9 @@ def test_a_scenario_reads_and_retries_its_records_as_record_items(item_records):
     retry = replace(original, created_at=456.0)
     assert item_records.append_result(retry) == AppendResult(original, False)
     assert item_records.existing_receipt(retry) == original
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.existing_receipt(replace(original, payload={"value": "changed"}))
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.append(replace(original, payload={"value": "changed"}))
     with pytest.raises(ValueError, match="scenario 'math'"):
         item_records.append(replace(original, scenario="code"))
@@ -166,7 +166,7 @@ def test_a_scenario_reads_and_retries_its_records_as_record_items(item_records):
 
 def test_a_batch_of_records_stores_all_or_none_and_a_repeat_is_a_retry(item_records):
     first, second = plain("first"), plain("second")
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.append_many([first, second, replace(first, payload={"changed": True})])
     assert item_records.count("math") == 0
     assert item_records.append_many([first, second, first]) == (
@@ -175,7 +175,7 @@ def test_a_batch_of_records_stores_all_or_none_and_a_repeat_is_a_retry(item_reco
         AppendResult(first, False),
     )
     assert item_records.append_many([replace(first, created_at=9.0)]) == (AppendResult(first, False),)
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.append_many([plain("third"), replace(first, payload={"changed": True})])
     assert item_records.read("math", "third") is None
 
@@ -186,7 +186,7 @@ def test_an_archive_ends_the_writes_of_the_open_records_and_the_loss_is_the_data
     assert data.prune_records(0) == 1
     assert item_records.loss("math").record_count == 1
     data.delete_scenario("acme", "math")
-    with pytest.raises(ScenarioArchived):
+    with pytest.raises(ScenarioArchivedError):
         item_records.append(plain("late"))
     assert item_records.replay("math") == ()
 

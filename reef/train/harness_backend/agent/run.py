@@ -27,7 +27,7 @@ from typing import Any, ClassVar
 from reef.core.errors import ReefError
 from reef.evaluation.harness.history import RUNS_DIR
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import AgentGateway, AgentTool
 from reef.harness.tasks.model_binding import ModelBinding
@@ -249,7 +249,7 @@ def run_agent(
                 # The executor copies the agent's files back, also after a time out.
                 run.session.close()
             outcome = AgentOutcome(process.exit_code, False, None, round(time.monotonic() - started, 1))
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             outcome = AgentOutcome(None, True, None, round(time.monotonic() - started, 1))
         except ProgramLaunchError as exc:
             outcome = AgentOutcome(None, False, str(exc), round(time.monotonic() - started, 1))

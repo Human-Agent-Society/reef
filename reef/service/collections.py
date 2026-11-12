@@ -12,7 +12,7 @@ from typing import Any
 
 from reef.service.data import DataAccess, update_items
 from reef.storage.data import MAX_QUERY_LIMIT, DataStore, check_owner
-from reef.storage.task_collections import CollectionNotFound, TaskCollection, collection_benchmarks
+from reef.storage.task_collections import CollectionNotFoundError, TaskCollection, collection_benchmarks
 
 
 def benchmark_tasks(store: DataStore, owner: str, benchmarks: Sequence[str]) -> dict[str, tuple[str, ...]]:
@@ -32,10 +32,10 @@ def benchmark_tasks(store: DataStore, owner: str, benchmarks: Sequence[str]) -> 
 
 def collection_tasks(store: DataStore, owner: str, name: str) -> tuple[TaskCollection, dict[str, tuple[str, ...]]]:
     """The collection ``name`` of ``owner``, and the tasks of each of its benchmarks (``collection_benchmarks``,
-    ``benchmark_tasks``); ``CollectionNotFound`` for an unknown name."""
+    ``benchmark_tasks``); ``CollectionNotFoundError`` for an unknown name."""
     stored = {collection.name: collection for collection in store.collections(owner)}
     if name not in stored:
-        raise CollectionNotFound(f"{owner!r} stores no collection {name!r}")
+        raise CollectionNotFoundError(f"{owner!r} stores no collection {name!r}")
     return stored[name], benchmark_tasks(store, owner, collection_benchmarks(stored, name))
 
 
@@ -65,7 +65,7 @@ def list_collections(data: DataAccess, owner: str) -> dict[str, Any]:
 
 
 def read_collection(data: DataAccess, owner: str, name: str) -> dict[str, Any]:
-    """The collection ``name`` of ``owner`` with its task counts; ``CollectionNotFound`` for an unknown name.
+    """The collection ``name`` of ``owner`` with its task counts; ``CollectionNotFoundError`` for an unknown name.
 
     ``benchmark_task_counts`` gives ``{benchmark, task_count}`` for each benchmark of the collection and of the
     collections under it. ``task_count`` counts each task once.
@@ -82,7 +82,7 @@ def read_collection(data: DataAccess, owner: str, name: str) -> dict[str, Any]:
 
 
 def delete_collection(data: DataAccess, owner: str, name: str) -> dict[str, Any]:
-    """Delete the collection ``name`` of ``owner``; no task item changes. ``CollectionNotFound`` if unknown.
+    """Delete the collection ``name`` of ``owner``; no task item changes. ``CollectionNotFoundError`` if unknown.
 
     Raise ``ValueError`` while another collection of ``owner`` names it.
     """
@@ -91,7 +91,7 @@ def delete_collection(data: DataAccess, owner: str, name: str) -> dict[str, Any]
     if users:
         raise ValueError(f"the collections {users} name the collection {name!r}")
     if not store.delete_collection(owner, name):
-        raise CollectionNotFound(f"{owner!r} stores no collection {name!r}")
+        raise CollectionNotFoundError(f"{owner!r} stores no collection {name!r}")
     return {"owner": owner, "name": name, "deleted": True}
 
 
@@ -100,7 +100,7 @@ def add_to_scenario(data: DataAccess, owner: str, name: str, body: Mapping[str, 
     ``{"scenario", "split"}``; return ``{owner, name, scenario, split, task_count, synced}``.
 
     The tasks get the metadata patch ``{"scenarios": {scenario: split}}``, at most ``MAX_QUERY_LIMIT`` in one
-    update, with the checks of ``update_items``. Raise ``CollectionNotFound`` for an unknown name, and
+    update, with the checks of ``update_items``. Raise ``CollectionNotFoundError`` for an unknown name, and
     ``ValueError`` for a collection without tasks.
     """
     scenario, split = body.get("scenario"), body.get("split")

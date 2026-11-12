@@ -57,7 +57,7 @@ inference:
     mem-fraction-static: "0.5"
     disable-prefill-cuda-graph: true
     cuda-graph-max-bs-decode: "128"
-  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-factory: reef.inference.sglang.chat:SGLangInferenceHandler
   handler-config:
     tool_call_parser: qwen3_coder
     # The bash agent pins temperature 1.0 and the completion budget on every

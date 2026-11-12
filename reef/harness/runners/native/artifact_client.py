@@ -16,11 +16,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
+from reef.core.errors import InternalError
+
 #: The poll backoff never waits longer than this between attempts.
 MAX_BACKOFF_S = 600.0
 
 
-class ArtifactClientError(Exception):
+class ArtifactClientError(InternalError):
     """Reef did not answer a snapshot request; ``status`` carries the HTTP status when there was one."""
 
     def __init__(self, message: str, *, status: int | None = None, timed_out: bool = False) -> None:

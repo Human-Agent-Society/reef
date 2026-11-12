@@ -69,7 +69,7 @@ def test_the_recipe_carries_its_activation_rule_into_each_scenario() -> None:
 @pytest.mark.parametrize(
     ("config", "match"),
     [
-        ({"module": "not-dotted"}, r"must be 'package\.module:ClassName'"),
+        ({"module": "not-dotted"}, r"unknown activation 'not-dotted'; use one of: always, evaluated, never, 'package"),
         ({"module": f"{PLUGIN}:missing"}, r"cannot import activation"),
         ({"module": f"{PLUGIN}:plain_function"}, r"must name a class that inherits ActivationRule"),
         ({"module": f"{PLUGIN}:EvaluatorOnly"}, r"must name a class that inherits ActivationRule"),

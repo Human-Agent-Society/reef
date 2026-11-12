@@ -17,14 +17,13 @@ Subclass :class:`TrajectoryReader`, set the class attribute ``format``, implemen
         def __call__(self, path):
             ...
 
-An external reader is named as a dotted ``"module:callable"`` reference that
-:func:`reader_for` resolves; a plain callable from a dotted reference is
-wrapped by :class:`_CallableTrajectoryReader`.
+A reader that Reef does not bundle is named by the reference
+``"package.module:ClassName"`` of its :class:`TrajectoryReader` subclass, which
+:func:`reader_for` resolves.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import shutil
 import tempfile
@@ -34,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.errors import ReefError
+from reef.core.plugins import PluginConfigError, resolve_plugin_class
 
 
 class TrajectoryError(ReefError):
@@ -68,63 +68,37 @@ class TrajectoryReader(ABC):
         return ()
 
 
-class _CallableTrajectoryReader(TrajectoryReader):
-    """Adapter wrapping a plain callable as a :class:`TrajectoryReader` instance.
-
-    Used when a dotted ``"module:callable"`` reference resolves to a function
-    rather than a ``TrajectoryReader`` subclass instance.
-    """
-
-    format = ""
-
-    def __init__(self, fn: Callable[[Path], tuple[dict[str, Any], ...]]) -> None:
-        self._fn = fn
-
-    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        return self._fn(path)
-
-
-_readers: dict[str, TrajectoryReader] = {}
-"""Bundled trajectory readers registered at import time by
-:func:`register_trajectory_reader`.
-
-Read by :func:`reader_for`; an external reader is a dotted reference instead.
+TRAJECTORY_READERS: dict[str, type[TrajectoryReader]] = {}
+"""The bundled trajectory readers by format name, filled at import time by
+:func:`register_trajectory_reader` and read by :func:`reader_for`.
 """
 
 
 def register_trajectory_reader(cls: type[TrajectoryReader]) -> type[TrajectoryReader]:
-    """Class decorator: instantiate and register a bundled trajectory reader."""
-    instance = cls()
-    fmt = instance.format
-    if fmt in _readers:
-        raise ValueError(f"trajectory reader {fmt!r} is already registered")
-    _readers[fmt] = instance
+    """Class decorator: register a bundled trajectory reader under its ``format``."""
+    if cls.format in TRAJECTORY_READERS:
+        raise ValueError(f"trajectory reader {cls.format!r} is already registered")
+    TRAJECTORY_READERS[cls.format] = cls
     return cls
 
 
 def reader_for(format_: str) -> TrajectoryReader:
-    """Resolve a registered reader name or a dotted ``"module:callable"`` reference."""
-    reader = _readers.get(format_)
-    if reader is not None:
-        return reader
-    if ":" in format_:
-        return _resolve_dotted(format_)
-    available = ", ".join(sorted(_readers))
-    raise TrajectoryError(f"unknown trajectory format {format_!r}; known: {available}")
+    """The reader of the trajectory format ``format_``, made with no arguments.
 
-
-def _resolve_dotted(reference: str) -> TrajectoryReader:
-    """Import a dotted reader reference, wrapping plain callables."""
-    module_name, separator, attribute = reference.partition(":")
-    if not separator or not module_name or not attribute:
-        available = ", ".join(sorted(_readers))
-        raise TrajectoryError(f"unknown trajectory format {reference!r}; known: {available}")
-    candidate = getattr(importlib.import_module(module_name), attribute)
-    if isinstance(candidate, TrajectoryReader):
-        return candidate
-    if callable(candidate):
-        return _CallableTrajectoryReader(candidate)
-    raise TrajectoryError(f"trajectory reader {reference!r} is not callable")
+    ``format_`` is a registered format name, or the ``package.module:ClassName`` reference of a
+    ``TrajectoryReader`` subclass. Raise ``TrajectoryError`` for any other value: a task run reports it as a
+    trajectory failure.
+    """
+    try:
+        reader_class = resolve_plugin_class(
+            format_,
+            builtins=TRAJECTORY_READERS,
+            base=TrajectoryReader,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="trajectory format",
+        )
+    except PluginConfigError as exc:
+        raise TrajectoryError(str(exc)) from exc
+    return reader_class()
 
 
 def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:

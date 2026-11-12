@@ -25,7 +25,7 @@ from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
 
-class ScenarioStoreConflict(ReefError):
+class ScenarioStoreConflictError(ReefError):
     """A commit's expected step or content conflicts with the stored history."""
 
 
@@ -151,7 +151,7 @@ class ScenarioStore(ABC):
         Conflicting writers are serialized across sessions. An identical retry
         (ignoring only ``recorded_at``) returns the original record, even after
         later steps. Different content or
-        a stale expected step raises ``ScenarioStoreConflict``.
+        a stale expected step raises ``ScenarioStoreConflictError``.
 
         An exception can occur after the commit becomes durable. Callers
         inspect history or retry the same commit before repeating training.
@@ -232,4 +232,4 @@ class ScenarioStorage(Plugin, ABC):
         """Release shared storage resources; repeated closes are harmless."""
 
 
-__all__ = ["ScenarioSettings", "ScenarioStorage", "ScenarioStore", "ScenarioStoreConflict"]
+__all__ = ["ScenarioSettings", "ScenarioStorage", "ScenarioStore", "ScenarioStoreConflictError"]

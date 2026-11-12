@@ -4,7 +4,7 @@ import asyncio
 
 from aiohttp import web
 
-from reef.core.errors import UnknownScenario
+from reef.core.errors import ScenarioNotFoundError
 from reef.core.records_types import RequestType
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
@@ -240,7 +240,7 @@ def register_scenario_writes(
         scenario, job_id = request.match_info["scenario"], request.match_info["job_id"]
         dispatcher = request_service.dispatcher
         if not await asyncio.to_thread(dispatcher.has_scenario, scenario):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         job = await asyncio.to_thread(cancel_scenario_job, dispatcher.queue, scenario, job_id)
         if job is None:
             raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training job {job_id!r}")

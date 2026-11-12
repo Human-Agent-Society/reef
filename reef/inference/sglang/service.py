@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from reef.inference.engine_control import EngineInferenceService
+from collections.abc import Mapping
+from typing import Any, Self
+
+from reef.inference.engine_control import EngineInferenceService, engine_executor_class
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import SGLangSettings
+from reef.inference.sglang.executor import SGLangExecutor
 from reef.inference.sglang.launch import engine_environment
 
 
@@ -14,6 +18,13 @@ class SGLangInferenceService(EngineInferenceService[SGLangSettings]):
     engine_name = "SGLang"
     control_worker_cls = "reef.inference.sglang.control:SGLangControl"
     backend_type = SGLangInferenceBackend
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Self:
+        """Validate native settings before allocation and return an unstarted service."""
+        values = dict(config)
+        values["executor"] = engine_executor_class(values.get("executor", "auto"), SGLangExecutor, "SGLang")
+        return cls(SGLangSettings(**values))
 
     def engine_environment(self) -> dict[str, str]:
         return engine_environment(self.config)

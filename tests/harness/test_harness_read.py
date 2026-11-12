@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 from tests.support.harness_jobs import IdleMethod, evolution_config
 
-from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, InMemoryRepositoryBackend
+from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import EvaluationSettings
@@ -73,13 +73,13 @@ def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path
     monkeypatch.setattr(
         service.dispatcher.get_or_create_scenario("delivery").repository, "materialize", fail_materialize
     )
-    with pytest.raises(ArtifactNotFound, match="the deployment's recipe declares no harness component"):
+    with pytest.raises(ArtifactNotFoundError, match="the deployment's recipe declares no harness component"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
 
 def test_current_files_never_creates_a_scenario(tmp_path) -> None:
     service = _service(tmp_path, recipe=_HarnessRecipe(rules="x"))
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFoundError):
         service.harness_manifest({"x-reef-scenario": "unknown"})
 
 
@@ -87,7 +87,7 @@ def test_manifest_error_distinguishes_a_scenario_without_a_published_tree(tmp_pa
     # A scenario exists and its recipe has a harness components, but its snapshot holds no tree yet. The message must
     # tell the operator that nothing has been published, not that the components is missing.
     service = _service(tmp_path, recipe=_HarnessRecipe(rules=None))
-    with pytest.raises(ArtifactNotFound, match="holds no harness tree"):
+    with pytest.raises(ArtifactNotFoundError, match="holds no harness tree"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
 

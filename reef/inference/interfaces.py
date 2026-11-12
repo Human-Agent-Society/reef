@@ -25,8 +25,9 @@ from threading import Lock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import InferenceUnavailable, ReefError
+from reef.core.errors import InferenceUnavailableError, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.plugins import Plugin
 from reef.core.served_models import ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import WeightFiles
@@ -106,10 +107,10 @@ class InferenceAdmissionController:
         self._active = 0
 
     async def acquire(self) -> InferenceAdmissionHandle:
-        """Count one active request; ``InferenceUnavailable`` once admission is closed."""
+        """Count one active request; ``InferenceUnavailableError`` once admission is closed."""
         with self._lock:
             if not self._open:
-                raise InferenceUnavailable("the inference runtime is shutting down")
+                raise InferenceUnavailableError("the inference runtime is shutting down")
             self._active += 1
             return InferenceAdmissionHandle(self)
 
@@ -260,7 +261,7 @@ class StartupSteps:
         return {"steps": [step.to_json() for step in self.steps], "estimate_seconds": self.estimate_seconds}
 
 
-class InferenceHandler(ABC):
+class InferenceHandler(Plugin, ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
     @classmethod

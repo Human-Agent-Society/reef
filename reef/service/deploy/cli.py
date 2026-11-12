@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 from reef.core.config import ConfigArgument
-from reef.core.errors import DeployConfigError
+from reef.core.errors import DeployConfigError, ReefError
 from reef.execution.executor.arguments import normalize_native_options
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.service.deploy.deployment_config import (
@@ -110,7 +110,7 @@ def object_override_path(key: str, arguments: tuple[ConfigArgument, ...]) -> tup
     return None
 
 
-class InvalidOverrideError(ValueError):
+class InvalidOverrideError(ReefError, ValueError):
     """A leftover ``reef serve`` argument is not a valid ``--key`` override."""
 
 

@@ -20,7 +20,12 @@ from unittest.mock import Mock
 import pytest
 
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession, template_alias
-from reef.execution.sandbox.process import ProcessOutcome, ProgramLaunchError, ProgramTimeout, SandboxUnavailable
+from reef.execution.sandbox.process import (
+    ProcessOutcome,
+    ProgramLaunchError,
+    ProgramTimeoutError,
+    SandboxUnavailableError,
+)
 from reef.execution.sandbox.relay import Relay
 from reef.execution.sandbox.remote import RELAY_SCRIPT, TunnelPump, pack, remote_command, remote_root, unpack
 
@@ -77,7 +82,7 @@ def test_command_timeout_kills_the_process_before_copying_its_files(tmp_path, mo
         sandbox.commands.kill.assert_called_once_with(42)
 
     monkeypatch.setattr(session, "pull", pull)
-    with pytest.raises(ProgramTimeout):
+    with pytest.raises(ProgramTimeoutError):
         session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
     sandbox.commands.connect.assert_not_called()
 
@@ -98,7 +103,7 @@ def test_reconnecting_does_not_extend_the_command_deadline(tmp_path, monkeypatch
     session = E2BSession(sandbox)
     monkeypatch.setattr(session, "push", lambda root: None)
     monkeypatch.setattr(session, "pull", lambda root: None)
-    with pytest.raises(ProgramTimeout):
+    with pytest.raises(ProgramTimeoutError):
         session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
     sandbox.commands.connect.assert_not_called()
     sandbox.commands.kill.assert_called_once_with(42)
@@ -392,7 +397,7 @@ def test_a_root_crosses_as_it_is_and_the_command_names_its_sandbox_path(tmp_path
 
 @pytest.mark.unit
 def test_an_e2b_executor_needs_its_key(monkeypatch) -> None:
-    with pytest.raises(SandboxUnavailable, match="E2B_API_KEY"):
+    with pytest.raises(SandboxUnavailableError, match="E2B_API_KEY"):
         E2BExecutor(api_key="").preflight()
     assert "sk" not in repr(E2BExecutor(api_key="sk-e2b"))
 
