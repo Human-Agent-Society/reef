@@ -24,7 +24,9 @@ Rules:
 - A body that the engine's handler refuses (``request_payload``): 400.
 - No row: 503 while its artifact starts or after startup fails; 404 for an unknown model.
   A replica that cannot read ``served_models`` and has no recent cached read answers 503.
-- An engine that fails or cannot be reached: 502; one that does not answer within the timeout: 504.
+- An engine that refuses the request with a 4xx: that status and the engine's message, which an agent reads to
+  repair its next call; an engine that fails otherwise or cannot be reached: 502; one that does not answer within
+  the timeout: 504.
 - An answer that the engine aborted is retried once after the replica reads the row again; then 409.
 - A scenario's traffic split (``TrafficWeights``) selects the row of a request that means ``active``: the replica puts
   the conversation in a bucket, and each bucket belongs to one artifact. A request without an identified conversation,
@@ -49,7 +51,7 @@ import aiohttp
 from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
-from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusError, inference_aborted
+from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
@@ -553,8 +555,9 @@ class InferenceReplica:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
     async def forward(self, served: ServedArtifact, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """The answer of the engine of ``served`` to ``payload`` under the row's model name: 502 for an error status,
-        an unreachable engine or an answer that is no JSON object, 504 when the engine does not answer in time."""
+        """The answer of the engine of ``served`` to ``payload`` under the row's model name. An engine's 4xx keeps its
+        status and message; a 5xx, an unreachable engine or an answer that is no JSON object is 502, and an engine
+        that does not answer in time 504."""
         handler = self.handler(served)
         try:
             return await asyncio.wait_for(
@@ -563,7 +566,7 @@ class InferenceReplica:
                 ),
                 timeout=self.timeout_seconds,
             )
-        except (UpstreamStatusError, aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
+        except (aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
@@ -638,7 +641,7 @@ class InferenceReplica:
             upstream = await handler.inference_stream(
                 InferenceArtifact(served.artifact_id), path, handler.address_model(payload, served.model_name)
             )
-        except (UpstreamStatusError, aiohttp.ClientError) as exc:
+        except aiohttp.ClientError as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc

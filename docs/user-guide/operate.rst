@@ -490,8 +490,11 @@ inference service never creates a scenario: create it first with
   is pending or starting and no route can serve it. A failed startup returns
   ``503`` with ``inference_start_failed`` until a retry of the startup
   succeeds.
-* ``502`` when the engine fails or cannot be reached, and ``504`` when it does
-  not answer within ``inference.timeout-s``.
+* the engine's own ``4xx`` and message when the engine refuses the request, for
+  example a prompt longer than the model's context. An agent reads it to end or
+  compact its run.
+* ``502`` when the engine fails otherwise or cannot be reached, and ``504`` when
+  it does not answer within ``inference.timeout-s``.
 * ``409`` when the engine answers with another model name or aborts the
   request twice. The service reads the row again and retries once, for
   example during a change of the served model.

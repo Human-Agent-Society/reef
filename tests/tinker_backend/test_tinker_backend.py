@@ -66,6 +66,8 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.fail = False
         #: The paths that resolve on no service.
         self.missing = set()
+        #: The model's context window that the service states, or None for none.
+        self.window = None
 
     def initialize(self):
         self.initializations += 1
@@ -86,7 +88,7 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.rendered = (messages, template_kwargs)
         return [101, 102]
 
-    def decode(self, tokens):
+    def decode(self, tokens, *, skip_special_tokens=True):
         return "hello"
 
     def sample(self, sampler_path, prompt, params, *, topk_logprobs):
@@ -95,6 +97,9 @@ class RemoteClient(TinkerClient, TinkerSampler):
 
     def chat_template(self, template_kwargs):
         return CharTemplate()
+
+    def context_window(self):
+        return self.window
 
     def check_remote(self, checkpoint):
         if checkpoint.state_path in self.missing:
@@ -601,6 +606,30 @@ def test_a_packed_tinker_step_trains_batch_size_packs(objective):
         batch(3), objective.name, {}, scheduling, batch_size=1, kl_coef=0.0, score_centering=None
     )
     assert [len(rows) for rows in step.steps] == [2, 1]
+
+
+@pytest.mark.unit
+def test_a_sample_longer_than_the_models_context_window_is_left_out_before_the_steps(component, client, objective):
+    # Tinker refuses a whole step for one row whose targets exceed the model's context window, and a long multi-turn
+    # rollout can have such a row.
+    longer = item(group="long")
+    training = longer.trajectory["extra"]["reef"]["training"]
+    training.update(
+        tokens=[10, 11, 20, 21, 22, 23], loss_mask=[1, 0, 1, 0], rollout_log_probs=[-0.2, -0.4, -0.1, -0.3]
+    )
+    data = JobData("long", (item(group="short"), longer))
+    client.window = 4
+    status = train(component, data, objective.name, batch_size=2)
+    assert status.state == "finished" and status.metrics["unrenderable_samples"] == 1, status.error
+    ((_, steps, _),) = client.calls
+    assert [[row.tokens for row in rows] for rows in steps] == [[(10, 11, 20, 21)]]
+
+    client.window = 2
+    status = train(
+        component, JobData("too-long", (item(group="short", token=25), longer)), objective.name, batch_size=2
+    )
+    assert status.state == "finished" and status.metrics["unrenderable_samples"] == 2, status.error
+    assert len(client.calls) == 1, "a job whose every sample is too long trains nothing"
 
 
 def test_step_size_respects_error_remainder(objective):
