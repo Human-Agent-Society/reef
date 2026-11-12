@@ -544,7 +544,8 @@ def test_the_inference_component_refuses_an_image_for_a_recipe_that_refuses_imag
         def refuses_images(self) -> bool:
             return True
 
-    monkeypatch.setattr("reef.service.components.serving_recipe", lambda *_: TextOnlyRecipe())
+    load = component_apps.load_serving_deployment
+    monkeypatch.setattr(component_apps, "load_serving_deployment", lambda *args: (TextOnlyRecipe(), load(*args)[1]))
     image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
     body = {"model": "m", "messages": [{"role": "user", "content": [image]}]}
 
