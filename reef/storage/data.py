@@ -27,12 +27,20 @@ from typing import Any, Literal, Self, get_args
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCallSummary, require_integer
-from reef.core.job_data import JobData
+from reef.core.job_data import JobData, TaskFiles, TaskSample
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
-from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
+from reef.storage.job_data import (
+    JOB_DATA_PREFIX,
+    JOB_FILE,
+    JobDataRef,
+    job_data_key,
+    job_data_kind,
+    job_task_files,
+    write_job_data,
+)
 from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.task_collections import TaskCollection, check_names
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
@@ -691,6 +699,8 @@ class DataStore(Plugin, ABC):
 
     #: The segment store of the job data directories.
     job_directories: SegmentStore
+    #: The task file store, which keeps the directory of each task that a job data directory names.
+    task_files: TaskFileStore
     #: How long the store keeps a job data directory that no job used, in seconds.
     job_directory_ttl_seconds: float
 
@@ -713,9 +723,19 @@ class DataStore(Plugin, ABC):
                 write_job_data(data, directory)
                 uri = self.job_directories.write_directory(name, directory)
         self.write_job_directory_use(key, time.time())
-        return JobDataRef(
-            uri, self.job_directories.open_directory(uri), data.data_id, len(data.samples), job_data_kind(data)
-        )
+        path = self.job_directories.open_directory(uri)
+        # The samples hold the directories that the task file store gave when it made them.
+        task_paths = tuple(sample.task_path for sample in data.samples if isinstance(sample, TaskSample))
+        return JobDataRef(uri, path, data.data_id, len(data.samples), job_data_kind(data), task_paths)
+
+    def item_task_files(self, item: StoredItem) -> TaskFiles:
+        """The name in the task file store of the directory of the task item ``item``, which ``task_path`` returns."""
+        return TaskFiles(task_partition(item.owner), item.digest)
+
+    def job_task_paths(self, directory: Path) -> tuple[Path, ...]:
+        """The local directory of each task of the job data directory ``directory``, in job order, from the task file
+        store. ``TaskStoreError`` for a task whose files the store does not hold."""
+        return tuple(self.task_files.path(files.partition, files.digest) for files in job_task_files(directory))
 
     def open_job_directory(self, value: Mapping[str, Any]) -> JobDataRef:
         uri = value.get("uri")
@@ -724,7 +744,7 @@ class DataStore(Plugin, ABC):
         path = self.job_directories.open_directory(uri)
         header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
         self.write_job_directory_use(header["key"], time.time())
-        return JobDataRef.from_dict(value, path)
+        return JobDataRef.from_dict(value, path, self.job_task_paths(path))
 
     def delete_unused_job_directories(self, time: float) -> int:
         unused = self.job_directories_unused_since(time)

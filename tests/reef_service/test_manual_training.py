@@ -43,7 +43,6 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample.traces import InferenceSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
-from reef.storage.job_data import read_job_data
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
@@ -995,7 +994,7 @@ def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop
     assert became_true(lambda: job_events(dispatcher) == expected), job_events(dispatcher)
     # Each job trains one request with the samples that it names.
     assert [
-        (job.request_id, [source_record_id(sample) for sample in read_job_data(job.data_dir).samples])
+        (job.request_id, [source_record_id(sample) for sample in job.read_data().samples])
         for job in component.submitted
     ] == [("one", ["a"]), ("two", ["b"])]
     artifacts = dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
@@ -1332,7 +1331,7 @@ def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp
     make_samples(trainer)
     assert trainer.advance_job() is not None
     assert component.submit_texts == ["one", "two"]
-    assert [source_record_id(sample) for sample in read_job_data(component.submitted[-1].data_dir).samples] == ["a"]
+    assert [source_record_id(sample) for sample in component.submitted[-1].read_data().samples] == ["a"]
     trainer.close()
 
 

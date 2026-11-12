@@ -19,7 +19,6 @@ from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceHandler
 from reef.observability import ExperimentLogger, ExperimentTracker
 from reef.service.app import create_app
-from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
@@ -337,7 +336,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     _submit_pair(dispatcher, "2")
     _wait_for_jobs(dispatcher, 2)
 
-    assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.calls] == [
+    assert [source_record_id(job.read_data().samples[0]) for job in component.calls] == [
         "inference-1",
         "inference-2",
     ]

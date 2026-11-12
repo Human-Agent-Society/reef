@@ -26,7 +26,7 @@ from typing import Any, Literal, cast
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
 from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, MemoryDataStore, NewItem, StoredItem
-from reef.storage.tasks import LocalTaskFileStore, SplitName
+from reef.storage.tasks import LocalTaskFileStore, SplitName, TaskFileStore
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
@@ -281,7 +281,12 @@ class SampleStore:
         else:
             name = {"name": item.item_id, "files_digest": item.digest, "split": split}
             metadata = {"task": name} if own is None else item.metadata["task_metadata"]
-            sample = TaskSample(self.data.task_path(item), source_agent_record_ids=records, metadata=metadata)
+            sample = TaskSample(
+                self.data.task_path(item),
+                source_agent_record_ids=records,
+                metadata=metadata,
+                files=self.data.item_task_files(item),
+            )
         component = None if own is None else own["component"]
         group = None if own is None else item.metadata.get("group")
         return StoredSample(sequence, item.item_id, split, sample, train_counts, component, group)
@@ -306,10 +311,13 @@ class SampleStore:
         return tuple(found)
 
 
-def memory_samples(scenario: str) -> SampleStore:
-    """The sample store of ``scenario`` in process memory, for a trainer without a scenario session: a data store whose
-    owner is the scenario, with its task files in a temporary directory, and a training state in memory."""
-    return SampleStore(MemoryDataStore(LocalTaskFileStore()), scenario, scenario, MemoryTrainingState())
+def memory_samples(scenario: str, task_files: TaskFileStore | None = None) -> SampleStore:
+    """The sample store of ``scenario`` in process memory, for a trainer without a scenario session: a new data store
+    whose owner is the scenario, and a training state in memory. The store keeps its task files in ``task_files``;
+    ``None`` gives a temporary directory. A trainer that trains passes the task file store of its job loop's data
+    store, so that the store that writes a job's data holds the files of the job's tasks."""
+    store = MemoryDataStore(LocalTaskFileStore() if task_files is None else task_files)
+    return SampleStore(store, scenario, scenario, MemoryTrainingState())
 
 
 @dataclass(frozen=True)

@@ -35,7 +35,7 @@ from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataKind, read_job_data
+from reef.storage.job_data import JobDataKind
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
 from reef.train.component import SavedCheckpoint, TrainingJob
@@ -245,7 +245,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             # A job from the base start reads ``base/`` as this process prepares it.
             self.start_at(self.prepared_base() if start == self._base else start)
         if job.kind == "task":
-            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
+            tasks = [item for item in job.read_data().samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
@@ -285,9 +285,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
-        tasks = tuple(
-            item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)
-        )
+        tasks = tuple(item for item in job.read_data().samples if isinstance(item, TaskSample))
         self.warm_sampler(start.sampler_path)
         chat = SamplerChat(
             self._sampler,
@@ -340,7 +338,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
         start = self.start_at(Path(job.start))
-        data = read_job_data(job.data_dir, job.data_id)
+        data = job.read_data()
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)

@@ -31,7 +31,7 @@ from reef.record2sample.service import ProducedSamples, Selection
 from reef.storage.commits import CommitRecord
 from reef.storage.record_items import used_record, used_records
 from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples, memory_samples
 from reef.storage.tasks import TaskStorage
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
@@ -178,6 +178,10 @@ class Trainer:
         ``TrainingStartRefusedError``.
         """
         trains = job_loop is not None
+        if samples is None and job_loop is not None:
+            # Without a scenario session, the samples are in memory. Their task files go to the store that the
+            # jobs' data directories name them in.
+            samples = memory_samples(scenario, job_loop.data_store.task_files).for_trainer("")
         pipeline = pipeline_factory(
             PipelineContext(
                 scenario=scenario,

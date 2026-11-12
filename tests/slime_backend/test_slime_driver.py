@@ -236,14 +236,14 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
         **parameters("sft"),
         **({"harbor": {}} if rollout else {}),
     }
-    # The job file that LocalJobComponent.submit writes: the job data reference with its local path.
+    # The job file that LocalJobComponent.submit writes: the job data reference with its local path and its tasks'.
     ref = job_data_ref(data)
     write_json(
         directory / JOB_FILE,
         {
             "scenario": "s",
             "start": str(start),
-            "data": {**ref.to_dict(), "path": str(ref.path)},
+            "data": {**ref.to_dict(), "path": str(ref.path), "task_paths": [str(path) for path in ref.task_paths]},
             "parameters": job_parameters,
         },
     )

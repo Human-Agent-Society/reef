@@ -16,7 +16,6 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceBackend
 from reef.inference.serving import OpenedEngines, ServingEngines
-from reef.storage.job_data import read_job_data
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
@@ -144,7 +143,7 @@ class RecordingComponent(StubTrainingComponent):
         self.batches: list[RecordedJob] = [] if batches is None else batches
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        data = read_job_data(job.data_dir, job.data_id)
+        data = job.read_data()
         self.batches.append(RecordedJob(data.data_id, data.samples, job.request_id))
         return ()
 

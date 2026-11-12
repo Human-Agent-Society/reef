@@ -31,6 +31,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.config import ConfiguredFactory
 from reef.core.errors import RuntimeConfigError
+from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.storage.job_data import JobDataKind, JobDataRef
@@ -45,7 +46,7 @@ class TrainingJob:
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
     (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root snapshot),
     ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
-    with ``read_job_data(job.data_dir, job.data_id)`` and cuts it into optimizer batches by its own batch size),
+    with ``job.read_data()`` and cuts it into optimizer batches by its own batch size),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
     trainer submits the job. The jobs of one scenario can run at the same time when the component has
     ``concurrent_jobs``; each starts from its own ``start``.
@@ -92,8 +93,12 @@ class TrainingJob:
 
     @property
     def data_dir(self) -> Path:
-        """The local job data directory: read it with ``read_job_data``."""
+        """The local job data directory: read it with ``read_data``."""
         return self.data.path
+
+    def read_data(self) -> JobData:
+        """The job's data, without a request: its samples in job order, each task with its local directory."""
+        return self.data.read()
 
     @property
     def data_uri(self) -> str:
